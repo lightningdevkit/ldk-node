@@ -145,8 +145,8 @@ impl LdkLiteBuilder {
 	/// Options: `mainnet`/`bitcoin`, `testnet`, `regtest`, `signet`
 	///
 	/// Default: `testnet`
-	pub fn network(&mut self, network: String) -> &mut Self {
-		self.config.network = match network.as_str() {
+	pub fn network(&mut self, network: &str) -> &mut Self {
+		self.config.network = match network {
 			"mainnet" => bitcoin::Network::Bitcoin,
 			"bitcoin" => bitcoin::Network::Bitcoin,
 			"testnet" => bitcoin::Network::Testnet,

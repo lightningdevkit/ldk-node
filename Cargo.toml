@@ -9,7 +9,6 @@ edition = "2018"
 
 [dependencies]
 lightning = { version = "0.0.110", features = ["max_level_trace", "std"] }
-lightning-block-sync = { version = "0.0.110", features = [ "rpc-client" ] }
 lightning-invoice = { version = "0.18" }
 lightning-net-tokio = { version = "0.0.110" }
 lightning-persister = { version = "0.0.110" }
