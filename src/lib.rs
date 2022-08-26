@@ -419,9 +419,6 @@ impl LdkLite {
 		runtime.stop_networking.store(true, Ordering::Release);
 		self.peer_manager.disconnect_all_peers();
 
-		// Wait for 500ms to make sure shutdown can happen cleanly.
-		thread::sleep(Duration::from_millis(500));
-
 		// Drop the runtime, which stops the background processor and any possibly remaining tokio threads.
 		*run_lock = None;
 		Ok(())
