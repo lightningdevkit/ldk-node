@@ -435,7 +435,7 @@ impl LdkLite {
 		let stop_wallet_sync = Arc::new(AtomicBool::new(false));
 		let stop_sync = Arc::clone(&stop_wallet_sync);
 
-		thread::spawn(move || {
+		_tokio_runtime.spawn(async move {
 			let mut rounds = 0;
 			loop {
 				if stop_sync.load(Ordering::Acquire) {
