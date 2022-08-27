@@ -416,7 +416,6 @@ impl LdkLite {
 	pub fn stop(&mut self) -> Result<(), Error> {
 		let mut run_lock = self.running.write().unwrap();
 		if run_lock.is_none() {
-			// We're not running.
 			return Err(Error::NotRunning);
 		}
 
@@ -568,7 +567,6 @@ impl LdkLite {
 	/// Returns our own node id
 	pub fn my_node_id(&self) -> Result<PublicKey, Error> {
 		if self.running.read().unwrap().is_none() {
-			// We're not running.
 			return Err(Error::NotRunning);
 		}
 
@@ -579,7 +577,6 @@ impl LdkLite {
 	pub fn new_funding_address(&mut self) -> Result<bitcoin::Address, Error> {
 		// TODO: log
 		if self.running.read().unwrap().is_none() {
-			// We're not running.
 			return Err(Error::NotRunning);
 		}
 
@@ -594,6 +591,9 @@ impl LdkLite {
 	//
 	/// Send a payement given an invoice.
 	pub fn send_payment(&self, invoice: Invoice) -> Result<PaymentId, Error> {
+		if self.running.read().unwrap().is_none() {
+			return Err(Error::NotRunning);
+		}
 		// TODO: ensure we never tried paying the given payment hash before
 		// TODO: log
 		Ok(self.invoice_payer.pay_invoice(&invoice)?)
@@ -603,6 +603,9 @@ impl LdkLite {
 	pub fn send_spontaneous_payment(
 		&self, amount_msat: u64, node_id: PublicKey,
 	) -> Result<PaymentId, Error> {
+		if self.running.read().unwrap().is_none() {
+			return Err(Error::NotRunning);
+		}
 		// TODO: log
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
 		Ok(self.invoice_payer.pay_pubkey(
