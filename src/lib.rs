@@ -40,10 +40,10 @@ use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager
 use lightning::chain::{chainmonitor, Access, BestBlock, Confirm, Filter, Watch};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+	ChainParameters, ChannelManagerReadArgs, PaymentId, SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
-use lightning::ln::PaymentHash;
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::scoring::ProbabilisticScorer;
@@ -59,8 +59,8 @@ use lightning_persister::FilesystemPersister;
 
 use lightning_net_tokio::SocketDescriptor;
 
-use lightning_invoice::payment;
 use lightning_invoice::utils::DefaultRouter;
+use lightning_invoice::{payment, Invoice};
 
 use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::blockchain::{GetBlockHash, GetHeight};
@@ -95,6 +95,8 @@ pub struct LdkLiteConfig {
 	pub network: bitcoin::Network,
 	/// The TCP port the network node will listen on.
 	pub listening_port: u16,
+	/// The default CLTV expiry delta to be used for payments.
+	pub default_cltv_expiry_delta: u32,
 }
 
 /// A builder for an [`LdkLite`] instance, allowing to set some configuration and module choices from
@@ -112,9 +114,15 @@ impl LdkLiteBuilder {
 		let esplora_server_url = "https://blockstream.info/api".to_string();
 		let network = bitcoin::Network::Testnet;
 		let listening_port = 9735;
+		let default_cltv_expiry_delta = 144;
 
-		let config =
-			LdkLiteConfig { storage_dir_path, esplora_server_url, network, listening_port };
+		let config = LdkLiteConfig {
+			storage_dir_path,
+			esplora_server_url,
+			network,
+			listening_port,
+			default_cltv_expiry_delta,
+		};
 
 		Self { config }
 	}
@@ -341,6 +349,7 @@ impl LdkLiteBuilder {
 			channel_manager,
 			chain_monitor,
 			peer_manager,
+			keys_manager,
 			gossip_sync,
 			persister,
 			logger,
@@ -373,6 +382,7 @@ pub struct LdkLite {
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
 	peer_manager: Arc<PeerManager>,
+	keys_manager: Arc<KeysManager>,
 	gossip_sync: Arc<GossipSync>,
 	persister: Arc<FilesystemPersister>,
 	logger: Arc<FilesystemLogger>,
@@ -567,6 +577,7 @@ impl LdkLite {
 
 	/// Retrieve a new on-chain/funding address.
 	pub fn new_funding_address(&mut self) -> Result<bitcoin::Address, Error> {
+		// TODO: log
 		if self.running.read().unwrap().is_none() {
 			// We're not running.
 			return Err(Error::NotRunning);
@@ -578,10 +589,52 @@ impl LdkLite {
 	// Connect to a node and open a new channel. Disconnects and re-connects should be handled automatically
 	//pub fn connect_open_channel(&mut self, node_id: PublicKey, node_address: NetAddress) -> Result<u64> {
 	//}
+	//	// Close a previously opened channel
+	//	pub close_channel(&mut self, channel_id: u64) -> Result<()>;
+	//
+	/// Send a payement given an invoice.
+	pub fn send_payment(&self, invoice: Invoice) -> Result<PaymentId, Error> {
+		// TODO: ensure we never tried paying the given payment hash before
+		// TODO: log
+		Ok(self.invoice_payer.pay_invoice(&invoice)?)
+	}
+
+	/// Send a spontaneous, aka. "keysend", payment
+	pub fn send_spontaneous_payment(
+		&self, amount_msat: u64, node_id: PublicKey,
+	) -> Result<PaymentId, Error> {
+		// TODO: log
+		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
+		Ok(self.invoice_payer.pay_pubkey(
+			node_id,
+			payment_preimage,
+			amount_msat,
+			self.config.default_cltv_expiry_delta,
+		)?)
+	}
+	//
+	//	// Create an invoice to receive a payment
+	//	pub receive_payment(&mut self, amount: Option<u64>) -> Invoice;
+	//
+	//	// Get a new on-chain/funding address.
+	//	pub new_funding_address(&mut self) -> Address;
+	//
+	//	// Query for information about payment status.
+	//	pub payment_info(&mut self) -> PaymentInfo;
+	//
+	//	// Query for information about our channels
+	//	pub channel_info(&mut self) -> ChannelInfo;
+	//
+	//	// Query for information about our on-chain/funding status.
+	//	pub funding_info(&mut self) -> FundingInfo;
+	//}
 }
 
 async fn connect_peer_if_necessary(
-	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+	// TODO: log
+	pubkey: PublicKey,
+	peer_addr: SocketAddr,
+	peer_manager: Arc<PeerManager>,
 ) -> Result<(), Error> {
 	for node_pubkey in peer_manager.get_peer_node_ids() {
 		if node_pubkey == pubkey {
@@ -593,7 +646,10 @@ async fn connect_peer_if_necessary(
 }
 
 async fn do_connect_peer(
-	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+	// TODO: log
+	pubkey: PublicKey,
+	peer_addr: SocketAddr,
+	peer_manager: Arc<PeerManager>,
 ) -> Result<(), Error> {
 	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
 	{
@@ -617,30 +673,6 @@ async fn do_connect_peer(
 	}
 }
 
-//	// Close a previously opened channel
-//	pub close_channel(&mut self, channel_id: u64) -> Result<()>;
-//
-//	// Pay an invoice
-//	pub send_payment(&mut self, invoice: Invoice) -> Result<PaymentId>
-//
-//	// Send a spontaneous, aka. "keysend", payment
-//	pub send_spontaneous_payment(&mut self, amount: u64, node_id: PublicKey) -> Result<PaymentId>;
-//
-//	// Create an invoice to receive a payment
-//	pub receive_payment(&mut self, amount: Option<u64>) -> Invoice;
-//
-//	// Get a new on-chain/funding address.
-//	pub new_funding_address(&mut self) -> Address;
-//
-//	// Query for information about payment status.
-//	pub payment_info(&mut self) -> PaymentInfo;
-//
-//	// Query for information about our channels
-//	pub channel_info(&mut self) -> ChannelInfo;
-//
-//	// Query for information about our on-chain/funding status.
-//	pub funding_info(&mut self) -> FundingInfo;
-//}
 //
 // Structs wrapping the particular information which should easily be
 // understandable, parseable, and transformable, i.e., we'll try to avoid

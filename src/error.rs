@@ -1,5 +1,6 @@
 use bdk::blockchain::esplora;
 use lightning::ln::msgs;
+use lightning_invoice::payment;
 use std::fmt;
 use std::io;
 use std::sync::mpsc;
@@ -23,6 +24,8 @@ pub enum LdkLiteError {
 	ConnectionClosed,
 	/// A wrapped LDK `DecodeError`
 	Decode(msgs::DecodeError),
+	/// A wrapped LDK `PaymentError`
+	Payment(payment::PaymentError),
 	/// A wrapped BDK error
 	Bdk(bdk::Error),
 	/// A wrapped `Bip32` error
@@ -41,6 +44,8 @@ impl fmt::Display for LdkLiteError {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match *self {
 			LdkLiteError::Decode(ref e) => write!(f, "LDK decode error: {}", e),
+			// TODO: print more sensible things based on the type of payment error
+			LdkLiteError::Payment(ref e) => write!(f, "LDK payment error: {:?}", e),
 			LdkLiteError::Bdk(ref e) => write!(f, "BDK error: {}", e),
 			LdkLiteError::Bip32(ref e) => write!(f, "Bitcoin error: {}", e),
 			LdkLiteError::Io(ref e) => write!(f, "IO error: {}", e),
@@ -60,6 +65,12 @@ impl fmt::Display for LdkLiteError {
 impl From<msgs::DecodeError> for LdkLiteError {
 	fn from(e: msgs::DecodeError) -> Self {
 		Self::Decode(e)
+	}
+}
+
+impl From<payment::PaymentError> for LdkLiteError {
+	fn from(e: payment::PaymentError) -> Self {
+		Self::Payment(e)
 	}
 }
 
