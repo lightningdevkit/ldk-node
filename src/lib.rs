@@ -34,7 +34,9 @@ use access::LdkLiteChainAccess;
 pub use error::LdkLiteError as Error;
 pub use event::LdkLiteEvent;
 use event::LdkLiteEventHandler;
-use logger::FilesystemLogger;
+
+#[allow(unused_imports)]
+use logger::{Logger, FilesystemLogger, log_info, log_error, log_warn, log_trace, log_given_level, log_internal};
 
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
 use lightning::chain::{chainmonitor, Access, BestBlock, Confirm, Filter, Watch};
@@ -49,9 +51,7 @@ use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::scoring::ProbabilisticScorer;
 
 use lightning::util::config::UserConfig;
-use lightning::util::logger::Logger;
 use lightning::util::ser::ReadableArgs;
-use lightning::{log_error, log_given_level, log_internal};
 
 use lightning_background_processor::BackgroundProcessor;
 use lightning_background_processor::GossipSync as BPGossipSync;

@@ -1,13 +1,14 @@
 use crate::{
-	ChannelManager, EventSender, FilesystemLogger, LdkLiteChainAccess, LdkLiteConfig, NetworkGraph,
+	ChannelManager, EventSender, LdkLiteChainAccess, LdkLiteConfig, NetworkGraph,
 	PaymentInfoStorage,
 };
+
+#[allow(unused_imports)]
+use crate::logger::{Logger, FilesystemLogger, log_info, log_error, log_warn, log_trace, log_given_level, log_internal};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::keysinterface::KeysManager;
 use lightning::util::events as ldk_events;
-use lightning::util::logger::Logger;
-use lightning::{log_error, log_given_level, log_internal};
 
 use bdk::database::MemoryDatabase;
 
