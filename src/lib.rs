@@ -63,7 +63,7 @@ use lightning_persister::FilesystemPersister;
 use lightning_net_tokio::SocketDescriptor;
 
 use lightning_invoice::utils::DefaultRouter;
-use lightning_invoice::{payment, Invoice};
+use lightning_invoice::{payment, Currency, Invoice};
 
 use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::blockchain::{GetBlockHash, GetHeight};
@@ -606,7 +606,8 @@ impl LdkLite {
 			Ok(_payment_id) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
 				// TODO: is this unwrap safe? Would a payment to an invoice with None amount ever
-				// succeed?
+				// succeed? Should we allow to set the amount in the interface or via a dedicated
+				// method?
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "initiated sending {} msats to {}", amt_msat, payee_pubkey);
 				PaymentStatus::Pending
@@ -685,12 +686,56 @@ impl LdkLite {
 
 		Ok(payment_hash)
 	}
-	//
-	//	// Create an invoice to receive a payment
-	//	pub receive_payment(&mut self, amount: Option<u64>) -> Invoice;
-	//
+
+	// TODO: Should we provide a configurable default for the expiry, or force the user to supply it on every call?
+	/// Returns a payable invoice that can be used to request and receive a payment.
+	pub fn receive_payment(
+		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
+	) -> Result<Invoice, Error> {
+		let mut inbound_payments_lock = self.inbound_payments.lock().unwrap();
+
+		let currency = match self.config.network {
+			bitcoin::Network::Bitcoin => Currency::Bitcoin,
+			bitcoin::Network::Testnet => Currency::BitcoinTestnet,
+			bitcoin::Network::Regtest => Currency::Regtest,
+			bitcoin::Network::Signet => Currency::Signet,
+		};
+		let keys_manager = Arc::clone(&self.keys_manager);
+		let invoice = match lightning_invoice::utils::create_invoice_from_channelmanager(
+			&self.channel_manager,
+			keys_manager,
+			currency,
+			amount_msat,
+			description.to_string(),
+			expiry_secs,
+		) {
+			Ok(inv) => {
+				log_info!(self.logger, "generated invoice: {}", inv);
+				inv
+			}
+			Err(e) => {
+				let err_str = &e.to_string();
+				log_error!(self.logger, "failed to create invoice: {:?}", err_str);
+				// TODO;
+				return Err(Error::InvoiceCreation(e));
+			}
+		};
+
+		let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
+		inbound_payments_lock.insert(
+			payment_hash,
+			PaymentInfo {
+				preimage: None,
+				secret: Some(invoice.payment_secret().clone()),
+				status: PaymentStatus::Pending,
+				amount_msat,
+			},
+		);
+		Ok(invoice)
+	}
+
 	///	Query for information about the status of a specific payment.
-	pub fn payment_info(&mut self, payment_hash: &[u8; 32]) -> Option<PaymentInfo> {
+	pub fn payment_info(&self, payment_hash: &[u8; 32]) -> Option<PaymentInfo> {
 		let payment_hash = PaymentHash(*payment_hash);
 
 		{
@@ -712,10 +757,10 @@ impl LdkLite {
 
 	//
 	//	// Query for information about our channels
-	//	pub channel_info(&mut self) -> ChannelInfo;
+	//	pub channel_info(&self) -> ChannelInfo;
 	//
 	//	// Query for information about our on-chain/funding status.
-	//	pub funding_info(&mut self) -> FundingInfo;
+	//	pub funding_info(&self) -> FundingInfo;
 	//}
 }
 

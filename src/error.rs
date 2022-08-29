@@ -26,6 +26,8 @@ pub enum LdkLiteError {
 	Decode(msgs::DecodeError),
 	/// A wrapped LDK `PaymentError`
 	Payment(payment::PaymentError),
+	/// A wrapped LDK `SignOrCreationError`
+	InvoiceCreation(lightning_invoice::SignOrCreationError),
 	/// A wrapped BDK error
 	Bdk(bdk::Error),
 	/// A wrapped `Bip32` error
@@ -46,6 +48,7 @@ impl fmt::Display for LdkLiteError {
 			LdkLiteError::Decode(ref e) => write!(f, "LDK decode error: {}", e),
 			// TODO: print more sensible things based on the type of payment error
 			LdkLiteError::Payment(ref e) => write!(f, "LDK payment error: {:?}", e),
+			LdkLiteError::InvoiceCreation(ref e) => write!(f, "LDK invoice sign or creation error: {:?}", e),
 			LdkLiteError::Bdk(ref e) => write!(f, "BDK error: {}", e),
 			LdkLiteError::Bip32(ref e) => write!(f, "Bitcoin error: {}", e),
 			LdkLiteError::Io(ref e) => write!(f, "IO error: {}", e),
@@ -71,6 +74,12 @@ impl From<msgs::DecodeError> for LdkLiteError {
 impl From<payment::PaymentError> for LdkLiteError {
 	fn from(e: payment::PaymentError) -> Self {
 		Self::Payment(e)
+	}
+}
+
+impl From<lightning_invoice::SignOrCreationError> for LdkLiteError {
+	fn from(e: lightning_invoice::SignOrCreationError) -> Self {
+		Self::InvoiceCreation(e)
 	}
 }
 
