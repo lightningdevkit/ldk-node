@@ -36,16 +36,19 @@ pub use event::LdkLiteEvent;
 use event::LdkLiteEventHandler;
 
 #[allow(unused_imports)]
-use logger::{Logger, FilesystemLogger, log_info, log_error, log_warn, log_trace, log_given_level, log_internal};
+use logger::{
+	log_error, log_given_level, log_info, log_internal, log_trace, log_warn, FilesystemLogger,
+	Logger,
+};
 
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
 use lightning::chain::{chainmonitor, Access, BestBlock, Confirm, Filter, Watch};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, PaymentId, SimpleArcChannelManager,
+	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
-use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::scoring::ProbabilisticScorer;
@@ -66,6 +69,8 @@ use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::blockchain::{GetBlockHash, GetHeight};
 use bdk::database::MemoryDatabase;
 
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::BlockHash;
 
@@ -306,8 +311,8 @@ impl LdkLiteBuilder {
 
 		// Step 13: Init payment info storage
 		// TODO: persist payment info to disk
-		let _inbound_payments = Arc::new(Mutex::new(HashMap::new()));
-		let _outbound_payments = Arc::new(Mutex::new(HashMap::new()));
+		let inbound_payments = Arc::new(Mutex::new(HashMap::new()));
+		let outbound_payments = Arc::new(Mutex::new(HashMap::new()));
 
 		// Step 14: Handle LDK Events
 		let event_queue = mpsc::sync_channel(CHANNEL_BUF_SIZE);
@@ -317,8 +322,8 @@ impl LdkLiteBuilder {
 			Arc::clone(&channel_manager),
 			Arc::clone(&network_graph),
 			Arc::clone(&keys_manager),
-			Arc::clone(&_inbound_payments),
-			Arc::clone(&_outbound_payments),
+			Arc::clone(&inbound_payments),
+			Arc::clone(&outbound_payments),
 			event_sender,
 			Arc::clone(&logger),
 			Arc::clone(&config),
@@ -356,8 +361,8 @@ impl LdkLiteBuilder {
 			network_graph,
 			scorer,
 			invoice_payer,
-			_inbound_payments,
-			_outbound_payments,
+			inbound_payments,
+			outbound_payments,
 			event_queue,
 		})
 	}
@@ -389,8 +394,8 @@ pub struct LdkLite {
 	scorer: Arc<Mutex<Scorer>>,
 	network_graph: Arc<NetworkGraph>,
 	invoice_payer: Arc<InvoicePayer<LdkLiteEventHandler>>,
-	_inbound_payments: Arc<PaymentInfoStorage>,
-	_outbound_payments: Arc<PaymentInfoStorage>,
+	inbound_payments: Arc<PaymentInfoStorage>,
+	outbound_payments: Arc<PaymentInfoStorage>,
 	event_queue: (EventSender, EventReceiver),
 }
 
@@ -575,12 +580,13 @@ impl LdkLite {
 
 	/// Retrieve a new on-chain/funding address.
 	pub fn new_funding_address(&mut self) -> Result<bitcoin::Address, Error> {
-		// TODO: log
 		if self.running.read().unwrap().is_none() {
 			return Err(Error::NotRunning);
 		}
 
-		self.chain_access.get_new_address()
+		let funding_address = self.chain_access.get_new_address()?;
+		log_info!(self.logger, "generated new funding address: {}", funding_address);
+		Ok(funding_address)
 	}
 
 	// Connect to a node and open a new channel. Disconnects and re-connects should be handled automatically
@@ -590,40 +596,120 @@ impl LdkLite {
 	//	pub close_channel(&mut self, channel_id: u64) -> Result<()>;
 	//
 	/// Send a payement given an invoice.
-	pub fn send_payment(&self, invoice: Invoice) -> Result<PaymentId, Error> {
+	pub fn send_payment(&self, invoice: Invoice) -> Result<PaymentHash, Error> {
 		if self.running.read().unwrap().is_none() {
 			return Err(Error::NotRunning);
 		}
+
 		// TODO: ensure we never tried paying the given payment hash before
-		// TODO: log
-		Ok(self.invoice_payer.pay_invoice(&invoice)?)
+		let status = match self.invoice_payer.pay_invoice(&invoice) {
+			Ok(_payment_id) => {
+				let payee_pubkey = invoice.recover_payee_pub_key();
+				// TODO: is this unwrap safe? Would a payment to an invoice with None amount ever
+				// succeed?
+				let amt_msat = invoice.amount_milli_satoshis().unwrap();
+				log_info!(self.logger, "initiated sending {} msats to {}", amt_msat, payee_pubkey);
+				PaymentStatus::Pending
+			}
+			Err(payment::PaymentError::Invoice(e)) => {
+				log_error!(self.logger, "invalid invoice: {}", e);
+				return Err(Error::Payment(payment::PaymentError::Invoice(e)));
+			}
+			Err(payment::PaymentError::Routing(e)) => {
+				log_error!(self.logger, "failed to find route: {}", e.err);
+				return Err(Error::Payment(payment::PaymentError::Routing(e)));
+			}
+			Err(payment::PaymentError::Sending(e)) => {
+				log_error!(self.logger, "failed to send payment: {:?}", e);
+				PaymentStatus::Failed
+			}
+		};
+
+		let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
+		let payment_secret = Some(invoice.payment_secret().clone());
+
+		let mut outbound_payments_lock = self.outbound_payments.lock().unwrap();
+		outbound_payments_lock.insert(
+			payment_hash,
+			PaymentInfo {
+				preimage: None,
+				secret: payment_secret,
+				status,
+				amount_msat: invoice.amount_milli_satoshis(),
+			},
+		);
+
+		Ok(payment_hash)
 	}
 
 	/// Send a spontaneous, aka. "keysend", payment
 	pub fn send_spontaneous_payment(
 		&self, amount_msat: u64, node_id: PublicKey,
-	) -> Result<PaymentId, Error> {
+	) -> Result<PaymentHash, Error> {
 		if self.running.read().unwrap().is_none() {
 			return Err(Error::NotRunning);
 		}
-		// TODO: log
+
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
-		Ok(self.invoice_payer.pay_pubkey(
+		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
+
+		let status = match self.invoice_payer.pay_pubkey(
 			node_id,
 			payment_preimage,
 			amount_msat,
 			self.config.default_cltv_expiry_delta,
-		)?)
+		) {
+			Ok(_payment_id) => {
+				log_info!(self.logger, "initiated sending {} msats to {}", amount_msat, node_id);
+				PaymentStatus::Pending
+			}
+			Err(payment::PaymentError::Invoice(e)) => {
+				log_error!(self.logger, "invalid invoice: {}", e);
+				return Err(Error::Payment(payment::PaymentError::Invoice(e)));
+			}
+			Err(payment::PaymentError::Routing(e)) => {
+				log_error!(self.logger, "failed to find route: {}", e.err);
+				return Err(Error::Payment(payment::PaymentError::Routing(e)));
+			}
+			Err(payment::PaymentError::Sending(e)) => {
+				log_error!(self.logger, "failed to send payment: {:?}", e);
+				PaymentStatus::Failed
+			}
+		};
+
+		let mut outbound_payments_lock = self.outbound_payments.lock().unwrap();
+		outbound_payments_lock.insert(
+			payment_hash,
+			PaymentInfo { preimage: None, secret: None, status, amount_msat: Some(amount_msat) },
+		);
+
+		Ok(payment_hash)
 	}
 	//
 	//	// Create an invoice to receive a payment
 	//	pub receive_payment(&mut self, amount: Option<u64>) -> Invoice;
 	//
-	//	// Get a new on-chain/funding address.
-	//	pub new_funding_address(&mut self) -> Address;
-	//
-	//	// Query for information about payment status.
-	//	pub payment_info(&mut self) -> PaymentInfo;
+	///	Query for information about the status of a specific payment.
+	pub fn payment_info(&mut self, payment_hash: &[u8; 32]) -> Option<PaymentInfo> {
+		let payment_hash = PaymentHash(*payment_hash);
+
+		{
+			let outbound_payments_lock = self.outbound_payments.lock().unwrap();
+			if let Some(payment_info) = outbound_payments_lock.get(&payment_hash) {
+				return Some((*payment_info).clone());
+			}
+		}
+
+		{
+			let inbound_payments_lock = self.inbound_payments.lock().unwrap();
+			if let Some(payment_info) = inbound_payments_lock.get(&payment_hash) {
+				return Some((*payment_info).clone());
+			}
+		}
+
+		None
+	}
+
 	//
 	//	// Query for information about our channels
 	//	pub channel_info(&mut self) -> ChannelInfo;
@@ -680,7 +766,30 @@ async fn do_connect_peer(
 // Structs wrapping the particular information which should easily be
 // understandable, parseable, and transformable, i.e., we'll try to avoid
 // exposing too many technical detail here.
-struct PaymentInfo;
+/// Represents a payment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaymentInfo {
+	/// The pre-image used by the payment.
+	pub preimage: Option<PaymentPreimage>,
+	/// The secret used by the payment.
+	pub secret: Option<PaymentSecret>,
+	/// The status of the payment.
+	pub status: PaymentStatus,
+	/// The amount transferred.
+	pub amount_msat: Option<u64>,
+}
+
+/// Represents the current status of a payment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaymentStatus {
+	/// The payment is still pending.
+	Pending,
+	/// The payment suceeded.
+	Succeeded,
+	/// The payment failed.
+	Failed,
+}
+
 //struct ChannelInfo;
 //struct FundingInfo;
 

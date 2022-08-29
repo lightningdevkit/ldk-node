@@ -4,7 +4,10 @@ use crate::{
 };
 
 #[allow(unused_imports)]
-use crate::logger::{Logger, FilesystemLogger, log_info, log_error, log_warn, log_trace, log_given_level, log_internal};
+use crate::logger::{
+	log_error, log_given_level, log_info, log_internal, log_trace, log_warn, FilesystemLogger,
+	Logger,
+};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::keysinterface::KeysManager;

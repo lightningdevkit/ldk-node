@@ -39,7 +39,6 @@ impl Logger for FilesystemLogger {
 	}
 }
 
-
 // TODO: We copied the logging macros for now from `lightning::util::macro_logger`. We should
 // switch back to using them from upstream after the next release, which includes their export.
 macro_rules! log_internal {
