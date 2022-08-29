@@ -525,6 +525,7 @@ impl LdkLite {
 										*pubkey,
 										peer_addr.clone(),
 										Arc::clone(&connect_pm),
+										Arc::clone(&connect_logger),
 									)
 									.await;
 								}
@@ -614,11 +615,11 @@ impl LdkLite {
 			}
 			Err(payment::PaymentError::Invoice(e)) => {
 				log_error!(self.logger, "invalid invoice: {}", e);
-				return Err(Error::Payment(payment::PaymentError::Invoice(e)));
+				return Err(Error::LdkPayment(payment::PaymentError::Invoice(e)));
 			}
 			Err(payment::PaymentError::Routing(e)) => {
 				log_error!(self.logger, "failed to find route: {}", e.err);
-				return Err(Error::Payment(payment::PaymentError::Routing(e)));
+				return Err(Error::LdkPayment(payment::PaymentError::Routing(e)));
 			}
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "failed to send payment: {:?}", e);
@@ -666,11 +667,11 @@ impl LdkLite {
 			}
 			Err(payment::PaymentError::Invoice(e)) => {
 				log_error!(self.logger, "invalid invoice: {}", e);
-				return Err(Error::Payment(payment::PaymentError::Invoice(e)));
+				return Err(Error::LdkPayment(payment::PaymentError::Invoice(e)));
 			}
 			Err(payment::PaymentError::Routing(e)) => {
 				log_error!(self.logger, "failed to find route: {}", e.err);
-				return Err(Error::Payment(payment::PaymentError::Routing(e)));
+				return Err(Error::LdkPayment(payment::PaymentError::Routing(e)));
 			}
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "failed to send payment: {:?}", e);
@@ -716,8 +717,7 @@ impl LdkLite {
 			Err(e) => {
 				let err_str = &e.to_string();
 				log_error!(self.logger, "failed to create invoice: {:?}", err_str);
-				// TODO;
-				return Err(Error::InvoiceCreation(e));
+				return Err(Error::LdkInvoiceCreation(e));
 			}
 		};
 
@@ -765,10 +765,8 @@ impl LdkLite {
 }
 
 async fn connect_peer_if_necessary(
-	// TODO: log
-	pubkey: PublicKey,
-	peer_addr: SocketAddr,
-	peer_manager: Arc<PeerManager>,
+	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
 	for node_pubkey in peer_manager.get_peer_node_ids() {
 		if node_pubkey == pubkey {
@@ -776,15 +774,14 @@ async fn connect_peer_if_necessary(
 		}
 	}
 
-	do_connect_peer(pubkey, peer_addr, peer_manager).await
+	do_connect_peer(pubkey, peer_addr, peer_manager, logger).await
 }
 
 async fn do_connect_peer(
-	// TODO: log
-	pubkey: PublicKey,
-	peer_addr: SocketAddr,
-	peer_manager: Arc<PeerManager>,
+	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
+	log_info!(logger, "connecting to peer: {}@{}", pubkey, peer_addr);
 	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
 	{
 		Some(connection_closed_future) => {
@@ -792,6 +789,7 @@ async fn do_connect_peer(
 			loop {
 				match futures::poll!(&mut connection_closed_future) {
 					std::task::Poll::Ready(_) => {
+						log_info!(logger, "peer connection closed: {}@{}", pubkey, peer_addr);
 						return Err(Error::ConnectionClosed);
 					}
 					std::task::Poll::Pending => {}
@@ -803,7 +801,10 @@ async fn do_connect_peer(
 				}
 			}
 		}
-		None => Err(Error::ConnectionClosed),
+		None => {
+			log_error!(logger, "failed to connect to peer: {}@{}", pubkey, peer_addr);
+			Err(Error::ConnectionClosed)
+		}
 	}
 }
 
@@ -834,11 +835,6 @@ pub enum PaymentStatus {
 	/// The payment failed.
 	Failed,
 }
-
-//struct ChannelInfo;
-//struct FundingInfo;
-
-/// TODO
 
 type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,

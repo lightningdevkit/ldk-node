@@ -1,6 +1,6 @@
 use crate::error::LdkLiteError as Error;
-use crate::logger::FilesystemLogger;
-use crate::{LdkLiteConfig, NetworkGraph, Scorer};
+
+use crate::{LdkLiteConfig, NetworkGraph, Scorer, FilesystemLogger};
 
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::ser::ReadableArgs;
@@ -26,7 +26,7 @@ pub(crate) fn read_or_generate_seed_file(config: Arc<LdkLiteConfig>) -> Result<[
 		let mut key = [0; 32];
 		thread_rng().fill_bytes(&mut key);
 
-		let mut f = fs::File::create(keys_seed_path.clone()).map_err(|e| Error::Io(e))?;
+		let mut f = fs::File::create(keys_seed_path.clone()).map_err(|e| Error::StdIo(e))?;
 		f.write_all(&key).expect("Failed to write node keys seed to disk");
 		f.sync_all().expect("Failed to sync node keys seed to disk");
 		key
@@ -82,7 +82,7 @@ pub(crate) fn read_channel_peer_data(
 				Ok((pubkey, socket_addr)) => {
 					peer_data.insert(pubkey, socket_addr);
 				}
-				Err(e) => return Err(Error::Io(e)),
+				Err(e) => return Err(e),
 			}
 		}
 	}
@@ -96,38 +96,6 @@ pub(crate) fn persist_channel_peer(
 	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
 	let mut file = fs::OpenOptions::new().create(true).append(true).open(peer_data_path)?;
 	file.write_all(format!("{}\n", peer_info).as_bytes())
-}
-
-pub(crate) fn parse_peer_info(
-	peer_pubkey_and_ip_addr: String,
-) -> Result<(PublicKey, SocketAddr), std::io::Error> {
-	let mut pubkey_and_addr = peer_pubkey_and_ip_addr.split("@");
-	let pubkey = pubkey_and_addr.next();
-	let peer_addr_str = pubkey_and_addr.next();
-	if peer_addr_str.is_none() || peer_addr_str.is_none() {
-		return Err(std::io::Error::new(
-			std::io::ErrorKind::Other,
-			"ERROR: incorrectly formatted peer info. Should be formatted as: `pubkey@host:port`",
-		));
-	}
-
-	let peer_addr = peer_addr_str.unwrap().to_socket_addrs().map(|mut r| r.next());
-	if peer_addr.is_err() || peer_addr.as_ref().unwrap().is_none() {
-		return Err(std::io::Error::new(
-			std::io::ErrorKind::Other,
-			"ERROR: couldn't parse pubkey@host:port into a socket address",
-		));
-	}
-
-	let pubkey = hex_to_compressed_pubkey(pubkey.unwrap());
-	if pubkey.is_none() {
-		return Err(std::io::Error::new(
-			std::io::ErrorKind::Other,
-			"ERROR: unable to parse given pubkey for node",
-		));
-	}
-
-	Ok((pubkey.unwrap(), peer_addr.unwrap().unwrap()))
 }
 
 pub fn hex_to_vec(hex: &str) -> Option<Vec<u8>> {
@@ -172,4 +140,30 @@ pub fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
 		Ok(pk) => Some(pk),
 		Err(_) => None,
 	}
+}
+
+// TODO: handle different kinds of NetAddress, e.g., the Hostname field.
+pub(crate) fn parse_peer_info(
+	peer_pubkey_and_ip_addr: String,
+) -> Result<(PublicKey, SocketAddr), Error> {
+	let mut pubkey_and_addr = peer_pubkey_and_ip_addr.split("@");
+	let pubkey = pubkey_and_addr.next();
+	let peer_addr_str = pubkey_and_addr.next();
+	if peer_addr_str.is_none() || peer_addr_str.is_none() {
+		return Err(Error::PeerInfoParse(
+			"Incorrect format. Should be formatted as: `pubkey@host:port`.",
+		));
+	}
+
+	let peer_addr = peer_addr_str.unwrap().to_socket_addrs().map(|mut r| r.next());
+	if peer_addr.is_err() || peer_addr.as_ref().unwrap().is_none() {
+		return Err(Error::PeerInfoParse("Couldn't parse pubkey@host:port into a socket address."));
+	}
+
+	let pubkey = hex_to_compressed_pubkey(pubkey.unwrap());
+	if pubkey.is_none() {
+		return Err(Error::PeerInfoParse("Unable to parse pubkey for node."));
+	}
+
+	Ok((pubkey.unwrap(), peer_addr.unwrap().unwrap()))
 }
