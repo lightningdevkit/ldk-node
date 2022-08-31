@@ -664,9 +664,13 @@ impl LdkLite {
 		}
 	}
 
-	//	// Close a previously opened channel
-	//	pub close_channel(&mut self, channel_id: u64) -> Result<()>;
-	//
+	/// Close a previously opened channel.
+	pub fn close_channel(
+		&self, channel_id: &[u8; 32], counterparty_node_id: &PublicKey,
+	) -> Result<(), Error> {
+		Ok(self.channel_manager.close_channel(channel_id, counterparty_node_id)?)
+	}
+
 	/// Send a payement given an invoice.
 	pub fn send_payment(&self, invoice: Invoice) -> Result<PaymentHash, Error> {
 		if self.running.read().unwrap().is_none() {
