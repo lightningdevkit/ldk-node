@@ -27,9 +27,9 @@
 mod access;
 mod error;
 mod event;
-mod logger;
-mod io;
 mod hex;
+mod io;
+mod logger;
 
 use access::LdkLiteChainAccess;
 pub use error::LdkLiteError as Error;
@@ -217,7 +217,8 @@ impl LdkLiteBuilder {
 
 		// TODO: Check that we can be sure that the Esplora client re-connects in case of failure
 		// and and exits cleanly on drop. Otherwise we need to handle this/move it to the runtime?
-		let blockchain = EsploraBlockchain::new(&config.esplora_server_url, BDK_CLIENT_STOP_GAP).with_concurrency(BDK_CLIENT_CONCURRENCY);
+		let blockchain = EsploraBlockchain::new(&config.esplora_server_url, BDK_CLIENT_STOP_GAP)
+			.with_concurrency(BDK_CLIENT_CONCURRENCY);
 
 		let chain_access = Arc::new(LdkLiteChainAccess::new(blockchain, bdk_wallet));
 

@@ -1,7 +1,7 @@
 use crate::error::LdkLiteError as Error;
 
-use crate::{LdkLiteConfig, NetworkGraph, Scorer, FilesystemLogger};
 use crate::hex;
+use crate::{FilesystemLogger, LdkLiteConfig, NetworkGraph, Scorer};
 
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::ser::ReadableArgs;
@@ -98,7 +98,6 @@ pub(crate) fn persist_channel_peer(
 	let mut file = fs::OpenOptions::new().create(true).append(true).open(peer_data_path)?;
 	file.write_all(format!("{}\n", peer_info).as_bytes())
 }
-
 
 // TODO: handle different kinds of NetAddress, e.g., the Hostname field.
 pub(crate) fn parse_peer_info(
