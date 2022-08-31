@@ -22,7 +22,7 @@ pub enum LdkLiteError {
 	/// TODO
 	ChainStateMismatch,
 	/// A network connection has been closed.
-	ConnectionClosed,
+	ConnectionFailed,
 	/// A given peer info could not be parsed.
 	PeerInfoParse(&'static str),
 	/// A wrapped LDK `APIError`
@@ -55,7 +55,7 @@ impl fmt::Display for LdkLiteError {
 			LdkLiteError::FundingTxNonWitnessOuputSpend => write!(f, "an input of the funding transaction tried spending a non-SegWit output, which is insecure"),
 			LdkLiteError::FundingTxNotFinalized => write!(f, "the funding transaction could not be finalized"),
 			LdkLiteError::ChainStateMismatch => write!(f, "ChainStateMismatch"),
-			LdkLiteError::ConnectionClosed => write!(f, "network connection closed"),
+			LdkLiteError::ConnectionFailed => write!(f, "network connection closed"),
 			LdkLiteError::PeerInfoParse(ref e) => write!(f, "given peer info could not be parsed: {}", e),
 			LdkLiteError::LdkDecode(ref e) => write!(f, "LDK decode error: {}", e),
 			LdkLiteError::LdkApi(ref e) => write!(f, "LDK API error: {:?}", e),

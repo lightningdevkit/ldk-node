@@ -54,7 +54,7 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::scoring::ProbabilisticScorer;
 
-use lightning::util::config::UserConfig;
+use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::ser::ReadableArgs;
 
 use lightning_background_processor::BackgroundProcessor;
@@ -384,7 +384,7 @@ impl LdkLiteBuilder {
 /// Wraps all objects that need to be preserved during the run time of `LdkLite`. Will be dropped
 /// upon [`LdkLite::stop()`].
 struct LdkLiteRuntime {
-	_tokio_runtime: tokio::runtime::Runtime,
+	tokio_runtime: tokio::runtime::Runtime,
 	_background_processor: BackgroundProcessor,
 	stop_networking: Arc<AtomicBool>,
 	stop_wallet_sync: Arc<AtomicBool>,
@@ -452,7 +452,7 @@ impl LdkLite {
 	}
 
 	fn setup_runtime(&self) -> Result<LdkLiteRuntime, Error> {
-		let _tokio_runtime =
+		let tokio_runtime =
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
 		// Setup wallet sync
@@ -462,7 +462,7 @@ impl LdkLite {
 		let stop_wallet_sync = Arc::new(AtomicBool::new(false));
 		let stop_sync = Arc::clone(&stop_wallet_sync);
 
-		_tokio_runtime.spawn(async move {
+		tokio_runtime.spawn(async move {
 			let mut rounds = 0;
 			loop {
 				if stop_sync.load(Ordering::Acquire) {
@@ -489,7 +489,7 @@ impl LdkLite {
 		let stop_networking = Arc::new(AtomicBool::new(false));
 		let stop_listen = Arc::clone(&stop_networking);
 
-		_tokio_runtime.spawn(async move {
+		tokio_runtime.spawn(async move {
 			let listener =
 				tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port)).await.expect(
 					"Failed to bind to listen port - is something else already listening on it?",
@@ -516,7 +516,7 @@ impl LdkLite {
 		let connect_config = Arc::clone(&self.config);
 		let connect_logger = Arc::clone(&self.logger);
 		let stop_connect = Arc::clone(&stop_networking);
-		_tokio_runtime.spawn(async move {
+		tokio_runtime.spawn(async move {
 			let mut interval = tokio::time::interval(Duration::from_secs(1));
 			loop {
 				if stop_connect.load(Ordering::Acquire) {
@@ -571,7 +571,7 @@ impl LdkLite {
 		// TODO: frequently check back on background_processor if there was an error
 
 		Ok(LdkLiteRuntime {
-			_tokio_runtime,
+			tokio_runtime,
 			_background_processor,
 			stop_networking,
 			stop_wallet_sync,
@@ -603,9 +603,67 @@ impl LdkLite {
 		Ok(funding_address)
 	}
 
-	// Connect to a node and open a new channel. Disconnects and re-connects should be handled automatically
-	//pub fn connect_open_channel(&mut self, node_id: PublicKey, node_address: NetAddress) -> Result<u64> {
-	//}
+	/// Connect to a node and open a new channel. Disconnects and re-connects are handled automatically
+	///
+	/// Returns a temporary channel id
+	pub fn connect_open_channel(
+		&self, node_pubkey_and_address: &str, channel_amount_sats: u64, announce_channel: bool,
+	) -> Result<[u8; 32], Error> {
+		let runtime_lock = self.running.read().unwrap();
+		if runtime_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		let (peer_pubkey, peer_addr) = io::parse_peer_info(node_pubkey_and_address.to_string())?;
+
+		let runtime = runtime_lock.as_ref().unwrap();
+
+		let con_success = Arc::new(AtomicBool::new(false));
+		let con_success_cloned = Arc::clone(&con_success);
+		let con_logger = Arc::clone(&self.logger);
+		let con_pm = Arc::clone(&self.peer_manager);
+
+		runtime.tokio_runtime.block_on(async move {
+			let res = connect_peer_if_necessary(peer_pubkey, peer_addr, con_pm, con_logger).await;
+			con_success_cloned.store(res.is_ok(), Ordering::Release);
+		});
+
+		if !con_success.load(Ordering::Acquire) {
+			return Err(Error::ConnectionFailed);
+		}
+
+		// TODO: make some of the UserConfig values configurable through LdkLiteConfig
+		let user_config = UserConfig {
+			channel_handshake_limits: ChannelHandshakeLimits {
+				// lnd's max to_self_delay is 2016, so we want to be compatible.
+				their_to_self_delay: 2016,
+				..Default::default()
+			},
+			channel_handshake_config: ChannelHandshakeConfig {
+				announced_channel: announce_channel,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		match self.channel_manager.create_channel(
+			peer_pubkey,
+			channel_amount_sats,
+			0,
+			0,
+			Some(user_config),
+		) {
+			Ok(temporary_channel_id) => {
+				log_info!(self.logger, "Initiated channel with peer {}. ", peer_pubkey);
+				return Ok(temporary_channel_id);
+			}
+			Err(e) => {
+				log_error!(self.logger, "failed to open channel: {:?}", e);
+				return Err(Error::LdkApi(e));
+			}
+		}
+	}
+
 	//	// Close a previously opened channel
 	//	pub close_channel(&mut self, channel_id: u64) -> Result<()>;
 	//
@@ -803,7 +861,7 @@ async fn do_connect_peer(
 				match futures::poll!(&mut connection_closed_future) {
 					std::task::Poll::Ready(_) => {
 						log_info!(logger, "peer connection closed: {}@{}", pubkey, peer_addr);
-						return Err(Error::ConnectionClosed);
+						return Err(Error::ConnectionFailed);
 					}
 					std::task::Poll::Pending => {}
 				}
@@ -816,7 +874,7 @@ async fn do_connect_peer(
 		}
 		None => {
 			log_error!(logger, "failed to connect to peer: {}@{}", pubkey, peer_addr);
-			Err(Error::ConnectionClosed)
+			Err(Error::ConnectionFailed)
 		}
 	}
 }
