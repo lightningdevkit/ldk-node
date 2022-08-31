@@ -75,7 +75,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::BlockHash;
 
-use rand::RngCore;
+use rand::Rng;
 
 use std::collections::HashMap;
 use std::fs;
@@ -300,8 +300,7 @@ impl LdkLiteBuilder {
 		));
 
 		//// Step 11: Initialize the PeerManager
-		let mut ephemeral_bytes = [0; 32];
-		rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
+		let ephemeral_bytes: [u8; 32] = rand::thread_rng().gen();
 		let lightning_msg_handler = MessageHandler {
 			chan_handler: Arc::clone(&channel_manager),
 			route_handler: Arc::clone(&gossip_sync),
