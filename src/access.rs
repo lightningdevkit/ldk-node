@@ -17,7 +17,7 @@ pub struct LdkLiteChainAccess<D>
 where
 	D: BatchDatabase,
 {
-	blockchain: Mutex<EsploraBlockchain>,
+	blockchain: EsploraBlockchain,
 	wallet: Mutex<bdk::Wallet<D>>,
 	queued_transactions: Mutex<Vec<Txid>>,
 	watched_transactions: Mutex<Vec<Txid>>,
@@ -31,7 +31,6 @@ where
 	D: BatchDatabase,
 {
 	pub fn new(blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>) -> Self {
-		let blockchain = Mutex::new(blockchain);
 		let wallet = Mutex::new(wallet);
 		let watched_transactions = Mutex::new(Vec::new());
 		let queued_transactions = Mutex::new(Vec::new());
@@ -52,18 +51,16 @@ where
 	pub fn sync_wallet(&self) -> Result<(), Error> {
 		let sync_options = SyncOptions { progress: None };
 
-		let locked_chain = self.blockchain.lock().unwrap();
 		self.wallet
 			.lock()
 			.unwrap()
-			.sync(&*locked_chain, sync_options)
+			.sync(&self.blockchain, sync_options)
 			.map_err(|e| Error::Bdk(e))?;
 		Ok(())
 	}
 
 	pub fn sync(&self, confirmables: Vec<&dyn Confirm>) -> Result<(), Error> {
-		let locked_chain = self.blockchain.lock().unwrap();
-		let client = &*(*locked_chain);
+		let client = &*self.blockchain;
 
 		let cur_height = client.get_height()?;
 
@@ -216,7 +213,7 @@ where
 		&self, output_script: &Script, value_sats: u64, confirmation_target: ConfirmationTarget,
 	) -> Result<Transaction, Error> {
 		let num_blocks = num_blocks_from_conf_target(confirmation_target);
-		let fee_rate = self.blockchain.lock().unwrap().estimate_fee(num_blocks)?;
+		let fee_rate = self.blockchain.estimate_fee(num_blocks)?;
 
 		let locked_wallet = self.wallet.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
@@ -256,7 +253,7 @@ where
 		// TODO: make this an unwrap_or?
 		// TODO: double-check here https://github.com/bitcoindevkit/bdk/pull/678/commits/03a5b223800b0fafd0e7c2c82bf4943ac9d5ae58
 		// TODO: switch to https://github.com/bitcoindevkit/bdk/pull/678 once that is merged
-		self.blockchain.lock().unwrap().estimate_fee(num_blocks).unwrap().fee_wu(1000) as u32
+		self.blockchain.estimate_fee(num_blocks).unwrap().fee_wu(1000) as u32
 	}
 }
 
@@ -265,7 +262,7 @@ where
 	D: BatchDatabase,
 {
 	fn broadcast_transaction(&self, tx: &Transaction) {
-		self.blockchain.lock().unwrap().broadcast(tx).ok();
+		self.blockchain.broadcast(tx).ok();
 	}
 }
 
@@ -289,7 +286,7 @@ where
 	D: BatchDatabase,
 {
 	fn get_height(&self) -> Result<u32, bdk::Error> {
-		self.blockchain.lock().unwrap().get_height()
+		self.blockchain.get_height()
 	}
 }
 
@@ -298,7 +295,7 @@ where
 	D: BatchDatabase,
 {
 	fn get_block_hash(&self, height: u64) -> Result<BlockHash, bdk::Error> {
-		self.blockchain.lock().unwrap().get_block_hash(height)
+		self.blockchain.get_block_hash(height)
 	}
 }
 
@@ -307,7 +304,7 @@ where
 	D: BatchDatabase,
 {
 	fn get_tx(&self, txid: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-		self.blockchain.lock().unwrap().get_tx(txid)
+		self.blockchain.get_tx(txid)
 	}
 }
 

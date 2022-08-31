@@ -646,7 +646,6 @@ impl LdkLite {
 			..Default::default()
 		};
 
-		// TODO: this seems to block for quite some time. Is this a locking conflict with chain access locks in the background?
 		match self.channel_manager.create_channel(
 			peer_pubkey,
 			channel_amount_sats,
