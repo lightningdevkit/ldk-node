@@ -5,16 +5,18 @@ use lightning::util::ser::Writer;
 use chrono::Utc;
 
 use std::fs;
+use std::path::Path;
 
 pub(crate) struct FilesystemLogger {
-	data_dir: String,
+	file_path: String,
 }
 
 impl FilesystemLogger {
-	pub(crate) fn new(data_dir: String) -> Self {
-		let logs_path = format!("{}/logs", data_dir);
-		fs::create_dir_all(logs_path.clone()).unwrap();
-		Self { data_dir: logs_path }
+	pub(crate) fn new(file_path: String) -> Self {
+		if let Some(parent_dir) = Path::new(&file_path).parent() {
+			fs::create_dir_all(parent_dir).unwrap();
+		}
+		Self { file_path }
 	}
 }
 impl Logger for FilesystemLogger {
@@ -28,11 +30,10 @@ impl Logger for FilesystemLogger {
 			record.line,
 			raw_log
 		);
-		let logs_file_path = format!("{}/logs.txt", self.data_dir.clone());
 		fs::OpenOptions::new()
 			.create(true)
 			.append(true)
-			.open(logs_file_path)
+			.open(self.file_path.clone())
 			.unwrap()
 			.write_all(log.as_bytes())
 			.unwrap();

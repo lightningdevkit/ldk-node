@@ -201,7 +201,8 @@ impl LdkLiteBuilder {
 		fs::create_dir_all(bdk_data_dir.clone())?;
 
 		// Step 0: Initialize the Logger
-		let logger = Arc::new(FilesystemLogger::new(config.storage_dir_path.clone()));
+		let log_file_path = format!("{}/ldk_lite.log", config.storage_dir_path.clone());
+		let logger = Arc::new(FilesystemLogger::new(log_file_path));
 
 		// Step 1: Initialize the on-chain wallet and chain access
 		let seed = io::read_or_generate_seed_file(Arc::clone(&config))?;
