@@ -28,7 +28,8 @@ mod access;
 mod error;
 mod event;
 mod logger;
-mod util;
+mod io;
+mod hex;
 
 use access::LdkLiteChainAccess;
 pub use error::LdkLiteError as Error;
@@ -192,7 +193,7 @@ impl LdkLiteBuilder {
 		let logger = Arc::new(FilesystemLogger::new(config.storage_dir_path.clone()));
 
 		// Step 1: Initialize the on-chain wallet and chain access
-		let seed = util::read_or_generate_seed_file(Arc::clone(&config))?;
+		let seed = io::read_or_generate_seed_file(Arc::clone(&config))?;
 		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed)?;
 
 		let bdk_wallet = bdk::Wallet::new(
@@ -279,7 +280,7 @@ impl LdkLiteBuilder {
 		// TODO: Use RGS on first start, if configured
 		// Step 10: Initialize the P2PGossipSync
 		let network_graph =
-			Arc::new(util::read_network_graph(Arc::clone(&config), Arc::clone(&logger))?);
+			Arc::new(io::read_network_graph(Arc::clone(&config), Arc::clone(&logger))?);
 		let gossip_sync = Arc::new(P2PGossipSync::new(
 			Arc::clone(&network_graph),
 			None::<Arc<dyn Access + Send + Sync>>,
@@ -303,7 +304,7 @@ impl LdkLiteBuilder {
 		));
 
 		// Step 12: Initialize routing ProbabilisticScorer
-		let scorer = Arc::new(Mutex::new(util::read_scorer(
+		let scorer = Arc::new(Mutex::new(io::read_scorer(
 			Arc::clone(&config),
 			Arc::clone(&network_graph),
 			Arc::clone(&logger),
@@ -510,7 +511,7 @@ impl LdkLite {
 					return;
 				}
 				interval.tick().await;
-				match util::read_channel_peer_data(Arc::clone(&connect_config)) {
+				match io::read_channel_peer_data(Arc::clone(&connect_config)) {
 					Ok(info) => {
 						let peers = connect_pm.get_peer_node_ids();
 						for node_id in connect_cm

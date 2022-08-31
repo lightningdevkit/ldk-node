@@ -1,6 +1,7 @@
 use crate::error::LdkLiteError as Error;
 
 use crate::{LdkLiteConfig, NetworkGraph, Scorer, FilesystemLogger};
+use crate::hex;
 
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::ser::ReadableArgs;
@@ -98,49 +99,6 @@ pub(crate) fn persist_channel_peer(
 	file.write_all(format!("{}\n", peer_info).as_bytes())
 }
 
-pub fn hex_to_vec(hex: &str) -> Option<Vec<u8>> {
-	let mut out = Vec::with_capacity(hex.len() / 2);
-
-	let mut b = 0;
-	for (idx, c) in hex.as_bytes().iter().enumerate() {
-		b <<= 4;
-		match *c {
-			b'A'..=b'F' => b |= c - b'A' + 10,
-			b'a'..=b'f' => b |= c - b'a' + 10,
-			b'0'..=b'9' => b |= c - b'0',
-			_ => return None,
-		}
-		if (idx & 1) == 1 {
-			out.push(b);
-			b = 0;
-		}
-	}
-
-	Some(out)
-}
-
-#[inline]
-pub fn hex_str(value: &[u8]) -> String {
-	let mut res = String::with_capacity(64);
-	for v in value {
-		res += &format!("{:02x}", v);
-	}
-	res
-}
-
-pub fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
-	if hex.len() != 33 * 2 {
-		return None;
-	}
-	let data = match hex_to_vec(&hex[0..33 * 2]) {
-		Some(bytes) => bytes,
-		None => return None,
-	};
-	match PublicKey::from_slice(&data) {
-		Ok(pk) => Some(pk),
-		Err(_) => None,
-	}
-}
 
 // TODO: handle different kinds of NetAddress, e.g., the Hostname field.
 pub(crate) fn parse_peer_info(
@@ -160,7 +118,7 @@ pub(crate) fn parse_peer_info(
 		return Err(Error::PeerInfoParse("Couldn't parse pubkey@host:port into a socket address."));
 	}
 
-	let pubkey = hex_to_compressed_pubkey(pubkey.unwrap());
+	let pubkey = hex::to_compressed_pubkey(pubkey.unwrap());
 	if pubkey.is_none() {
 		return Err(Error::PeerInfoParse("Unable to parse pubkey for node."));
 	}
