@@ -88,7 +88,18 @@ use std::time::{Duration, SystemTime};
 
 // TODO: Is MemoryDatabase okay to use?
 
+// The number of messages we buffer in the used channels.
 const CHANNEL_BUF_SIZE: usize = 1000;
+
+// The used 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
+// number of blocks after which BDK stops looking for scripts belonging to the wallet.
+const BDK_CLIENT_STOP_GAP: usize = 20;
+
+// The number of concurrent requests made against the API provider.
+const BDK_CLIENT_CONCURRENCY: u8 = 8;
+
+// The timeout after which we abandon retrying failed payments.
+const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 /// Represents the configuration of an `LdkLite` instance.
@@ -205,7 +216,7 @@ impl LdkLiteBuilder {
 
 		// TODO: Check that we can be sure that the Esplora client re-connects in case of failure
 		// and and exits cleanly on drop. Otherwise we need to handle this/move it to the runtime?
-		let blockchain = EsploraBlockchain::new(&config.esplora_server_url, 20).with_concurrency(8);
+		let blockchain = EsploraBlockchain::new(&config.esplora_server_url, BDK_CLIENT_STOP_GAP).with_concurrency(BDK_CLIENT_CONCURRENCY);
 
 		let chain_access = Arc::new(LdkLiteChainAccess::new(blockchain, bdk_wallet));
 
@@ -343,7 +354,7 @@ impl LdkLiteBuilder {
 			Arc::clone(&scorer),
 			Arc::clone(&logger),
 			event_handler,
-			payment::Retry::Timeout(Duration::from_secs(10)),
+			payment::Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
 		));
 
 		let running = RwLock::new(None);
