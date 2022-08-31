@@ -646,6 +646,7 @@ impl LdkLite {
 			..Default::default()
 		};
 
+		// TODO: this seems to block for quite some time. Is this a locking conflict with chain access locks in the background?
 		match self.channel_manager.create_channel(
 			peer_pubkey,
 			channel_amount_sats,
@@ -655,11 +656,11 @@ impl LdkLite {
 		) {
 			Ok(temporary_channel_id) => {
 				log_info!(self.logger, "Initiated channel with peer {}. ", peer_pubkey);
-				return Ok(temporary_channel_id);
+				Ok(temporary_channel_id)
 			}
 			Err(e) => {
 				log_error!(self.logger, "failed to open channel: {:?}", e);
-				return Err(Error::LdkApi(e));
+				Err(Error::LdkApi(e))
 			}
 		}
 	}
