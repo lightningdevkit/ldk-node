@@ -1,4 +1,9 @@
 use crate::error::LdkLiteError as Error;
+#[allow(unused_imports)]
+use crate::logger::{
+	log_error, log_given_level, log_info, log_internal, log_trace, log_warn, FilesystemLogger,
+	Logger,
+};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::WatchedOutput;
@@ -11,7 +16,8 @@ use bdk::{SignOptions, SyncOptions};
 
 use bitcoin::{BlockHash, Script, Transaction, Txid};
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub struct LdkLiteChainAccess<D>
 where
@@ -24,13 +30,16 @@ where
 	queued_outputs: Mutex<Vec<WatchedOutput>>,
 	watched_outputs: Mutex<Vec<WatchedOutput>>,
 	last_sync_height: Mutex<Option<u32>>,
+	logger: Arc<FilesystemLogger>,
 }
 
 impl<D> LdkLiteChainAccess<D>
 where
 	D: BatchDatabase,
 {
-	pub fn new(blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>) -> Self {
+	pub(crate) fn new(
+		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>, logger: Arc<FilesystemLogger>,
+	) -> Self {
 		let wallet = Mutex::new(wallet);
 		let watched_transactions = Mutex::new(Vec::new());
 		let queued_transactions = Mutex::new(Vec::new());
@@ -45,21 +54,31 @@ where
 			queued_outputs,
 			watched_outputs,
 			last_sync_height,
+			logger,
 		}
 	}
 
-	pub fn sync_wallet(&self) -> Result<(), Error> {
+	pub(crate) fn sync_wallet(&self) -> Result<(), Error> {
 		let sync_options = SyncOptions { progress: None };
 
+		let now = Instant::now();
 		self.wallet
 			.lock()
 			.unwrap()
 			.sync(&self.blockchain, sync_options)
 			.map_err(|e| Error::Bdk(e))?;
+
+		log_info!(
+			self.logger,
+			"On-chain wallet sync finished in {} seconds.",
+			now.elapsed().as_secs()
+		);
+
 		Ok(())
 	}
 
-	pub fn sync(&self, confirmables: Vec<&dyn Confirm>) -> Result<(), Error> {
+	pub(crate) fn sync(&self, confirmables: Vec<&dyn Confirm>) -> Result<(), Error> {
+		let now = Instant::now();
 		let client = &*self.blockchain;
 
 		let cur_height = client.get_height()?;
@@ -206,10 +225,15 @@ where
 		}
 
 		// TODO: check whether new outputs have been registered by now and process them
+		log_info!(
+			self.logger,
+			"Lightning wallet sync finished in {} seconds.",
+			now.elapsed().as_secs()
+		);
 		Ok(())
 	}
 
-	pub fn create_funding_transaction(
+	pub(crate) fn create_funding_transaction(
 		&self, output_script: &Script, value_sats: u64, confirmation_target: ConfirmationTarget,
 	) -> Result<Transaction, Error> {
 		let num_blocks = num_blocks_from_conf_target(confirmation_target);
@@ -238,7 +262,7 @@ where
 		Ok(psbt.extract_tx())
 	}
 
-	pub fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
+	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
 		let address_info = self.wallet.lock().unwrap().get_address(AddressIndex::New)?;
 		Ok(address_info.address)
 	}

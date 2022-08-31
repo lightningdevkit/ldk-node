@@ -220,7 +220,8 @@ impl LdkLiteBuilder {
 		let blockchain = EsploraBlockchain::new(&config.esplora_server_url, BDK_CLIENT_STOP_GAP)
 			.with_concurrency(BDK_CLIENT_CONCURRENCY);
 
-		let chain_access = Arc::new(LdkLiteChainAccess::new(blockchain, bdk_wallet));
+		let chain_access =
+			Arc::new(LdkLiteChainAccess::new(blockchain, bdk_wallet, Arc::clone(&logger)));
 
 		// Step 3: Initialize Persist
 		let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
