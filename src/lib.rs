@@ -73,6 +73,7 @@ use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::blockchain::{GetBlockHash, GetHeight};
 use bdk::sled;
 use bdk::template::Bip84;
+use bdk::keys::bip39;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -114,11 +115,19 @@ pub struct LdkLiteConfig {
 	pub default_cltv_expiry_delta: u32,
 }
 
+#[derive(Debug, Clone)]
+enum LdkLiteWalletEntropy {
+	SeedFile(String),
+	SeedBytes([u8; 64]),
+	Bip39Mnemonic(bip39::Mnemonic),
+}
+
 /// A builder for an [`LdkLite`] instance, allowing to set some configuration and module choices from
 /// the getgo.
 #[derive(Debug, Clone)]
 pub struct LdkLiteBuilder {
 	config: LdkLiteConfig,
+	wallet_entropy: LdkLiteWalletEntropy,
 }
 
 impl LdkLiteBuilder {
@@ -126,6 +135,8 @@ impl LdkLiteBuilder {
 	pub fn new() -> Self {
 		// Set the config defaults
 		let storage_dir_path = "/tmp/ldk_lite/".to_string();
+		let seed_path = format!("{}/keys_seed", storage_dir_path);
+		let wallet_entropy = LdkLiteWalletEntropy::SeedFile(seed_path);
 		let esplora_server_url = "https://blockstream.info/api".to_string();
 		let network = bitcoin::Network::Testnet;
 		let listening_port = 9735;
@@ -139,12 +150,33 @@ impl LdkLiteBuilder {
 			default_cltv_expiry_delta,
 		};
 
-		Self { config }
+		Self { config, wallet_entropy }
 	}
 
 	/// Creates a new builder instance from an [`LdkLiteConfig`].
 	pub fn from_config(config: LdkLiteConfig) -> Self {
-		Self { config }
+		let seed_path = format!("{}/keys_seed", config.storage_dir_path);
+		let wallet_entropy = LdkLiteWalletEntropy::SeedFile(seed_path);
+		Self { config, wallet_entropy }
+	}
+
+	/// Configures [`LdkLite`] to source its wallet entropy from a seed file on disk.
+	pub fn set_entropy_seed_path(&mut self, seed_path: String) -> &mut Self {
+		self.wallet_entropy = LdkLiteWalletEntropy::SeedFile(seed_path);
+		self
+	}
+
+	/// Configures [`LdkLite`] to source its wallet entropy from a [`Bip39`] mnemonic code.
+	pub fn set_entropy_bip39_mnemonic(&mut self, mnemonic_str: String) -> &mut Self {
+		let mnemonic = bip39::Mnemonic::from_str(mnemonic_str).unwrap();
+		self.wallet_entropy = LdkLiteWalletEntropy::Bip39Mnemonic(mnemonic);
+		self
+	}
+
+	/// Configures [`LdkLite`] to source its wallet entropy from the given seed bytes.
+	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: [u8; 64]) -> &mut Self {
+		self.wallet_entropy = LdkLiteWalletEntropy::SeedBytes(seed_bytes);
+		self
 	}
 
 	/// Sets the used storage directory path.
@@ -203,8 +235,13 @@ impl LdkLiteBuilder {
 		let logger = Arc::new(FilesystemLogger::new(log_file_path));
 
 		// Step 1: Initialize the on-chain wallet and chain access
-		let seed = io::read_or_generate_seed_file(Arc::clone(&config))?;
-		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed)?;
+		let seed_bytes = match self.wallet_entropy {
+			LdkLiteWalletEntropy::SeedBytes(bytes) => bytes,
+			LdkLiteWalletEntropy::SeedFile(seed_path) => io::read_or_generate_seed_file(seed_path)?,
+			LdkLiteWalletEntropy::Bip39Mnemonic(mnemonic) => mnemonic.to_seed(),
+		};
+
+		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)?;
 
 		let wallet_name = bdk::wallet::wallet_name_from_descriptor(
 			Bip84(xprv.clone(), bdk::KeychainKind::External),
@@ -244,7 +281,8 @@ impl LdkLiteBuilder {
 
 		// Step 5: Initialize the KeysManager
 		let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-		let keys_manager = Arc::new(KeysManager::new(&seed, cur.as_secs(), cur.subsec_nanos()));
+		let ldk_seed: [u8; 32] = xprv.private_key.secret_bytes();
+		let keys_manager = Arc::new(KeysManager::new(&ldk_seed, cur.as_secs(), cur.subsec_nanos()));
 
 		// Step 6: Read ChannelMonitor state from disk
 		let mut channel_monitors = persister.read_channelmonitors(keys_manager.clone())?;
