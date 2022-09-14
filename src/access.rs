@@ -237,13 +237,13 @@ where
 		// wallet descriptor this technically shouldn't ever happen, but better safe than sorry.
 		for input in &psbt.inputs {
 			if input.witness_utxo.is_none() {
-				return Err(Error::FundingTxNonWitnessOuputSpend);
+				log_error!(self.logger, "Tried to spend a non-witness funding output. This must not ever happen. Panicking!");
+				panic!("Tried to spend a non-witness funding output. This must not ever happen.");
 			}
 		}
 
-		let finalized = locked_wallet.sign(&mut psbt, SignOptions::default())?;
-		if !finalized {
-			return Err(Error::FundingTxNotFinalized);
+		if !locked_wallet.sign(&mut psbt, SignOptions::default())? {
+			return Err(Error::FundingTxCreationFailed);
 		}
 
 		Ok(psbt.extract_tx())
