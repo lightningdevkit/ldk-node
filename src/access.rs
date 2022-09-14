@@ -16,6 +16,7 @@ use bdk::{SignOptions, SyncOptions};
 
 use bitcoin::{BlockHash, Script, Transaction, Txid};
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// The minimum feerate we are allowed to send, as specify by LDK.
@@ -101,14 +102,11 @@ where
 
 				// Check in the current queue, as well as in registered transactions leftover from
 				// previous iterations.
-				let mut registered_txs: Vec<Txid> = locked_watched_transactions
+				let registered_txs: HashSet<Txid> = locked_watched_transactions
 					.iter()
 					.chain(locked_queued_transactions.iter())
 					.cloned()
 					.collect();
-
-				registered_txs.sort_unstable_by(|txid1, txid2| txid1.cmp(&txid2));
-				registered_txs.dedup_by(|txid1, txid2| txid1.eq(&txid2));
 
 				// Remember all registered but unconfirmed transactions for future processing.
 				let mut unconfirmed_registered_txs = Vec::new();
