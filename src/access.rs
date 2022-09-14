@@ -173,11 +173,11 @@ where
 					unspent_registered_outputs.push(output);
 				}
 
-				// Sort all confirmed transactions by block height and feed them to the interface
-				// in order.
+				// Sort all confirmed transactions first by block height, then by in-block
+				// position, and finally feed them to the interface in order.
 				confirmed_txs.sort_unstable_by(
-					|(_, block_height1, _, _), (_, block_height2, _, _)| {
-						block_height1.cmp(&block_height2)
+					|(_, block_height1, _, pos1), (_, block_height2, _, pos2)| {
+						block_height1.cmp(&block_height2).then_with(|| pos1.cmp(&pos2))
 					},
 				);
 				for (tx, block_height, block_header, pos) in confirmed_txs {
