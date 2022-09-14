@@ -18,6 +18,9 @@ use bitcoin::{BlockHash, Script, Transaction, Txid};
 
 use std::sync::{Arc, Mutex};
 
+/// The minimum feerate we are allowed to send, as specify by LDK.
+const MIN_FEERATE: u32 = 253;
+
 pub struct LdkLiteChainAccess<D>
 where
 	D: BatchDatabase,
@@ -261,8 +264,10 @@ where
 {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
 		let num_blocks = num_blocks_from_conf_target(confirmation_target);
-		self.blockchain.estimate_fee(num_blocks).map_or(253, |fee_rate| fee_rate.fee_wu(1000))
-			as u32
+		let fallback_fee = fallback_fee_from_conf_target(confirmation_target);
+		self.blockchain
+			.estimate_fee(num_blocks)
+			.map_or(fallback_fee, |fee_rate| (fee_rate.fee_wu(1000) as u32).max(MIN_FEERATE)) as u32
 	}
 }
 
@@ -271,7 +276,10 @@ where
 	D: BatchDatabase,
 {
 	fn broadcast_transaction(&self, tx: &Transaction) {
-		self.blockchain.broadcast(tx).ok();
+		match self.blockchain.broadcast(tx) {
+			Ok(_) => {}
+			Err(err) => log_error!(self.logger, "Failed to broadcast transaction: {}", err),
+		}
 	}
 }
 
@@ -318,8 +326,16 @@ where
 
 fn num_blocks_from_conf_target(confirmation_target: ConfirmationTarget) -> usize {
 	match confirmation_target {
-		ConfirmationTarget::Background => 6,
-		ConfirmationTarget::Normal => 3,
-		ConfirmationTarget::HighPriority => 1,
+		ConfirmationTarget::Background => 12,
+		ConfirmationTarget::Normal => 6,
+		ConfirmationTarget::HighPriority => 3,
+	}
+}
+
+fn fallback_fee_from_conf_target(confirmation_target: ConfirmationTarget) -> u32 {
+	match confirmation_target {
+		ConfirmationTarget::Background => MIN_FEERATE,
+		ConfirmationTarget::Normal => 2000,
+		ConfirmationTarget::HighPriority => 5000,
 	}
 }
