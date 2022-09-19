@@ -11,12 +11,20 @@ pub enum Error {
 	FundingTxCreationFailed,
 	/// A network connection has been closed.
 	ConnectionFailed,
+	/// The given address is invalid.
+	AddressInvalid,
+	/// The given public key is invalid.
+	PublicKeyInvalid,
+	/// The given payment hash is invalid.
+	PaymentHashInvalid,
 	/// Payment of the given invoice has already been intiated.
 	NonUniquePaymentHash,
 	/// The given invoice is invalid.
 	InvoiceInvalid,
 	/// Invoice creation failed.
 	InvoiceCreationFailed,
+	/// The given channel ID is invalid.
+	ChannelIdInvalid,
 	/// No route for the given target could be found.
 	RoutingFailed,
 	/// A given peer info could not be parsed.
@@ -40,13 +48,15 @@ impl fmt::Display for Error {
 		match *self {
 			Self::AlreadyRunning => write!(f, "Node is already running."),
 			Self::NotRunning => write!(f, "Node is not running."),
-			Self::FundingTxCreationFailed => {
-				write!(f, "Funding transaction could not be created.")
-			}
+			Self::FundingTxCreationFailed => write!(f, "Funding transaction could not be created."),
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
+			Self::AddressInvalid => write!(f, "The given address is invalid."),
+			Self::PublicKeyInvalid => write!(f, "The given public key is invalid."),
+			Self::PaymentHashInvalid => write!(f, "The given payment hash is invalid."),
 			Self::NonUniquePaymentHash => write!(f, "An invoice must not get payed twice."),
 			Self::InvoiceInvalid => write!(f, "The given invoice is invalid."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
+			Self::ChannelIdInvalid => write!(f, "The given channel ID is invalid."),
 			Self::RoutingFailed => write!(f, "Failed to find route."),
 			Self::PeerInfoParseFailed => write!(f, "Failed to parse the given peer information."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),

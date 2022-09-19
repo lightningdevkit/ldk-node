@@ -17,7 +17,6 @@
 //! - Wallet and channel states are persisted to disk.
 //! - Gossip is retrieved over the P2P network.
 
-#![deny(missing_docs)]
 #![deny(broken_intra_doc_links)]
 #![deny(private_intra_doc_links)]
 #![allow(bare_trait_objects)]
@@ -34,7 +33,8 @@ mod peer_store;
 mod tests;
 mod wallet;
 
-pub use error::Error;
+pub use error::Error as NodeError;
+use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
 use peer_store::{PeerInfo, PeerInfoStorage};
@@ -64,7 +64,7 @@ use lightning_transaction_sync::EsploraSyncClient;
 use lightning_net_tokio::SocketDescriptor;
 
 use lightning::routing::router::DefaultRouter;
-use lightning_invoice::{payment, Currency, Invoice};
+use lightning_invoice::{payment, Currency, Invoice, SignedRawInvoice};
 
 use bdk::bitcoin::secp256k1::Secp256k1;
 use bdk::blockchain::esplora::EsploraBlockchain;
@@ -74,10 +74,11 @@ use bdk::template::Bip84;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::BlockHash;
+use bitcoin::{Address, BlockHash};
 
 use rand::Rng;
 
+use core::str::FromStr;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::default::Default;
@@ -86,6 +87,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
+
+uniffi_macros::include_scaffolding!("ldk_node");
 
 // The used 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of blocks after which BDK stops looking for scripts belonging to the wallet.
@@ -193,8 +196,8 @@ impl Builder {
 		self
 	}
 
-	/// Builds an [`Node`] instance according to the options previously configured.
-	pub fn build(&self) -> Node {
+	/// Builds a [`Node`] instance according to the options previously configured.
+	pub fn build(&self) -> Arc<Node> {
 		let config = Arc::new(self.config.clone());
 
 		let ldk_data_dir = format!("{}/ldk", &config.storage_dir_path.clone());
@@ -427,7 +430,7 @@ impl Builder {
 
 		let running = RwLock::new(None);
 
-		Node {
+		Arc::new(Node {
 			running,
 			config,
 			wallet,
@@ -446,7 +449,7 @@ impl Builder {
 			inbound_payments,
 			outbound_payments,
 			peer_store,
-		}
+		})
 	}
 }
 
@@ -488,7 +491,7 @@ impl Node {
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network. After this returns, the [`Node`] instance can be
 	/// controlled via the provided API methods in a thread-safe manner.
-	pub fn start(&mut self) -> Result<(), Error> {
+	pub fn start(&self) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
 		let mut run_lock = self.running.write().unwrap();
 		if run_lock.is_some() {
@@ -502,7 +505,7 @@ impl Node {
 	}
 
 	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].
-	pub fn stop(&mut self) -> Result<(), Error> {
+	pub fn stop(&self) -> Result<(), Error> {
 		let mut run_lock = self.running.write().unwrap();
 		if run_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -696,7 +699,7 @@ impl Node {
 	}
 
 	/// Retrieve a new on-chain/funding address.
-	pub fn new_funding_address(&mut self) -> Result<bitcoin::Address, Error> {
+	pub fn new_funding_address(&self) -> Result<Address, Error> {
 		let funding_address = self.wallet.get_new_address()?;
 		log_info!(self.logger, "Generated new funding address: {}", funding_address);
 		Ok(funding_address)
@@ -704,7 +707,7 @@ impl Node {
 
 	#[cfg(test)]
 	/// Retrieve the current on-chain balance.
-	pub fn on_chain_balance(&mut self) -> Result<bdk::Balance, Error> {
+	pub fn on_chain_balance(&self) -> Result<bdk::Balance, Error> {
 		self.wallet.get_balance()
 	}
 
@@ -1100,3 +1103,106 @@ pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
 	Arc<FilesystemLogger>,
 	IgnoringMessageHandler,
 >;
+
+impl UniffiCustomTypeConverter for PublicKey {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Ok(key) = PublicKey::from_str(&val) {
+			return Ok(key);
+		}
+
+		Err(Error::PublicKeyInvalid.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for Address {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Ok(addr) = Address::from_str(&val) {
+			return Ok(addr);
+		}
+
+		Err(Error::AddressInvalid.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for Invoice {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Ok(signed) = val.parse::<SignedRawInvoice>() {
+			if let Ok(invoice) = Invoice::from_signed(signed) {
+				return Ok(invoice);
+			}
+		}
+
+		Err(Error::InvoiceInvalid.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for PaymentHash {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Ok(hash) = Sha256::from_str(&val) {
+			Ok(PaymentHash(hash.into_inner()))
+		} else {
+			Err(Error::PaymentHashInvalid.into())
+		}
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		Sha256::from_slice(&obj.0).unwrap().to_string()
+	}
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelId([u8; 32]);
+
+impl UniffiCustomTypeConverter for ChannelId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(hex_vec) = hex_utils::to_vec(&val) {
+			if hex_vec.len() == 32 {
+				let mut channel_id = [0u8; 32];
+				channel_id.copy_from_slice(&hex_vec[..]);
+				return Ok(Self(channel_id));
+			}
+		}
+		Err(Error::ChannelIdInvalid.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&obj.0)
+	}
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserChannelId(u128);
+
+impl UniffiCustomTypeConverter for UserChannelId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(UserChannelId(u128::from_str(&val).map_err(|_| Error::ChannelIdInvalid)?))
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.0.to_string()
+	}
+}

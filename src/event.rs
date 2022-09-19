@@ -1,6 +1,6 @@
 use crate::{
-	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, PaymentInfo,
-	PaymentInfoStorage, PaymentStatus, Wallet,
+	hex_utils, ChannelId, ChannelManager, Config, Error, KeysManager, NetworkGraph, PaymentInfo,
+	PaymentInfoStorage, PaymentStatus, UserChannelId, Wallet,
 };
 
 use crate::logger::{log_error, log_given_level, log_info, log_internal, Logger};
@@ -50,16 +50,16 @@ pub enum Event {
 	/// A channel is ready to be used.
 	ChannelReady {
 		/// The `channel_id` of the channel.
-		channel_id: [u8; 32],
+		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
-		user_channel_id: u128,
+		user_channel_id: UserChannelId,
 	},
 	/// A channel has been closed.
 	ChannelClosed {
 		/// The `channel_id` of the channel.
-		channel_id: [u8; 32],
+		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
-		user_channel_id: u128,
+		user_channel_id: UserChannelId,
 	},
 }
 
@@ -83,13 +83,13 @@ impl Readable for Event {
 				Ok(Self::PaymentReceived { payment_hash, amount_msat })
 			}
 			3u8 => {
-				let channel_id: [u8; 32] = Readable::read(reader)?;
-				let user_channel_id: u128 = Readable::read(reader)?;
+				let channel_id = ChannelId(Readable::read(reader)?);
+				let user_channel_id = UserChannelId(Readable::read(reader)?);
 				Ok(Self::ChannelReady { channel_id, user_channel_id })
 			}
 			4u8 => {
-				let channel_id: [u8; 32] = Readable::read(reader)?;
-				let user_channel_id: u128 = Readable::read(reader)?;
+				let channel_id = ChannelId(Readable::read(reader)?);
+				let user_channel_id = UserChannelId(Readable::read(reader)?);
 				Ok(Self::ChannelClosed { channel_id, user_channel_id })
 			}
 			_ => Err(lightning::ln::msgs::DecodeError::InvalidValue),
@@ -118,14 +118,14 @@ impl Writeable for Event {
 			}
 			Self::ChannelReady { channel_id, user_channel_id } => {
 				3u8.write(writer)?;
-				channel_id.write(writer)?;
-				user_channel_id.write(writer)?;
+				channel_id.0.write(writer)?;
+				user_channel_id.0.write(writer)?;
 				Ok(())
 			}
 			Self::ChannelClosed { channel_id, user_channel_id } => {
 				4u8.write(writer)?;
-				channel_id.write(writer)?;
-				user_channel_id.write(writer)?;
+				channel_id.0.write(writer)?;
+				user_channel_id.0.write(writer)?;
 				Ok(())
 			}
 		}
@@ -576,7 +576,10 @@ where
 					counterparty_node_id,
 				);
 				self.event_queue
-					.add_event(Event::ChannelReady { channel_id, user_channel_id })
+					.add_event(Event::ChannelReady {
+						channel_id: ChannelId(channel_id),
+						user_channel_id: UserChannelId(user_channel_id),
+					})
 					.expect("Failed to push to event queue");
 			}
 			LdkEvent::ChannelClosed { channel_id, reason, user_channel_id } => {
@@ -587,7 +590,10 @@ where
 					reason
 				);
 				self.event_queue
-					.add_event(Event::ChannelClosed { channel_id, user_channel_id })
+					.add_event(Event::ChannelClosed {
+						channel_id: ChannelId(channel_id),
+						user_channel_id: UserChannelId(user_channel_id),
+					})
 					.expect("Failed to push to event queue");
 			}
 			LdkEvent::DiscardFunding { .. } => {}
@@ -606,7 +612,10 @@ mod tests {
 		let test_persister = Arc::new(TestPersister::new());
 		let event_queue = EventQueue::new(Arc::clone(&test_persister));
 
-		let expected_event = Event::ChannelReady { channel_id: [23u8; 32], user_channel_id: 2323 };
+		let expected_event = Event::ChannelReady {
+			channel_id: ChannelId([23u8; 32]),
+			user_channel_id: UserChannelId(2323),
+		};
 		event_queue.add_event(expected_event.clone()).unwrap();
 		assert!(test_persister.get_and_clear_pending_persist());
 

@@ -1,0 +1,79 @@
+namespace ldk_node {
+};
+
+interface Builder {
+	constructor();
+	Node build();
+};
+
+interface Node {
+	[Throws=NodeError]
+	void start();
+	[Throws=NodeError]
+	void stop();
+	Event next_event();
+	void event_handled();
+	[Throws=NodeError]
+	PublicKey node_id();
+	[Throws=NodeError]
+	Address new_funding_address();
+	[Throws=NodeError]
+	void connect_open_channel([ByRef]string node_pubkey_and_address, u64 channel_amount_sats, boolean announce_channel);
+	[Throws=NodeError]
+	PaymentHash send_payment(Invoice invoice);
+	[Throws=NodeError]
+	PaymentHash send_spontaneous_payment(u64 amount_msat, [ByRef]string node_id);
+	[Throws=NodeError]
+	Invoice receive_payment(u64? amount_msat, [ByRef]string description, u32 expiry_secs);
+	// TODO: payment_info()
+};
+
+[Error]
+enum NodeError {
+	"AlreadyRunning",
+	"NotRunning",
+	"FundingTxCreationFailed",
+	"ConnectionFailed",
+	"AddressInvalid",
+	"PublicKeyInvalid",
+	"PaymentHashInvalid",
+	"NonUniquePaymentHash",
+	"InvoiceInvalid",
+	"InvoiceCreationFailed",
+	"ChannelIdInvalid",
+	"RoutingFailed",
+	"PeerInfoParseFailed",
+	"ChannelCreationFailed",
+	"ChannelClosingFailed",
+	"PersistenceFailed",
+	"WalletOperationFailed",
+	"WalletSigningFailed",
+	"TxSyncFailed",
+};
+
+[Enum]
+interface Event {
+	PaymentSuccessful( PaymentHash payment_hash );
+	PaymentFailed( PaymentHash payment_hash );
+	PaymentReceived( PaymentHash payment_hash, u64 amount_msat);
+	ChannelReady ( ChannelId channel_id, UserChannelId user_channel_id );
+	ChannelClosed ( ChannelId channel_id, UserChannelId user_channel_id );
+};
+
+[Custom]
+typedef string PublicKey;
+
+[Custom]
+typedef string Address;
+
+[Custom]
+typedef string Invoice;
+
+[Custom]
+typedef string PaymentHash;
+
+[Custom]
+typedef string ChannelId;
+
+[Custom]
+typedef string UserChannelId;

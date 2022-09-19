@@ -8,6 +8,10 @@ description = "A ready-to-go node implementation based on LDK."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+crate-type = ["staticlib", "cdylib"]
+name = "ldk_node"
+
 [dependencies]
 #lightning = { version = "0.0.112", features = ["max_level_trace", "std"] }
 #lightning-invoice = { version = "0.20" }
@@ -47,11 +51,16 @@ chrono = "0.4"
 futures = "0.3"
 serde_json = { version = "1.0" }
 tokio = { version = "1", features = [ "full" ] }
+uniffi = { version = "0.21.0", features = ["builtin-bindgen"] }
+uniffi_macros = { version = "0.21.0", features = ["builtin-bindgen"] }
 
 [dev-dependencies]
 electrsd = { version = "0.22.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_23_0"] }
 electrum-client = "0.12.0"
 once_cell = "1.16.0"
+
+[build-dependencies]
+uniffi_build = "0.21.0"
 
 [profile.release]
 panic = "abort"
