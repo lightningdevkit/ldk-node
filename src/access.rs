@@ -17,7 +17,7 @@ use bdk::{SignOptions, SyncOptions};
 use bitcoin::{BlockHash, Script, Transaction, Txid};
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The minimum feerate we are allowed to send, as specify by LDK.
 const MIN_FEERATE: u32 = 253;
@@ -80,143 +80,156 @@ where
 
 		let mut locked_last_sync_height = self.last_sync_height.lock().unwrap();
 		if cur_height >= locked_last_sync_height.unwrap_or(0) {
-			{
-				// First, inform the interface of the new block.
-				let cur_block_header = client.get_header(cur_height)?;
-				for c in &confirmables {
-					c.best_block_updated(&cur_block_header, cur_height);
-				}
+			self.sync_best_block_updated(confirmables.clone(), cur_height, &mut locked_last_sync_height)?;
+			self.sync_transactions_confirmed(confirmables.clone())?;
+			self.sync_transaction_unconfirmed(confirmables.clone())?;
+		}
+		// TODO: check whether new outputs have been registered by now and process them
+		Ok(())
+	}
 
-				*locked_last_sync_height = Some(cur_height);
-			}
+	fn sync_best_block_updated(&self, confirmables: Vec<&(dyn Confirm + Sync)>, cur_height: u32, locked_last_sync_height: &mut MutexGuard<Option<u32>>) -> Result<(), Error> {
+		let client = &*self.blockchain;
 
-			{
-				// First, check the confirmation status of registered transactions as well as the
-				// status of dependent transactions of registered outputs.
-				let mut locked_queued_transactions = self.queued_transactions.lock().unwrap();
-				let mut locked_queued_outputs = self.queued_outputs.lock().unwrap();
-				let mut locked_watched_transactions = self.watched_transactions.lock().unwrap();
-				let mut locked_watched_outputs = self.watched_outputs.lock().unwrap();
+		// Inform the interface of the new block.
+		let cur_block_header = client.get_header(cur_height)?;
+		for c in &confirmables {
+			c.best_block_updated(&cur_block_header, cur_height);
+		}
 
-				let mut confirmed_txs = Vec::new();
+		**locked_last_sync_height = Some(cur_height);
+		Ok(())
+	}
 
-				// Check in the current queue, as well as in registered transactions leftover from
-				// previous iterations.
-				let registered_txs: HashSet<Txid> = locked_watched_transactions
-					.iter()
-					.chain(locked_queued_transactions.iter())
-					.cloned()
-					.collect();
+	fn sync_transactions_confirmed(&self, confirmables: Vec<&(dyn Confirm + Sync)>) -> Result<(), Error> {
+		let client = &*self.blockchain;
 
-				// Remember all registered but unconfirmed transactions for future processing.
-				let mut unconfirmed_registered_txs = Vec::new();
+		// First, check the confirmation status of registered transactions as well as the
+		// status of dependent transactions of registered outputs.
+		let mut locked_queued_transactions = self.queued_transactions.lock().unwrap();
+		let mut locked_queued_outputs = self.queued_outputs.lock().unwrap();
+		let mut locked_watched_transactions = self.watched_transactions.lock().unwrap();
+		let mut locked_watched_outputs = self.watched_outputs.lock().unwrap();
 
-				for txid in registered_txs {
-					if let Some(tx_status) = client.get_tx_status(&txid)? {
-						if tx_status.confirmed {
-							if let Some(tx) = client.get_tx(&txid)? {
-								if let Some(block_height) = tx_status.block_height {
-									let block_header = client.get_header(block_height)?;
-									if let Some(merkle_proof) = client.get_merkle_proof(&txid)? {
-										confirmed_txs.push((
-											tx,
-											block_height,
-											block_header,
-											merkle_proof.pos,
+		let mut confirmed_txs = Vec::new();
+
+		// Check in the current queue, as well as in registered transactions leftover from
+		// previous iterations.
+		let registered_txs: HashSet<Txid> = locked_watched_transactions
+			.iter()
+			.chain(locked_queued_transactions.iter())
+			.cloned()
+			.collect();
+
+		// Remember all registered but unconfirmed transactions for future processing.
+		let mut unconfirmed_registered_txs = Vec::new();
+
+		for txid in registered_txs {
+			if let Some(tx_status) = client.get_tx_status(&txid)? {
+				if tx_status.confirmed {
+					if let Some(tx) = client.get_tx(&txid)? {
+						if let Some(block_height) = tx_status.block_height {
+							let block_header = client.get_header(block_height)?;
+							if let Some(merkle_proof) = client.get_merkle_proof(&txid)? {
+								confirmed_txs.push((
+										tx,
+										block_height,
+										block_header,
+										merkle_proof.pos,
 										));
-										continue;
-									}
-								}
+								continue;
 							}
 						}
 					}
-					unconfirmed_registered_txs.push(txid);
 				}
+			}
+			unconfirmed_registered_txs.push(txid);
+		}
 
-				// Check all registered outputs for dependent spending transactions.
-				let registered_outputs: Vec<WatchedOutput> = locked_watched_outputs
-					.iter()
-					.chain(locked_queued_outputs.iter())
-					.cloned()
-					.collect();
+		// Check all registered outputs for dependent spending transactions.
+		let registered_outputs: Vec<WatchedOutput> = locked_watched_outputs
+			.iter()
+			.chain(locked_queued_outputs.iter())
+			.cloned()
+			.collect();
 
-				// Remember all registered outputs that haven't been spent for future processing.
-				let mut unspent_registered_outputs = Vec::new();
+		// Remember all registered outputs that haven't been spent for future processing.
+		let mut unspent_registered_outputs = Vec::new();
 
-				for output in registered_outputs {
-					if let Some(output_status) = client
-						.get_output_status(&output.outpoint.txid, output.outpoint.index as u64)?
-					{
-						if output_status.spent {
-							if let Some(spending_tx_status) = output_status.status {
-								if spending_tx_status.confirmed {
-									let spending_txid = output_status.txid.unwrap();
-									if let Some(spending_tx) = client.get_tx(&spending_txid)? {
-										let block_height = spending_tx_status.block_height.unwrap();
-										let block_header = client.get_header(block_height)?;
-										if let Some(merkle_proof) =
-											client.get_merkle_proof(&spending_txid)?
+		for output in registered_outputs {
+			if let Some(output_status) = client
+				.get_output_status(&output.outpoint.txid, output.outpoint.index as u64)?
+				{
+					if output_status.spent {
+						if let Some(spending_tx_status) = output_status.status {
+							if spending_tx_status.confirmed {
+								let spending_txid = output_status.txid.unwrap();
+								if let Some(spending_tx) = client.get_tx(&spending_txid)? {
+									let block_height = spending_tx_status.block_height.unwrap();
+									let block_header = client.get_header(block_height)?;
+									if let Some(merkle_proof) =
+										client.get_merkle_proof(&spending_txid)?
 										{
 											confirmed_txs.push((
-												spending_tx,
-												block_height,
-												block_header,
-												merkle_proof.pos,
-											));
+													spending_tx,
+													block_height,
+													block_header,
+													merkle_proof.pos,
+													));
 											continue;
 										}
-									}
 								}
 							}
 						}
 					}
-					unspent_registered_outputs.push(output);
 				}
+			unspent_registered_outputs.push(output);
+		}
 
-				// Sort all confirmed transactions first by block height, then by in-block
-				// position, and finally feed them to the interface in order.
-				confirmed_txs.sort_unstable_by(
-					|(_, block_height1, _, pos1), (_, block_height2, _, pos2)| {
-						block_height1.cmp(&block_height2).then_with(|| pos1.cmp(&pos2))
-					},
-				);
-				for (tx, block_height, block_header, pos) in confirmed_txs {
-					for c in &confirmables {
-						c.transactions_confirmed(&block_header, &[(pos, &tx)], block_height);
-					}
-				}
-
-				*locked_watched_transactions = unconfirmed_registered_txs;
-				*locked_queued_transactions = Vec::new();
-				*locked_watched_outputs = unspent_registered_outputs;
-				*locked_queued_outputs = Vec::new();
-			}
-
-			{
-				// Query the interface for relevant txids and check whether they have been
-				// reorged-out of the chain.
-				let unconfirmed_txids = confirmables
-					.iter()
-					.flat_map(|c| c.get_relevant_txids())
-					.filter(|txid| {
-						client
-							.get_tx_status(txid)
-							.ok()
-							.unwrap_or(None)
-							.map_or(true, |status| !status.confirmed)
-					})
-					.collect::<Vec<Txid>>();
-
-				// Mark all relevant unconfirmed transactions as unconfirmed.
-				for txid in &unconfirmed_txids {
-					for c in &confirmables {
-						c.transaction_unconfirmed(txid);
-					}
-				}
+		// Sort all confirmed transactions first by block height, then by in-block
+		// position, and finally feed them to the interface in order.
+		confirmed_txs.sort_unstable_by(
+			|(_, block_height1, _, pos1), (_, block_height2, _, pos2)| {
+				block_height1.cmp(&block_height2).then_with(|| pos1.cmp(&pos2))
+			},
+			);
+		for (tx, block_height, block_header, pos) in confirmed_txs {
+			for c in &confirmables {
+				c.transactions_confirmed(&block_header, &[(pos, &tx)], block_height);
 			}
 		}
 
-		// TODO: check whether new outputs have been registered by now and process them
+		*locked_watched_transactions = unconfirmed_registered_txs;
+		*locked_queued_transactions = Vec::new();
+		*locked_watched_outputs = unspent_registered_outputs;
+		*locked_queued_outputs = Vec::new();
+
+		Ok(())
+	}
+
+	fn sync_transaction_unconfirmed(&self, confirmables: Vec<&(dyn Confirm + Sync)>) -> Result<(), Error> {
+		let client = &*self.blockchain;
+		// Query the interface for relevant txids and check whether they have been
+		// reorged-out of the chain.
+		let unconfirmed_txids = confirmables
+			.iter()
+			.flat_map(|c| c.get_relevant_txids())
+			.filter(|txid| {
+				client
+					.get_tx_status(txid)
+					.ok()
+					.unwrap_or(None)
+					.map_or(true, |status| !status.confirmed)
+			})
+		.collect::<Vec<Txid>>();
+
+		// Mark all relevant unconfirmed transactions as unconfirmed.
+		for txid in &unconfirmed_txids {
+			for c in &confirmables {
+				c.transaction_unconfirmed(txid);
+			}
+		}
+
 		Ok(())
 	}
 
