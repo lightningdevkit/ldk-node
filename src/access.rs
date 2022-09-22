@@ -295,7 +295,10 @@ where
 	fn broadcast_transaction(&self, tx: &Transaction) {
 		match self.blockchain.broadcast(tx) {
 			Ok(_) => {}
-			Err(err) => log_error!(self.logger, "Failed to broadcast transaction: {}", err),
+			Err(err) => {
+				log_error!(self.logger, "Failed to broadcast transaction: {}", err),
+				panic!("Failed to broadcast transaction: {}", err);
+			}
 		}
 	}
 }
