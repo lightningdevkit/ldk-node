@@ -16,7 +16,7 @@ lightning-background-processor = { version = "0.0.110" }
 lightning-rapid-gossip-sync = { version = "0.0.110" }
 
 #bdk = "0.20.0"
-bdk = { git = "https://github.com/tnull/bdk", branch="feat/use-external-esplora-client", features = ["use-esplora-ureq", "key-value-db"]}
+bdk = { git = "https://github.com/tnull/bdk", branch="feat/use-external-esplora-client", features = ["use-esplora-reqwest", "key-value-db"]}
 bitcoin = "0.28.1"
 
 rand = "0.8.5"
