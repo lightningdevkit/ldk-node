@@ -1,7 +1,8 @@
+use crate::payment_store::{PaymentInfo, PAYMENT_INFO_PERSISTENCE_PREFIX};
 use crate::{Config, FilesystemLogger, NetworkGraph, Scorer, WALLET_KEYS_SEED_LEN};
 
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
-use lightning::util::ser::ReadableArgs;
+use lightning::util::ser::{Readable, ReadableArgs};
 
 use rand::{thread_rng, RngCore};
 
@@ -59,4 +60,26 @@ pub(crate) fn read_scorer(
 		}
 	}
 	ProbabilisticScorer::new(params, network_graph, logger)
+}
+
+pub(crate) fn read_payment_info(config: &Config) -> Vec<PaymentInfo> {
+	let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
+	let payment_store_path = format!("{}/{}", ldk_data_dir, PAYMENT_INFO_PERSISTENCE_PREFIX);
+	let mut payments = Vec::new();
+
+	if let Ok(res) = fs::read_dir(payment_store_path) {
+		for entry in res {
+			if let Ok(entry) = entry {
+				if entry.path().is_file() {
+					if let Ok(mut f) = fs::File::open(entry.path()) {
+						if let Ok(payment_info) = PaymentInfo::read(&mut f) {
+							payments.push(payment_info);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	payments
 }

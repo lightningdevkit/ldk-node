@@ -71,6 +71,7 @@ mod event;
 mod hex_utils;
 mod io_utils;
 mod logger;
+mod payment_store;
 mod peer_store;
 #[cfg(test)]
 mod tests;
@@ -84,12 +85,13 @@ pub use lightning_invoice;
 pub use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
+use payment_store::PaymentInfoStorage;
+pub use payment_store::{PaymentDirection, PaymentInfo, PaymentStatus};
 use peer_store::{PeerInfo, PeerInfoStorage};
 use types::{
 	ChainMonitor, ChannelManager, GossipSync, KeysManager, NetworkGraph, OnionMessenger,
-	PaymentInfoStorage, PeerManager, Scorer,
+	PeerManager, Scorer,
 };
-pub use types::{PaymentInfo, PaymentStatus};
 use wallet::Wallet;
 
 use logger::{log_error, log_info, FilesystemLogger, Logger};
@@ -129,7 +131,6 @@ use bitcoin::BlockHash;
 
 use rand::Rng;
 
-use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::default::Default;
 use std::fs;
@@ -464,9 +465,9 @@ impl Builder {
 		));
 
 		// Init payment info storage
-		// TODO: persist payment info to disk
-		let inbound_payments = Arc::new(Mutex::new(HashMap::new()));
-		let outbound_payments = Arc::new(Mutex::new(HashMap::new()));
+		let payments = io_utils::read_payment_info(config.as_ref());
+		let payment_store =
+			Arc::new(PaymentInfoStorage::from_payments(payments, Arc::clone(&persister)));
 
 		// Restore event handler from disk or create a new one.
 		let event_queue = if let Ok(mut f) =
@@ -508,9 +509,8 @@ impl Builder {
 			persister,
 			logger,
 			scorer,
-			inbound_payments,
-			outbound_payments,
 			peer_store,
+			payment_store,
 		}
 	}
 }
@@ -542,9 +542,8 @@ pub struct Node {
 	persister: Arc<FilesystemPersister>,
 	logger: Arc<FilesystemLogger>,
 	scorer: Arc<Mutex<Scorer>>,
-	inbound_payments: Arc<PaymentInfoStorage>,
-	outbound_payments: Arc<PaymentInfoStorage>,
 	peer_store: Arc<PeerInfoStorage<FilesystemPersister>>,
+	payment_store: Arc<PaymentInfoStorage<Arc<FilesystemPersister>>>,
 }
 
 impl Node {
@@ -604,8 +603,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.keys_manager),
-			Arc::clone(&self.inbound_payments),
-			Arc::clone(&self.outbound_payments),
+			Arc::clone(&self.payment_store),
 			Arc::clone(&tokio_runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
@@ -958,9 +956,13 @@ impl Node {
 			return Err(Error::NotRunning);
 		}
 
-		let mut outbound_payments_lock = self.outbound_payments.lock().unwrap();
-
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+
+		if self.payment_store.contains(&payment_hash) {
+			log_error!(self.logger, "Payment error: an invoice must not get paid twice.");
+			return Err(Error::NonUniquePaymentHash);
+		}
+
 		let payment_secret = Some(*invoice.payment_secret());
 
 		match lightning_invoice::payment::pay_invoice(
@@ -973,15 +975,15 @@ impl Node {
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
 
-				outbound_payments_lock.insert(
+				let payment_info = PaymentInfo {
+					preimage: None,
 					payment_hash,
-					PaymentInfo {
-						preimage: None,
-						secret: payment_secret,
-						status: PaymentStatus::Pending,
-						amount_msat: invoice.amount_milli_satoshis(),
-					},
-				);
+					secret: payment_secret,
+					amount_msat: invoice.amount_milli_satoshis(),
+					direction: PaymentDirection::Outbound,
+					status: PaymentStatus::Pending,
+				};
+				self.payment_store.insert(payment_info)?;
 
 				Ok(payment_hash)
 			}
@@ -992,15 +994,7 @@ impl Node {
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
-				outbound_payments_lock.insert(
-					payment_hash,
-					PaymentInfo {
-						preimage: None,
-						secret: payment_secret,
-						status: PaymentStatus::Failed,
-						amount_msat: invoice.amount_milli_satoshis(),
-					},
-				);
+				self.payment_store.set_status(&payment_hash, PaymentStatus::Failed)?;
 				Err(Error::PaymentFailed)
 			}
 		}
@@ -1019,8 +1013,6 @@ impl Node {
 			return Err(Error::NotRunning);
 		}
 
-		let mut outbound_payments_lock = self.outbound_payments.lock().unwrap();
-
 		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
 			if amount_msat < invoice_amount_msat {
 				log_error!(
@@ -1030,8 +1022,13 @@ impl Node {
 			}
 		}
 
-		let payment_id = PaymentId(invoice.payment_hash().into_inner());
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+		if self.payment_store.contains(&payment_hash) {
+			log_error!(self.logger, "Payment error: an invoice must not get paid twice.");
+			return Err(Error::NonUniquePaymentHash);
+		}
+
+		let payment_id = PaymentId(invoice.payment_hash().into_inner());
 		let payment_secret = Some(*invoice.payment_secret());
 		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
 		let mut payment_params = PaymentParameters::from_node_id(
@@ -1067,15 +1064,15 @@ impl Node {
 					payee_pubkey
 				);
 
-				outbound_payments_lock.insert(
+				let payment_info = PaymentInfo {
 					payment_hash,
-					PaymentInfo {
-						preimage: None,
-						secret: payment_secret,
-						status: PaymentStatus::Pending,
-						amount_msat: Some(amount_msat),
-					},
-				);
+					preimage: None,
+					secret: payment_secret,
+					direction: PaymentDirection::Outbound,
+					status: PaymentStatus::Pending,
+					amount_msat: Some(amount_msat),
+				};
+				self.payment_store.insert(payment_info)?;
 
 				Ok(payment_hash)
 			}
@@ -1086,15 +1083,7 @@ impl Node {
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
-				outbound_payments_lock.insert(
-					payment_hash,
-					PaymentInfo {
-						preimage: None,
-						secret: payment_secret,
-						status: PaymentStatus::Failed,
-						amount_msat: Some(amount_msat),
-					},
-				);
+				self.payment_store.set_status(&payment_hash, PaymentStatus::Failed)?;
 				Err(Error::PaymentFailed)
 			}
 		}
@@ -1107,8 +1096,6 @@ impl Node {
 		if self.running.read().unwrap().is_none() {
 			return Err(Error::NotRunning);
 		}
-
-		let mut outbound_payments_lock = self.outbound_payments.lock().unwrap();
 
 		let pubkey = hex_utils::to_compressed_pubkey(node_id).ok_or(Error::PeerInfoParseFailed)?;
 
@@ -1131,28 +1118,32 @@ impl Node {
 		) {
 			Ok(_payment_id) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
-				outbound_payments_lock.insert(
+
+				let payment_info = PaymentInfo {
 					payment_hash,
-					PaymentInfo {
-						preimage: None,
-						secret: None,
-						status: PaymentStatus::Pending,
-						amount_msat: Some(amount_msat),
-					},
-				);
+					preimage: Some(payment_preimage),
+					secret: None,
+					status: PaymentStatus::Pending,
+					direction: PaymentDirection::Outbound,
+					amount_msat: Some(amount_msat),
+				};
+				self.payment_store.insert(payment_info)?;
+
 				Ok(payment_hash)
 			}
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
-				outbound_payments_lock.insert(
+
+				let payment_info = PaymentInfo {
 					payment_hash,
-					PaymentInfo {
-						preimage: None,
-						secret: None,
-						status: PaymentStatus::Failed,
-						amount_msat: Some(amount_msat),
-					},
-				);
+					preimage: Some(payment_preimage),
+					secret: None,
+					status: PaymentStatus::Failed,
+					direction: PaymentDirection::Outbound,
+					amount_msat: Some(amount_msat),
+				};
+				self.payment_store.insert(payment_info)?;
+
 				Err(Error::PaymentFailed)
 			}
 		}
@@ -1177,8 +1168,6 @@ impl Node {
 	fn receive_payment_inner(
 		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
 	) -> Result<Invoice, Error> {
-		let mut inbound_payments_lock = self.inbound_payments.lock().unwrap();
-
 		let currency = match self.config.network {
 			bitcoin::Network::Bitcoin => Currency::Bitcoin,
 			bitcoin::Network::Testnet => Currency::BitcoinTestnet,
@@ -1207,37 +1196,23 @@ impl Node {
 		};
 
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
-		inbound_payments_lock.insert(
+		let payment_info = PaymentInfo {
+			preimage: None,
 			payment_hash,
-			PaymentInfo {
-				preimage: None,
-				secret: Some(*invoice.payment_secret()),
-				status: PaymentStatus::Pending,
-				amount_msat,
-			},
-		);
+			secret: Some(invoice.payment_secret().clone()),
+			amount_msat,
+			direction: PaymentDirection::Inbound,
+			status: PaymentStatus::Pending,
+		};
+
+		self.payment_store.insert(payment_info)?;
+
 		Ok(invoice)
 	}
 
 	/// Query for information about the status of a specific payment.
-	pub fn payment_info(&self, payment_hash: &[u8; 32]) -> Option<PaymentInfo> {
-		let payment_hash = PaymentHash(*payment_hash);
-
-		{
-			let outbound_payments_lock = self.outbound_payments.lock().unwrap();
-			if let Some(payment_info) = outbound_payments_lock.get(&payment_hash) {
-				return Some((*payment_info).clone());
-			}
-		}
-
-		{
-			let inbound_payments_lock = self.inbound_payments.lock().unwrap();
-			if let Some(payment_info) = inbound_payments_lock.get(&payment_hash) {
-				return Some((*payment_info).clone());
-			}
-		}
-
-		None
+	pub fn payment_info(&self, payment_hash: &PaymentHash) -> Option<PaymentInfo> {
+		self.payment_store.get(payment_hash)
 	}
 }
 
