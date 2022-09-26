@@ -60,6 +60,7 @@ futures = "0.3"
 serde_json = { version = "1.0" }
 tokio = { version = "1", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
 esplora-client = { version = "=0.3", default-features = false }
+libc = "0.2"
 
 [dev-dependencies]
 electrsd = { version = "0.22.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_23_0"] }

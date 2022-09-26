@@ -1,3 +1,4 @@
+use crate::io_utils::KVStoreUnpersister;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::Writeable;
 
@@ -51,5 +52,13 @@ impl KVStorePersister for TestPersister {
 		persisted_bytes_lock.insert(key.to_owned(), bytes);
 		self.did_persist.store(true, Ordering::SeqCst);
 		Ok(())
+	}
+}
+
+impl KVStoreUnpersister for TestPersister {
+	fn unpersist(&self, key: &str) -> std::io::Result<bool> {
+		let mut persisted_bytes_lock = self.persisted_bytes.lock().unwrap();
+		self.did_persist.store(true, Ordering::SeqCst);
+		Ok(persisted_bytes_lock.remove(key).is_some())
 	}
 }
