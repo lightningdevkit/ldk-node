@@ -1,3 +1,7 @@
+//! The events emitted by [`LdkLite`] live here.
+//!
+//! [`LdkLite`]: [`crate::LdkLite`]
+
 use crate::{
 	hex_utils, ChannelManager, Error, FilesystemPersister, LdkLiteChainAccess, LdkLiteConfig,
 	NetworkGraph, PaymentInfo, PaymentInfoStorage, PaymentStatus,
@@ -27,48 +31,31 @@ use std::time::Duration;
 /// The event queue will be persisted under this key.
 pub(crate) const EVENTS_PERSISTENCE_KEY: &str = "events";
 
-/// An event emitted by [`LdkLite`] that should be handled by the user. This will more often than
-/// not wrap a LDK event accessible via the `inner` field.
+/// An event emitted by [`LdkLite`] that should be handled by the user.
+///
+/// This wraps an event of a specific type and will more often than not wrap a LDK event accessible
+/// via the `inner` field.
+///
+/// [`LdkLite`]: [`crate::LdkLite`]
 #[derive(Debug, Clone)]
 pub enum LdkLiteEvent {
 	/// A payment we sent was successful.
-	PaymentSuccessful {
-		/// The hash of the payment.
-		payment_hash: PaymentHash,
-		/// The wrapped LDK event.
-		inner: ldk_events::Event,
-	},
+	PaymentSuccessful(PaymentSuccessfulEvent),
 	/// A payment we sent has failed.
-	PaymentFailed {
-		/// The hash of the payment.
-		payment_hash: PaymentHash,
-		/// The wrapped LDK event.
-		inner: ldk_events::Event,
-	},
+	PaymentFailed(PaymentFailedEvent),
 	/// A payment has been received.
-	PaymentReceived {
-		/// The hash of the payment.
-		payment_hash: PaymentHash,
-		/// The value, in thousandths of a satoshi that has been received.
-		amount_msat: u64,
-		/// The wrapped LDK event.
-		inner: ldk_events::Event,
-	},
+	PaymentReceived(PaymentReceivedEvent),
 	// TODO: Implement after a corresponding LDK event is added.
-	//ChannelOpened {
-	//},
+	//ChannelOpened(ChannelOpenedEvent),
 	/// A channel has been closed.
-	ChannelClosed {
-		/// The channel_id of the channel which has been closed.
-		channel_id: [u8; 32],
-		/// The wrapped LDK event.
-		inner: ldk_events::Event,
-	},
+	ChannelClosed(ChannelClosedEvent),
 	// TODO: Implement on-chain events when better integrating with BDK wallet sync.
-	//OnChainPaymentSent {
-	//},
-	//OnChainPaymentReceived {
-	//}
+	//OnChainPaymentSent(OnChainPaymentSentEvent),
+	//OnChainPaymentReceived(OnChainPaymentReceivedEvent),
+}
+
+trait EventType {
+	const TYPE: u8;
 }
 
 impl Readable for LdkLiteEvent {
@@ -76,30 +63,13 @@ impl Readable for LdkLiteEvent {
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		match Readable::read(reader)? {
-			0u8 => {
-				let payment_hash: PaymentHash = Readable::read(reader)?;
-				let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-				Ok(Self::PaymentSuccessful { payment_hash, inner })
-			}
-			1u8 => {
-				let payment_hash: PaymentHash = Readable::read(reader)?;
-				let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-				Ok(Self::PaymentFailed { payment_hash, inner })
-			}
-			2u8 => {
-				let payment_hash: PaymentHash = Readable::read(reader)?;
-				let amount_msat: u64 = Readable::read(reader)?;
-				let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-				Ok(Self::PaymentReceived { payment_hash, amount_msat, inner })
-			}
-			//3u8 => {
+			PaymentSuccessfulEvent::TYPE => Ok(Self::PaymentSuccessful(Readable::read(reader)?)),
+			PaymentFailedEvent::TYPE => Ok(Self::PaymentFailed(Readable::read(reader)?)),
+			PaymentReceivedEvent::TYPE => Ok(Self::PaymentReceived(Readable::read(reader)?)),
+			// ChannelOpenedEvent::TYPE => {
 			// TODO ChannelOpened
 			//}
-			4u8 => {
-				let channel_id: [u8; 32] = Readable::read(reader)?;
-				let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-				Ok(Self::ChannelClosed { channel_id, inner })
-			}
+			ChannelClosedEvent::TYPE => Ok(Self::ChannelClosed(Readable::read(reader)?)),
 			//5u8 => {
 			// TODO OnChainPaymentSent
 			//}
@@ -114,32 +84,23 @@ impl Readable for LdkLiteEvent {
 impl Writeable for LdkLiteEvent {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
 		match self {
-			Self::PaymentSuccessful { payment_hash, inner } => {
-				0u8.write(writer)?;
-				payment_hash.write(writer)?;
-				inner.write(writer)?;
+			Self::PaymentSuccessful(event) => {
+				event.write(writer)?;
 				Ok(())
 			}
-			Self::PaymentFailed { payment_hash, inner } => {
-				1u8.write(writer)?;
-				payment_hash.write(writer)?;
-				inner.write(writer)?;
+			Self::PaymentFailed(event) => {
+				event.write(writer)?;
 				Ok(())
 			}
-			Self::PaymentReceived { payment_hash, amount_msat, inner } => {
-				2u8.write(writer)?;
-				payment_hash.write(writer)?;
-				amount_msat.write(writer)?;
-				inner.write(writer)?;
+			Self::PaymentReceived(event) => {
+				event.write(writer)?;
 				Ok(())
 			}
 			//Self::ChannelOpened { .. } => {
 			//TODO
 			//}
-			Self::ChannelClosed { channel_id, inner } => {
-				4u8.write(writer)?;
-				channel_id.write(writer)?;
-				inner.write(writer)?;
+			Self::ChannelClosed(event) => {
+				event.write(writer)?;
 				Ok(())
 			} //Self::OnChainPaymentSent { .. } => {
 			  //TODO
@@ -148,6 +109,138 @@ impl Writeable for LdkLiteEvent {
 			  //TODO
 			  //}
 		}
+	}
+}
+
+/// A payment we sent was successful.
+#[derive(Debug, Clone)]
+pub struct PaymentSuccessfulEvent {
+	/// The hash of the payment.
+	pub payment_hash: PaymentHash,
+	/// The wrapped LDK event.
+	pub inner: ldk_events::Event,
+}
+
+impl EventType for PaymentSuccessfulEvent {
+	const TYPE: u8 = 0u8;
+}
+
+impl Readable for PaymentSuccessfulEvent {
+	fn read<R: lightning::io::Read>(
+		reader: &mut R,
+	) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let payment_hash: PaymentHash = Readable::read(reader)?;
+		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
+		Ok(Self { payment_hash, inner })
+	}
+}
+
+impl Writeable for PaymentSuccessfulEvent {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+		Self::TYPE.write(writer)?;
+		self.payment_hash.write(writer)?;
+		self.inner.write(writer)?;
+		Ok(())
+	}
+}
+
+/// A payment we sent has failed.
+#[derive(Debug, Clone)]
+pub struct PaymentFailedEvent {
+	/// The hash of the payment.
+	pub payment_hash: PaymentHash,
+	/// The wrapped LDK event.
+	pub inner: ldk_events::Event,
+}
+
+impl EventType for PaymentFailedEvent {
+	const TYPE: u8 = 1u8;
+}
+
+impl Readable for PaymentFailedEvent {
+	fn read<R: lightning::io::Read>(
+		reader: &mut R,
+	) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let payment_hash: PaymentHash = Readable::read(reader)?;
+		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
+		Ok(Self { payment_hash, inner })
+	}
+}
+
+impl Writeable for PaymentFailedEvent {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+		Self::TYPE.write(writer)?;
+		self.payment_hash.write(writer)?;
+		self.inner.write(writer)?;
+		Ok(())
+	}
+}
+
+/// A payment has been received.
+#[derive(Debug, Clone)]
+pub struct PaymentReceivedEvent {
+	/// The hash of the payment.
+	pub payment_hash: PaymentHash,
+	/// The value, in thousandths of a satoshi that has been received.
+	pub amount_msat: u64,
+	/// The wrapped LDK event.
+	pub inner: ldk_events::Event,
+}
+
+impl EventType for PaymentReceivedEvent {
+	const TYPE: u8 = 2u8;
+}
+
+impl Readable for PaymentReceivedEvent {
+	fn read<R: lightning::io::Read>(
+		reader: &mut R,
+	) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let payment_hash: PaymentHash = Readable::read(reader)?;
+		let amount_msat: u64 = Readable::read(reader)?;
+		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
+		Ok(Self { payment_hash, amount_msat, inner })
+	}
+}
+
+impl Writeable for PaymentReceivedEvent {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+		Self::TYPE.write(writer)?;
+		self.payment_hash.write(writer)?;
+		self.amount_msat.write(writer)?;
+		self.inner.write(writer)?;
+		Ok(())
+	}
+}
+
+/// A channel has been closed.
+#[derive(Debug, Clone)]
+pub struct ChannelClosedEvent {
+	/// The channel_id of the channel which has been closed.
+	pub channel_id: [u8; 32],
+	/// The wrapped LDK event.
+	pub inner: ldk_events::Event,
+}
+
+impl EventType for ChannelClosedEvent {
+	const TYPE: u8 = 4u8;
+}
+
+impl Readable for ChannelClosedEvent {
+	fn read<R: lightning::io::Read>(
+		reader: &mut R,
+	) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let channel_id: [u8; 32] = Readable::read(reader)?;
+		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
+		Ok(Self { channel_id, inner })
+	}
+}
+
+impl Writeable for ChannelClosedEvent {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+		Self::TYPE.write(writer)?;
+		self.channel_id.write(writer)?;
+		self.inner.write(writer)?;
+		Ok(())
 	}
 }
 
@@ -315,11 +408,11 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 				};
 				self.channel_manager.claim_funds(payment_preimage.unwrap());
 				self.event_queue
-					.add_event(LdkLiteEvent::PaymentReceived {
+					.add_event(LdkLiteEvent::PaymentReceived(PaymentReceivedEvent {
 						payment_hash: *payment_hash,
 						amount_msat: *amount_msat,
 						inner: event.clone(),
-					})
+					}))
 					.unwrap();
 			}
 			ldk_events::Event::PaymentClaimed { payment_hash, purpose, amount_msat } => {
@@ -384,10 +477,10 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					}
 				}
 				self.event_queue
-					.add_event(LdkLiteEvent::PaymentSuccessful {
+					.add_event(LdkLiteEvent::PaymentSuccessful(PaymentSuccessfulEvent {
 						payment_hash: *payment_hash,
 						inner: event.clone(),
-					})
+					}))
 					.unwrap();
 			}
 			ldk_events::Event::PaymentFailed { payment_hash, .. } => {
@@ -403,10 +496,10 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					payment.status = PaymentStatus::Failed;
 				}
 				self.event_queue
-					.add_event(LdkLiteEvent::PaymentFailed {
+					.add_event(LdkLiteEvent::PaymentFailed(PaymentFailedEvent {
 						payment_hash: *payment_hash,
 						inner: event.clone(),
-					})
+					}))
 					.unwrap();
 			}
 
@@ -518,10 +611,10 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					reason
 				);
 				self.event_queue
-					.add_event(LdkLiteEvent::ChannelClosed {
+					.add_event(LdkLiteEvent::ChannelClosed(ChannelClosedEvent {
 						channel_id: *channel_id,
 						inner: event.clone(),
-					})
+					}))
 					.unwrap();
 			}
 			ldk_events::Event::DiscardFunding { .. } => {}
