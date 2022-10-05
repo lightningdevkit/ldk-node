@@ -58,6 +58,14 @@ trait EventType {
 	const TYPE: u8;
 }
 
+fn write_event<T: EventType + Writeable, W: Writer>(
+	event: &T, writer: &mut W,
+) -> Result<(), lightning::io::Error> {
+	T::TYPE.write(writer)?;
+	event.write(writer)?;
+	Ok(())
+}
+
 impl Readable for LdkLiteEvent {
 	fn read<R: lightning::io::Read>(
 		reader: &mut R,
@@ -84,31 +92,12 @@ impl Readable for LdkLiteEvent {
 impl Writeable for LdkLiteEvent {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
 		match self {
-			Self::PaymentSuccessful(event) => {
-				event.write(writer)?;
-				Ok(())
-			}
-			Self::PaymentFailed(event) => {
-				event.write(writer)?;
-				Ok(())
-			}
-			Self::PaymentReceived(event) => {
-				event.write(writer)?;
-				Ok(())
-			}
-			//Self::ChannelOpened { .. } => {
-			//TODO
-			//}
-			Self::ChannelClosed(event) => {
-				event.write(writer)?;
-				Ok(())
-			} //Self::OnChainPaymentSent { .. } => {
-			  //TODO
-			  //}
-			  //Self::OnChainPaymentReceived { .. } => {
-			  //TODO
-			  //}
+			Self::PaymentSuccessful(event) => write_event(event, writer)?,
+			Self::PaymentFailed(event) => write_event(event, writer)?,
+			Self::PaymentReceived(event) => write_event(event, writer)?,
+			Self::ChannelClosed(event) => write_event(event, writer)?,
 		}
+		Ok(())
 	}
 }
 
@@ -137,7 +126,6 @@ impl Readable for PaymentSuccessfulEvent {
 
 impl Writeable for PaymentSuccessfulEvent {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		Self::TYPE.write(writer)?;
 		self.payment_hash.write(writer)?;
 		self.inner.write(writer)?;
 		Ok(())
@@ -169,7 +157,6 @@ impl Readable for PaymentFailedEvent {
 
 impl Writeable for PaymentFailedEvent {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		Self::TYPE.write(writer)?;
 		self.payment_hash.write(writer)?;
 		self.inner.write(writer)?;
 		Ok(())
