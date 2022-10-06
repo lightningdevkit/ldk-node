@@ -135,6 +135,7 @@ where
 				if tx_status.confirmed {
 					if let Some(tx) = client.get_tx(&txid).await? {
 						if let Some(block_height) = tx_status.block_height {
+							// TODO: Switch to `get_header_by_hash` once released upstream (https://github.com/bitcoindevkit/rust-esplora-client/pull/17)
 							let block_header = client.get_header(block_height).await?;
 							if let Some(merkle_proof) = client.get_merkle_proof(&txid).await? {
 								if block_height == merkle_proof.block_height {
@@ -175,6 +176,7 @@ where
 							let spending_txid = output_status.txid.unwrap();
 							if let Some(spending_tx) = client.get_tx(&spending_txid).await? {
 								let block_height = spending_tx_status.block_height.unwrap();
+								// TODO: Switch to `get_header_by_hash` once released upstream (https://github.com/bitcoindevkit/rust-esplora-client/pull/17)
 								let block_header = client.get_header(block_height).await?;
 								if let Some(merkle_proof) =
 									client.get_merkle_proof(&spending_txid).await?
