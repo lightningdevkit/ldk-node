@@ -137,13 +137,15 @@ where
 						if let Some(block_height) = tx_status.block_height {
 							let block_header = client.get_header(block_height).await?;
 							if let Some(merkle_proof) = client.get_merkle_proof(&txid).await? {
-								confirmed_txs.push((
-									tx,
-									block_height,
-									block_header,
-									merkle_proof.pos,
-								));
-								continue;
+								if block_height == merkle_proof.block_height {
+									confirmed_txs.push((
+											tx,
+											block_height,
+											block_header,
+											merkle_proof.pos,
+											));
+									continue;
+								}
 							}
 						}
 					}
