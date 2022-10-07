@@ -19,7 +19,7 @@ use lightning::ln::PaymentHash;
 use lightning::routing::gossip::NodeId;
 use lightning::util::events as ldk_events;
 use lightning::util::persist::KVStorePersister;
-use lightning::util::ser::{MaybeReadable, Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{Readable, Readable, ReadableArgs, Writeable, Writer};
 
 use bitcoin::secp256k1::Secp256k1;
 use rand::{thread_rng, Rng};
@@ -32,9 +32,6 @@ use std::time::Duration;
 pub(crate) const EVENTS_PERSISTENCE_KEY: &str = "events";
 
 /// An event emitted by [`LdkLite`] that should be handled by the user.
-///
-/// This wraps an event of a specific type and will more often than not wrap a LDK event accessible
-/// via the `inner` field.
 ///
 /// [`LdkLite`]: [`crate::LdkLite`]
 #[derive(Debug, Clone)]
@@ -106,8 +103,6 @@ impl Writeable for LdkLiteEvent {
 pub struct PaymentSuccessfulEvent {
 	/// The hash of the payment.
 	pub payment_hash: PaymentHash,
-	/// The wrapped LDK event.
-	pub inner: ldk_events::Event,
 }
 
 impl EventType for PaymentSuccessfulEvent {
@@ -119,15 +114,13 @@ impl Readable for PaymentSuccessfulEvent {
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let payment_hash: PaymentHash = Readable::read(reader)?;
-		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-		Ok(Self { payment_hash, inner })
+		Ok(Self { payment_hash })
 	}
 }
 
 impl Writeable for PaymentSuccessfulEvent {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
 		self.payment_hash.write(writer)?;
-		self.inner.write(writer)?;
 		Ok(())
 	}
 }
@@ -137,8 +130,6 @@ impl Writeable for PaymentSuccessfulEvent {
 pub struct PaymentFailedEvent {
 	/// The hash of the payment.
 	pub payment_hash: PaymentHash,
-	/// The wrapped LDK event.
-	pub inner: ldk_events::Event,
 }
 
 impl EventType for PaymentFailedEvent {
@@ -150,15 +141,13 @@ impl Readable for PaymentFailedEvent {
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let payment_hash: PaymentHash = Readable::read(reader)?;
-		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-		Ok(Self { payment_hash, inner })
+		Ok(Self { payment_hash })
 	}
 }
 
 impl Writeable for PaymentFailedEvent {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
 		self.payment_hash.write(writer)?;
-		self.inner.write(writer)?;
 		Ok(())
 	}
 }
@@ -170,8 +159,6 @@ pub struct PaymentReceivedEvent {
 	pub payment_hash: PaymentHash,
 	/// The value, in thousandths of a satoshi that has been received.
 	pub amount_msat: u64,
-	/// The wrapped LDK event.
-	pub inner: ldk_events::Event,
 }
 
 impl EventType for PaymentReceivedEvent {
@@ -184,8 +171,7 @@ impl Readable for PaymentReceivedEvent {
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let payment_hash: PaymentHash = Readable::read(reader)?;
 		let amount_msat: u64 = Readable::read(reader)?;
-		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-		Ok(Self { payment_hash, amount_msat, inner })
+		Ok(Self { payment_hash, amount_msat })
 	}
 }
 
@@ -194,7 +180,6 @@ impl Writeable for PaymentReceivedEvent {
 		Self::TYPE.write(writer)?;
 		self.payment_hash.write(writer)?;
 		self.amount_msat.write(writer)?;
-		self.inner.write(writer)?;
 		Ok(())
 	}
 }
@@ -204,8 +189,6 @@ impl Writeable for PaymentReceivedEvent {
 pub struct ChannelClosedEvent {
 	/// The channel_id of the channel which has been closed.
 	pub channel_id: [u8; 32],
-	/// The wrapped LDK event.
-	pub inner: ldk_events::Event,
 }
 
 impl EventType for ChannelClosedEvent {
@@ -217,8 +200,7 @@ impl Readable for ChannelClosedEvent {
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let channel_id: [u8; 32] = Readable::read(reader)?;
-		let inner: ldk_events::Event = MaybeReadable::read(reader)?.unwrap();
-		Ok(Self { channel_id, inner })
+		Ok(Self { channel_id })
 	}
 }
 
@@ -226,7 +208,6 @@ impl Writeable for ChannelClosedEvent {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
 		Self::TYPE.write(writer)?;
 		self.channel_id.write(writer)?;
-		self.inner.write(writer)?;
 		Ok(())
 	}
 }
@@ -398,7 +379,6 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					.add_event(LdkLiteEvent::PaymentReceived(PaymentReceivedEvent {
 						payment_hash: *payment_hash,
 						amount_msat: *amount_msat,
-						inner: event.clone(),
 					}))
 					.unwrap();
 			}
@@ -466,7 +446,6 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 				self.event_queue
 					.add_event(LdkLiteEvent::PaymentSuccessful(PaymentSuccessfulEvent {
 						payment_hash: *payment_hash,
-						inner: event.clone(),
 					}))
 					.unwrap();
 			}
@@ -485,7 +464,6 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 				self.event_queue
 					.add_event(LdkLiteEvent::PaymentFailed(PaymentFailedEvent {
 						payment_hash: *payment_hash,
-						inner: event.clone(),
 					}))
 					.unwrap();
 			}
@@ -600,7 +578,6 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 				self.event_queue
 					.add_event(LdkLiteEvent::ChannelClosed(ChannelClosedEvent {
 						channel_id: *channel_id,
-						inner: event.clone(),
 					}))
 					.unwrap();
 			}
