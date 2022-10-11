@@ -19,7 +19,7 @@ use lightning::ln::PaymentHash;
 use lightning::routing::gossip::NodeId;
 use lightning::util::events as ldk_events;
 use lightning::util::persist::KVStorePersister;
-use lightning::util::ser::{Readable, Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use bitcoin::secp256k1::Secp256k1;
 use rand::{thread_rng, Rng};
