@@ -14,11 +14,13 @@ use std::convert::TryFrom;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
-pub(crate) fn read_or_generate_seed_file(config: Arc<LdkLiteConfig>) -> Result<[u8; 32], Error> {
+pub(crate) fn read_or_generate_seed_file(config: Arc<LdkLiteConfig>) -> [u8; 32] {
 	let keys_seed_path = format!("{}/keys_seed", config.storage_dir_path);
-	let keys_seed = if let Ok(seed) = fs::read(keys_seed_path.clone()) {
+	let keys_seed = if Path::new(&keys_seed_path).exists() {
+		let seed = fs::read(keys_seed_path.clone()).expect("Failed to read keys seed file");
 		assert_eq!(seed.len(), 32);
 		let mut key = [0; 32];
 		key.copy_from_slice(&seed);
@@ -27,13 +29,14 @@ pub(crate) fn read_or_generate_seed_file(config: Arc<LdkLiteConfig>) -> Result<[
 		let mut key = [0; 32];
 		thread_rng().fill_bytes(&mut key);
 
-		let mut f = fs::File::create(keys_seed_path.clone()).map_err(|e| Error::StdIo(e))?;
+		let mut f =
+			fs::File::create(keys_seed_path.clone()).expect("Failed to create keys seed file");
 		f.write_all(&key).expect("Failed to write node keys seed to disk");
 		f.sync_all().expect("Failed to sync node keys seed to disk");
 		key
 	};
 
-	Ok(keys_seed)
+	keys_seed
 }
 
 pub(crate) fn read_network_graph(

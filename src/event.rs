@@ -154,7 +154,9 @@ impl<K: KVStorePersister> LdkLiteEventQueue<K> {
 		let mut locked_queue = self.queue.lock().unwrap();
 		locked_queue.0.push_back(event);
 
-		self.persister.persist(EVENTS_PERSISTENCE_KEY, &*locked_queue)?;
+		self.persister
+			.persist(EVENTS_PERSISTENCE_KEY, &*locked_queue)
+			.map_err(|_| Error::PersistenceFailed)?;
 
 		self.notifier.notify_one();
 		Ok(())
@@ -171,7 +173,9 @@ impl<K: KVStorePersister> LdkLiteEventQueue<K> {
 	pub(crate) fn event_handled(&self) -> Result<(), Error> {
 		let mut locked_queue = self.queue.lock().unwrap();
 		locked_queue.0.pop_front();
-		self.persister.persist(EVENTS_PERSISTENCE_KEY, &*locked_queue)?;
+		self.persister
+			.persist(EVENTS_PERSISTENCE_KEY, &*locked_queue)
+			.map_err(|_| Error::PersistenceFailed)?;
 		self.notifier.notify_one();
 		Ok(())
 	}

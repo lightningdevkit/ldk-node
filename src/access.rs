@@ -64,11 +64,7 @@ where
 	pub(crate) async fn sync_wallet(&self) -> Result<(), Error> {
 		let sync_options = SyncOptions { progress: None };
 
-		self.wallet
-			.lock()
-			.unwrap()
-			.sync(&self.blockchain, sync_options)
-			.map_err(|e| Error::Bdk(e))?;
+		self.wallet.lock().unwrap().sync(&self.blockchain, sync_options)?;
 
 		Ok(())
 	}
@@ -140,11 +136,11 @@ where
 							if let Some(merkle_proof) = client.get_merkle_proof(&txid).await? {
 								if block_height == merkle_proof.block_height {
 									confirmed_txs.push((
-											tx,
-											block_height,
-											block_header,
-											merkle_proof.pos,
-											));
+										tx,
+										block_height,
+										block_header,
+										merkle_proof.pos,
+									));
 									continue;
 								}
 							}
@@ -300,7 +296,7 @@ where
 		match self.blockchain.broadcast(tx) {
 			Ok(_) => {}
 			Err(err) => {
-				log_error!(self.logger, "Failed to broadcast transaction: {}", err),
+				log_error!(self.logger, "Failed to broadcast transaction: {}", err);
 				panic!("Failed to broadcast transaction: {}", err);
 			}
 		}

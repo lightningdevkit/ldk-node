@@ -189,38 +189,42 @@ impl LdkLiteBuilder {
 	}
 
 	/// Builds an [`LdkLite`] instance according to the options previously configured.
-	pub fn build(&self) -> Result<LdkLite, Error> {
+	pub fn build(&self) -> LdkLite {
 		let config = Arc::new(self.config.clone());
 
 		let ldk_data_dir = format!("{}/ldk", &config.storage_dir_path.clone());
-		fs::create_dir_all(ldk_data_dir.clone())?;
+		fs::create_dir_all(ldk_data_dir.clone()).expect("Failed to create LDK data directory");
 
 		let bdk_data_dir = format!("{}/bdk", config.storage_dir_path.clone());
-		fs::create_dir_all(bdk_data_dir.clone())?;
+		fs::create_dir_all(bdk_data_dir.clone()).expect("Failed to create BDK data directory");
 
 		// Step 0: Initialize the Logger
 		let log_file_path = format!("{}/ldk_lite.log", config.storage_dir_path.clone());
 		let logger = Arc::new(FilesystemLogger::new(log_file_path));
 
 		// Step 1: Initialize the on-chain wallet and chain access
-		let seed = io_utils::read_or_generate_seed_file(Arc::clone(&config))?;
-		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed)?;
+		let seed = io_utils::read_or_generate_seed_file(Arc::clone(&config));
+		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed)
+			.expect("Failed to read wallet master key");
 
 		let wallet_name = bdk::wallet::wallet_name_from_descriptor(
 			Bip84(xprv.clone(), bdk::KeychainKind::External),
 			Some(Bip84(xprv.clone(), bdk::KeychainKind::Internal)),
 			config.network,
 			&Secp256k1::new(),
-		)?;
-		let database = sled::open(bdk_data_dir)?;
-		let database = database.open_tree(wallet_name.clone())?;
+		)
+		.expect("Failed to derive on-chain wallet name");
+		let database = sled::open(bdk_data_dir).expect("Failed to open BDK database");
+		let database =
+			database.open_tree(wallet_name.clone()).expect("Failed to open BDK database");
 
 		let bdk_wallet = bdk::Wallet::new(
 			Bip84(xprv.clone(), bdk::KeychainKind::External),
 			Some(Bip84(xprv.clone(), bdk::KeychainKind::Internal)),
 			config.network,
 			database,
-		)?;
+		)
+		.expect("Failed to setup on-chain wallet");
 
 		// TODO: Check that we can be sure that the Esplora client re-connects in case of failure
 		// and and exits cleanly on drop. Otherwise we need to handle this/move it to the runtime?
@@ -243,16 +247,20 @@ impl LdkLiteBuilder {
 		));
 
 		// Step 5: Initialize the KeysManager
-		let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+		let cur = SystemTime::now()
+			.duration_since(SystemTime::UNIX_EPOCH)
+			.expect("System time error: Clock may have gone backwards");
 		let keys_manager = Arc::new(KeysManager::new(&seed, cur.as_secs(), cur.subsec_nanos()));
 
 		// Step 6: Read ChannelMonitor state from disk
-		let mut channel_monitors = persister.read_channelmonitors(keys_manager.clone())?;
+		let mut channel_monitors = persister
+			.read_channelmonitors(keys_manager.clone())
+			.expect("Failed to read channel monitors from disk");
 
 		// Step 7: Initialize the ChannelManager
 		let mut user_config = UserConfig::default();
 		user_config.channel_handshake_limits.force_announced_channel_preference = false;
-		let (_channel_manager_blockhash, channel_manager) = {
+		let channel_manager = {
 			if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
 				let mut channel_monitor_mut_references = Vec::new();
 				for (_, channel_monitor) in channel_monitors.iter_mut() {
@@ -267,15 +275,19 @@ impl LdkLiteBuilder {
 					user_config,
 					channel_monitor_mut_references,
 				);
-				<(BlockHash, ChannelManager)>::read(&mut f, read_args)?
+				let (_hash, channel_manager) =
+					<(BlockHash, ChannelManager)>::read(&mut f, read_args)
+						.expect("Failed to read channel manager from disk");
+				channel_manager
 			} else {
 				// We're starting a fresh node.
-				let latest_block_height = chain_access.get_height()?;
-				let latest_block_hash = chain_access.get_block_hash(latest_block_height as u64)?;
+				let dummy_block_hash = bitcoin::blockdata::constants::genesis_block(config.network)
+					.header
+					.block_hash();
 
 				let chain_params = ChainParameters {
 					network: config.network,
-					best_block: BestBlock::new(latest_block_hash, latest_block_height),
+					best_block: BestBlock::new(dummy_block_hash, 0),
 				};
 				let fresh_channel_manager = channelmanager::ChannelManager::new(
 					Arc::clone(&chain_access),
@@ -286,7 +298,7 @@ impl LdkLiteBuilder {
 					user_config,
 					chain_params,
 				);
-				(latest_block_hash, fresh_channel_manager)
+				fresh_channel_manager
 			}
 		};
 
@@ -299,8 +311,10 @@ impl LdkLiteBuilder {
 		}
 
 		// Step 10: Initialize the P2PGossipSync
-		let network_graph =
-			Arc::new(io_utils::read_network_graph(Arc::clone(&config), Arc::clone(&logger))?);
+		let network_graph = Arc::new(
+			io_utils::read_network_graph(Arc::clone(&config), Arc::clone(&logger))
+				.expect("Failed to read the network graph"),
+		);
 		let gossip_sync = Arc::new(P2PGossipSync::new(
 			Arc::clone(&network_graph),
 			None::<Arc<dyn Access + Send + Sync>>,
@@ -338,7 +352,10 @@ impl LdkLiteBuilder {
 		let event_queue = if let Ok(mut f) =
 			fs::File::open(format!("{}/{}", ldk_data_dir.clone(), event::EVENTS_PERSISTENCE_KEY))
 		{
-			Arc::new(LdkLiteEventQueue::read(&mut f, Arc::clone(&persister))?)
+			Arc::new(
+				LdkLiteEventQueue::read(&mut f, Arc::clone(&persister))
+					.expect("Failed to read event queue from disk."),
+			)
 		} else {
 			Arc::new(LdkLiteEventQueue::new(Arc::clone(&persister)))
 		};
@@ -376,14 +393,17 @@ impl LdkLiteBuilder {
 			ldk_data_dir.clone(),
 			peer_store::PEER_INFO_PERSISTENCE_KEY
 		)) {
-			Arc::new(PeerInfoStorage::read(&mut f, Arc::clone(&persister))?)
+			Arc::new(
+				PeerInfoStorage::read(&mut f, Arc::clone(&persister))
+					.expect("Failed to read peer information from disk."),
+			)
 		} else {
 			Arc::new(PeerInfoStorage::new(Arc::clone(&persister)))
 		};
 
 		let running = RwLock::new(None);
 
-		Ok(LdkLite {
+		LdkLite {
 			running,
 			config,
 			chain_access,
@@ -400,7 +420,7 @@ impl LdkLiteBuilder {
 			inbound_payments,
 			outbound_payments,
 			peer_store,
-		})
+		}
 	}
 }
 
@@ -501,7 +521,7 @@ impl LdkLite {
 							"On-chain wallet sync finished in {}ms.",
 							now.elapsed().as_millis()
 						),
-						Err(e) => log_error!(sync_logger, "On-chain wallet sync failed: {}", e),
+						Err(_) => log_error!(sync_logger, "On-chain wallet sync failed"),
 					}
 				}
 				rounds = (rounds + 1) % 5;
@@ -635,7 +655,7 @@ impl LdkLite {
 		}
 
 		let funding_address = self.chain_access.get_new_address()?;
-		log_info!(self.logger, "generated new funding address: {}", funding_address);
+		log_info!(self.logger, "Generated new funding address: {}", funding_address);
 		Ok(funding_address)
 	}
 
@@ -697,12 +717,16 @@ impl LdkLite {
 		) {
 			Ok(_) => {
 				self.peer_store.add_peer(peer_info.clone())?;
-				log_info!(self.logger, "Initiated channel with peer {}. ", peer_info.pubkey);
+				log_info!(
+					self.logger,
+					"Initiated channel creation with peer {}. ",
+					peer_info.pubkey
+				);
 				Ok(())
 			}
 			Err(e) => {
-				log_error!(self.logger, "failed to open channel: {:?}", e);
-				Err(Error::LdkApi(e))
+				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
+				Err(Error::ChannelCreationFailed)
 			}
 		}
 	}
@@ -712,7 +736,10 @@ impl LdkLite {
 		&self, channel_id: &[u8; 32], counterparty_node_id: &PublicKey,
 	) -> Result<(), Error> {
 		self.peer_store.remove_peer(counterparty_node_id)?;
-		Ok(self.channel_manager.close_channel(channel_id, counterparty_node_id)?)
+		match self.channel_manager.close_channel(channel_id, counterparty_node_id) {
+			Ok(_) => Ok(()),
+			Err(_) => Err(Error::ChannelClosingFailed),
+		}
 	}
 
 	/// Send a payement given an invoice.
@@ -729,19 +756,19 @@ impl LdkLite {
 				// succeed? Should we allow to set the amount in the interface or via a dedicated
 				// method?
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
-				log_info!(self.logger, "initiated sending {} msats to {}", amt_msat, payee_pubkey);
+				log_info!(self.logger, "Initiated sending {} msats to {}", amt_msat, payee_pubkey);
 				PaymentStatus::Pending
 			}
 			Err(payment::PaymentError::Invoice(e)) => {
-				log_error!(self.logger, "invalid invoice: {}", e);
-				return Err(Error::LdkPayment(payment::PaymentError::Invoice(e)));
+				log_error!(self.logger, "Failed to send payment due to invalid invoice: {}", e);
+				return Err(Error::InvoiceInvalid);
 			}
 			Err(payment::PaymentError::Routing(e)) => {
-				log_error!(self.logger, "failed to find route: {}", e.err);
-				return Err(Error::LdkPayment(payment::PaymentError::Routing(e)));
+				log_error!(self.logger, "Failed to send payment due to routing failure: {}", e.err);
+				return Err(Error::RoutingFailed);
 			}
 			Err(payment::PaymentError::Sending(e)) => {
-				log_error!(self.logger, "failed to send payment: {:?}", e);
+				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				PaymentStatus::Failed
 			}
 		};
@@ -771,8 +798,7 @@ impl LdkLite {
 			return Err(Error::NotRunning);
 		}
 
-		let pubkey = hex_utils::to_compressed_pubkey(node_id)
-			.ok_or(Error::PeerInfoParse("failed to parse node id"))?;
+		let pubkey = hex_utils::to_compressed_pubkey(node_id).ok_or(Error::PeerInfoParseFailed)?;
 
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
 		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
@@ -784,19 +810,19 @@ impl LdkLite {
 			self.config.default_cltv_expiry_delta,
 		) {
 			Ok(_payment_id) => {
-				log_info!(self.logger, "initiated sending {} msats to {}", amount_msat, node_id);
+				log_info!(self.logger, "Initiated sending {} msats to {}.", amount_msat, node_id);
 				PaymentStatus::Pending
 			}
 			Err(payment::PaymentError::Invoice(e)) => {
-				log_error!(self.logger, "invalid invoice: {}", e);
-				return Err(Error::LdkPayment(payment::PaymentError::Invoice(e)));
+				log_error!(self.logger, "Failed to send payment due to invalid invoice: {}", e);
+				return Err(Error::InvoiceInvalid);
 			}
 			Err(payment::PaymentError::Routing(e)) => {
-				log_error!(self.logger, "failed to find route: {}", e.err);
-				return Err(Error::LdkPayment(payment::PaymentError::Routing(e)));
+				log_error!(self.logger, "Failed to send payment due to routing failure: {}", e.err);
+				return Err(Error::RoutingFailed);
 			}
 			Err(payment::PaymentError::Sending(e)) => {
-				log_error!(self.logger, "failed to send payment: {:?}", e);
+				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				PaymentStatus::Failed
 			}
 		};
@@ -832,13 +858,12 @@ impl LdkLite {
 			expiry_secs,
 		) {
 			Ok(inv) => {
-				log_info!(self.logger, "generated invoice: {}", inv);
+				log_info!(self.logger, "Invoice created: {}", inv);
 				inv
 			}
 			Err(e) => {
-				let err_str = &e.to_string();
-				log_error!(self.logger, "failed to create invoice: {:?}", err_str);
-				return Err(Error::LdkInvoiceCreation(e));
+				log_error!(self.logger, "Failed to create invoice: {}", e);
+				return Err(Error::InvoiceCreationFailed);
 			}
 		};
 

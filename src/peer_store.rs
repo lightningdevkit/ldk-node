@@ -38,7 +38,9 @@ impl<K: KVStorePersister> PeerInfoStorage<K> {
 		}
 
 		locked_peers.0.push(peer_info);
-		self.persister.persist(PEER_INFO_PERSISTENCE_KEY, &*locked_peers)?;
+		self.persister
+			.persist(PEER_INFO_PERSISTENCE_KEY, &*locked_peers)
+			.map_err(|_| Error::PersistenceFailed)?;
 
 		return Ok(());
 	}
@@ -48,7 +50,9 @@ impl<K: KVStorePersister> PeerInfoStorage<K> {
 
 		locked_peers.0.retain(|info| info.pubkey != *peer_pubkey);
 
-		self.persister.persist(PEER_INFO_PERSISTENCE_KEY, &*locked_peers)?;
+		self.persister
+			.persist(PEER_INFO_PERSISTENCE_KEY, &*locked_peers)
+			.map_err(|_| Error::PersistenceFailed)?;
 
 		return Ok(());
 	}
@@ -150,21 +154,17 @@ impl TryFrom<String> for PeerInfo {
 		let pubkey = pubkey_and_addr.next();
 		let peer_addr_str = pubkey_and_addr.next();
 		if pubkey.is_none() || peer_addr_str.is_none() {
-			return Err(Error::PeerInfoParse(
-				"Incorrect format. Should be formatted as: `pubkey@host:port`.",
-			));
+			return Err(Error::PeerInfoParseFailed);
 		}
 
 		let peer_addr = peer_addr_str.unwrap().to_socket_addrs().map(|mut r| r.next());
 		if peer_addr.is_err() || peer_addr.as_ref().unwrap().is_none() {
-			return Err(Error::PeerInfoParse(
-				"Couldn't parse pubkey@host:port into a socket address.",
-			));
+			return Err(Error::PeerInfoParseFailed);
 		}
 
 		let pubkey = hex_utils::to_compressed_pubkey(pubkey.unwrap());
 		if pubkey.is_none() {
-			return Err(Error::PeerInfoParse("Unable to parse pubkey for node."));
+			return Err(Error::PeerInfoParseFailed);
 		}
 
 		Ok(PeerInfo { pubkey: pubkey.unwrap(), address: peer_addr.unwrap().unwrap() })
