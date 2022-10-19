@@ -1,9 +1,7 @@
-use crate::error::LdkLiteError as Error;
-#[allow(unused_imports)]
 use crate::logger::{
-	log_error, log_given_level, log_info, log_internal, log_trace, log_warn, FilesystemLogger,
-	Logger,
+	log_error, log_given_level, log_internal, log_trace, FilesystemLogger, Logger,
 };
+use crate::Error;
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::WatchedOutput;
@@ -22,7 +20,7 @@ use std::sync::{Arc, Mutex};
 /// The minimum feerate we are allowed to send, as specify by LDK.
 const MIN_FEERATE: u32 = 253;
 
-pub struct LdkLiteChainAccess<D>
+pub struct ChainAccess<D>
 where
 	D: BatchDatabase,
 {
@@ -36,7 +34,7 @@ where
 	logger: Arc<FilesystemLogger>,
 }
 
-impl<D> LdkLiteChainAccess<D>
+impl<D> ChainAccess<D>
 where
 	D: BatchDatabase,
 {
@@ -275,7 +273,7 @@ where
 	}
 }
 
-impl<D> FeeEstimator for LdkLiteChainAccess<D>
+impl<D> FeeEstimator for ChainAccess<D>
 where
 	D: BatchDatabase,
 {
@@ -288,7 +286,7 @@ where
 	}
 }
 
-impl<D> BroadcasterInterface for LdkLiteChainAccess<D>
+impl<D> BroadcasterInterface for ChainAccess<D>
 where
 	D: BatchDatabase,
 {
@@ -303,7 +301,7 @@ where
 	}
 }
 
-impl<D> Filter for LdkLiteChainAccess<D>
+impl<D> Filter for ChainAccess<D>
 where
 	D: BatchDatabase,
 {
@@ -317,7 +315,7 @@ where
 	}
 }
 
-impl<D> GetHeight for LdkLiteChainAccess<D>
+impl<D> GetHeight for ChainAccess<D>
 where
 	D: BatchDatabase,
 {
@@ -326,7 +324,7 @@ where
 	}
 }
 
-impl<D> GetBlockHash for LdkLiteChainAccess<D>
+impl<D> GetBlockHash for ChainAccess<D>
 where
 	D: BatchDatabase,
 {
@@ -335,7 +333,7 @@ where
 	}
 }
 
-impl<D> GetTx for LdkLiteChainAccess<D>
+impl<D> GetTx for ChainAccess<D>
 where
 	D: BatchDatabase,
 {

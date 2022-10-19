@@ -78,6 +78,7 @@ macro_rules! log_error {
 		log_given_level!($logger, lightning::util::logger::Level::Error, $($arg)*)
 	)
 }
+#[allow(unused_imports)]
 pub(crate) use log_error;
 
 #[allow(unused_macros)]
@@ -86,6 +87,7 @@ macro_rules! log_warn {
 		log_given_level!($logger, lightning::util::logger::Level::Warn, $($arg)*)
 	)
 }
+#[allow(unused_imports)]
 pub(crate) use log_warn;
 
 #[allow(unused_macros)]
@@ -94,6 +96,7 @@ macro_rules! log_info {
 		log_given_level!($logger, lightning::util::logger::Level::Info, $($arg)*)
 	)
 }
+#[allow(unused_imports)]
 pub(crate) use log_info;
 
 #[allow(unused_macros)]
@@ -102,6 +105,8 @@ macro_rules! log_debug {
 		log_given_level!($logger, lightning::util::logger::Level::Debug, $($arg)*)
 	)
 }
+#[allow(unused_imports)]
+pub(crate) use log_debug;
 
 #[allow(unused_macros)]
 macro_rules! log_trace {
@@ -109,4 +114,5 @@ macro_rules! log_trace {
 		log_given_level!($logger, lightning::util::logger::Level::Trace, $($arg)*)
 	)
 }
+#[allow(unused_imports)]
 pub(crate) use log_trace;

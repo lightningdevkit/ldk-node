@@ -26,23 +26,19 @@
 
 mod access;
 mod error;
-pub mod event;
+mod event;
 mod hex_utils;
 mod io_utils;
 mod logger;
 mod peer_store;
 
-use access::LdkLiteChainAccess;
-pub use error::LdkLiteError as Error;
-use event::LdkLiteEvent;
-use event::{LdkLiteEventHandler, LdkLiteEventQueue};
+use access::ChainAccess;
+pub use error::Error;
+pub use event::Event;
+use event::{EventHandler, EventQueue};
 use peer_store::{PeerInfo, PeerInfoStorage};
 
-#[allow(unused_imports)]
-use logger::{
-	log_error, log_given_level, log_info, log_internal, log_trace, log_warn, FilesystemLogger,
-	Logger,
-};
+use logger::{log_error, log_given_level, log_info, log_internal, FilesystemLogger, Logger};
 
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
 use lightning::chain::{chainmonitor, Access, BestBlock, Confirm, Filter, Watch};
@@ -70,7 +66,6 @@ use lightning_invoice::{payment, Currency, Invoice};
 
 use bdk::bitcoin::secp256k1::Secp256k1;
 use bdk::blockchain::esplora::EsploraBlockchain;
-use bdk::blockchain::{GetBlockHash, GetHeight};
 use bdk::sled;
 use bdk::template::Bip84;
 
@@ -101,7 +96,7 @@ const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`LdkLite`] instance.
-pub struct LdkLiteConfig {
+pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
 	/// The URL of the utilized Esplora server.
@@ -117,11 +112,11 @@ pub struct LdkLiteConfig {
 /// A builder for an [`LdkLite`] instance, allowing to set some configuration and module choices from
 /// the getgo.
 #[derive(Debug, Clone)]
-pub struct LdkLiteBuilder {
-	config: LdkLiteConfig,
+pub struct Builder {
+	config: Config,
 }
 
-impl LdkLiteBuilder {
+impl Builder {
 	/// Creates a new builder instance with the default configuration.
 	pub fn new() -> Self {
 		// Set the config defaults
@@ -131,7 +126,7 @@ impl LdkLiteBuilder {
 		let listening_port = 9735;
 		let default_cltv_expiry_delta = 144;
 
-		let config = LdkLiteConfig {
+		let config = Config {
 			storage_dir_path,
 			esplora_server_url,
 			network,
@@ -142,8 +137,8 @@ impl LdkLiteBuilder {
 		Self { config }
 	}
 
-	/// Creates a new builder instance from an [`LdkLiteConfig`].
-	pub fn from_config(config: LdkLiteConfig) -> Self {
+	/// Creates a new builder instance from an [`Config`].
+	pub fn from_config(config: Config) -> Self {
 		Self { config }
 	}
 
@@ -231,8 +226,7 @@ impl LdkLiteBuilder {
 		let blockchain = EsploraBlockchain::new(&config.esplora_server_url, BDK_CLIENT_STOP_GAP)
 			.with_concurrency(BDK_CLIENT_CONCURRENCY);
 
-		let chain_access =
-			Arc::new(LdkLiteChainAccess::new(blockchain, bdk_wallet, Arc::clone(&logger)));
+		let chain_access = Arc::new(ChainAccess::new(blockchain, bdk_wallet, Arc::clone(&logger)));
 
 		// Step 3: Initialize Persist
 		let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
@@ -353,14 +347,14 @@ impl LdkLiteBuilder {
 			fs::File::open(format!("{}/{}", ldk_data_dir.clone(), event::EVENTS_PERSISTENCE_KEY))
 		{
 			Arc::new(
-				LdkLiteEventQueue::read(&mut f, Arc::clone(&persister))
+				EventQueue::read(&mut f, Arc::clone(&persister))
 					.expect("Failed to read event queue from disk."),
 			)
 		} else {
-			Arc::new(LdkLiteEventQueue::new(Arc::clone(&persister)))
+			Arc::new(EventQueue::new(Arc::clone(&persister)))
 		};
 
-		let event_handler = LdkLiteEventHandler::new(
+		let event_handler = EventHandler::new(
 			Arc::clone(&chain_access),
 			Arc::clone(&event_queue),
 			Arc::clone(&channel_manager),
@@ -426,7 +420,7 @@ impl LdkLiteBuilder {
 
 /// Wraps all objects that need to be preserved during the run time of [`LdkLite`]. Will be dropped
 /// upon [`LdkLite::stop()`].
-struct LdkLiteRuntime {
+struct Runtime {
 	tokio_runtime: tokio::runtime::Runtime,
 	_background_processor: BackgroundProcessor,
 	stop_networking: Arc<AtomicBool>,
@@ -435,12 +429,12 @@ struct LdkLiteRuntime {
 
 /// The main interface object of the simplified API, wrapping the necessary LDK and BDK functionalities.
 ///
-/// Needs to be initialized and instantiated through [`LdkLiteBuilder::build`].
+/// Needs to be initialized and instantiated through [`Builder::build`].
 pub struct LdkLite {
-	running: RwLock<Option<LdkLiteRuntime>>,
-	config: Arc<LdkLiteConfig>,
-	chain_access: Arc<LdkLiteChainAccess<bdk::sled::Tree>>,
-	event_queue: Arc<LdkLiteEventQueue<FilesystemPersister>>,
+	running: RwLock<Option<Runtime>>,
+	config: Arc<Config>,
+	chain_access: Arc<ChainAccess<bdk::sled::Tree>>,
+	event_queue: Arc<EventQueue<FilesystemPersister>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
 	peer_manager: Arc<PeerManager>,
@@ -449,7 +443,7 @@ pub struct LdkLite {
 	persister: Arc<FilesystemPersister>,
 	logger: Arc<FilesystemLogger>,
 	scorer: Arc<Mutex<Scorer>>,
-	invoice_payer: Arc<InvoicePayer<LdkLiteEventHandler>>,
+	invoice_payer: Arc<InvoicePayer<EventHandler>>,
 	inbound_payments: Arc<PaymentInfoStorage>,
 	outbound_payments: Arc<PaymentInfoStorage>,
 	peer_store: Arc<PeerInfoStorage<FilesystemPersister>>,
@@ -493,7 +487,7 @@ impl LdkLite {
 		Ok(())
 	}
 
-	fn setup_runtime(&self) -> Result<LdkLiteRuntime, Error> {
+	fn setup_runtime(&self) -> Result<Runtime, Error> {
 		let tokio_runtime =
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
@@ -619,18 +613,13 @@ impl LdkLite {
 
 		// TODO: frequently check back on background_processor if there was an error
 
-		Ok(LdkLiteRuntime {
-			tokio_runtime,
-			_background_processor,
-			stop_networking,
-			stop_wallet_sync,
-		})
+		Ok(Runtime { tokio_runtime, _background_processor, stop_networking, stop_wallet_sync })
 	}
 
 	/// Blocks until the next event is available.
 	///
 	/// Note: this will always return the same event until handling is confirmed via [`LdkLite::event_handled`].
-	pub fn next_event(&self) -> LdkLiteEvent {
+	pub fn next_event(&self) -> Event {
 		self.event_queue.next_event()
 	}
 
@@ -977,8 +966,8 @@ pub enum PaymentStatus {
 type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<dyn Filter + Send + Sync>,
-	Arc<LdkLiteChainAccess<bdk::sled::Tree>>,
-	Arc<LdkLiteChainAccess<bdk::sled::Tree>>,
+	Arc<ChainAccess<bdk::sled::Tree>>,
+	Arc<ChainAccess<bdk::sled::Tree>>,
 	Arc<FilesystemLogger>,
 	Arc<FilesystemPersister>,
 >;
@@ -986,16 +975,16 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 type PeerManager = SimpleArcPeerManager<
 	SocketDescriptor,
 	ChainMonitor,
-	LdkLiteChainAccess<bdk::sled::Tree>,
-	LdkLiteChainAccess<bdk::sled::Tree>,
+	ChainAccess<bdk::sled::Tree>,
+	ChainAccess<bdk::sled::Tree>,
 	dyn Access + Send + Sync,
 	FilesystemLogger,
 >;
 
 pub(crate) type ChannelManager = SimpleArcChannelManager<
 	ChainMonitor,
-	LdkLiteChainAccess<bdk::sled::Tree>,
-	LdkLiteChainAccess<bdk::sled::Tree>,
+	ChainAccess<bdk::sled::Tree>,
+	ChainAccess<bdk::sled::Tree>,
 	FilesystemLogger,
 >;
 

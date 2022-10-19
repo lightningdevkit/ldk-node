@@ -1,23 +1,16 @@
-use crate::error::LdkLiteError as Error;
-
-use crate::{FilesystemLogger, LdkLiteConfig, NetworkGraph, PeerInfo, Scorer};
+use crate::{Config, Error, FilesystemLogger, NetworkGraph, Scorer};
 
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::ser::ReadableArgs;
 
-use bitcoin::secp256k1::PublicKey;
-
 use rand::{thread_rng, RngCore};
 
-use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::SocketAddr;
+use std::io::{BufReader, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-pub(crate) fn read_or_generate_seed_file(config: Arc<LdkLiteConfig>) -> [u8; 32] {
+pub(crate) fn read_or_generate_seed_file(config: Arc<Config>) -> [u8; 32] {
 	let keys_seed_path = format!("{}/keys_seed", config.storage_dir_path);
 	let keys_seed = if Path::new(&keys_seed_path).exists() {
 		let seed = fs::read(keys_seed_path.clone()).expect("Failed to read keys seed file");
@@ -40,7 +33,7 @@ pub(crate) fn read_or_generate_seed_file(config: Arc<LdkLiteConfig>) -> [u8; 32]
 }
 
 pub(crate) fn read_network_graph(
-	config: Arc<LdkLiteConfig>, logger: Arc<FilesystemLogger>,
+	config: Arc<Config>, logger: Arc<FilesystemLogger>,
 ) -> Result<NetworkGraph, Error> {
 	let ldk_data_dir = format!("{}/ldk", &config.storage_dir_path.clone());
 	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
@@ -57,7 +50,7 @@ pub(crate) fn read_network_graph(
 }
 
 pub(crate) fn read_scorer(
-	config: Arc<LdkLiteConfig>, network_graph: Arc<NetworkGraph>, logger: Arc<FilesystemLogger>,
+	config: Arc<Config>, network_graph: Arc<NetworkGraph>, logger: Arc<FilesystemLogger>,
 ) -> Scorer {
 	let ldk_data_dir = format!("{}/ldk", &config.storage_dir_path.clone());
 	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());

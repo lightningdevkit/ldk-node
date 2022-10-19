@@ -3,7 +3,7 @@ use std::fmt;
 
 #[derive(Debug)]
 /// An error that possibly needs to be handled by the user.
-pub enum LdkLiteError {
+pub enum Error {
 	/// Returned when trying to start LdkLite while it is already running.
 	AlreadyRunning,
 	/// Returned when trying to stop LdkLite while it is not running.
@@ -36,7 +36,7 @@ pub enum LdkLiteError {
 	ChainAccessFailed,
 }
 
-impl fmt::Display for LdkLiteError {
+impl fmt::Display for Error {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match *self {
 			Self::AlreadyRunning => write!(f, "LDKLite is already running."),
@@ -60,9 +60,9 @@ impl fmt::Display for LdkLiteError {
 	}
 }
 
-impl std::error::Error for LdkLiteError {}
+impl std::error::Error for Error {}
 
-impl From<bdk::Error> for LdkLiteError {
+impl From<bdk::Error> for Error {
 	fn from(e: bdk::Error) -> Self {
 		match e {
 			bdk::Error::Signer(_) => Self::WalletSigningFailed,
@@ -71,7 +71,7 @@ impl From<bdk::Error> for LdkLiteError {
 	}
 }
 
-impl From<esplora::EsploraError> for LdkLiteError {
+impl From<esplora::EsploraError> for Error {
 	fn from(_e: esplora::EsploraError) -> Self {
 		Self::ChainAccessFailed
 	}

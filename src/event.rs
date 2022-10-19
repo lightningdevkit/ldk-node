@@ -1,13 +1,9 @@
 use crate::{
-	hex_utils, ChannelManager, Error, FilesystemPersister, LdkLiteChainAccess, LdkLiteConfig,
-	NetworkGraph, PaymentInfo, PaymentInfoStorage, PaymentStatus,
+	hex_utils, ChainAccess, ChannelManager, Config, Error, FilesystemPersister, NetworkGraph,
+	PaymentInfo, PaymentInfoStorage, PaymentStatus,
 };
 
-#[allow(unused_imports)]
-use crate::logger::{
-	log_error, log_given_level, log_info, log_internal, log_trace, log_warn, FilesystemLogger,
-	Logger,
-};
+use crate::logger::{log_error, log_given_level, log_info, log_internal, FilesystemLogger, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::keysinterface::KeysManager;
@@ -33,7 +29,7 @@ pub(crate) const EVENTS_PERSISTENCE_KEY: &str = "events";
 ///
 /// [`LdkLite`]: [`crate::LdkLite`]
 #[derive(Debug, Clone)]
-pub enum LdkLiteEvent {
+pub enum Event {
 	/// A payment we sent was successful.
 	PaymentSuccessful {
 		/// The hash of the payment.
@@ -66,7 +62,7 @@ pub enum LdkLiteEvent {
 	//}
 }
 
-impl Readable for LdkLiteEvent {
+impl Readable for Event {
 	fn read<R: lightning::io::Read>(
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
@@ -102,7 +98,7 @@ impl Readable for LdkLiteEvent {
 	}
 }
 
-impl Writeable for LdkLiteEvent {
+impl Writeable for Event {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
 		match self {
 			Self::PaymentSuccessful { payment_hash } => {
@@ -138,19 +134,19 @@ impl Writeable for LdkLiteEvent {
 	}
 }
 
-pub(crate) struct LdkLiteEventQueue<K: KVStorePersister> {
+pub(crate) struct EventQueue<K: KVStorePersister> {
 	queue: Mutex<EventQueueSerWrapper>,
 	notifier: Condvar,
 	persister: Arc<K>,
 }
 
-impl<K: KVStorePersister> LdkLiteEventQueue<K> {
+impl<K: KVStorePersister> EventQueue<K> {
 	pub(crate) fn new(persister: Arc<K>) -> Self {
 		let queue: Mutex<EventQueueSerWrapper> = Mutex::new(EventQueueSerWrapper(VecDeque::new()));
 		let notifier = Condvar::new();
 		Self { queue, notifier, persister }
 	}
-	pub(crate) fn add_event(&self, event: LdkLiteEvent) -> Result<(), Error> {
+	pub(crate) fn add_event(&self, event: Event) -> Result<(), Error> {
 		let mut locked_queue = self.queue.lock().unwrap();
 		locked_queue.0.push_back(event);
 
@@ -162,7 +158,7 @@ impl<K: KVStorePersister> LdkLiteEventQueue<K> {
 		Ok(())
 	}
 
-	pub(crate) fn next_event(&self) -> LdkLiteEvent {
+	pub(crate) fn next_event(&self) -> Event {
 		let locked_queue = self
 			.notifier
 			.wait_while(self.queue.lock().unwrap(), |queue| queue.0.is_empty())
@@ -181,7 +177,7 @@ impl<K: KVStorePersister> LdkLiteEventQueue<K> {
 	}
 }
 
-impl<K: KVStorePersister> ReadableArgs<Arc<K>> for LdkLiteEventQueue<K> {
+impl<K: KVStorePersister> ReadableArgs<Arc<K>> for EventQueue<K> {
 	#[inline]
 	fn read<R: lightning::io::Read>(
 		reader: &mut R, persister: Arc<K>,
@@ -192,7 +188,7 @@ impl<K: KVStorePersister> ReadableArgs<Arc<K>> for LdkLiteEventQueue<K> {
 	}
 }
 
-struct EventQueueSerWrapper(VecDeque<LdkLiteEvent>);
+struct EventQueueSerWrapper(VecDeque<Event>);
 
 impl Readable for EventQueueSerWrapper {
 	fn read<R: lightning::io::Read>(
@@ -217,26 +213,25 @@ impl Writeable for EventQueueSerWrapper {
 	}
 }
 
-pub(crate) struct LdkLiteEventHandler {
-	chain_access: Arc<LdkLiteChainAccess<bdk::sled::Tree>>,
-	event_queue: Arc<LdkLiteEventQueue<FilesystemPersister>>,
+pub(crate) struct EventHandler {
+	chain_access: Arc<ChainAccess<bdk::sled::Tree>>,
+	event_queue: Arc<EventQueue<FilesystemPersister>>,
 	channel_manager: Arc<ChannelManager>,
 	network_graph: Arc<NetworkGraph>,
 	keys_manager: Arc<KeysManager>,
 	inbound_payments: Arc<PaymentInfoStorage>,
 	outbound_payments: Arc<PaymentInfoStorage>,
 	logger: Arc<FilesystemLogger>,
-	_config: Arc<LdkLiteConfig>,
+	_config: Arc<Config>,
 }
 
-impl LdkLiteEventHandler {
+impl EventHandler {
 	pub fn new(
-		chain_access: Arc<LdkLiteChainAccess<bdk::sled::Tree>>,
-		event_queue: Arc<LdkLiteEventQueue<FilesystemPersister>>,
-		channel_manager: Arc<ChannelManager>, network_graph: Arc<NetworkGraph>,
-		keys_manager: Arc<KeysManager>, inbound_payments: Arc<PaymentInfoStorage>,
-		outbound_payments: Arc<PaymentInfoStorage>, logger: Arc<FilesystemLogger>,
-		_config: Arc<LdkLiteConfig>,
+		chain_access: Arc<ChainAccess<bdk::sled::Tree>>,
+		event_queue: Arc<EventQueue<FilesystemPersister>>, channel_manager: Arc<ChannelManager>,
+		network_graph: Arc<NetworkGraph>, keys_manager: Arc<KeysManager>,
+		inbound_payments: Arc<PaymentInfoStorage>, outbound_payments: Arc<PaymentInfoStorage>,
+		logger: Arc<FilesystemLogger>, _config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -252,7 +247,7 @@ impl LdkLiteEventHandler {
 	}
 }
 
-impl LdkEventHandler for LdkLiteEventHandler {
+impl LdkEventHandler for EventHandler {
 	fn handle_event(&self, event: &LdkEvent) {
 		match event {
 			LdkEvent::FundingGenerationReady {
@@ -299,14 +294,12 @@ impl LdkEventHandler for LdkLiteEventHandler {
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					PaymentPurpose::InvoicePayment { payment_preimage, .. } => {
-						*payment_preimage
-					}
+					PaymentPurpose::InvoicePayment { payment_preimage, .. } => *payment_preimage,
 					PaymentPurpose::SpontaneousPayment(preimage) => Some(*preimage),
 				};
 				self.channel_manager.claim_funds(payment_preimage.unwrap());
 				self.event_queue
-					.add_event(LdkLiteEvent::PaymentReceived {
+					.add_event(Event::PaymentReceived {
 						payment_hash: *payment_hash,
 						amount_msat: *amount_msat,
 					})
@@ -320,14 +313,10 @@ impl LdkEventHandler for LdkLiteEventHandler {
 					amount_msat,
 				);
 				let (payment_preimage, payment_secret) = match purpose {
-					PaymentPurpose::InvoicePayment {
-						payment_preimage,
-						payment_secret,
-						..
-					} => (*payment_preimage, Some(*payment_secret)),
-					PaymentPurpose::SpontaneousPayment(preimage) => {
-						(Some(*preimage), None)
+					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
+						(*payment_preimage, Some(*payment_secret))
 					}
+					PaymentPurpose::SpontaneousPayment(preimage) => (Some(*preimage), None),
 				};
 				let mut payments = self.inbound_payments.lock().unwrap();
 				match payments.entry(*payment_hash) {
@@ -347,12 +336,7 @@ impl LdkEventHandler for LdkLiteEventHandler {
 					}
 				}
 			}
-			LdkEvent::PaymentSent {
-				payment_preimage,
-				payment_hash,
-				fee_paid_msat,
-				..
-			} => {
+			LdkEvent::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 				let mut payments = self.outbound_payments.lock().unwrap();
 				for (hash, payment) in payments.iter_mut() {
 					if *hash == *payment_hash {
@@ -374,9 +358,7 @@ impl LdkEventHandler for LdkLiteEventHandler {
 					}
 				}
 				self.event_queue
-					.add_event(LdkLiteEvent::PaymentSuccessful {
-						payment_hash: *payment_hash,
-					})
+					.add_event(Event::PaymentSuccessful { payment_hash: *payment_hash })
 					.unwrap();
 			}
 			LdkEvent::PaymentFailed { payment_hash, .. } => {
@@ -392,9 +374,7 @@ impl LdkEventHandler for LdkLiteEventHandler {
 					payment.status = PaymentStatus::Failed;
 				}
 				self.event_queue
-					.add_event(LdkLiteEvent::PaymentFailed {
-						payment_hash: *payment_hash,
-					})
+					.add_event(Event::PaymentFailed { payment_hash: *payment_hash })
 					.unwrap();
 			}
 
@@ -506,9 +486,7 @@ impl LdkEventHandler for LdkLiteEventHandler {
 					reason
 				);
 				self.event_queue
-					.add_event(LdkLiteEvent::ChannelClosed {
-						channel_id: *channel_id,
-					})
+					.add_event(Event::ChannelClosed { channel_id: *channel_id })
 					.unwrap();
 			}
 			LdkEvent::DiscardFunding { .. } => {}
