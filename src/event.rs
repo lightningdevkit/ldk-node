@@ -17,7 +17,9 @@ use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget,
 use lightning::chain::keysinterface::KeysManager;
 use lightning::ln::PaymentHash;
 use lightning::routing::gossip::NodeId;
-use lightning::util::events as ldk_events;
+use lightning::util::events::Event as LdkEvent;
+use lightning::util::events::EventHandler as LdkEventHandler;
+use lightning::util::events::PaymentPurpose;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
@@ -322,10 +324,10 @@ impl LdkLiteEventHandler {
 	}
 }
 
-impl ldk_events::EventHandler for LdkLiteEventHandler {
-	fn handle_event(&self, event: &ldk_events::Event) {
+impl LdkEventHandler for LdkLiteEventHandler {
+	fn handle_event(&self, event: &LdkEvent) {
 		match event {
-			ldk_events::Event::FundingGenerationReady {
+			LdkEvent::FundingGenerationReady {
 				temporary_channel_id,
 				counterparty_node_id,
 				channel_value_satoshis,
@@ -361,7 +363,7 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					}
 				}
 			}
-			ldk_events::Event::PaymentReceived { payment_hash, purpose, amount_msat } => {
+			LdkEvent::PaymentReceived { payment_hash, purpose, amount_msat } => {
 				log_info!(
 					self.logger,
 					"Received payment from payment hash {} of {} millisatoshis",
@@ -369,10 +371,10 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					ldk_events::PaymentPurpose::InvoicePayment { payment_preimage, .. } => {
+					PaymentPurpose::InvoicePayment { payment_preimage, .. } => {
 						*payment_preimage
 					}
-					ldk_events::PaymentPurpose::SpontaneousPayment(preimage) => Some(*preimage),
+					PaymentPurpose::SpontaneousPayment(preimage) => Some(*preimage),
 				};
 				self.channel_manager.claim_funds(payment_preimage.unwrap());
 				self.event_queue
@@ -382,7 +384,7 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					}))
 					.unwrap();
 			}
-			ldk_events::Event::PaymentClaimed { payment_hash, purpose, amount_msat } => {
+			LdkEvent::PaymentClaimed { payment_hash, purpose, amount_msat } => {
 				log_info!(
 					self.logger,
 					"Claimed payment from payment hash {} of {} millisatoshis",
@@ -390,12 +392,12 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					amount_msat,
 				);
 				let (payment_preimage, payment_secret) = match purpose {
-					ldk_events::PaymentPurpose::InvoicePayment {
+					PaymentPurpose::InvoicePayment {
 						payment_preimage,
 						payment_secret,
 						..
 					} => (*payment_preimage, Some(*payment_secret)),
-					ldk_events::PaymentPurpose::SpontaneousPayment(preimage) => {
+					PaymentPurpose::SpontaneousPayment(preimage) => {
 						(Some(*preimage), None)
 					}
 				};
@@ -417,7 +419,7 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					}
 				}
 			}
-			ldk_events::Event::PaymentSent {
+			LdkEvent::PaymentSent {
 				payment_preimage,
 				payment_hash,
 				fee_paid_msat,
@@ -449,7 +451,7 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					}))
 					.unwrap();
 			}
-			ldk_events::Event::PaymentFailed { payment_hash, .. } => {
+			LdkEvent::PaymentFailed { payment_hash, .. } => {
 				log_info!(
 					self.logger,
 					"Failed to send payment to payment hash {:?}: exhausted payment retry attempts",
@@ -468,12 +470,12 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					.unwrap();
 			}
 
-			ldk_events::Event::PaymentPathSuccessful { .. } => {}
-			ldk_events::Event::PaymentPathFailed { .. } => {}
-			ldk_events::Event::ProbeSuccessful { .. } => {}
-			ldk_events::Event::ProbeFailed { .. } => {}
-			ldk_events::Event::HTLCHandlingFailed { .. } => {}
-			ldk_events::Event::PendingHTLCsForwardable { time_forwardable } => {
+			LdkEvent::PaymentPathSuccessful { .. } => {}
+			LdkEvent::PaymentPathFailed { .. } => {}
+			LdkEvent::ProbeSuccessful { .. } => {}
+			LdkEvent::ProbeFailed { .. } => {}
+			LdkEvent::HTLCHandlingFailed { .. } => {}
+			LdkEvent::PendingHTLCsForwardable { time_forwardable } => {
 				let forwarding_channel_manager = self.channel_manager.clone();
 				let min = time_forwardable.as_millis() as u64;
 
@@ -485,7 +487,7 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					forwarding_channel_manager.process_pending_htlc_forwards();
 				});
 			}
-			ldk_events::Event::SpendableOutputs { outputs } => {
+			LdkEvent::SpendableOutputs { outputs } => {
 				let destination_address = self.chain_access.get_new_address().unwrap();
 				let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
 				let tx_feerate =
@@ -502,8 +504,8 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					.unwrap();
 				self.chain_access.broadcast_transaction(&spending_tx);
 			}
-			ldk_events::Event::OpenChannelRequest { .. } => {}
-			ldk_events::Event::PaymentForwarded {
+			LdkEvent::OpenChannelRequest { .. } => {}
+			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,
 				fee_earned_msat,
@@ -568,7 +570,7 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 				}
 			}
 
-			ldk_events::Event::ChannelClosed { channel_id, reason, user_channel_id: _ } => {
+			LdkEvent::ChannelClosed { channel_id, reason, user_channel_id: _ } => {
 				log_info!(
 					self.logger,
 					"Channel {} closed due to: {:?}",
@@ -581,7 +583,7 @@ impl ldk_events::EventHandler for LdkLiteEventHandler {
 					}))
 					.unwrap();
 			}
-			ldk_events::Event::DiscardFunding { .. } => {}
+			LdkEvent::DiscardFunding { .. } => {}
 		}
 	}
 }
