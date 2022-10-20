@@ -1,11 +1,11 @@
 use crate::logger::{
 	log_error, log_given_level, log_internal, log_trace, FilesystemLogger, Logger,
 };
-use crate::{Config, Error};
+use crate::{scid_utils, Config, Error};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::WatchedOutput;
-use lightning::chain::{Confirm, Filter};
+use lightning::chain::{Access, AccessError, Confirm, Filter};
 
 use bdk::blockchain::EsploraBlockchain;
 use bdk::database::BatchDatabase;
@@ -13,7 +13,7 @@ use bdk::esplora_client;
 use bdk::wallet::AddressIndex;
 use bdk::{FeeRate, SignOptions, SyncOptions};
 
-use bitcoin::{Script, Transaction, Txid};
+use bitcoin::{BlockHash, Script, Transaction, TxOut, Txid};
 
 use std::collections::HashSet;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -41,7 +41,7 @@ where
 	watched_outputs: Mutex<Vec<WatchedOutput>>,
 	last_sync_height: tokio::sync::Mutex<Option<u32>>,
 	tokio_runtime: RwLock<Option<Arc<tokio::runtime::Runtime>>>,
-	_config: Arc<Config>,
+	config: Arc<Config>,
 	logger: Arc<FilesystemLogger>,
 }
 
@@ -78,7 +78,7 @@ where
 			watched_outputs,
 			last_sync_height,
 			tokio_runtime,
-			_config: config,
+			config,
 			logger,
 		}
 	}
@@ -384,6 +384,61 @@ where
 	fn register_output(&self, output: WatchedOutput) -> Option<(usize, Transaction)> {
 		self.queued_outputs.lock().unwrap().push(output);
 		return None;
+	}
+}
+
+impl<D> Access for ChainAccess<D>
+where
+	D: BatchDatabase,
+{
+	fn get_utxo(
+		&self, genesis_hash: &BlockHash, short_channel_id: u64,
+	) -> Result<TxOut, AccessError> {
+		if genesis_hash
+			!= &bitcoin::blockdata::constants::genesis_block(self.config.network)
+				.header
+				.block_hash()
+		{
+			return Err(AccessError::UnknownChain);
+		}
+
+		let locked_runtime = self.tokio_runtime.read().unwrap();
+		if locked_runtime.as_ref().is_none() {
+			return Err(AccessError::UnknownTx);
+		}
+
+		let block_height = scid_utils::block_from_scid(&short_channel_id);
+		let tx_index = scid_utils::tx_index_from_scid(&short_channel_id);
+		let vout = scid_utils::vout_from_scid(&short_channel_id);
+
+		let client_tokio = Arc::clone(&self.client);
+		locked_runtime.as_ref().unwrap().block_on(async move {
+			// TODO: migrate to https://github.com/bitcoindevkit/rust-esplora-client/pull/13 with
+			// next release.
+			let block_hash = client_tokio
+				.get_header(block_height.into())
+				.await
+				.map_err(|_| AccessError::UnknownTx)?
+				.block_hash();
+
+			let txid = client_tokio
+				.get_txid_at_block_index(&block_hash, tx_index as usize)
+				.await
+				.map_err(|_| AccessError::UnknownTx)?
+				.ok_or(AccessError::UnknownTx)?;
+
+			let tx = client_tokio
+				.get_tx(&txid)
+				.await
+				.map_err(|_| AccessError::UnknownTx)?
+				.ok_or(AccessError::UnknownTx)?;
+
+			if let Some(tx_out) = tx.output.get(vout as usize) {
+				return Ok(tx_out.clone());
+			} else {
+				Err(AccessError::UnknownTx)
+			}
+		})
 	}
 }
 

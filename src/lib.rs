@@ -31,6 +31,7 @@ mod hex_utils;
 mod io_utils;
 mod logger;
 mod peer_store;
+mod scid_utils;
 
 use access::ChainAccess;
 pub use error::Error;
