@@ -65,7 +65,6 @@ use lightning_invoice::utils::DefaultRouter;
 use lightning_invoice::{payment, Currency, Invoice};
 
 use bdk::bitcoin::secp256k1::Secp256k1;
-use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::sled;
 use bdk::template::Bip84;
 
@@ -83,13 +82,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
-
-// The used 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
-// number of blocks after which BDK stops looking for scripts belonging to the wallet.
-const BDK_CLIENT_STOP_GAP: usize = 20;
-
-// The number of concurrent requests made against the API provider.
-const BDK_CLIENT_CONCURRENCY: u8 = 8;
 
 // The timeout after which we abandon retrying failed payments.
 const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -221,12 +213,8 @@ impl Builder {
 		)
 		.expect("Failed to setup on-chain wallet");
 
-		// TODO: Check that we can be sure that the Esplora client re-connects in case of failure
-		// and and exits cleanly on drop. Otherwise we need to handle this/move it to the runtime?
-		let blockchain = EsploraBlockchain::new(&config.esplora_server_url, BDK_CLIENT_STOP_GAP)
-			.with_concurrency(BDK_CLIENT_CONCURRENCY);
-
-		let chain_access = Arc::new(ChainAccess::new(blockchain, bdk_wallet, Arc::clone(&logger)));
+		let chain_access =
+			Arc::new(ChainAccess::new(bdk_wallet, Arc::clone(&config), Arc::clone(&logger)));
 
 		// Step 3: Initialize Persist
 		let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
@@ -354,7 +342,7 @@ impl Builder {
 			Arc::new(EventQueue::new(Arc::clone(&persister)))
 		};
 
-		let event_handler = EventHandler::new(
+		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&chain_access),
 			Arc::clone(&event_queue),
 			Arc::clone(&channel_manager),
@@ -364,7 +352,7 @@ impl Builder {
 			Arc::clone(&outbound_payments),
 			Arc::clone(&logger),
 			Arc::clone(&config),
-		);
+		));
 
 		//// Step 16: Create Router and InvoicePayer
 		let router = DefaultRouter::new(
@@ -378,7 +366,7 @@ impl Builder {
 			router,
 			Arc::clone(&scorer),
 			Arc::clone(&logger),
-			event_handler,
+			Arc::clone(&event_handler),
 			payment::Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
 		));
 
@@ -402,6 +390,7 @@ impl Builder {
 			config,
 			chain_access,
 			event_queue,
+			event_handler,
 			channel_manager,
 			chain_monitor,
 			peer_manager,
@@ -421,7 +410,7 @@ impl Builder {
 /// Wraps all objects that need to be preserved during the run time of [`LdkLite`]. Will be dropped
 /// upon [`LdkLite::stop()`].
 struct Runtime {
-	tokio_runtime: tokio::runtime::Runtime,
+	tokio_runtime: Arc<tokio::runtime::Runtime>,
 	_background_processor: BackgroundProcessor,
 	stop_networking: Arc<AtomicBool>,
 	stop_wallet_sync: Arc<AtomicBool>,
@@ -435,6 +424,7 @@ pub struct LdkLite {
 	config: Arc<Config>,
 	chain_access: Arc<ChainAccess<bdk::sled::Tree>>,
 	event_queue: Arc<EventQueue<FilesystemPersister>>,
+	event_handler: Arc<EventHandler>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
 	peer_manager: Arc<PeerManager>,
@@ -443,7 +433,7 @@ pub struct LdkLite {
 	persister: Arc<FilesystemPersister>,
 	logger: Arc<FilesystemLogger>,
 	scorer: Arc<Mutex<Scorer>>,
-	invoice_payer: Arc<InvoicePayer<EventHandler>>,
+	invoice_payer: Arc<InvoicePayer<Arc<EventHandler>>>,
 	inbound_payments: Arc<PaymentInfoStorage>,
 	outbound_payments: Arc<PaymentInfoStorage>,
 	peer_store: Arc<PeerInfoStorage<FilesystemPersister>>,
@@ -482,6 +472,10 @@ impl LdkLite {
 		runtime.stop_networking.store(true, Ordering::Release);
 		self.peer_manager.disconnect_all_peers();
 
+		// Drop the held runtimes.
+		self.chain_access.drop_runtime();
+		self.event_handler.drop_runtime();
+
 		// Drop the runtime, which stops the background processor and any possibly remaining tokio threads.
 		*run_lock = None;
 		Ok(())
@@ -489,7 +483,10 @@ impl LdkLite {
 
 	fn setup_runtime(&self) -> Result<Runtime, Error> {
 		let tokio_runtime =
-			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+			Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
+
+		self.chain_access.set_runtime(Arc::clone(&tokio_runtime));
+		self.event_handler.set_runtime(Arc::clone(&tokio_runtime));
 
 		// Setup wallet sync
 		let chain_access = Arc::clone(&self.chain_access);
@@ -499,7 +496,7 @@ impl LdkLite {
 		let stop_wallet_sync = Arc::new(AtomicBool::new(false));
 		let stop_sync = Arc::clone(&stop_wallet_sync);
 
-		tokio_runtime.spawn(async move {
+		tokio_runtime.block_on(async move {
 			let mut rounds = 0;
 			loop {
 				if stop_sync.load(Ordering::Acquire) {
@@ -521,8 +518,8 @@ impl LdkLite {
 				rounds = (rounds + 1) % 5;
 
 				let confirmables = vec![
-					&*sync_cman as &(dyn Confirm + Sync),
-					&*sync_cmon as &(dyn Confirm + Sync),
+					&*sync_cman as &(dyn Confirm + Send + Sync),
+					&*sync_cmon as &(dyn Confirm + Send + Sync),
 				];
 				let now = Instant::now();
 				match chain_access.sync(confirmables).await {
@@ -669,7 +666,7 @@ impl LdkLite {
 		let con_logger = Arc::clone(&self.logger);
 		let con_pm = Arc::clone(&self.peer_manager);
 
-		runtime.tokio_runtime.block_on(async move {
+		runtime.tokio_runtime.spawn(async move {
 			let res = connect_peer_if_necessary(
 				con_peer_info.pubkey,
 				con_peer_info.address,

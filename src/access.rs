@@ -1,36 +1,47 @@
 use crate::logger::{
 	log_error, log_given_level, log_internal, log_trace, FilesystemLogger, Logger,
 };
-use crate::Error;
+use crate::{Config, Error};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::WatchedOutput;
 use lightning::chain::{Confirm, Filter};
 
-use bdk::blockchain::{Blockchain, EsploraBlockchain, GetBlockHash, GetHeight, GetTx};
+use bdk::blockchain::EsploraBlockchain;
 use bdk::database::BatchDatabase;
+use bdk::esplora_client;
 use bdk::wallet::AddressIndex;
-use bdk::{SignOptions, SyncOptions};
+use bdk::{FeeRate, SignOptions, SyncOptions};
 
-use bitcoin::{BlockHash, Script, Transaction, Txid};
+use bitcoin::{Script, Transaction, Txid};
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 
 /// The minimum feerate we are allowed to send, as specify by LDK.
 const MIN_FEERATE: u32 = 253;
+
+// The used 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
+// number of blocks after which BDK stops looking for scripts belonging to the wallet.
+const BDK_CLIENT_STOP_GAP: usize = 20;
+
+// The number of concurrent requests made against the API provider.
+const BDK_CLIENT_CONCURRENCY: u8 = 8;
 
 pub struct ChainAccess<D>
 where
 	D: BatchDatabase,
 {
-	blockchain: EsploraBlockchain,
+	blockchain: Arc<EsploraBlockchain>,
+	client: Arc<esplora_client::AsyncClient>,
 	wallet: Mutex<bdk::Wallet<D>>,
 	queued_transactions: Mutex<Vec<Txid>>,
 	watched_transactions: Mutex<Vec<Txid>>,
 	queued_outputs: Mutex<Vec<WatchedOutput>>,
 	watched_outputs: Mutex<Vec<WatchedOutput>>,
 	last_sync_height: tokio::sync::Mutex<Option<u32>>,
+	tokio_runtime: RwLock<Option<Arc<tokio::runtime::Runtime>>>,
+	_config: Arc<Config>,
 	logger: Arc<FilesystemLogger>,
 }
 
@@ -39,7 +50,7 @@ where
 	D: BatchDatabase,
 {
 	pub(crate) fn new(
-		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>, logger: Arc<FilesystemLogger>,
+		wallet: bdk::Wallet<D>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
 	) -> Self {
 		let wallet = Mutex::new(wallet);
 		let watched_transactions = Mutex::new(Vec::new());
@@ -47,30 +58,51 @@ where
 		let watched_outputs = Mutex::new(Vec::new());
 		let queued_outputs = Mutex::new(Vec::new());
 		let last_sync_height = tokio::sync::Mutex::new(None);
+		let tokio_runtime = RwLock::new(None);
+		// TODO: Check that we can be sure that the Esplora client re-connects in case of failure
+		// and and exits cleanly on drop. Otherwise we need to handle this/move it to the runtime?
+		let blockchain = Arc::new(
+			EsploraBlockchain::new(&config.esplora_server_url, BDK_CLIENT_STOP_GAP)
+				.with_concurrency(BDK_CLIENT_CONCURRENCY),
+		);
+		let client_builder =
+			esplora_client::Builder::new(&format!("http://{}", &config.esplora_server_url));
+		let client = Arc::new(client_builder.build_async().unwrap());
 		Self {
 			blockchain,
+			client,
 			wallet,
 			queued_transactions,
 			watched_transactions,
 			queued_outputs,
 			watched_outputs,
 			last_sync_height,
+			tokio_runtime,
+			_config: config,
 			logger,
 		}
+	}
+
+	pub(crate) fn set_runtime(&self, tokio_runtime: Arc<tokio::runtime::Runtime>) {
+		*self.tokio_runtime.write().unwrap() = Some(tokio_runtime);
+	}
+
+	pub(crate) fn drop_runtime(&self) {
+		*self.tokio_runtime.write().unwrap() = None;
 	}
 
 	pub(crate) async fn sync_wallet(&self) -> Result<(), Error> {
 		let sync_options = SyncOptions { progress: None };
 
-		self.wallet.lock().unwrap().sync(&self.blockchain, sync_options)?;
+		self.wallet.lock().unwrap().sync(&self.blockchain, sync_options).await?;
 
 		Ok(())
 	}
 
-	pub(crate) async fn sync(&self, confirmables: Vec<&(dyn Confirm + Sync)>) -> Result<(), Error> {
-		let client = &*self.blockchain;
-
-		let cur_height = client.get_height().await?;
+	pub(crate) async fn sync(
+		&self, confirmables: Vec<&(dyn Confirm + Send + Sync)>,
+	) -> Result<(), Error> {
+		let cur_height = self.client.get_height().await?;
 
 		let mut locked_last_sync_height = self.last_sync_height.lock().await;
 		if cur_height >= locked_last_sync_height.unwrap_or(0) {
@@ -84,13 +116,11 @@ where
 	}
 
 	async fn sync_best_block_updated(
-		&self, confirmables: &Vec<&(dyn Confirm + Sync)>, cur_height: u32,
+		&self, confirmables: &Vec<&(dyn Confirm + Send + Sync)>, cur_height: u32,
 		locked_last_sync_height: &mut tokio::sync::MutexGuard<'_, Option<u32>>,
 	) -> Result<(), Error> {
-		let client = &*self.blockchain;
-
 		// Inform the interface of the new block.
-		let cur_block_header = client.get_header(cur_height).await?;
+		let cur_block_header = self.client.get_header(cur_height).await?;
 		for c in confirmables {
 			c.best_block_updated(&cur_block_header, cur_height);
 		}
@@ -100,10 +130,8 @@ where
 	}
 
 	async fn sync_transactions_confirmed(
-		&self, confirmables: &Vec<&(dyn Confirm + Sync)>,
+		&self, confirmables: &Vec<&(dyn Confirm + Send + Sync)>,
 	) -> Result<(), Error> {
-		let client = &*self.blockchain;
-
 		// First, check the confirmation status of registered transactions as well as the
 		// status of dependent transactions of registered outputs.
 
@@ -125,13 +153,13 @@ where
 		let mut unconfirmed_registered_txs = Vec::new();
 
 		for txid in registered_txs {
-			if let Some(tx_status) = client.get_tx_status(&txid).await? {
+			if let Some(tx_status) = self.client.get_tx_status(&txid).await? {
 				if tx_status.confirmed {
-					if let Some(tx) = client.get_tx(&txid).await? {
+					if let Some(tx) = self.client.get_tx(&txid).await? {
 						if let Some(block_height) = tx_status.block_height {
 							// TODO: Switch to `get_header_by_hash` once released upstream (https://github.com/bitcoindevkit/rust-esplora-client/pull/17)
-							let block_header = client.get_header(block_height).await?;
-							if let Some(merkle_proof) = client.get_merkle_proof(&txid).await? {
+							let block_header = self.client.get_header(block_height).await?;
+							if let Some(merkle_proof) = self.client.get_merkle_proof(&txid).await? {
 								if block_height == merkle_proof.block_height {
 									confirmed_txs.push((
 										tx,
@@ -160,7 +188,8 @@ where
 		let mut unspent_registered_outputs = Vec::new();
 
 		for output in registered_outputs {
-			if let Some(output_status) = client
+			if let Some(output_status) = self
+				.client
 				.get_output_status(&output.outpoint.txid, output.outpoint.index as u64)
 				.await?
 			{
@@ -168,12 +197,12 @@ where
 					if let Some(spending_tx_status) = output_status.status {
 						if spending_tx_status.confirmed {
 							let spending_txid = output_status.txid.unwrap();
-							if let Some(spending_tx) = client.get_tx(&spending_txid).await? {
+							if let Some(spending_tx) = self.client.get_tx(&spending_txid).await? {
 								let block_height = spending_tx_status.block_height.unwrap();
 								// TODO: Switch to `get_header_by_hash` once released upstream (https://github.com/bitcoindevkit/rust-esplora-client/pull/17)
-								let block_header = client.get_header(block_height).await?;
+								let block_header = self.client.get_header(block_height).await?;
 								if let Some(merkle_proof) =
-									client.get_merkle_proof(&spending_txid).await?
+									self.client.get_merkle_proof(&spending_txid).await?
 								{
 									confirmed_txs.push((
 										spending_tx,
@@ -213,15 +242,15 @@ where
 	}
 
 	async fn sync_transaction_unconfirmed(
-		&self, confirmables: &Vec<&(dyn Confirm + Sync)>,
+		&self, confirmables: &Vec<&(dyn Confirm + Send + Sync)>,
 	) -> Result<(), Error> {
-		let client = &*self.blockchain;
 		// Query the interface for relevant txids and check whether they have been
 		// reorged-out of the chain.
 		let relevant_txids =
 			confirmables.iter().flat_map(|c| c.get_relevant_txids()).collect::<HashSet<Txid>>();
 		for txid in relevant_txids {
-			let tx_unconfirmed = client
+			let tx_unconfirmed = self
+				.client
 				.get_tx_status(&txid)
 				.await
 				.ok()
@@ -240,11 +269,13 @@ where
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: &Script, value_sats: u64, confirmation_target: ConfirmationTarget,
 	) -> Result<Transaction, Error> {
-		let num_blocks = num_blocks_from_conf_target(confirmation_target);
-		let fee_rate = self.blockchain.estimate_fee(num_blocks)?;
-
 		let locked_wallet = self.wallet.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
+
+		let fallback_fee = fallback_fee_from_conf_target(confirmation_target);
+		let fee_rate = self
+			.estimate_fee(confirmation_target)
+			.unwrap_or(FeeRate::from_sat_per_kwu(fallback_fee as f32));
 
 		tx_builder.add_recipient(output_script.clone(), value_sats).fee_rate(fee_rate).enable_rbf();
 
@@ -271,6 +302,33 @@ where
 		let address_info = self.wallet.lock().unwrap().get_address(AddressIndex::New)?;
 		Ok(address_info.address)
 	}
+
+	fn estimate_fee(&self, confirmation_target: ConfirmationTarget) -> Result<bdk::FeeRate, Error> {
+		let num_blocks = num_blocks_from_conf_target(confirmation_target);
+
+		let locked_runtime = self.tokio_runtime.read().unwrap();
+		if locked_runtime.as_ref().is_none() {
+			return Err(Error::FeeEstimationFailed);
+		}
+
+		let tokio_client = Arc::clone(&self.client);
+		let (sender, receiver) = mpsc::sync_channel(1);
+
+		locked_runtime.as_ref().unwrap().spawn(async move {
+			let res = tokio_client.get_fee_estimates().await;
+			let _ = sender.send(res);
+		});
+
+		let estimates = receiver
+			.recv()
+			.map_err(|_| Error::FeeEstimationFailed)?
+			.map_err(|_| Error::FeeEstimationFailed)?;
+
+		Ok(bdk::FeeRate::from_sat_per_vb(
+			esplora_client::convert_fee_rate(num_blocks, estimates)
+				.map_err(|_| Error::FeeEstimationFailed)?,
+		))
+	}
 }
 
 impl<D> FeeEstimator for ChainAccess<D>
@@ -278,10 +336,9 @@ where
 	D: BatchDatabase,
 {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
-		let num_blocks = num_blocks_from_conf_target(confirmation_target);
 		let fallback_fee = fallback_fee_from_conf_target(confirmation_target);
-		self.blockchain
-			.estimate_fee(num_blocks)
+
+		self.estimate_fee(confirmation_target)
 			.map_or(fallback_fee, |fee_rate| (fee_rate.fee_wu(1000) as u32).max(MIN_FEERATE)) as u32
 	}
 }
@@ -291,7 +348,22 @@ where
 	D: BatchDatabase,
 {
 	fn broadcast_transaction(&self, tx: &Transaction) {
-		match self.blockchain.broadcast(tx) {
+		let locked_runtime = self.tokio_runtime.read().unwrap();
+		if locked_runtime.as_ref().is_none() {
+			log_error!(self.logger, "Failed to broadcast transaction: No runtime.");
+			return;
+		}
+
+		let tokio_client = Arc::clone(&self.client);
+		let tokio_tx = tx.clone();
+		let (sender, receiver) = mpsc::sync_channel(1);
+
+		locked_runtime.as_ref().unwrap().spawn(async move {
+			let res = tokio_client.broadcast(&tokio_tx).await;
+			let _ = sender.send(res);
+		});
+
+		match receiver.recv().unwrap() {
 			Ok(_) => {}
 			Err(err) => {
 				log_error!(self.logger, "Failed to broadcast transaction: {}", err);
@@ -312,33 +384,6 @@ where
 	fn register_output(&self, output: WatchedOutput) -> Option<(usize, Transaction)> {
 		self.queued_outputs.lock().unwrap().push(output);
 		return None;
-	}
-}
-
-impl<D> GetHeight for ChainAccess<D>
-where
-	D: BatchDatabase,
-{
-	fn get_height(&self) -> Result<u32, bdk::Error> {
-		self.blockchain.get_height()
-	}
-}
-
-impl<D> GetBlockHash for ChainAccess<D>
-where
-	D: BatchDatabase,
-{
-	fn get_block_hash(&self, height: u64) -> Result<BlockHash, bdk::Error> {
-		self.blockchain.get_block_hash(height)
-	}
-}
-
-impl<D> GetTx for ChainAccess<D>
-where
-	D: BatchDatabase,
-{
-	fn get_tx(&self, txid: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-		self.blockchain.get_tx(txid)
 	}
 }
 

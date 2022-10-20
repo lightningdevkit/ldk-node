@@ -18,8 +18,7 @@ use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use bitcoin::secp256k1::Secp256k1;
 use rand::{thread_rng, Rng};
 use std::collections::{hash_map, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 /// The event queue will be persisted under this key.
@@ -221,6 +220,7 @@ pub(crate) struct EventHandler {
 	keys_manager: Arc<KeysManager>,
 	inbound_payments: Arc<PaymentInfoStorage>,
 	outbound_payments: Arc<PaymentInfoStorage>,
+	tokio_runtime: RwLock<Option<Arc<tokio::runtime::Runtime>>>,
 	logger: Arc<FilesystemLogger>,
 	_config: Arc<Config>,
 }
@@ -233,6 +233,7 @@ impl EventHandler {
 		inbound_payments: Arc<PaymentInfoStorage>, outbound_payments: Arc<PaymentInfoStorage>,
 		logger: Arc<FilesystemLogger>, _config: Arc<Config>,
 	) -> Self {
+		let tokio_runtime = RwLock::new(None);
 		Self {
 			event_queue,
 			chain_access,
@@ -241,9 +242,18 @@ impl EventHandler {
 			keys_manager,
 			inbound_payments,
 			outbound_payments,
+			tokio_runtime,
 			logger,
 			_config,
 		}
+	}
+
+	pub(crate) fn set_runtime(&self, tokio_runtime: Arc<tokio::runtime::Runtime>) {
+		*self.tokio_runtime.write().unwrap() = Some(tokio_runtime);
+	}
+
+	pub(crate) fn drop_runtime(&self) {
+		*self.tokio_runtime.write().unwrap() = None;
 	}
 }
 
@@ -284,7 +294,7 @@ impl LdkEventHandler for EventHandler {
 					Err(err) => {
 						log_error!(self.logger, "Failed to create funding transaction: {}", err);
 					}
-				}
+				};
 			}
 			LdkEvent::PaymentReceived { payment_hash, purpose, amount_msat } => {
 				log_info!(
@@ -387,11 +397,14 @@ impl LdkEventHandler for EventHandler {
 				let forwarding_channel_manager = self.channel_manager.clone();
 				let min = time_forwardable.as_millis() as u64;
 
-				// TODO: any way we still can use tokio here?
-				// TODO: stop this thread on shutdown
-				thread::spawn(move || {
+				let locked_runtime = self.tokio_runtime.read().unwrap();
+				if locked_runtime.as_ref().is_none() {
+					return;
+				}
+
+				locked_runtime.as_ref().unwrap().spawn(async move {
 					let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
-					thread::sleep(Duration::from_millis(millis_to_sleep));
+					tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
 					forwarding_channel_manager.process_pending_htlc_forwards();
 				});
 			}

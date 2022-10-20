@@ -10,6 +10,8 @@ pub enum Error {
 	NotRunning,
 	/// The funding transaction could not be created.
 	FundingTxCreationFailed,
+	/// Returned when we could not estimate a transaction fee.
+	FeeEstimationFailed,
 	/// A network connection has been closed.
 	ConnectionFailed,
 	/// Payment of the given invoice has already been intiated.
@@ -41,9 +43,8 @@ impl fmt::Display for Error {
 		match *self {
 			Self::AlreadyRunning => write!(f, "LDKLite is already running."),
 			Self::NotRunning => write!(f, "LDKLite is not running."),
-			Self::FundingTxCreationFailed => {
-				write!(f, "Funding transaction could not be created.")
-			}
+			Self::FundingTxCreationFailed => write!(f, "Funding transaction could not be created."),
+			Self::FeeEstimationFailed => write!(f, "Fee estimation failed."),
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::NonUniquePaymentHash => write!(f, "An invoice must not get payed twice."),
 			Self::InvoiceInvalid => write!(f, "The given invoice is invalid."),
