@@ -411,34 +411,29 @@ where
 		let tx_index = scid_utils::tx_index_from_scid(&short_channel_id);
 		let vout = scid_utils::vout_from_scid(&short_channel_id);
 
-		let client_tokio = Arc::clone(&self.client);
-		locked_runtime.as_ref().unwrap().block_on(async move {
+		let client = Arc::clone(&self.client);
+
+		let (sender, receiver) = mpsc::sync_channel(1);
+
+		locked_runtime.as_ref().unwrap().spawn(async move {
 			// TODO: migrate to https://github.com/bitcoindevkit/rust-esplora-client/pull/13 with
 			// next release.
-			let block_hash = client_tokio
-				.get_header(block_height.into())
-				.await
-				.map_err(|_| AccessError::UnknownTx)?
-				.block_hash();
-
-			let txid = client_tokio
-				.get_txid_at_block_index(&block_hash, tx_index as usize)
-				.await
-				.map_err(|_| AccessError::UnknownTx)?
-				.ok_or(AccessError::UnknownTx)?;
-
-			let tx = client_tokio
-				.get_tx(&txid)
-				.await
-				.map_err(|_| AccessError::UnknownTx)?
-				.ok_or(AccessError::UnknownTx)?;
-
-			if let Some(tx_out) = tx.output.get(vout as usize) {
-				return Ok(tx_out.clone());
-			} else {
-				Err(AccessError::UnknownTx)
+			if let Ok(block_header) = client.get_header(block_height.into()).await {
+				let block_hash = block_header.block_hash();
+				if let Ok(Some(txid)) =
+					client.get_txid_at_block_index(&block_hash, tx_index as usize).await
+				{
+					if let Ok(Some(tx)) = client.get_tx(&txid).await {
+						if let Some(tx_out) = tx.output.get(vout as usize) {
+							let _ = sender.send(Ok(tx_out.clone()));
+						}
+					}
+				}
 			}
-		})
+			let _ = sender.send(Err(AccessError::UnknownTx));
+		});
+
+		receiver.recv().map_err(|_| AccessError::UnknownTx)?
 	}
 }
 
