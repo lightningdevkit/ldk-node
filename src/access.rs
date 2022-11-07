@@ -336,6 +336,41 @@ where
 
 		Ok(())
 	}
+
+	pub(crate) fn create_funding_transaction(
+		&self, output_script: &Script, value_sats: u64, confirmation_target: ConfirmationTarget,
+	) -> Result<Transaction, Error> {
+		let num_blocks = num_blocks_from_conf_target(confirmation_target);
+		let fee_rate = self.blockchain.estimate_fee(num_blocks)?;
+
+		let locked_wallet = self.wallet.lock().unwrap();
+		let mut tx_builder = locked_wallet.build_tx();
+
+		tx_builder.add_recipient(output_script.clone(), value_sats).fee_rate(fee_rate).enable_rbf();
+
+		let (mut psbt, _) = tx_builder.finish()?;
+		log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
+
+		// We double-check that no inputs try to spend non-witness outputs. As we use a SegWit
+		// wallet descriptor this technically shouldn't ever happen, but better safe than sorry.
+		for input in &psbt.inputs {
+			if input.witness_utxo.is_none() {
+				log_error!(self.logger, "Tried to spend a non-witness funding output. This must not ever happen. Panicking!");
+				panic!("Tried to spend a non-witness funding output. This must not ever happen.");
+			}
+		}
+
+		if !locked_wallet.sign(&mut psbt, SignOptions::default())? {
+			return Err(Error::FundingTxCreationFailed);
+		}
+
+		Ok(psbt.extract_tx())
+	}
+
+	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
+		let address_info = self.wallet.lock().unwrap().get_address(AddressIndex::New)?;
+		Ok(address_info.address)
+	}
 }
 
 struct ConfirmedTx {
