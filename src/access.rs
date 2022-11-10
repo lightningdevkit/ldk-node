@@ -113,7 +113,7 @@ where
 
 				match self.get_confirmed_transactions().await {
 					Ok((confirmed_txs, unconfirmed_registered_txs, unspent_registered_outputs)) => {
-						// Double-check best tip. If something changed, restart last-minute.
+						// Double-check tip hash. If something changed, restart last-minute.
 						tip_hash = client.get_tip_hash().await?;
 						if Some(tip_hash) != *locked_last_sync_hash {
 							continue;
@@ -301,7 +301,7 @@ where
 					return Ok(Some(ConfirmedTx { tx, block_header, pos, block_height }));
 				} else {
 					// If any previously-confirmed block suddenly is no longer confirmed, we found
-					// an inconsisteny and should start over.
+					// an inconsistency and should start over.
 					return Err(Error::ChainAccessInconsistency);
 				}
 			}
