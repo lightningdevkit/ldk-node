@@ -288,8 +288,8 @@ where
 			let mut matches = vec![*txid];
 			let mut indexes = Vec::new();
 			let _ = merkle_block.txn.extract_matches(&mut matches, &mut indexes);
-			assert_eq!(indexes.len(), 1);
-			let pos = indexes[0] as usize;
+			debug_assert_eq!(indexes.len(), 1);
+			let pos = *indexes.get(0).ok_or(Error::ChainAccessFailed)? as usize;
 			if let Some(tx) = client.get_tx(&txid).await? {
 				if let Some(block_height) = known_block_height {
 					// We can take a shortcut here if a previous call already gave us the height.
