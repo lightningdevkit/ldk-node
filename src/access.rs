@@ -86,18 +86,20 @@ where
 		let mut tip_hash = client.get_tip_hash().await?;
 
 		loop {
-			let pending_registrations = self.process_queues();
-			let new_tip = Some(tip_hash) != *locked_last_sync_hash;
+			let registrations_are_pending = self.process_queues();
+			let tip_is_new = Some(tip_hash) != *locked_last_sync_hash;
 
 			// We loop until any registered transactions have been processed at least once, or the
 			// tip hasn't been updated during the last iteration.
-			if pending_registrations || new_tip {
-				// First check for any unconfirmed tranasactions and act on it immediately.
-				self.sync_unconfirmed_transactions(&confirmables).await?;
-
+			if !registrations_are_pending && !tip_is_new {
+				// Nothing to do.
+				break;
+			} else {
 				// Update the known tip to the newest one.
-				if new_tip {
-					*locked_last_sync_hash = Some(tip_hash);
+				if tip_is_new {
+					// First check for any unconfirmed transactions and act on it immediately.
+					self.sync_unconfirmed_transactions(&confirmables).await?;
+
 					match self.sync_best_block_updated(&confirmables, &tip_hash).await {
 						Ok(()) => {}
 						Err(Error::ChainAccessInconsistency) => {
@@ -135,8 +137,7 @@ where
 						return Err(err);
 					}
 				}
-			} else {
-				break;
+				*locked_last_sync_hash = Some(tip_hash);
 			}
 		}
 		Ok(())
