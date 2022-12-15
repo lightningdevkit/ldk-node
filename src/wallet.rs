@@ -1,18 +1,30 @@
 use crate::logger::{
 	log_error, log_given_level, log_internal, log_trace, FilesystemLogger, Logger,
 };
+
 use crate::Error;
 
 use lightning::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, FEERATE_FLOOR_SATS_PER_KW,
 };
 
+use lightning::chain::keysinterface::{
+	EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner, Recipient, SignerProvider,
+	SpendableOutputDescriptor,
+};
+use lightning::ln::msgs::DecodeError;
+use lightning::ln::script::ShutdownScript;
+
 use bdk::blockchain::{Blockchain, EsploraBlockchain};
 use bdk::database::BatchDatabase;
 use bdk::wallet::AddressIndex;
 use bdk::{FeeRate, SignOptions, SyncOptions};
 
-use bitcoin::{Script, Transaction};
+use bitcoin::bech32::u5;
+use bitcoin::secp256k1::ecdh::SharedSecret;
+use bitcoin::secp256k1::ecdsa::RecoverableSignature;
+use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
+use bitcoin::{Script, Transaction, TxOut};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -197,6 +209,131 @@ where
 			Err(err) => {
 				log_error!(self.logger, "Failed to broadcast transaction: {}", err);
 			}
+		}
+	}
+}
+
+/// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
+/// directly spendable by the BDK wallet.
+pub struct WalletKeysManager<D>
+where
+	D: BatchDatabase,
+{
+	inner: KeysManager,
+	wallet: Arc<Wallet<D>>,
+}
+
+impl<D> WalletKeysManager<D>
+where
+	D: BatchDatabase,
+{
+	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
+	///
+	/// See [`KeysManager::new`] for more information on `seed`, `starting_time_secs`, and
+	/// `starting_time_nanos`.
+	pub fn new(
+		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32, wallet: Arc<Wallet<D>>,
+	) -> Self {
+		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
+		Self { inner, wallet }
+	}
+
+	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
+	pub fn spend_spendable_outputs<C: Signing>(
+		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
+		change_destination_script: Script, feerate_sat_per_1000_weight: u32,
+		secp_ctx: &Secp256k1<C>,
+	) -> Result<Transaction, ()> {
+		let only_non_static = &descriptors
+			.iter()
+			.filter(|desc| !matches!(desc, SpendableOutputDescriptor::StaticOutput { .. }))
+			.copied()
+			.collect::<Vec<_>>();
+		self.inner.spend_spendable_outputs(
+			only_non_static,
+			outputs,
+			change_destination_script,
+			feerate_sat_per_1000_weight,
+			secp_ctx,
+		)
+	}
+}
+
+impl<D> NodeSigner for WalletKeysManager<D>
+where
+	D: BatchDatabase,
+{
+	fn get_node_secret(&self, recipient: Recipient) -> Result<SecretKey, ()> {
+		self.inner.get_node_secret(recipient)
+	}
+
+	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
+		self.inner.get_node_id(recipient)
+	}
+
+	fn ecdh(
+		&self, recipient: Recipient, other_key: &PublicKey, tweak: Option<&Scalar>,
+	) -> Result<SharedSecret, ()> {
+		self.inner.ecdh(recipient, other_key, tweak)
+	}
+
+	fn get_inbound_payment_key_material(&self) -> KeyMaterial {
+		self.inner.get_inbound_payment_key_material()
+	}
+
+	fn sign_invoice(
+		&self, hrp_bytes: &[u8], invoice_data: &[u5], recipient: Recipient,
+	) -> Result<RecoverableSignature, ()> {
+		self.inner.sign_invoice(hrp_bytes, invoice_data, recipient)
+	}
+}
+
+impl<D> EntropySource for WalletKeysManager<D>
+where
+	D: BatchDatabase,
+{
+	fn get_secure_random_bytes(&self) -> [u8; 32] {
+		self.inner.get_secure_random_bytes()
+	}
+}
+
+impl<D> SignerProvider for WalletKeysManager<D>
+where
+	D: BatchDatabase,
+{
+	type Signer = InMemorySigner;
+
+	fn generate_channel_keys_id(
+		&self, inbound: bool, channel_value_satoshis: u64, user_channel_id: u128,
+	) -> [u8; 32] {
+		self.inner.generate_channel_keys_id(inbound, channel_value_satoshis, user_channel_id)
+	}
+
+	fn derive_channel_signer(
+		&self, channel_value_satoshis: u64, channel_keys_id: [u8; 32],
+	) -> Self::Signer {
+		self.inner.derive_channel_signer(channel_value_satoshis, channel_keys_id)
+	}
+
+	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::Signer, DecodeError> {
+		self.inner.read_chan_signer(reader)
+	}
+
+	fn get_destination_script(&self) -> Script {
+		let address =
+			self.wallet.get_new_address().expect("Failed to retrieve new address from wallet.");
+		address.script_pubkey()
+	}
+
+	fn get_shutdown_scriptpubkey(&self) -> ShutdownScript {
+		let address =
+			self.wallet.get_new_address().expect("Failed to retrieve new address from wallet.");
+		match address.payload {
+			bitcoin::util::address::Payload::WitnessProgram { version, program } => {
+				return ShutdownScript::new_witness_program(version, &program)
+					.expect("Invalid shutdown script.");
+			}
+			_ => panic!("Tried to use a non-witness address. This must not ever happen."),
 		}
 	}
 }
