@@ -1,2 +1,2 @@
-# ldk-lite
-A Simplified API for LDK.
+# LDK Node
+A ready-to-go node implementation based on LDK.
