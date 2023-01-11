@@ -30,6 +30,8 @@ mod hex_utils;
 mod io_utils;
 mod logger;
 mod peer_store;
+#[cfg(test)]
+mod tests;
 mod wallet;
 
 pub use error::Error;
