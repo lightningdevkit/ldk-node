@@ -25,9 +25,9 @@ use std::time::Duration;
 /// The event queue will be persisted under this key.
 pub(crate) const EVENTS_PERSISTENCE_KEY: &str = "events";
 
-/// An event emitted by [`LdkLite`], which should be handled by the user.
+/// An event emitted by [`Node`], which should be handled by the user.
 ///
-/// [`LdkLite`]: [`crate::LdkLite`]
+/// [`Node`]: [`crate::Node`]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
 	/// A sent payment was successful.
@@ -332,7 +332,8 @@ where
 							}
 						}
 					}
-					Err(_err) => {
+					Err(err) => {
+						log_error!(self.logger, "Failed to create funding transaction: {}", err);
 						self.channel_manager
 							.force_close_without_broadcasting_txn(
 								&temporary_channel_id,

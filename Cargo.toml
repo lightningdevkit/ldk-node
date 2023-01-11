@@ -1,29 +1,52 @@
 [package]
-name = "ldk-lite"
+name = "ldk-node"
 version = "0.1.0"
 authors = ["Elias Rohrer <dev@tnull.de>"]
 license = "MIT OR Apache-2.0"
 edition = "2018"
+description = "A ready-to-go node implementation based on LDK."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lightning = { version = "0.0.110", features = ["max_level_trace", "std"] }
-lightning-invoice = { version = "0.18" }
-lightning-net-tokio = { version = "0.0.110" }
-lightning-persister = { version = "0.0.110" }
-lightning-background-processor = { version = "0.0.110" }
-lightning-rapid-gossip-sync = { version = "0.0.110" }
+#lightning = { version = "0.0.112", features = ["max_level_trace", "std"] }
+#lightning-invoice = { version = "0.20" }
+#lightning-net-tokio = { version = "0.0.112" }
+#lightning-persister = { version = "0.0.112" }
+#lightning-background-processor = { version = "0.0.112" }
+#lightning-rapid-gossip-sync = { version = "0.0.112" }
 
-#bdk = "0.20.0"
-bdk = { git = "https://github.com/tnull/bdk", branch="feat/use-external-esplora-client", features = ["use-esplora-ureq", "key-value-db"]}
-bitcoin = "0.28.1"
+#lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std"] }
+#lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+
+lightning = { git = "https://github.com/tnull/rust-lightning", branch="2022-11-add-transaction-sync-crate", features = ["max_level_trace", "std"] }
+lightning-invoice = { git = "https://github.com/tnull/rust-lightning", branch="2022-11-add-transaction-sync-crate" }
+lightning-net-tokio = { git = "https://github.com/tnull/rust-lightning", branch="2022-11-add-transaction-sync-crate" }
+lightning-persister = { git = "https://github.com/tnull/rust-lightning", branch="2022-11-add-transaction-sync-crate" }
+lightning-background-processor = { git = "https://github.com/tnull/rust-lightning", branch="2022-11-add-transaction-sync-crate" }
+lightning-rapid-gossip-sync = { git = "https://github.com/tnull/rust-lightning", branch="2022-11-add-transaction-sync-crate" }
+lightning-transaction-sync = { git = "https://github.com/tnull/rust-lightning", branch="2022-11-add-transaction-sync-crate", features = ["esplora-async"] }
+
+#lightning = { path = "../rust-lightning/lightning", features = ["max_level_trace", "std"] }
+#lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
+#lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
+#lightning-persister = { path = "../rust-lightning/lightning-persister" }
+#lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
+#lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
+#lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
+
+bdk = { version = "0.26.0", default-features = false, features = ["async-interface", "use-esplora-async", "key-value-db"]}
+bitcoin = "0.29.2"
 
 rand = "0.8.5"
 chrono = "0.4"
 futures = "0.3"
 serde_json = { version = "1.0" }
-tokio = { version = "1", features = [ "io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }
+tokio = { version = "1", features = [ "full" ] }
 
 
 [profile.release]
