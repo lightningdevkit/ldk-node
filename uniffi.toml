@@ -1,0 +1,9 @@
+[bindings.kotlin]
+package_name = "org.ldk.ldknode"
+cdylib_name = "ldk_node"
+
+[bindings.python]
+cdylib_name = "ldk_node"
+
+[bindings.swift]
+cdylib_name = "ldk_node"
