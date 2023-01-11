@@ -25,3 +25,5 @@ jobs:
       - name: Check formatting
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check
+      - name: Test on Rust ${{ matrix.toolchain }}
+        run: cargo test

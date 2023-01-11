@@ -1,6 +1,4 @@
-use crate::logger::{
-	log_error, log_given_level, log_internal, log_trace, FilesystemLogger, Logger,
-};
+use crate::logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use crate::Error;
 
@@ -12,7 +10,7 @@ use lightning::chain::keysinterface::{
 	EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner, Recipient, SignerProvider,
 	SpendableOutputDescriptor,
 };
-use lightning::ln::msgs::DecodeError;
+use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 
 use bdk::blockchain::{Blockchain, EsploraBlockchain};
@@ -22,12 +20,13 @@ use bdk::{FeeRate, SignOptions, SyncOptions};
 
 use bitcoin::bech32::u5;
 use bitcoin::secp256k1::ecdh::SharedSecret;
-use bitcoin::secp256k1::ecdsa::RecoverableSignature;
-use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
+use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
+use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, Signing};
 use bitcoin::{Script, Transaction, TxOut};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::Duration;
 
 pub struct Wallet<D>
 where
@@ -40,6 +39,7 @@ where
 	// A cache storing the most recently retrieved fee rate estimations.
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
 	tokio_runtime: RwLock<Option<Arc<tokio::runtime::Runtime>>>,
+	sync_lock: (Mutex<()>, Condvar),
 	logger: Arc<FilesystemLogger>,
 }
 
@@ -53,10 +53,24 @@ where
 		let inner = Mutex::new(wallet);
 		let fee_rate_cache = RwLock::new(HashMap::new());
 		let tokio_runtime = RwLock::new(None);
-		Self { blockchain, inner, fee_rate_cache, tokio_runtime, logger }
+		let sync_lock = (Mutex::new(()), Condvar::new());
+		Self { blockchain, inner, fee_rate_cache, tokio_runtime, sync_lock, logger }
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
+		let (lock, cvar) = &self.sync_lock;
+
+		let guard = match lock.try_lock() {
+			Ok(guard) => guard,
+			Err(_) => {
+				log_info!(self.logger, "Sync in progress, skipping.");
+				let guard = cvar.wait(lock.lock().unwrap());
+				drop(guard);
+				cvar.notify_all();
+				return Ok(());
+			}
+		};
+
 		match self.update_fee_estimates().await {
 			Ok(()) => (),
 			Err(e) => {
@@ -66,13 +80,39 @@ where
 		}
 
 		let sync_options = SyncOptions { progress: None };
-		match self.inner.lock().unwrap().sync(&self.blockchain, sync_options).await {
+		let wallet_lock = self.inner.lock().unwrap();
+		let res = match wallet_lock.sync(&self.blockchain, sync_options).await {
 			Ok(()) => Ok(()),
-			Err(e) => {
-				log_error!(self.logger, "Wallet sync error: {}", e);
-				Err(From::from(e))
-			}
-		}
+			Err(e) => match e {
+				bdk::Error::Esplora(ref be) => match **be {
+					bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
+						tokio::time::sleep(Duration::from_secs(1)).await;
+						log_error!(
+							self.logger,
+							"Sync failed due to HTTP connection error, retrying: {}",
+							e
+						);
+						let sync_options = SyncOptions { progress: None };
+						wallet_lock
+							.sync(&self.blockchain, sync_options)
+							.await
+							.map_err(|e| From::from(e))
+					}
+					_ => {
+						log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
+						Err(From::from(e))
+					}
+				},
+				_ => {
+					log_error!(self.logger, "Wallet sync error: {}", e);
+					Err(From::from(e))
+				}
+			},
+		};
+
+		drop(guard);
+		cvar.notify_all();
+		res
 	}
 
 	pub(crate) fn set_runtime(&self, tokio_runtime: Arc<tokio::runtime::Runtime>) {
@@ -105,7 +145,8 @@ where
 					locked_fee_rate_cache.insert(target, rate);
 					log_trace!(
 						self.logger,
-						"Fee rate estimation updated: {} sats/kwu",
+						"Fee rate estimation updated for {:?}: {} sats/kwu",
+						target,
 						rate.fee_wu(1000)
 					);
 				}
@@ -139,12 +180,20 @@ where
 			}
 			Err(err) => {
 				log_error!(self.logger, "Failed to create funding transaction: {}", err);
-				Err(err)?
+				return Err(err.into());
 			}
 		};
 
-		if !locked_wallet.sign(&mut psbt, SignOptions::default())? {
-			return Err(Error::FundingTxCreationFailed);
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					return Err(Error::FundingTxCreationFailed);
+				}
+			}
+			Err(err) => {
+				log_error!(self.logger, "Failed to create funding transaction: {}", err);
+				return Err(err.into());
+			}
 		}
 
 		Ok(psbt.extract_tx())
@@ -155,7 +204,6 @@ where
 		Ok(address_info.address)
 	}
 
-	#[cfg(any(test))]
 	pub(crate) fn get_balance(&self) -> Result<bdk::Balance, Error> {
 		Ok(self.inner.lock().unwrap().get_balance()?)
 	}
@@ -194,7 +242,7 @@ where
 		let locked_runtime = self.tokio_runtime.read().unwrap();
 		if locked_runtime.as_ref().is_none() {
 			log_error!(self.logger, "Failed to broadcast transaction: No runtime.");
-			unreachable!("Failed to broadcast transaction: No runtime.");
+			return;
 		}
 
 		let res = tokio::task::block_in_place(move || {
@@ -263,10 +311,6 @@ impl<D> NodeSigner for WalletKeysManager<D>
 where
 	D: BatchDatabase,
 {
-	fn get_node_secret(&self, recipient: Recipient) -> Result<SecretKey, ()> {
-		self.inner.get_node_secret(recipient)
-	}
-
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
 		self.inner.get_node_id(recipient)
 	}
@@ -285,6 +329,10 @@ where
 		&self, hrp_bytes: &[u8], invoice_data: &[u5], recipient: Recipient,
 	) -> Result<RecoverableSignature, ()> {
 		self.inner.sign_invoice(hrp_bytes, invoice_data, recipient)
+	}
+
+	fn sign_gossip_message(&self, msg: UnsignedGossipMessage<'_>) -> Result<Signature, ()> {
+		self.inner.sign_gossip_message(msg)
 	}
 }
 

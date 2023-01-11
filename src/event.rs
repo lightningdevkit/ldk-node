@@ -3,9 +3,10 @@ use crate::{
 	PaymentInfoStorage, PaymentStatus, Wallet,
 };
 
-use crate::logger::{log_error, log_given_level, log_info, log_internal, Logger};
+use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
+use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::PaymentHash;
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
@@ -25,9 +26,9 @@ use std::time::Duration;
 /// The event queue will be persisted under this key.
 pub(crate) const EVENTS_PERSISTENCE_KEY: &str = "events";
 
-/// An event emitted by [`LdkLite`], which should be handled by the user.
+/// An event emitted by [`Node`], which should be handled by the user.
 ///
-/// [`LdkLite`]: [`crate::LdkLite`]
+/// [`Node`]: [`crate::Node`]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
 	/// A sent payment was successful.
@@ -63,74 +64,26 @@ pub enum Event {
 	},
 }
 
-// TODO: Figure out serialization more concretely - see issue #30
-impl Readable for Event {
-	fn read<R: lightning::io::Read>(
-		reader: &mut R,
-	) -> Result<Self, lightning::ln::msgs::DecodeError> {
-		match Readable::read(reader)? {
-			0u8 => {
-				let payment_hash: PaymentHash = Readable::read(reader)?;
-				Ok(Self::PaymentSuccessful { payment_hash })
-			}
-			1u8 => {
-				let payment_hash: PaymentHash = Readable::read(reader)?;
-				Ok(Self::PaymentFailed { payment_hash })
-			}
-			2u8 => {
-				let payment_hash: PaymentHash = Readable::read(reader)?;
-				let amount_msat: u64 = Readable::read(reader)?;
-				Ok(Self::PaymentReceived { payment_hash, amount_msat })
-			}
-			3u8 => {
-				let channel_id: [u8; 32] = Readable::read(reader)?;
-				let user_channel_id: u128 = Readable::read(reader)?;
-				Ok(Self::ChannelReady { channel_id, user_channel_id })
-			}
-			4u8 => {
-				let channel_id: [u8; 32] = Readable::read(reader)?;
-				let user_channel_id: u128 = Readable::read(reader)?;
-				Ok(Self::ChannelClosed { channel_id, user_channel_id })
-			}
-			_ => Err(lightning::ln::msgs::DecodeError::InvalidValue),
-		}
-	}
-}
-
-impl Writeable for Event {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		match self {
-			Self::PaymentSuccessful { payment_hash } => {
-				0u8.write(writer)?;
-				payment_hash.write(writer)?;
-				Ok(())
-			}
-			Self::PaymentFailed { payment_hash } => {
-				1u8.write(writer)?;
-				payment_hash.write(writer)?;
-				Ok(())
-			}
-			Self::PaymentReceived { payment_hash, amount_msat } => {
-				2u8.write(writer)?;
-				payment_hash.write(writer)?;
-				amount_msat.write(writer)?;
-				Ok(())
-			}
-			Self::ChannelReady { channel_id, user_channel_id } => {
-				3u8.write(writer)?;
-				channel_id.write(writer)?;
-				user_channel_id.write(writer)?;
-				Ok(())
-			}
-			Self::ChannelClosed { channel_id, user_channel_id } => {
-				4u8.write(writer)?;
-				channel_id.write(writer)?;
-				user_channel_id.write(writer)?;
-				Ok(())
-			}
-		}
-	}
-}
+impl_writeable_tlv_based_enum!(Event,
+	(0, PaymentSuccessful) => {
+		(0, payment_hash, required),
+	},
+	(1, PaymentFailed) => {
+		(0, payment_hash, required),
+	},
+	(2, PaymentReceived) => {
+		(0, payment_hash, required),
+		(1, amount_msat, required),
+	},
+	(3, ChannelReady) => {
+		(0, channel_id, required),
+		(1, user_channel_id, required),
+	},
+	(4, ChannelClosed) => {
+		(0, channel_id, required),
+		(1, user_channel_id, required),
+	};
+);
 
 pub(crate) struct EventQueue<K: Deref>
 where
@@ -233,7 +186,7 @@ where
 	K::Target: KVStorePersister,
 	L::Target: Logger,
 {
-	wallet: Arc<Wallet<bdk::sled::Tree>>,
+	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
 	event_queue: Arc<EventQueue<K>>,
 	channel_manager: Arc<ChannelManager>,
 	network_graph: Arc<NetworkGraph>,
@@ -251,7 +204,7 @@ where
 	L::Target: Logger,
 {
 	pub fn new(
-		wallet: Arc<Wallet<bdk::sled::Tree>>, event_queue: Arc<EventQueue<K>>,
+		wallet: Arc<Wallet<bdk::database::SqliteDatabase>>, event_queue: Arc<EventQueue<K>>,
 		channel_manager: Arc<ChannelManager>, network_graph: Arc<NetworkGraph>,
 		keys_manager: Arc<KeysManager>, inbound_payments: Arc<PaymentInfoStorage>,
 		outbound_payments: Arc<PaymentInfoStorage>, tokio_runtime: Arc<tokio::runtime::Runtime>,
@@ -324,7 +277,8 @@ where
 							}
 						}
 					}
-					Err(_err) => {
+					Err(err) => {
+						log_error!(self.logger, "Failed to create funding transaction: {}", err);
 						self.channel_manager
 							.force_close_without_broadcasting_txn(
 								&temporary_channel_id,
@@ -400,6 +354,7 @@ where
 						payment.status = PaymentStatus::Succeeded;
 						payment.preimage = payment_preimage;
 						payment.secret = payment_secret;
+						payment.amount_msat = Some(amount_msat);
 					}
 					hash_map::Entry::Vacant(e) => {
 						e.insert(PaymentInfo {
@@ -480,17 +435,19 @@ where
 				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
 				let tx_feerate =
 					self.wallet.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
-				let spending_tx = self
-					.keys_manager
-					.spend_spendable_outputs(
-						output_descriptors,
-						Vec::new(),
-						destination_address.script_pubkey(),
-						tx_feerate,
-						&Secp256k1::new(),
-					)
-					.unwrap();
-				self.wallet.broadcast_transaction(&spending_tx);
+				let res = self.keys_manager.spend_spendable_outputs(
+					output_descriptors,
+					Vec::new(),
+					destination_address.script_pubkey(),
+					tx_feerate,
+					&Secp256k1::new(),
+				);
+				match res {
+					Ok(spending_tx) => self.wallet.broadcast_transaction(&spending_tx),
+					Err(err) => {
+						log_error!(self.logger, "Error spending outputs: {:?}", err);
+					}
+				}
 			}
 			LdkEvent::OpenChannelRequest { .. } => {}
 			LdkEvent::PaymentForwarded {
@@ -588,21 +545,29 @@ mod tests {
 
 	#[test]
 	fn event_queue_persistence() {
-		let test_persister = Arc::new(TestPersister::new());
-		let event_queue = EventQueue::new(Arc::clone(&test_persister));
+		let persister = Arc::new(TestPersister::new());
+		let event_queue = EventQueue::new(Arc::clone(&persister));
 
 		let expected_event = Event::ChannelReady { channel_id: [23u8; 32], user_channel_id: 2323 };
 		event_queue.add_event(expected_event.clone()).unwrap();
-		assert!(test_persister.get_and_clear_pending_persist());
+		assert!(persister.get_and_clear_did_persist());
 
 		// Check we get the expected event and that it is returned until we mark it handled.
 		for _ in 0..5 {
 			assert_eq!(event_queue.next_event(), expected_event);
-			assert_eq!(false, test_persister.get_and_clear_pending_persist());
+			assert_eq!(false, persister.get_and_clear_did_persist());
 		}
+
+		// Check we can read back what we persisted.
+		let persisted_bytes = persister.get_persisted_bytes(EVENTS_PERSISTENCE_KEY).unwrap();
+		let deser_event_queue =
+			EventQueue::read(&mut &persisted_bytes[..], Arc::clone(&persister)).unwrap();
+		assert_eq!(deser_event_queue.next_event(), expected_event);
+		assert!(!persister.get_and_clear_did_persist());
 
 		// Check we persisted on `event_handled()`
 		event_queue.event_handled().unwrap();
-		assert!(test_persister.get_and_clear_pending_persist());
+
+		assert!(persister.get_and_clear_did_persist());
 	}
 }
