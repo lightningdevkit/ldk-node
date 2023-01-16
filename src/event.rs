@@ -28,7 +28,7 @@ pub(crate) const EVENTS_PERSISTENCE_KEY: &str = "events";
 /// An event emitted by [`LdkLite`], which should be handled by the user.
 ///
 /// [`LdkLite`]: [`crate::LdkLite`]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
 	/// A sent payment was successful.
 	PaymentSuccessful {
@@ -155,7 +155,7 @@ where
 		{
 			let mut locked_queue = self.queue.lock().unwrap();
 			locked_queue.push_back(event);
-			self.persist_queue(&*locked_queue)?;
+			self.persist_queue(&locked_queue)?;
 		}
 
 		self.notifier.notify_one();
@@ -172,7 +172,7 @@ where
 		{
 			let mut locked_queue = self.queue.lock().unwrap();
 			locked_queue.pop_front();
-			self.persist_queue(&*locked_queue)?;
+			self.persist_queue(&locked_queue)?;
 		}
 		self.notifier.notify_one();
 		Ok(())
@@ -477,7 +477,7 @@ where
 			LdkEvent::SpendableOutputs { outputs } => {
 				// TODO: We should eventually remember the outputs and supply them to the wallet's coin selection, once BDK allows us to do so.
 				let destination_address = self.wallet.get_new_address().unwrap();
-				let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
+				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
 				let tx_feerate =
 					self.wallet.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
 				let spending_tx = self
