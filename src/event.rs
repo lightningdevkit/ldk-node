@@ -292,7 +292,7 @@ where
 
 				// Sign the final funding transaction and broadcast it.
 				match self.wallet.create_funding_transaction(
-					&output_script,
+					output_script,
 					channel_value_satoshis,
 					confirmation_target,
 				) {
