@@ -19,7 +19,7 @@ use bitcoin::secp256k1::Secp256k1;
 use rand::{thread_rng, Rng};
 use std::collections::{hash_map, VecDeque};
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// The event queue will be persisted under this key.
@@ -240,7 +240,7 @@ where
 	keys_manager: Arc<KeysManager>,
 	inbound_payments: Arc<PaymentInfoStorage>,
 	outbound_payments: Arc<PaymentInfoStorage>,
-	tokio_runtime: RwLock<Option<Arc<tokio::runtime::Runtime>>>,
+	tokio_runtime: Arc<tokio::runtime::Runtime>,
 	logger: L,
 	_config: Arc<Config>,
 }
@@ -254,9 +254,9 @@ where
 		wallet: Arc<Wallet<bdk::sled::Tree>>, event_queue: Arc<EventQueue<K>>,
 		channel_manager: Arc<ChannelManager>, network_graph: Arc<NetworkGraph>,
 		keys_manager: Arc<KeysManager>, inbound_payments: Arc<PaymentInfoStorage>,
-		outbound_payments: Arc<PaymentInfoStorage>, logger: L, _config: Arc<Config>,
+		outbound_payments: Arc<PaymentInfoStorage>, tokio_runtime: Arc<tokio::runtime::Runtime>,
+		logger: L, _config: Arc<Config>,
 	) -> Self {
-		let tokio_runtime = RwLock::new(None);
 		Self {
 			event_queue,
 			wallet,
@@ -269,14 +269,6 @@ where
 			tokio_runtime,
 			_config,
 		}
-	}
-
-	pub(crate) fn set_runtime(&self, tokio_runtime: Arc<tokio::runtime::Runtime>) {
-		*self.tokio_runtime.write().unwrap() = Some(tokio_runtime);
-	}
-
-	pub(crate) fn drop_runtime(&self) {
-		*self.tokio_runtime.write().unwrap() = None;
 	}
 }
 
@@ -472,16 +464,10 @@ where
 			LdkEvent::ProbeFailed { .. } => {}
 			LdkEvent::HTLCHandlingFailed { .. } => {}
 			LdkEvent::PendingHTLCsForwardable { time_forwardable } => {
-				let locked_runtime = self.tokio_runtime.read().unwrap();
-				if locked_runtime.as_ref().is_none() {
-					log_error!(self.logger, "Failed process HTLC forwards: No runtime.");
-					unreachable!("Failed process HTLC forwards: No runtime.");
-				}
-
 				let forwarding_channel_manager = self.channel_manager.clone();
 				let min = time_forwardable.as_millis() as u64;
 
-				locked_runtime.as_ref().unwrap().spawn(async move {
+				self.tokio_runtime.spawn(async move {
 					let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
 					tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
 
