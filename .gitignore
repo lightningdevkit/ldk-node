@@ -22,3 +22,5 @@ swift.swiftdoc
 
 # Ignore ldk_nodeFFI.xcframework files
 /bindings/swift/ldk_nodeFFI.xcframework
+/bindings/kotlin/ldk-node-android/lib/src/main/jniLibs
+/bindings/kotlin/ldk-node-android/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
