@@ -1,11 +1,11 @@
 # LDK Node
 A ready-to-go Lightning node library built using [LDK](https://lightningdevkit.org/) and [BDK](https://bitcoindevkit.org/).
 
-LDK Node is a non-custodial Lightning node in library form. Its central goal is to provide a small, simple, and straightforward interface that enables users to easily setup and run a Lightning node with an integrated on-chain wallet. While minimalism is at its core, LDK Node aims to be sufficiently modular and configurable to be useful for a variety of use cases. 
+LDK Node is a non-custodial Lightning node in library form. Its central goal is to provide a small, simple, and straightforward interface that enables users to easily set up and run a Lightning node with an integrated on-chain wallet. While minimalism is at its core, LDK Node aims to be sufficiently modular and configurable to be useful for a variety of use cases. 
 
 ## Getting Started
 
-The main interface of the library is the `Node`, which can be retrieved by setting up and configuring a `Builder` to the user's liking and calling `build()`. `Node` can then be controlled via commands such as `start`,`stop`,`connect_open_channel`, `send_payment`, etc.:
+The primary abstraction of the library is the `Node`, which can be retrieved by setting up and configuring a `Builder` to your liking and calling `build()`. `Node` can then be controlled via commands such as `start`, `stop`, `connect_open_channel`, `send_payment`, etc.:
 
 ```rust
 use ldk_node::Builder;
@@ -39,7 +39,7 @@ fn main() {
 
 LDK Node currently comes with a decidedly opionated set of design choices:
 
-- On-chain data is handled by the integrated BDK wallet.
+- On-chain data is handled by the integrated BDK wallet
 - Chain data is accessed via Esplora (support for Electrum and `bitcoind` RPC will follow)
 - Wallet and channel state is persisted to file system (support for SQLite will follow)
 - Gossip data is sourced via Lightnings peer-to-peer network (support for [Rapid Gossip Sync](https://docs.rs/lightning-rapid-gossip-sync/*/lightning_rapid_gossip_sync/) will follow)

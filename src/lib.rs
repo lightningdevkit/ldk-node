@@ -10,16 +10,20 @@
 #![crate_name = "ldk_node"]
 
 //! # LDK Node
-//! A ready-to-go Lightning node library built using [LDK](https://lightningdevkit.org/) and [BDK](https://bitcoindevkit.org/).
+//! A ready-to-go Lightning node library built using [LDK](https://lightningdevkit.org/) and
+//! [BDK](https://bitcoindevkit.org/).
 //!
-//! LDK Node is a non-custodial Lightning node in library form. Its central goal is to provide a small, simple, and straightforward interface that enables users to easily setup and run a Lightning node with an integrated on-chain wallet. While minimalism is at its core, LDK Node aims to be sufficiently modular and configurable to be useful for a variety of use cases.
+//! LDK Node is a non-custodial Lightning node in library form. Its central goal is to provide a
+//! small, simple, and straightforward interface that enables users to easily set up and run a
+//! Lightning node with an integrated on-chain wallet. While minimalism is at its core, LDK Node
+//! aims to be sufficiently modular and configurable to be useful for a variety of use cases.
 //!
 //! ## Getting Started
 //!
-//! The main interface of the library is the [`Node`], which can be retrieved by setting up and
-//! configuring a [`Builder`] to the user's liking and calling [`build`]. `Node` can then be
-//! controlled via commands such as [`start`],[`stop`],[`connect_open_channel`], [`send_payment`],
-//! etc.:
+//! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
+//! and configuring a [`Builder`] to your liking and calling [`build`]. `Node` can then be
+//! controlled via commands such as [`start`], [`stop`], [`connect_open_channel`],
+//! [`send_payment`], etc.:
 //!
 //! ```no_run
 //! use ldk_node::Builder;
@@ -311,7 +315,7 @@ impl Builder {
 			config.network,
 			database,
 		)
-		.expect("Failed to setup on-chain wallet");
+		.expect("Failed to set up on-chain wallet");
 
 		let tx_sync = Arc::new(EsploraSyncClient::new(
 			config.esplora_server_url.clone(),
