@@ -48,4 +48,4 @@ LDK Node currently comes with a decidedly opionated set of design choices:
 
 ## Language Support
 
-LDK Node is written in [Rust](https://www.rust-lang.org/) and may therefore be natively included in any `std` Rust program. Beyond it's Rust API it also offers language bindings for Swift, Kotlin, and Python based on [UniFFI](https://github.com/mozilla/uniffi-rs/).
+LDK Node is written in [Rust](https://www.rust-lang.org/) and may therefore be natively included in any `std` Rust program. Beyond its Rust API it also offers language bindings for Swift, Kotlin, and Python based on [UniFFI](https://github.com/mozilla/uniffi-rs/).
