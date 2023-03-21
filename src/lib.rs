@@ -9,14 +9,52 @@
 
 #![crate_name = "ldk_node"]
 
-//! A library providing a simplified API for the Lightning Dev Kit. While LDK itself provides a
-//! highly configurable and adaptable interface, this API champions simplicity and ease of use over
-//! configurability. To this end, it provides an opionated set of design choices and ready-to-go
-//! default modules, while still enabling some configurability when dearly needed by the user:
-//! - Chain data is accessed through an Esplora client.
-//! - Wallet and channel states are persisted to disk.
-//! - Gossip is retrieved over the P2P network.
-
+//! # LDK Node
+//! A ready-to-go Lightning node library built using [LDK](https://lightningdevkit.org/) and [BDK](https://bitcoindevkit.org/).
+//!
+//! LDK Node is a non-custodial Lightning node in library form. Its central goal is to provide a small, simple, and straightforward interface that enables users to easily setup and run a Lightning node with an integrated on-chain wallet. While minimalism is at its core, LDK Node aims to be sufficiently modular and configurable to be useful for a variety of use cases.
+//!
+//! ## Getting Started
+//!
+//! The main interface of the library is the [`Node`], which can be retrieved by setting up and
+//! configuring a [`Builder`] to the user's liking and calling [`build`]. `Node` can then be
+//! controlled via commands such as [`start`],[`stop`],[`connect_open_channel`], [`send_payment`],
+//! etc.:
+//!
+//! ```no_run
+//! use ldk_node::Builder;
+//! use ldk_node::lightning_invoice::Invoice;
+//! use std::str::FromStr;
+//!
+//! fn main() {
+//! 	let node = Builder::new()
+//! 		.set_network("testnet")
+//! 		.set_esplora_server_url("https://blockstream.info/testnet/api".to_string())
+//! 		.build();
+//!
+//! 	node.start().unwrap();
+//!
+//! 	let _funding_address = node.new_funding_address();
+//!
+//! 	// .. fund address ..
+//!
+//! 	node.sync_wallets().unwrap();
+//!
+//! 	node.connect_open_channel("NODE_ID@PEER_ADDR:PORT", 10000, false).unwrap();
+//!
+//! 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
+//! 	node.send_payment(invoice).unwrap();
+//!
+//! 	node.stop().unwrap();
+//! }
+//! ```
+//!
+//! [`build`]: Builder::build
+//! [`start`]: Node::start
+//! [`stop`]: Node::stop
+//! [`connect_open_channel`]: Node::connect_open_channel
+//! [`send_payment`]: Node::send_payment
+//!
 #![deny(missing_docs)]
 #![deny(broken_intra_doc_links)]
 #![deny(private_intra_doc_links)]
@@ -482,7 +520,7 @@ struct Runtime {
 	stop_wallet_sync: Arc<AtomicBool>,
 }
 
-/// The main interface object of the simplified API, wrapping the necessary LDK and BDK functionalities.
+/// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
 pub struct Node {
@@ -716,12 +754,14 @@ impl Node {
 
 	/// Blocks until the next event is available.
 	///
-	/// Note: this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
 	pub fn next_event(&self) -> Event {
 		self.event_queue.next_event()
 	}
 
 	/// Confirm the last retrieved event handled.
+	///
+	/// **Note:** This **MUST** be called after each event has been handled.
 	pub fn event_handled(&self) {
 		self.event_queue.event_handled().unwrap();
 	}
