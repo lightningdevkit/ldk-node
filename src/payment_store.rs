@@ -1,5 +1,5 @@
 use crate::hex_utils;
-use crate::io_utils::KVStoreUnpersister;
+use crate::io::KVStoreUnpersister;
 use crate::Error;
 
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};

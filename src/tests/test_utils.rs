@@ -1,4 +1,4 @@
-use crate::io_utils::KVStoreUnpersister;
+use crate::io::KVStoreUnpersister;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::Writeable;
 

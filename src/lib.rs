@@ -69,7 +69,7 @@
 mod error;
 mod event;
 mod hex_utils;
-mod io_utils;
+mod io;
 mod logger;
 mod payment_store;
 mod peer_store;
@@ -287,13 +287,13 @@ impl Builder {
 			match entropy_source {
 				WalletEntropySource::SeedBytes(bytes) => bytes.clone(),
 				WalletEntropySource::SeedFile(seed_path) => {
-					io_utils::read_or_generate_seed_file(seed_path)
+					io::utils::read_or_generate_seed_file(seed_path)
 				}
 			}
 		} else {
 			// Default to read or generate from the default location generate a seed file.
 			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			io_utils::read_or_generate_seed_file(&seed_path)
+			io::utils::read_or_generate_seed_file(&seed_path)
 		};
 
 		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
@@ -355,8 +355,8 @@ impl Builder {
 
 		// Initialize the network graph, scorer, and router
 		let network_graph =
-			Arc::new(io_utils::read_network_graph(config.as_ref(), Arc::clone(&logger)));
-		let scorer = Arc::new(Mutex::new(io_utils::read_scorer(
+			Arc::new(io::utils::read_network_graph(config.as_ref(), Arc::clone(&logger)));
+		let scorer = Arc::new(Mutex::new(io::utils::read_scorer(
 			config.as_ref(),
 			Arc::clone(&network_graph),
 			Arc::clone(&logger),
@@ -465,7 +465,7 @@ impl Builder {
 		));
 
 		// Init payment info storage
-		let payments = io_utils::read_payment_info(config.as_ref());
+		let payments = io::utils::read_payment_info(config.as_ref());
 		let payment_store =
 			Arc::new(PaymentInfoStorage::from_payments(payments, Arc::clone(&persister)));
 

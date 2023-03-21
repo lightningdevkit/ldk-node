@@ -3,7 +3,7 @@ use crate::{
 	PaymentInfo, PaymentInfoStorage, PaymentStatus, Wallet,
 };
 
-use crate::io_utils::KVStoreUnpersister;
+use crate::io::KVStoreUnpersister;
 use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
