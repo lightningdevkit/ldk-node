@@ -1,9 +1,12 @@
-use crate::{
-	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, PaymentDirection,
-	PaymentInfo, PaymentInfoStorage, PaymentStatus, Wallet,
+use crate::{hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, Wallet};
+
+use crate::payment_store::{
+	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentStatus, PaymentStore,
 };
 
-use crate::io::KVStoreUnpersister;
+use crate::io::{
+	KVStore, TransactionalWrite, EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_NAMESPACE,
+};
 use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
@@ -14,7 +17,6 @@ use lightning::util::errors::APIError;
 use lightning::util::events::Event as LdkEvent;
 use lightning::util::events::EventHandler as LdkEventHandler;
 use lightning::util::events::PaymentPurpose;
-use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use bitcoin::secp256k1::Secp256k1;
@@ -23,9 +25,6 @@ use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
-
-/// The event queue will be persisted under this key.
-pub(crate) const EVENTS_PERSISTENCE_KEY: &str = "events";
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -86,30 +85,33 @@ impl_writeable_tlv_based_enum!(Event,
 	};
 );
 
-pub(crate) struct EventQueue<K: Deref>
+pub struct EventQueue<K: Deref, L: Deref>
 where
-	K::Target: KVStorePersister,
+	K::Target: KVStore,
+	L::Target: Logger,
 {
 	queue: Mutex<VecDeque<Event>>,
 	notifier: Condvar,
-	persister: K,
+	kv_store: K,
+	logger: L,
 }
 
-impl<K: Deref> EventQueue<K>
+impl<K: Deref, L: Deref> EventQueue<K, L>
 where
-	K::Target: KVStorePersister,
+	K::Target: KVStore,
+	L::Target: Logger,
 {
-	pub(crate) fn new(persister: K) -> Self {
+	pub(crate) fn new(kv_store: K, logger: L) -> Self {
 		let queue: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
 		let notifier = Condvar::new();
-		Self { queue, notifier, persister }
+		Self { queue, notifier, kv_store, logger }
 	}
 
 	pub(crate) fn add_event(&self, event: Event) -> Result<(), Error> {
 		{
 			let mut locked_queue = self.queue.lock().unwrap();
 			locked_queue.push_back(event);
-			self.persist_queue(&locked_queue)?;
+			self.write_queue_and_commit(&locked_queue)?;
 		}
 
 		self.notifier.notify_one();
@@ -126,32 +128,64 @@ where
 		{
 			let mut locked_queue = self.queue.lock().unwrap();
 			locked_queue.pop_front();
-			self.persist_queue(&locked_queue)?;
+			self.write_queue_and_commit(&locked_queue)?;
 		}
 		self.notifier.notify_one();
 		Ok(())
 	}
 
-	fn persist_queue(&self, locked_queue: &VecDeque<Event>) -> Result<(), Error> {
-		self.persister
-			.persist(EVENTS_PERSISTENCE_KEY, &EventQueueSerWrapper(locked_queue))
-			.map_err(|_| Error::PersistenceFailed)?;
+	fn write_queue_and_commit(&self, locked_queue: &VecDeque<Event>) -> Result<(), Error> {
+		let mut writer = self
+			.kv_store
+			.write(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Getting writer for key {}/{} failed due to: {}",
+					EVENT_QUEUE_PERSISTENCE_NAMESPACE,
+					EVENT_QUEUE_PERSISTENCE_KEY,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
+		EventQueueSerWrapper(locked_queue).write(&mut writer).map_err(|e| {
+			log_error!(
+				self.logger,
+				"Writing event queue data to key {}/{} failed due to: {}",
+				EVENT_QUEUE_PERSISTENCE_NAMESPACE,
+				EVENT_QUEUE_PERSISTENCE_KEY,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+		writer.commit().map_err(|e| {
+			log_error!(
+				self.logger,
+				"Committing event queue data to key {}/{} failed due to: {}",
+				EVENT_QUEUE_PERSISTENCE_NAMESPACE,
+				EVENT_QUEUE_PERSISTENCE_KEY,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
 		Ok(())
 	}
 }
 
-impl<K: Deref> ReadableArgs<K> for EventQueue<K>
+impl<K: Deref, L: Deref> ReadableArgs<(K, L)> for EventQueue<K, L>
 where
-	K::Target: KVStorePersister,
+	K::Target: KVStore,
+	L::Target: Logger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
-		reader: &mut R, persister: K,
+		reader: &mut R, args: (K, L),
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let (kv_store, logger) = args;
 		let read_queue: EventQueueDeserWrapper = Readable::read(reader)?;
 		let queue: Mutex<VecDeque<Event>> = Mutex::new(read_queue.0);
 		let notifier = Condvar::new();
-		Ok(Self { queue, notifier, persister })
+		Ok(Self { queue, notifier, kv_store, logger })
 	}
 }
 
@@ -184,15 +218,15 @@ impl Writeable for EventQueueSerWrapper<'_> {
 
 pub(crate) struct EventHandler<K: Deref + Clone, L: Deref>
 where
-	K::Target: KVStorePersister + KVStoreUnpersister,
+	K::Target: KVStore,
 	L::Target: Logger,
 {
 	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
-	event_queue: Arc<EventQueue<K>>,
+	event_queue: Arc<EventQueue<K, L>>,
 	channel_manager: Arc<ChannelManager>,
 	network_graph: Arc<NetworkGraph>,
 	keys_manager: Arc<KeysManager>,
-	payment_store: Arc<PaymentInfoStorage<K>>,
+	payment_store: Arc<PaymentStore<K, L>>,
 	tokio_runtime: Arc<tokio::runtime::Runtime>,
 	logger: L,
 	_config: Arc<Config>,
@@ -200,13 +234,13 @@ where
 
 impl<K: Deref + Clone, L: Deref> EventHandler<K, L>
 where
-	K::Target: KVStorePersister + KVStoreUnpersister,
+	K::Target: KVStore,
 	L::Target: Logger,
 {
 	pub fn new(
-		wallet: Arc<Wallet<bdk::database::SqliteDatabase>>, event_queue: Arc<EventQueue<K>>,
+		wallet: Arc<Wallet<bdk::database::SqliteDatabase>>, event_queue: Arc<EventQueue<K, L>>,
 		channel_manager: Arc<ChannelManager>, network_graph: Arc<NetworkGraph>,
-		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentInfoStorage<K>>,
+		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
 		tokio_runtime: Arc<tokio::runtime::Runtime>, logger: L, _config: Arc<Config>,
 	) -> Self {
 		Self {
@@ -225,7 +259,7 @@ where
 
 impl<K: Deref + Clone, L: Deref> LdkEventHandler for EventHandler<K, L>
 where
-	K::Target: KVStorePersister + KVStoreUnpersister,
+	K::Target: KVStore,
 	L::Target: Logger,
 {
 	fn handle_event(&self, event: LdkEvent) {
@@ -305,9 +339,12 @@ where
 							amount_msat,
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
-						self.payment_store
-							.set_status(&payment_hash, PaymentStatus::Failed)
-							.expect("Failed to access payment store");
+
+						let update = PaymentDetailsUpdate {
+							status: Some(PaymentStatus::Failed),
+							..PaymentDetailsUpdate::new(payment_hash)
+						};
+						self.payment_store.update(&update).expect("Failed to access payment store");
 						return;
 					}
 				}
@@ -340,9 +377,12 @@ where
 						hex_utils::to_string(&payment_hash.0),
 					);
 					self.channel_manager.fail_htlc_backwards(&payment_hash);
-					self.payment_store
-						.set_status(&payment_hash, PaymentStatus::Failed)
-						.expect("Failed to access payment store");
+
+					let update = PaymentDetailsUpdate {
+						status: Some(PaymentStatus::Failed),
+						..PaymentDetailsUpdate::new(payment_hash)
+					};
+					self.payment_store.update(&update).expect("Failed to access payment store");
 				}
 			}
 			LdkEvent::PaymentClaimed {
@@ -357,47 +397,85 @@ where
 					hex_utils::to_string(&payment_hash.0),
 					amount_msat,
 				);
-				let (payment_preimage, payment_secret) = match purpose {
+				match purpose {
 					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
-						(payment_preimage, Some(payment_secret))
+						let update = PaymentDetailsUpdate {
+							preimage: Some(payment_preimage),
+							secret: Some(Some(payment_secret)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_hash)
+						};
+						match self.payment_store.update(&update) {
+							Ok(true) => (),
+							Ok(false) => {
+								log_error!(
+									self.logger,
+									"Payment with hash {} couldn't be found in store",
+									hex_utils::to_string(&payment_hash.0)
+								);
+								debug_assert!(false);
+							}
+							Err(e) => {
+								log_error!(
+									self.logger,
+									"Failed to update payment with hash {}: {}",
+									hex_utils::to_string(&payment_hash.0),
+									e
+								);
+								debug_assert!(false);
+							}
+						}
 					}
-					PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
-				};
+					PaymentPurpose::SpontaneousPayment(preimage) => {
+						let payment = PaymentDetails {
+							preimage: Some(preimage),
+							hash: payment_hash,
+							secret: None,
+							amount_msat: Some(amount_msat),
+							direction: PaymentDirection::Inbound,
+							status: PaymentStatus::Succeeded,
+						};
 
-				let mut locked_store = self.payment_store.lock().unwrap();
-				locked_store
-					.entry(payment_hash)
-					.and_modify(|payment_info| {
-						payment_info.status = PaymentStatus::Succeeded;
-						payment_info.preimage = payment_preimage;
-						payment_info.secret = payment_secret;
-						payment_info.amount_msat = Some(amount_msat);
-					})
-					.or_insert(PaymentInfo {
-						preimage: payment_preimage,
-						payment_hash,
-						secret: payment_secret,
-						amount_msat: Some(amount_msat),
-						direction: PaymentDirection::Inbound,
-						status: PaymentStatus::Succeeded,
-					});
+						match self.payment_store.insert(payment) {
+							Ok(false) => (),
+							Ok(true) => {
+								log_error!(
+									self.logger,
+									"Spontaneous payment with hash {} was previosly known",
+									hex_utils::to_string(&payment_hash.0)
+								);
+								debug_assert!(false);
+							}
+							Err(e) => {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with hash {}: {}",
+									hex_utils::to_string(&payment_hash.0),
+									e
+								);
+								debug_assert!(false);
+							}
+						}
+					}
+				};
 
 				self.event_queue
 					.add_event(Event::PaymentReceived { payment_hash, amount_msat })
 					.expect("Failed to push to event queue");
 			}
 			LdkEvent::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
-				if let Some(mut payment_info) = self.payment_store.get(&payment_hash) {
-					payment_info.preimage = Some(payment_preimage);
-					payment_info.status = PaymentStatus::Succeeded;
+				if let Some(mut payment) = self.payment_store.get(&payment_hash) {
+					payment.preimage = Some(payment_preimage);
+					payment.status = PaymentStatus::Succeeded;
 					self.payment_store
-						.insert(payment_info.clone())
+						.insert(payment.clone())
 						.expect("Failed to access payment store");
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
 						payment hash {:?} with preimage {:?}",
-						payment_info.amount_msat.unwrap(),
+						payment.amount_msat.unwrap(),
 						if let Some(fee) = fee_paid_msat {
 							format!(" (fee {} msat)", fee)
 						} else {
@@ -418,9 +496,11 @@ where
 					hex_utils::to_string(&payment_hash.0)
 				);
 
-				self.payment_store
-					.set_status(&payment_hash, PaymentStatus::Failed)
-					.expect("Failed to access payment store");
+				let update = PaymentDetailsUpdate {
+					status: Some(PaymentStatus::Failed),
+					..PaymentDetailsUpdate::new(payment_hash)
+				};
+				self.payment_store.update(&update).expect("Failed to access payment store");
 				self.event_queue
 					.add_event(Event::PaymentFailed { payment_hash })
 					.expect("Failed to push to event queue");
@@ -554,33 +634,36 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test::utils::TestPersister;
+	use crate::test::utils::{TestLogger, TestStore};
 
 	#[test]
 	fn event_queue_persistence() {
-		let persister = Arc::new(TestPersister::new());
-		let event_queue = EventQueue::new(Arc::clone(&persister));
+		let store = Arc::new(TestStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let event_queue = EventQueue::new(Arc::clone(&store), Arc::clone(&logger));
 
 		let expected_event = Event::ChannelReady { channel_id: [23u8; 32], user_channel_id: 2323 };
 		event_queue.add_event(expected_event.clone()).unwrap();
-		assert!(persister.get_and_clear_did_persist());
+		assert!(store.get_and_clear_did_persist());
 
 		// Check we get the expected event and that it is returned until we mark it handled.
 		for _ in 0..5 {
 			assert_eq!(event_queue.next_event(), expected_event);
-			assert_eq!(false, persister.get_and_clear_did_persist());
+			assert_eq!(false, store.get_and_clear_did_persist());
 		}
 
 		// Check we can read back what we persisted.
-		let persisted_bytes = persister.get_persisted_bytes(EVENTS_PERSISTENCE_KEY).unwrap();
+		let persisted_bytes = store
+			.get_persisted_bytes(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY)
+			.unwrap();
 		let deser_event_queue =
-			EventQueue::read(&mut &persisted_bytes[..], Arc::clone(&persister)).unwrap();
+			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
 		assert_eq!(deser_event_queue.next_event(), expected_event);
-		assert!(!persister.get_and_clear_did_persist());
+		assert!(!store.get_and_clear_did_persist());
 
 		// Check we persisted on `event_handled()`
 		event_queue.event_handled().unwrap();
 
-		assert!(persister.get_and_clear_did_persist());
+		assert!(store.get_and_clear_did_persist());
 	}
 }

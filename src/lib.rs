@@ -85,9 +85,11 @@ pub use lightning_invoice;
 pub use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
-use payment_store::PaymentInfoStorage;
-pub use payment_store::{PaymentDirection, PaymentInfo, PaymentStatus};
-use peer_store::{PeerInfo, PeerInfoStorage};
+use io::fs_store::FilesystemStore;
+use io::{KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_NAMESPACE};
+use payment_store::PaymentStore;
+pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
+use peer_store::{PeerInfo, PeerStore};
 use types::{
 	ChainMonitor, ChannelManager, GossipSync, KeysManager, NetworkGraph, OnionMessenger,
 	PeerManager, Scorer,
@@ -105,6 +107,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::P2PGossipSync;
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::routing::utxo::UtxoLookup;
 
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
@@ -112,7 +115,6 @@ use lightning::util::ser::ReadableArgs;
 
 use lightning_background_processor::BackgroundProcessor;
 use lightning_background_processor::GossipSync as BPGossipSync;
-use lightning_persister::FilesystemPersister;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
@@ -329,8 +331,7 @@ impl Builder {
 
 		let wallet = Arc::new(Wallet::new(blockchain, bdk_wallet, Arc::clone(&logger)));
 
-		// Initialize Persist
-		let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
+		let kv_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
 
 		// Initialize the ChainMonitor
 		let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
@@ -338,7 +339,7 @@ impl Builder {
 			Arc::clone(&wallet),
 			Arc::clone(&logger),
 			Arc::clone(&wallet),
-			Arc::clone(&persister),
+			Arc::clone(&kv_store),
 		));
 
 		// Initialize the KeysManager
@@ -355,12 +356,38 @@ impl Builder {
 
 		// Initialize the network graph, scorer, and router
 		let network_graph =
-			Arc::new(io::utils::read_network_graph(config.as_ref(), Arc::clone(&logger)));
-		let scorer = Arc::new(Mutex::new(io::utils::read_scorer(
-			config.as_ref(),
+			match io::utils::read_network_graph(Arc::clone(&kv_store), Arc::clone(&logger)) {
+				Ok(graph) => Arc::new(graph),
+				Err(e) => {
+					if e.kind() == std::io::ErrorKind::NotFound {
+						Arc::new(NetworkGraph::new(config.network, Arc::clone(&logger)))
+					} else {
+						log_error!(logger, "Failed to read network graph: {}", e.to_string());
+						panic!("Failed to read network graph: {}", e.to_string());
+					}
+				}
+			};
+
+		let scorer = match io::utils::read_scorer(
+			Arc::clone(&kv_store),
 			Arc::clone(&network_graph),
 			Arc::clone(&logger),
-		)));
+		) {
+			Ok(scorer) => Arc::new(Mutex::new(scorer)),
+			Err(e) => {
+				if e.kind() == std::io::ErrorKind::NotFound {
+					let params = ProbabilisticScoringParameters::default();
+					Arc::new(Mutex::new(ProbabilisticScorer::new(
+						params,
+						Arc::clone(&network_graph),
+						Arc::clone(&logger),
+					)))
+				} else {
+					log_error!(logger, "Failed to read scorer: {}", e.to_string());
+					panic!("Failed to read scorer: {}", e.to_string());
+				}
+			}
+		};
 
 		let router = Arc::new(DefaultRouter::new(
 			Arc::clone(&network_graph),
@@ -369,16 +396,26 @@ impl Builder {
 			Arc::clone(&scorer),
 		));
 
-		// Read ChannelMonitor state from disk
-		let mut channel_monitors = persister
-			.read_channelmonitors(Arc::clone(&keys_manager), Arc::clone(&keys_manager))
-			.expect("Failed to read channel monitors from disk");
+		// Read ChannelMonitor state from store
+		let mut channel_monitors = match io::utils::read_channel_monitors(
+			Arc::clone(&kv_store),
+			Arc::clone(&keys_manager),
+			Arc::clone(&keys_manager),
+		) {
+			Ok(monitors) => monitors,
+			Err(e) => {
+				log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
+				panic!("Failed to read channel monitors: {}", e.to_string());
+			}
+		};
 
 		// Initialize the ChannelManager
 		let mut user_config = UserConfig::default();
 		user_config.channel_handshake_limits.force_announced_channel_preference = false;
 		let channel_manager = {
-			if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir)) {
+			if let Ok(mut reader) = kv_store
+				.read(CHANNEL_MANAGER_PERSISTENCE_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_KEY)
+			{
 				let channel_monitor_references =
 					channel_monitors.iter_mut().map(|(_, chanmon)| chanmon).collect();
 				let read_args = ChannelManagerReadArgs::new(
@@ -394,8 +431,8 @@ impl Builder {
 					channel_monitor_references,
 				);
 				let (_hash, channel_manager) =
-					<(BlockHash, ChannelManager)>::read(&mut f, read_args)
-						.expect("Failed to read channel manager from disk");
+					<(BlockHash, ChannelManager)>::read(&mut reader, read_args)
+						.expect("Failed to read channel manager from store");
 				channel_manager
 			} else {
 				// We're starting a fresh node.
@@ -465,31 +502,40 @@ impl Builder {
 		));
 
 		// Init payment info storage
-		let payments = io::utils::read_payment_info(config.as_ref());
-		let payment_store =
-			Arc::new(PaymentInfoStorage::from_payments(payments, Arc::clone(&persister)));
-
-		// Restore event handler from disk or create a new one.
-		let event_queue = if let Ok(mut f) =
-			fs::File::open(format!("{}/{}", ldk_data_dir, event::EVENTS_PERSISTENCE_KEY))
-		{
-			Arc::new(
-				EventQueue::read(&mut f, Arc::clone(&persister))
-					.expect("Failed to read event queue from disk."),
-			)
-		} else {
-			Arc::new(EventQueue::new(Arc::clone(&persister)))
+		let payment_store = match io::utils::read_payments(Arc::clone(&kv_store)) {
+			Ok(payments) => {
+				Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
+			}
+			Err(e) => {
+				log_error!(logger, "Failed to read payment information: {}", e.to_string());
+				panic!("Failed to read payment information: {}", e.to_string());
+			}
 		};
 
-		let peer_store = if let Ok(mut f) =
-			fs::File::open(format!("{}/{}", ldk_data_dir, peer_store::PEER_INFO_PERSISTENCE_KEY))
+		let event_queue =
+			match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger)) {
+				Ok(event_queue) => Arc::new(event_queue),
+				Err(e) => {
+					if e.kind() == std::io::ErrorKind::NotFound {
+						Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
+					} else {
+						log_error!(logger, "Failed to read event queue: {}", e.to_string());
+						panic!("Failed to read event queue: {}", e.to_string());
+					}
+				}
+			};
+
+		let peer_store = match io::utils::read_peer_info(Arc::clone(&kv_store), Arc::clone(&logger))
 		{
-			Arc::new(
-				PeerInfoStorage::read(&mut f, Arc::clone(&persister))
-					.expect("Failed to read peer information from disk."),
-			)
-		} else {
-			Arc::new(PeerInfoStorage::new(Arc::clone(&persister)))
+			Ok(peer_store) => Arc::new(peer_store),
+			Err(e) => {
+				if e.kind() == std::io::ErrorKind::NotFound {
+					Arc::new(PeerStore::new(Arc::clone(&kv_store), Arc::clone(&logger)))
+				} else {
+					log_error!(logger, "Failed to read peer store: {}", e.to_string());
+					panic!("Failed to read peer store: {}", e.to_string());
+				}
+			}
 		};
 
 		let running = RwLock::new(None);
@@ -506,7 +552,7 @@ impl Builder {
 			keys_manager,
 			network_graph,
 			gossip_sync,
-			persister,
+			kv_store,
 			logger,
 			scorer,
 			peer_store,
@@ -532,18 +578,18 @@ pub struct Node {
 	config: Arc<Config>,
 	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
-	event_queue: Arc<EventQueue<Arc<FilesystemPersister>>>,
+	event_queue: Arc<EventQueue<Arc<FilesystemStore>, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
 	peer_manager: Arc<PeerManager>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
 	gossip_sync: Arc<GossipSync>,
-	persister: Arc<FilesystemPersister>,
+	kv_store: Arc<FilesystemStore>,
 	logger: Arc<FilesystemLogger>,
 	scorer: Arc<Mutex<Scorer>>,
-	peer_store: Arc<PeerInfoStorage<FilesystemPersister>>,
-	payment_store: Arc<PaymentInfoStorage<Arc<FilesystemPersister>>>,
+	peer_store: Arc<PeerStore<Arc<FilesystemStore>, Arc<FilesystemLogger>>>,
+	payment_store: Arc<PaymentStore<Arc<FilesystemStore>, Arc<FilesystemLogger>>>,
 }
 
 impl Node {
@@ -740,7 +786,7 @@ impl Node {
 
 		// Setup background processing
 		let _background_processor = BackgroundProcessor::start(
-			Arc::clone(&self.persister),
+			Arc::clone(&self.kv_store),
 			Arc::clone(&event_handler),
 			Arc::clone(&self.chain_monitor),
 			Arc::clone(&self.channel_manager),
@@ -975,15 +1021,15 @@ impl Node {
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
 
-				let payment_info = PaymentInfo {
+				let payment = PaymentDetails {
 					preimage: None,
-					payment_hash,
+					hash: payment_hash,
 					secret: payment_secret,
 					amount_msat: invoice.amount_milli_satoshis(),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
 				};
-				self.payment_store.insert(payment_info)?;
+				self.payment_store.insert(payment)?;
 
 				Ok(payment_hash)
 			}
@@ -994,7 +1040,16 @@ impl Node {
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
-				self.payment_store.set_status(&payment_hash, PaymentStatus::Failed)?;
+				let payment = PaymentDetails {
+					preimage: None,
+					hash: payment_hash,
+					secret: payment_secret,
+					amount_msat: invoice.amount_milli_satoshis(),
+					direction: PaymentDirection::Outbound,
+					status: PaymentStatus::Failed,
+				};
+				self.payment_store.insert(payment)?;
+
 				Err(Error::PaymentFailed)
 			}
 		}
@@ -1064,15 +1119,15 @@ impl Node {
 					payee_pubkey
 				);
 
-				let payment_info = PaymentInfo {
-					payment_hash,
+				let payment = PaymentDetails {
+					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					amount_msat: Some(amount_msat),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
-					amount_msat: Some(amount_msat),
 				};
-				self.payment_store.insert(payment_info)?;
+				self.payment_store.insert(payment)?;
 
 				Ok(payment_hash)
 			}
@@ -1083,7 +1138,16 @@ impl Node {
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
-				self.payment_store.set_status(&payment_hash, PaymentStatus::Failed)?;
+				let payment = PaymentDetails {
+					hash: payment_hash,
+					preimage: None,
+					secret: payment_secret,
+					amount_msat: Some(amount_msat),
+					direction: PaymentDirection::Outbound,
+					status: PaymentStatus::Failed,
+				};
+				self.payment_store.insert(payment)?;
+
 				Err(Error::PaymentFailed)
 			}
 		}
@@ -1119,30 +1183,30 @@ impl Node {
 			Ok(_payment_id) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
 
-				let payment_info = PaymentInfo {
-					payment_hash,
+				let payment = PaymentDetails {
+					hash: payment_hash,
 					preimage: Some(payment_preimage),
 					secret: None,
 					status: PaymentStatus::Pending,
 					direction: PaymentDirection::Outbound,
 					amount_msat: Some(amount_msat),
 				};
-				self.payment_store.insert(payment_info)?;
+				self.payment_store.insert(payment)?;
 
 				Ok(payment_hash)
 			}
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
-				let payment_info = PaymentInfo {
-					payment_hash,
+				let payment = PaymentDetails {
+					hash: payment_hash,
 					preimage: Some(payment_preimage),
 					secret: None,
 					status: PaymentStatus::Failed,
 					direction: PaymentDirection::Outbound,
 					amount_msat: Some(amount_msat),
 				};
-				self.payment_store.insert(payment_info)?;
+				self.payment_store.insert(payment)?;
 
 				Err(Error::PaymentFailed)
 			}
@@ -1196,23 +1260,51 @@ impl Node {
 		};
 
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
-		let payment_info = PaymentInfo {
+		let payment = PaymentDetails {
+			hash: payment_hash,
 			preimage: None,
-			payment_hash,
 			secret: Some(invoice.payment_secret().clone()),
 			amount_msat,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
 		};
 
-		self.payment_store.insert(payment_info)?;
+		self.payment_store.insert(payment)?;
 
 		Ok(invoice)
 	}
 
-	/// Query for information about the status of a specific payment.
-	pub fn payment_info(&self, payment_hash: &PaymentHash) -> Option<PaymentInfo> {
+	/// Retrieve the details of a specific payment with the given hash.
+	///
+	/// Returns `Some` if the payment was known and `None` otherwise.
+	pub fn payment(&self, payment_hash: &PaymentHash) -> Option<PaymentDetails> {
 		self.payment_store.get(payment_hash)
+	}
+
+	/// Remove the payment with the given hash from the store.
+	///
+	/// Returns `true` if the payment was present and `false` otherwise.
+	pub fn remove_payment(&self, payment_hash: &PaymentHash) -> Result<bool, Error> {
+		self.payment_store.remove(&payment_hash)
+	}
+
+	/// Retrieves all payments that match the given predicate.
+	///
+	/// For example, you could retrieve all stored outbound payments as follows:
+	/// ```
+	/// # use ldk_node::{Builder, Config, PaymentDirection};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut config = Config::default();
+	/// # config.network = Network::Regtest;
+	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();
+	/// # let builder = Builder::from_config(config);
+	/// # let node = builder.build();
+	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	/// ```
+	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<PaymentDetails> {
+		self.payment_store.list_filter(f)
 	}
 }
 

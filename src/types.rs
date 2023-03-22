@@ -1,3 +1,4 @@
+use crate::io::fs_store::FilesystemStore;
 use crate::logger::FilesystemLogger;
 use crate::wallet::{Wallet, WalletKeysManager};
 
@@ -10,7 +11,6 @@ use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::routing::utxo::UtxoLookup;
 use lightning_net_tokio::SocketDescriptor;
-use lightning_persister::FilesystemPersister;
 use lightning_transaction_sync::EsploraSyncClient;
 
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<Wallet<bdk::database::SqliteDatabase>>,
 	Arc<Wallet<bdk::database::SqliteDatabase>>,
 	Arc<FilesystemLogger>,
-	Arc<FilesystemPersister>,
+	Arc<FilesystemStore>,
 >;
 
 pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<

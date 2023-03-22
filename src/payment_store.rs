@@ -1,22 +1,22 @@
 use crate::hex_utils;
-use crate::io::KVStoreUnpersister;
+use crate::io::{KVStore, TransactionalWrite, PAYMENT_INFO_PERSISTENCE_NAMESPACE};
+use crate::logger::{log_error, Logger};
 use crate::Error;
 
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::util::persist::KVStorePersister;
+use lightning::util::ser::Writeable;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 
-use std::collections::hash_map;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ops::Deref;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaymentInfo {
+pub struct PaymentDetails {
 	/// The payment hash, i.e., the hash of the `preimage`.
-	pub payment_hash: PaymentHash,
+	pub hash: PaymentHash,
 	/// The pre-image used by the payment.
 	pub preimage: Option<PaymentPreimage>,
 	/// The secret used by the payment.
@@ -29,8 +29,8 @@ pub struct PaymentInfo {
 	pub status: PaymentStatus,
 }
 
-impl_writeable_tlv_based!(PaymentInfo, {
-	(0, payment_hash, required),
+impl_writeable_tlv_based!(PaymentDetails, {
+	(0, hash, required),
 	(1, preimage, required),
 	(2, secret, required),
 	(3, amount_msat, required),
@@ -39,7 +39,7 @@ impl_writeable_tlv_based!(PaymentInfo, {
 });
 
 /// Represents the direction of a payment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PaymentDirection {
 	/// The payment is inbound.
 	Inbound,
@@ -53,7 +53,7 @@ impl_writeable_tlv_based_enum!(PaymentDirection,
 );
 
 /// Represents the current status of a payment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PaymentStatus {
 	/// The payment is still pending.
 	Pending,
@@ -69,155 +69,178 @@ impl_writeable_tlv_based_enum!(PaymentStatus,
 	(2, Failed) => {};
 );
 
-/// The payment information will be persisted under this prefix.
-pub(crate) const PAYMENT_INFO_PERSISTENCE_PREFIX: &str = "payments";
-
-pub(crate) struct PaymentInfoStorage<K: Deref + Clone>
-where
-	K::Target: KVStorePersister + KVStoreUnpersister,
-{
-	payments: Mutex<HashMap<PaymentHash, PaymentInfo>>,
-	persister: K,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaymentDetailsUpdate {
+	pub hash: PaymentHash,
+	pub preimage: Option<Option<PaymentPreimage>>,
+	pub secret: Option<Option<PaymentSecret>>,
+	pub amount_msat: Option<Option<u64>>,
+	pub direction: Option<PaymentDirection>,
+	pub status: Option<PaymentStatus>,
 }
 
-impl<K: Deref + Clone> PaymentInfoStorage<K>
-where
-	K::Target: KVStorePersister + KVStoreUnpersister,
-{
-	pub(crate) fn new(persister: K) -> Self {
-		let payments = Mutex::new(HashMap::new());
-		Self { payments, persister }
+impl PaymentDetailsUpdate {
+	pub fn new(hash: PaymentHash) -> Self {
+		Self {
+			hash,
+			preimage: None,
+			secret: None,
+			amount_msat: None,
+			direction: None,
+			status: None,
+		}
 	}
+}
 
-	pub(crate) fn from_payments(payments: Vec<PaymentInfo>, persister: K) -> Self {
+pub(crate) struct PaymentStore<K: Deref + Clone, L: Deref>
+where
+	K::Target: KVStore,
+	L::Target: Logger,
+{
+	payments: Mutex<HashMap<PaymentHash, PaymentDetails>>,
+	kv_store: K,
+	logger: L,
+}
+
+impl<K: Deref + Clone, L: Deref> PaymentStore<K, L>
+where
+	K::Target: KVStore,
+	L::Target: Logger,
+{
+	pub(crate) fn new(payments: Vec<PaymentDetails>, kv_store: K, logger: L) -> Self {
 		let payments = Mutex::new(HashMap::from_iter(
-			payments.into_iter().map(|payment_info| (payment_info.payment_hash, payment_info)),
+			payments.into_iter().map(|payment| (payment.hash, payment)),
 		));
-		Self { payments, persister }
+		Self { payments, kv_store, logger }
 	}
 
-	pub(crate) fn insert(&self, payment_info: PaymentInfo) -> Result<(), Error> {
+	pub(crate) fn insert(&self, payment: PaymentDetails) -> Result<bool, Error> {
 		let mut locked_payments = self.payments.lock().unwrap();
 
-		let payment_hash = payment_info.payment_hash.clone();
-		locked_payments.insert(payment_hash.clone(), payment_info.clone());
-
-		let key = format!(
-			"{}/{}",
-			PAYMENT_INFO_PERSISTENCE_PREFIX,
-			hex_utils::to_string(&payment_hash.0)
-		);
-
-		self.persister.persist(&key, &payment_info).map_err(|_| Error::PersistenceFailed)?;
-
-		return Ok(());
+		let hash = payment.hash.clone();
+		let updated = locked_payments.insert(hash.clone(), payment.clone()).is_some();
+		self.write_info_and_commit(&hash, &payment)?;
+		Ok(updated)
 	}
 
-	pub(crate) fn lock(&self) -> Result<PaymentInfoGuard<K>, ()> {
-		let locked_store = self.payments.lock().map_err(|_| ())?;
-		Ok(PaymentInfoGuard::new(locked_store, self.persister.clone()))
-	}
-
-	pub(crate) fn remove(&self, payment_hash: &PaymentHash) -> Result<(), Error> {
-		let key = format!(
-			"{}/{}",
-			PAYMENT_INFO_PERSISTENCE_PREFIX,
-			hex_utils::to_string(&payment_hash.0)
-		);
-		self.persister.unpersist(&key).map_err(|_| Error::PersistenceFailed)?;
-		Ok(())
-	}
-
-	pub(crate) fn get(&self, payment_hash: &PaymentHash) -> Option<PaymentInfo> {
-		self.payments.lock().unwrap().get(payment_hash).cloned()
-	}
-
-	pub(crate) fn contains(&self, payment_hash: &PaymentHash) -> bool {
-		self.payments.lock().unwrap().contains_key(payment_hash)
-	}
-
-	pub(crate) fn set_status(
-		&self, payment_hash: &PaymentHash, payment_status: PaymentStatus,
-	) -> Result<(), Error> {
-		let mut locked_payments = self.payments.lock().unwrap();
-
-		if let Some(p) = locked_payments.get_mut(payment_hash) {
-			p.status = payment_status;
-
-			let key = format!(
-				"{}/{}",
-				PAYMENT_INFO_PERSISTENCE_PREFIX,
-				hex_utils::to_string(&payment_hash.0)
+	pub(crate) fn remove(&self, hash: &PaymentHash) -> Result<bool, Error> {
+		let store_key = hex_utils::to_string(&hash.0);
+		self.kv_store.remove(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &store_key).map_err(|e| {
+			log_error!(
+				self.logger,
+				"Removing payment data for key {}/{} failed due to: {}",
+				PAYMENT_INFO_PERSISTENCE_NAMESPACE,
+				store_key,
+				e
 			);
-			self.persister.persist(&key, p).map_err(|_| Error::PersistenceFailed)?;
+			Error::PersistenceFailed
+		})
+	}
+
+	pub(crate) fn get(&self, hash: &PaymentHash) -> Option<PaymentDetails> {
+		self.payments.lock().unwrap().get(hash).cloned()
+	}
+
+	pub(crate) fn contains(&self, hash: &PaymentHash) -> bool {
+		self.payments.lock().unwrap().contains_key(hash)
+	}
+
+	pub(crate) fn update(&self, update: &PaymentDetailsUpdate) -> Result<bool, Error> {
+		let mut updated = false;
+		let mut locked_payments = self.payments.lock().unwrap();
+
+		if let Some(payment) = locked_payments.get_mut(&update.hash) {
+			if let Some(preimage_opt) = update.preimage {
+				payment.preimage = preimage_opt;
+			}
+
+			if let Some(secret_opt) = update.secret {
+				payment.secret = secret_opt;
+			}
+
+			if let Some(amount_opt) = update.amount_msat {
+				payment.amount_msat = amount_opt;
+			}
+
+			if let Some(status) = update.status {
+				payment.status = status;
+			}
+
+			self.write_info_and_commit(&update.hash, payment)?;
+			updated = true;
 		}
-		Ok(())
-	}
-}
 
-pub(crate) struct PaymentInfoGuard<'a, K: Deref>
-where
-	K::Target: KVStorePersister + KVStoreUnpersister,
-{
-	inner: MutexGuard<'a, HashMap<PaymentHash, PaymentInfo>>,
-	touched_keys: HashSet<PaymentHash>,
-	persister: K,
-}
-
-impl<'a, K: Deref> PaymentInfoGuard<'a, K>
-where
-	K::Target: KVStorePersister + KVStoreUnpersister,
-{
-	pub fn new(inner: MutexGuard<'a, HashMap<PaymentHash, PaymentInfo>>, persister: K) -> Self {
-		let touched_keys = HashSet::new();
-		Self { inner, touched_keys, persister }
+		Ok(updated)
 	}
 
-	pub fn entry(
-		&mut self, payment_hash: PaymentHash,
-	) -> hash_map::Entry<PaymentHash, PaymentInfo> {
-		self.touched_keys.insert(payment_hash);
-		self.inner.entry(payment_hash)
+	pub(crate) fn list_filter<F: FnMut(&&PaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<PaymentDetails> {
+		self.payments
+			.lock()
+			.unwrap()
+			.iter()
+			.map(|(_, p)| p)
+			.filter(f)
+			.cloned()
+			.collect::<Vec<PaymentDetails>>()
 	}
-}
 
-impl<'a, K: Deref> Drop for PaymentInfoGuard<'a, K>
-where
-	K::Target: KVStorePersister + KVStoreUnpersister,
-{
-	fn drop(&mut self) {
-		for key in self.touched_keys.iter() {
-			let store_key =
-				format!("{}/{}", PAYMENT_INFO_PERSISTENCE_PREFIX, hex_utils::to_string(&key.0));
-
-			match self.inner.entry(*key) {
-				hash_map::Entry::Vacant(_) => {
-					self.persister.unpersist(&store_key).expect("Persistence failed");
-				}
-				hash_map::Entry::Occupied(e) => {
-					self.persister.persist(&store_key, e.get()).expect("Persistence failed");
-				}
-			};
-		}
+	fn write_info_and_commit(
+		&self, hash: &PaymentHash, payment: &PaymentDetails,
+	) -> Result<(), Error> {
+		let store_key = hex_utils::to_string(&hash.0);
+		let mut writer =
+			self.kv_store.write(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &store_key).map_err(|e| {
+				log_error!(
+					self.logger,
+					"Getting writer for key {}/{} failed due to: {}",
+					PAYMENT_INFO_PERSISTENCE_NAMESPACE,
+					store_key,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
+		payment.write(&mut writer).map_err(|e| {
+			log_error!(
+				self.logger,
+				"Writing payment data for key {}/{} failed due to: {}",
+				PAYMENT_INFO_PERSISTENCE_NAMESPACE,
+				store_key,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+		writer.commit().map_err(|e| {
+			log_error!(
+				self.logger,
+				"Committing payment data for key {}/{} failed due to: {}",
+				PAYMENT_INFO_PERSISTENCE_NAMESPACE,
+				store_key,
+				e
+			);
+			Error::PersistenceFailed
+		})
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test::utils::TestPersister;
+	use crate::test::utils::{TestLogger, TestStore};
 	use std::sync::Arc;
 
 	#[test]
 	fn persistence_guard_persists_on_drop() {
-		let persister = Arc::new(TestPersister::new());
-		let payment_info_store = PaymentInfoStorage::new(Arc::clone(&persister));
+		let store = Arc::new(TestStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let payment_store = PaymentStore::new(Vec::new(), Arc::clone(&store), logger);
 
-		let payment_hash = PaymentHash([42u8; 32]);
-		assert!(!payment_info_store.contains(&payment_hash));
+		let hash = PaymentHash([42u8; 32]);
+		assert!(!payment_store.contains(&hash));
 
-		let payment_info = PaymentInfo {
-			payment_hash,
+		let payment = PaymentDetails {
+			hash,
 			preimage: None,
 			secret: None,
 			amount_msat: None,
@@ -225,8 +248,19 @@ mod tests {
 			status: PaymentStatus::Pending,
 		};
 
-		assert!(!persister.get_and_clear_did_persist());
-		payment_info_store.lock().unwrap().entry(payment_hash).or_insert(payment_info);
-		assert!(persister.get_and_clear_did_persist());
+		assert!(!store.get_and_clear_did_persist());
+
+		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
+		assert!(store.get_and_clear_did_persist());
+
+		assert_eq!(Ok(true), payment_store.insert(payment));
+		assert!(store.get_and_clear_did_persist());
+
+		let mut update = PaymentDetailsUpdate::new(hash);
+		update.status = Some(PaymentStatus::Succeeded);
+		assert_eq!(Ok(true), payment_store.update(&update));
+		assert!(store.get_and_clear_did_persist());
+
+		assert_eq!(PaymentStatus::Succeeded, payment_store.get(&hash).unwrap().status);
 	}
 }

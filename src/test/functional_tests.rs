@@ -78,14 +78,30 @@ fn channel_full_cycle() {
 	println!("\nA send_payment");
 	let payment_hash = node_a.send_payment(invoice.clone()).unwrap();
 
+	let outbound_payments_a =
+		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	assert_eq!(outbound_payments_a.len(), 1);
+
+	let inbound_payments_a =
+		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	assert_eq!(inbound_payments_a.len(), 0);
+
+	let outbound_payments_b =
+		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	assert_eq!(outbound_payments_b.len(), 0);
+
+	let inbound_payments_b =
+		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	assert_eq!(inbound_payments_b.len(), 1);
+
 	expect_event!(node_a, PaymentSuccessful);
 	expect_event!(node_b, PaymentReceived);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().amount_msat, Some(invoice_amount));
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().amount_msat, Some(invoice_amount));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount));
 
 	// Assert we fail duplicate outbound payments.
 	assert_eq!(Err(Error::NonUniquePaymentHash), node_a.send_payment(invoice));
@@ -115,12 +131,12 @@ fn channel_full_cycle() {
 		}
 	};
 	assert_eq!(received_amount, overpaid_amount);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().amount_msat, Some(overpaid_amount));
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().amount_msat, Some(overpaid_amount));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount));
 
 	// Test "zero-amount" invoice payment
 	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
@@ -141,12 +157,12 @@ fn channel_full_cycle() {
 		}
 	};
 	assert_eq!(received_amount, determined_amount);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment_info(&payment_hash).unwrap().amount_msat, Some(determined_amount));
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment_info(&payment_hash).unwrap().amount_msat, Some(determined_amount));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount));
 
 	node_b.close_channel(&channel_id, &node_a.node_id()).unwrap();
 	expect_event!(node_a, ChannelClosed);

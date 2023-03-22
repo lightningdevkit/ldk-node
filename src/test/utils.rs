@@ -1,5 +1,6 @@
-use crate::io::KVStoreUnpersister;
+use crate::io::{KVStore, TransactionalWrite};
 use crate::Config;
+use lightning::util::logger::{Level, Logger, Record};
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::Writeable;
 
@@ -10,12 +11,18 @@ use electrsd::bitcoind::bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
 use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
 use electrum_client::ElectrumApi;
 
+use regex;
+
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use std::collections::hash_map;
 use std::collections::HashMap;
 use std::env;
+use std::io::{BufWriter, Cursor, Read, Write};
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 macro_rules! expect_event {
@@ -34,44 +41,233 @@ macro_rules! expect_event {
 
 pub(crate) use expect_event;
 
-pub(crate) struct TestPersister {
-	persisted_bytes: Mutex<HashMap<String, Vec<u8>>>,
-	did_persist: AtomicBool,
+pub(crate) struct TestStore {
+	persisted_bytes: RwLock<HashMap<String, HashMap<String, Arc<RwLock<Vec<u8>>>>>>,
+	did_persist: Arc<AtomicBool>,
 }
 
-impl TestPersister {
+impl TestStore {
 	pub fn new() -> Self {
-		let persisted_bytes = Mutex::new(HashMap::new());
-		let did_persist = AtomicBool::new(false);
+		let persisted_bytes = RwLock::new(HashMap::new());
+		let did_persist = Arc::new(AtomicBool::new(false));
 		Self { persisted_bytes, did_persist }
 	}
 
-	pub fn get_persisted_bytes(&self, key: &str) -> Option<Vec<u8>> {
-		let persisted_bytes_lock = self.persisted_bytes.lock().unwrap();
-		persisted_bytes_lock.get(key).cloned()
+	pub fn get_persisted_bytes(&self, namespace: &str, key: &str) -> Option<Vec<u8>> {
+		if let Some(outer_ref) = self.persisted_bytes.read().unwrap().get(namespace) {
+			if let Some(inner_ref) = outer_ref.get(key) {
+				let locked = inner_ref.read().unwrap();
+				return Some((*locked).clone());
+			}
+		}
+		None
 	}
 
 	pub fn get_and_clear_did_persist(&self) -> bool {
-		self.did_persist.swap(false, Ordering::SeqCst)
+		self.did_persist.swap(false, Ordering::Relaxed)
 	}
 }
 
-impl KVStorePersister for TestPersister {
-	fn persist<W: Writeable>(&self, key: &str, object: &W) -> std::io::Result<()> {
-		let mut persisted_bytes_lock = self.persisted_bytes.lock().unwrap();
-		let mut bytes = Vec::new();
-		object.write(&mut bytes)?;
-		persisted_bytes_lock.insert(key.to_owned(), bytes);
+impl KVStore for TestStore {
+	type Reader = TestReader;
+	type Writer = TestWriter;
+
+	fn read(&self, namespace: &str, key: &str) -> std::io::Result<Self::Reader> {
+		if let Some(outer_ref) = self.persisted_bytes.read().unwrap().get(namespace) {
+			if let Some(inner_ref) = outer_ref.get(key) {
+				Ok(TestReader::new(Arc::clone(inner_ref)))
+			} else {
+				let msg = format!("Key not found: {}", key);
+				Err(std::io::Error::new(std::io::ErrorKind::NotFound, msg))
+			}
+		} else {
+			let msg = format!("Namespace not found: {}", namespace);
+			Err(std::io::Error::new(std::io::ErrorKind::NotFound, msg))
+		}
+	}
+
+	fn write(&self, namespace: &str, key: &str) -> std::io::Result<Self::Writer> {
+		let mut guard = self.persisted_bytes.write().unwrap();
+		let outer_e = guard.entry(namespace.to_string()).or_insert(HashMap::new());
+		let inner_e = outer_e.entry(key.to_string()).or_insert(Arc::new(RwLock::new(Vec::new())));
+		Ok(TestWriter::new(Arc::clone(&inner_e), Arc::clone(&self.did_persist)))
+	}
+
+	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<bool> {
+		match self.persisted_bytes.write().unwrap().entry(namespace.to_string()) {
+			hash_map::Entry::Occupied(mut e) => {
+				self.did_persist.store(true, Ordering::SeqCst);
+				Ok(e.get_mut().remove(&key.to_string()).is_some())
+			}
+			hash_map::Entry::Vacant(_) => Ok(false),
+		}
+	}
+
+	fn list(&self, namespace: &str) -> std::io::Result<Vec<String>> {
+		match self.persisted_bytes.write().unwrap().entry(namespace.to_string()) {
+			hash_map::Entry::Occupied(e) => Ok(e.get().keys().cloned().collect()),
+			hash_map::Entry::Vacant(_) => Ok(Vec::new()),
+		}
+	}
+}
+
+impl KVStorePersister for TestStore {
+	fn persist<W: Writeable>(&self, prefixed_key: &str, object: &W) -> std::io::Result<()> {
+		let msg = format!("Could not persist file for key {}.", prefixed_key);
+		let dest_file = PathBuf::from_str(prefixed_key).map_err(|_| {
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg.clone())
+		})?;
+
+		let parent_directory = dest_file.parent().ok_or(lightning::io::Error::new(
+			lightning::io::ErrorKind::InvalidInput,
+			msg.clone(),
+		))?;
+		let namespace = parent_directory.display().to_string();
+
+		let dest_without_namespace = dest_file
+			.strip_prefix(&namespace)
+			.map_err(|_| lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg))?;
+		let key = dest_without_namespace.display().to_string();
+		let mut writer = self.write(&namespace, &key)?;
+		object.write(&mut writer)?;
+		writer.commit()?;
+		Ok(())
+	}
+}
+
+pub struct TestReader {
+	entry_ref: Arc<RwLock<Vec<u8>>>,
+}
+
+impl TestReader {
+	pub fn new(entry_ref: Arc<RwLock<Vec<u8>>>) -> Self {
+		Self { entry_ref }
+	}
+}
+
+impl Read for TestReader {
+	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+		let bytes = self.entry_ref.read().unwrap().clone();
+		let mut reader = Cursor::new(bytes);
+		reader.read(buf)
+	}
+}
+
+pub struct TestWriter {
+	tmp_inner: BufWriter<Vec<u8>>,
+	entry_ref: Arc<RwLock<Vec<u8>>>,
+	did_persist: Arc<AtomicBool>,
+}
+
+impl TestWriter {
+	pub fn new(entry_ref: Arc<RwLock<Vec<u8>>>, did_persist: Arc<AtomicBool>) -> Self {
+		let tmp_inner = BufWriter::new(Vec::new());
+		Self { tmp_inner, entry_ref, did_persist }
+	}
+}
+
+impl Write for TestWriter {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		self.tmp_inner.write(buf)
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		self.tmp_inner.flush()
+	}
+}
+
+impl TransactionalWrite for TestWriter {
+	fn commit(&mut self) -> std::io::Result<()> {
+		self.flush()?;
+		let bytes_ref = self.tmp_inner.get_ref();
+		let mut guard = self.entry_ref.write().unwrap();
+		guard.clone_from(bytes_ref);
 		self.did_persist.store(true, Ordering::SeqCst);
 		Ok(())
 	}
 }
 
-impl KVStoreUnpersister for TestPersister {
-	fn unpersist(&self, key: &str) -> std::io::Result<bool> {
-		let mut persisted_bytes_lock = self.persisted_bytes.lock().unwrap();
-		self.did_persist.store(true, Ordering::SeqCst);
-		Ok(persisted_bytes_lock.remove(key).is_some())
+// Copied over from upstream LDK
+#[allow(dead_code)]
+pub struct TestLogger {
+	level: Level,
+	pub(crate) id: String,
+	pub lines: Mutex<HashMap<(String, String), usize>>,
+}
+
+impl TestLogger {
+	#[allow(dead_code)]
+	pub fn new() -> TestLogger {
+		Self::with_id("".to_owned())
+	}
+
+	#[allow(dead_code)]
+	pub fn with_id(id: String) -> TestLogger {
+		TestLogger { level: Level::Trace, id, lines: Mutex::new(HashMap::new()) }
+	}
+
+	#[allow(dead_code)]
+	pub fn enable(&mut self, level: Level) {
+		self.level = level;
+	}
+
+	#[allow(dead_code)]
+	pub fn assert_log(&self, module: String, line: String, count: usize) {
+		let log_entries = self.lines.lock().unwrap();
+		assert_eq!(log_entries.get(&(module, line)), Some(&count));
+	}
+
+	/// Search for the number of occurrence of the logged lines which
+	/// 1. belongs to the specified module and
+	/// 2. contains `line` in it.
+	/// And asserts if the number of occurrences is the same with the given `count`
+	#[allow(dead_code)]
+	pub fn assert_log_contains(&self, module: &str, line: &str, count: usize) {
+		let log_entries = self.lines.lock().unwrap();
+		let l: usize = log_entries
+			.iter()
+			.filter(|&(&(ref m, ref l), _c)| m == module && l.contains(line))
+			.map(|(_, c)| c)
+			.sum();
+		assert_eq!(l, count)
+	}
+
+	/// Search for the number of occurrences of logged lines which
+	/// 1. belong to the specified module and
+	/// 2. match the given regex pattern.
+	/// Assert that the number of occurrences equals the given `count`
+	#[allow(dead_code)]
+	pub fn assert_log_regex(&self, module: &str, pattern: regex::Regex, count: usize) {
+		let log_entries = self.lines.lock().unwrap();
+		let l: usize = log_entries
+			.iter()
+			.filter(|&(&(ref m, ref l), _c)| m == module && pattern.is_match(&l))
+			.map(|(_, c)| c)
+			.sum();
+		assert_eq!(l, count)
+	}
+}
+
+impl Logger for TestLogger {
+	fn log(&self, record: &Record) {
+		*self
+			.lines
+			.lock()
+			.unwrap()
+			.entry((record.module_path.to_string(), format!("{}", record.args)))
+			.or_insert(0) += 1;
+		if record.level >= self.level {
+			#[cfg(feature = "std")]
+			println!(
+				"{:<5} {} [{} : {}, {}] {}",
+				record.level.to_string(),
+				self.id,
+				record.module_path,
+				record.file,
+				record.line,
+				record.args
+			);
+		}
 	}
 }
 
