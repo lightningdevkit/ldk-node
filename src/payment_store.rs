@@ -205,7 +205,7 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::tests::test_utils::TestPersister;
+	use crate::test::utils::TestPersister;
 	use std::sync::Arc;
 
 	#[test]

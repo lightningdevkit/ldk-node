@@ -1,7 +1,10 @@
 use crate::io::KVStoreUnpersister;
+use crate::Config;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::Writeable;
 
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -61,4 +64,33 @@ impl KVStoreUnpersister for TestPersister {
 		self.did_persist.store(true, Ordering::SeqCst);
 		Ok(persisted_bytes_lock.remove(key).is_some())
 	}
+}
+
+pub fn random_storage_path() -> String {
+	let mut rng = thread_rng();
+	let rand_dir: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
+	format!("/tmp/{}", rand_dir)
+}
+
+pub fn random_port() -> u16 {
+	let mut rng = thread_rng();
+	rng.gen_range(5000..65535)
+}
+
+pub fn random_config(esplora_url: &str) -> Config {
+	let mut config = Config::default();
+
+	println!("Setting esplora server URL: {}", esplora_url);
+	config.esplora_server_url = format!("http://{}", esplora_url);
+
+	let rand_dir = random_storage_path();
+	println!("Setting random LDK storage dir: {}", rand_dir);
+	config.storage_dir_path = rand_dir;
+
+	let rand_port = random_port();
+	println!("Setting random LDK listening port: {}", rand_port);
+	let listening_address = format!("127.0.0.1:{}", rand_port);
+	config.listening_address = Some(listening_address);
+
+	config
 }

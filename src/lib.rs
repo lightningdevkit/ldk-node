@@ -74,7 +74,7 @@ mod logger;
 mod payment_store;
 mod peer_store;
 #[cfg(test)]
-mod tests;
+mod test;
 mod types;
 mod wallet;
 

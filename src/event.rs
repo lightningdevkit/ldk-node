@@ -554,7 +554,7 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::tests::test_utils::TestPersister;
+	use crate::test::utils::TestPersister;
 
 	#[test]
 	fn event_queue_persistence() {

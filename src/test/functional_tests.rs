@@ -1,5 +1,5 @@
-use crate::tests::test_utils::expect_event;
-use crate::{Builder, Config, Error, Event, PaymentDirection, PaymentStatus};
+use crate::test::utils::{expect_event, random_config};
+use crate::{Builder, Error, Event, PaymentDirection, PaymentStatus};
 
 use bitcoin::{Address, Amount, OutPoint, Txid};
 use bitcoind::bitcoincore_rpc::RpcApi;
@@ -8,8 +8,6 @@ use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
 use electrum_client::ElectrumApi;
 
 use once_cell::sync::OnceCell;
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
 
 use std::env;
 use std::sync::Mutex;
@@ -137,38 +135,17 @@ fn premine_and_distribute_funds(addrs: Vec<Address>, amount: Amount) {
 	generate_blocks_and_wait(1);
 }
 
-fn rand_config() -> Config {
-	let mut config = Config::default();
-
-	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
-
-	println!("Setting esplora server URL: {}", esplora_url);
-	config.esplora_server_url = format!("http://{}", esplora_url);
-
-	let mut rng = thread_rng();
-	let rand_dir: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-	let rand_path = format!("/tmp/{}", rand_dir);
-	println!("Setting random LDK storage dir: {}", rand_dir);
-	config.storage_dir_path = rand_path;
-
-	let rand_port: u16 = rng.gen_range(5000..8000);
-	println!("Setting random LDK listening port: {}", rand_port);
-	let listening_address = format!("127.0.0.1:{}", rand_port);
-	config.listening_address = Some(listening_address);
-
-	config
-}
-
 #[test]
 fn channel_full_cycle() {
 	println!("== Node A ==");
-	let config_a = rand_config();
+	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let config_a = random_config(esplora_url);
 	let node_a = Builder::from_config(config_a).build();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
 	println!("\n== Node B ==");
-	let config_b = rand_config();
+	let config_b = random_config(esplora_url);
 	let node_b = Builder::from_config(config_b).build();
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
@@ -317,13 +294,14 @@ fn channel_full_cycle() {
 #[test]
 fn channel_open_fails_when_funds_insufficient() {
 	println!("== Node A ==");
-	let config_a = rand_config();
+	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let config_a = random_config(&esplora_url);
 	let node_a = Builder::from_config(config_a).build();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
 	println!("\n== Node B ==");
-	let config_b = rand_config();
+	let config_b = random_config(&esplora_url);
 	let node_b = Builder::from_config(config_b).build();
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
@@ -344,7 +322,8 @@ fn channel_open_fails_when_funds_insufficient() {
 
 #[test]
 fn connect_to_public_testnet_esplora() {
-	let mut config = rand_config();
+	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let mut config = random_config(&esplora_url);
 	config.esplora_server_url = "https://blockstream.info/testnet/api".to_string();
 	config.network = bitcoin::Network::Testnet;
 	let node = Builder::from_config(config).build();
@@ -355,7 +334,8 @@ fn connect_to_public_testnet_esplora() {
 
 #[test]
 fn start_stop_reinit() {
-	let config = rand_config();
+	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let config = random_config(&esplora_url);
 	let node = Builder::from_config(config.clone()).build();
 	let expected_node_id = node.node_id();
 
