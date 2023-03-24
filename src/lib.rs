@@ -117,7 +117,7 @@ use lightning::routing::utxo::UtxoLookup;
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::ser::ReadableArgs;
 
-use lightning_background_processor::BackgroundProcessor;
+use lightning_background_processor::process_events_async;
 use lightning_background_processor::GossipSync as BPGossipSync;
 
 use lightning_transaction_sync::EsploraSyncClient;
@@ -583,9 +583,7 @@ impl Builder {
 /// upon [`Node::stop()`].
 struct Runtime {
 	tokio_runtime: Arc<tokio::runtime::Runtime>,
-	_background_processor: BackgroundProcessor,
-	stop_networking: Arc<AtomicBool>,
-	stop_wallet_sync: Arc<AtomicBool>,
+	stop_runtime: Arc<AtomicBool>,
 }
 
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
@@ -640,11 +638,10 @@ impl Node {
 
 		let runtime = run_lock.as_ref().unwrap();
 
-		// Stop wallet sync
-		runtime.stop_wallet_sync.store(true, Ordering::Release);
+		// Stop the runtime.
+		runtime.stop_runtime.store(true, Ordering::Release);
 
-		// Stop networking
-		runtime.stop_networking.store(true, Ordering::Release);
+		// Stop disconnect peers.
 		self.peer_manager.disconnect_all_peers();
 
 		// Drop the held runtimes.
@@ -660,6 +657,8 @@ impl Node {
 			Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
 
 		self.wallet.set_runtime(Arc::clone(&tokio_runtime));
+
+		let stop_runtime = Arc::new(AtomicBool::new(false));
 
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.wallet),
@@ -679,8 +678,7 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_logger = Arc::clone(&self.logger);
-		let stop_wallet_sync = Arc::new(AtomicBool::new(false));
-		let stop_sync = Arc::clone(&stop_wallet_sync);
+		let stop_sync = Arc::clone(&stop_runtime);
 
 		std::thread::spawn(move || {
 			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
@@ -711,7 +709,7 @@ impl Node {
 		});
 
 		let sync_logger = Arc::clone(&self.logger);
-		let stop_sync = Arc::clone(&stop_wallet_sync);
+		let stop_sync = Arc::clone(&stop_runtime);
 		tokio_runtime.spawn(async move {
 			loop {
 				if stop_sync.load(Ordering::Acquire) {
@@ -736,11 +734,10 @@ impl Node {
 			}
 		});
 
-		let stop_networking = Arc::new(AtomicBool::new(false));
 		if let Some(listening_address) = &self.config.listening_address {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
-			let stop_listen = Arc::clone(&stop_networking);
+			let stop_listen = Arc::clone(&stop_runtime);
 			let listening_address = listening_address.clone();
 
 			tokio_runtime.spawn(async move {
@@ -770,7 +767,7 @@ impl Node {
 		let connect_pm = Arc::clone(&self.peer_manager);
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
-		let stop_connect = Arc::clone(&stop_networking);
+		let stop_connect = Arc::clone(&stop_runtime);
 		tokio_runtime.spawn(async move {
 			let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
 			loop {
@@ -803,19 +800,45 @@ impl Node {
 		});
 
 		// Setup background processing
-		let _background_processor = BackgroundProcessor::start(
-			Arc::clone(&self.kv_store),
-			Arc::clone(&event_handler),
-			Arc::clone(&self.chain_monitor),
-			Arc::clone(&self.channel_manager),
-			BPGossipSync::p2p(Arc::clone(&self.gossip_sync)),
-			Arc::clone(&self.peer_manager),
-			Arc::clone(&self.logger),
-			Some(Arc::clone(&self.scorer)),
-		);
+		let background_persister = Arc::clone(&self.kv_store);
+		let background_event_handler = Arc::clone(&event_handler);
+		let background_chain_mon = Arc::clone(&self.chain_monitor);
+		let background_chan_man = Arc::clone(&self.channel_manager);
+		let background_gossip_sync = BPGossipSync::p2p(Arc::clone(&self.gossip_sync));
+		let background_peer_man = Arc::clone(&self.peer_manager);
+		let background_logger = Arc::clone(&self.logger);
+		let background_scorer = Arc::clone(&self.scorer);
+		let stop_background_processing = Arc::clone(&stop_runtime);
+		let sleeper = move |d| {
+			let stop = Arc::clone(&stop_background_processing);
+			Box::pin(async move {
+				if stop.load(Ordering::Acquire) {
+					true
+				} else {
+					tokio::time::sleep(d).await;
+					false
+				}
+			})
+		};
 
-		// TODO: frequently check back on background_processor if there was an error
-		Ok(Runtime { tokio_runtime, _background_processor, stop_networking, stop_wallet_sync })
+		tokio_runtime.spawn(async move {
+			process_events_async(
+				background_persister,
+				|e| background_event_handler.handle_event(e),
+				background_chain_mon,
+				background_chan_man,
+				background_gossip_sync,
+				background_peer_man,
+				background_logger,
+				Some(background_scorer),
+				sleeper,
+				true,
+			)
+			.await
+			.expect("Failed to process events");
+		});
+
+		Ok(Runtime { tokio_runtime, stop_runtime })
 	}
 
 	/// Blocks until the next event is available.

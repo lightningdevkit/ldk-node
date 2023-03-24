@@ -11,7 +11,6 @@ use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::events::Event as LdkEvent;
-use lightning::events::EventHandler as LdkEventHandler;
 use lightning::events::PaymentPurpose;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::PaymentHash;
@@ -276,14 +275,8 @@ where
 			_config,
 		}
 	}
-}
 
-impl<K: Deref + Clone, L: Deref> LdkEventHandler for EventHandler<K, L>
-where
-	K::Target: KVStore,
-	L::Target: Logger,
-{
-	fn handle_event(&self, event: LdkEvent) {
+	pub async fn handle_event(&self, event: LdkEvent) {
 		match event {
 			LdkEvent::FundingGenerationReady {
 				temporary_channel_id,

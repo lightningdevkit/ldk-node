@@ -13,7 +13,7 @@ lightning = { version = "0.0.115", features = ["max_level_trace", "std"] }
 lightning-invoice = { version = "0.23" }
 lightning-net-tokio = { version = "0.0.115" }
 lightning-persister = { version = "0.0.115" }
-lightning-background-processor = { version = "0.0.115" }
+lightning-background-processor = { version = "0.0.115", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.115" }
 lightning-transaction-sync = { version = "0.0.115", features = ["esplora-async-https"] }
 
@@ -21,7 +21,7 @@ lightning-transaction-sync = { version = "0.0.115", features = ["esplora-async-h
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
 #lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
 #lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-#lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["futures"] }
 #lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["esplora-async"] }
 
@@ -29,7 +29,7 @@ lightning-transaction-sync = { version = "0.0.115", features = ["esplora-async-h
 #lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
 #lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
 #lightning-persister = { path = "../rust-lightning/lightning-persister" }
-#lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
+#lightning-background-processor = { path = "../rust-lightning/lightning-background-processor", features = ["futures"] }
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
 
