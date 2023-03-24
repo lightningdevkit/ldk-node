@@ -1,144 +1,15 @@
+use crate::test::utils::*;
 use crate::test::utils::{expect_event, random_config};
 use crate::{Builder, Error, Event, PaymentDirection, PaymentStatus};
 
-use bitcoin::{Address, Amount, OutPoint, Txid};
-use bitcoind::bitcoincore_rpc::RpcApi;
-use electrsd::bitcoind::bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
-use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
-use electrum_client::ElectrumApi;
+use bitcoin::Amount;
 
-use once_cell::sync::OnceCell;
-
-use std::env;
-use std::sync::Mutex;
 use std::time::Duration;
-
-static BITCOIND: OnceCell<BitcoinD> = OnceCell::new();
-static ELECTRSD: OnceCell<ElectrsD> = OnceCell::new();
-static PREMINE: OnceCell<()> = OnceCell::new();
-static MINER_LOCK: Mutex<()> = Mutex::new(());
-
-fn get_bitcoind() -> &'static BitcoinD {
-	BITCOIND.get_or_init(|| {
-		let bitcoind_exe =
-			env::var("BITCOIND_EXE").ok().or_else(|| bitcoind::downloaded_exe_path().ok()).expect(
-				"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
-			);
-		let mut conf = bitcoind::Conf::default();
-		conf.network = "regtest";
-		BitcoinD::with_conf(bitcoind_exe, &conf).unwrap()
-	})
-}
-
-fn get_electrsd() -> &'static ElectrsD {
-	ELECTRSD.get_or_init(|| {
-		let bitcoind = get_bitcoind();
-		let electrs_exe =
-			env::var("ELECTRS_EXE").ok().or_else(electrsd::downloaded_exe_path).expect(
-				"you need to provide env var ELECTRS_EXE or specify an electrsd version feature",
-			);
-		let mut conf = electrsd::Conf::default();
-		conf.http_enabled = true;
-		conf.network = "regtest";
-		ElectrsD::with_conf(electrs_exe, &bitcoind, &conf).unwrap()
-	})
-}
-
-fn generate_blocks_and_wait(num: usize) {
-	let _miner = MINER_LOCK.lock().unwrap();
-	let cur_height = get_bitcoind().client.get_block_count().unwrap();
-	let address =
-		get_bitcoind().client.get_new_address(Some("test"), Some(AddressType::Legacy)).unwrap();
-	let _block_hashes = get_bitcoind().client.generate_to_address(num as u64, &address).unwrap();
-	wait_for_block(cur_height as usize + num);
-}
-
-fn wait_for_block(min_height: usize) {
-	let mut header = get_electrsd().client.block_headers_subscribe().unwrap();
-	loop {
-		if header.height >= min_height {
-			break;
-		}
-		header = exponential_backoff_poll(|| {
-			get_electrsd().trigger().unwrap();
-			get_electrsd().client.ping().unwrap();
-			get_electrsd().client.block_headers_pop().unwrap()
-		});
-	}
-}
-
-fn wait_for_tx(txid: Txid) {
-	let mut tx_res = get_electrsd().client.transaction_get(&txid);
-	loop {
-		if tx_res.is_ok() {
-			break;
-		}
-		tx_res = exponential_backoff_poll(|| {
-			get_electrsd().trigger().unwrap();
-			get_electrsd().client.ping().unwrap();
-			Some(get_electrsd().client.transaction_get(&txid))
-		});
-	}
-}
-
-fn wait_for_outpoint_spend(outpoint: OutPoint) {
-	let tx = get_electrsd().client.transaction_get(&outpoint.txid).unwrap();
-	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
-	let mut is_spent = !get_electrsd().client.script_get_history(&txout_script).unwrap().is_empty();
-	loop {
-		if is_spent {
-			break;
-		}
-
-		is_spent = exponential_backoff_poll(|| {
-			get_electrsd().trigger().unwrap();
-			get_electrsd().client.ping().unwrap();
-			Some(!get_electrsd().client.script_get_history(&txout_script).unwrap().is_empty())
-		});
-	}
-}
-
-fn exponential_backoff_poll<T, F>(mut poll: F) -> T
-where
-	F: FnMut() -> Option<T>,
-{
-	let mut delay = Duration::from_millis(64);
-	let mut tries = 0;
-	loop {
-		match poll() {
-			Some(data) => break data,
-			None if delay.as_millis() < 512 => {
-				delay = delay.mul_f32(2.0);
-			}
-
-			None => {}
-		}
-		assert!(tries < 10, "Reached max tries.");
-		tries += 1;
-		std::thread::sleep(delay);
-	}
-}
-
-fn premine_and_distribute_funds(addrs: Vec<Address>, amount: Amount) {
-	PREMINE.get_or_init(|| {
-		generate_blocks_and_wait(101);
-	});
-
-	for addr in addrs {
-		let txid = get_bitcoind()
-			.client
-			.send_to_address(&addr, amount, None, None, None, None, None, None)
-			.unwrap();
-		wait_for_tx(txid);
-	}
-
-	generate_blocks_and_wait(1);
-}
-
 #[test]
 fn channel_full_cycle() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
-	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
 	let config_a = random_config(esplora_url);
 	let node_a = Builder::from_config(config_a).build();
 	node_a.start().unwrap();
@@ -150,7 +21,12 @@ fn channel_full_cycle() {
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
-	premine_and_distribute_funds(vec![addr_a, addr_b], Amount::from_sat(100000));
+	premine_and_distribute_funds(
+		&bitcoind,
+		&electrsd,
+		vec![addr_a, addr_b],
+		Amount::from_sat(100000),
+	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 	assert_eq!(node_a.on_chain_balance().unwrap().get_spendable(), 100000);
@@ -170,10 +46,10 @@ fn channel_full_cycle() {
 		}
 	};
 
-	wait_for_tx(funding_txo.txid);
+	wait_for_tx(&electrsd, funding_txo.txid);
 
 	println!("\n .. generating blocks, syncing wallets .. ");
-	generate_blocks_and_wait(6);
+	generate_blocks_and_wait(&bitcoind, &electrsd, 6);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -276,9 +152,9 @@ fn channel_full_cycle() {
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(funding_txo.into_bitcoin_outpoint());
+	wait_for_outpoint_spend(&electrsd, funding_txo.into_bitcoin_outpoint());
 
-	generate_blocks_and_wait(1);
+	generate_blocks_and_wait(&bitcoind, &electrsd, 1);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -293,8 +169,9 @@ fn channel_full_cycle() {
 
 #[test]
 fn channel_open_fails_when_funds_insufficient() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
-	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
 	let config_a = random_config(&esplora_url);
 	let node_a = Builder::from_config(config_a).build();
 	node_a.start().unwrap();
@@ -306,7 +183,12 @@ fn channel_open_fails_when_funds_insufficient() {
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
-	premine_and_distribute_funds(vec![addr_a, addr_b], Amount::from_sat(100000));
+	premine_and_distribute_funds(
+		&bitcoind,
+		&electrsd,
+		vec![addr_a, addr_b],
+		Amount::from_sat(100000),
+	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 	assert_eq!(node_a.on_chain_balance().unwrap().get_spendable(), 100000);
@@ -322,7 +204,8 @@ fn channel_open_fails_when_funds_insufficient() {
 
 #[test]
 fn connect_to_public_testnet_esplora() {
-	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
 	let mut config = random_config(&esplora_url);
 	config.esplora_server_url = "https://blockstream.info/testnet/api".to_string();
 	config.network = bitcoin::Network::Testnet;
@@ -334,7 +217,8 @@ fn connect_to_public_testnet_esplora() {
 
 #[test]
 fn start_stop_reinit() {
-	let esplora_url = get_electrsd().esplora_url.as_ref().unwrap();
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
 	let config = random_config(&esplora_url);
 	let node = Builder::from_config(config.clone()).build();
 	let expected_node_id = node.node_id();
@@ -342,7 +226,7 @@ fn start_stop_reinit() {
 	let funding_address = node.new_funding_address().unwrap();
 	let expected_amount = Amount::from_sat(100000);
 
-	premine_and_distribute_funds(vec![funding_address], expected_amount);
+	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
 	assert_eq!(node.on_chain_balance().unwrap().get_total(), 0);
 
 	node.start().unwrap();
