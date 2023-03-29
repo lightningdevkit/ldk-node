@@ -17,13 +17,21 @@ description = "A ready-to-go node implementation built using LDK."
 #lightning-rapid-gossip-sync = { version = "0.0.114" }
 #lightning-transaction-sync = { version = "0.0.114", features = ["esplora-async"] }
 
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std"] }
-lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["esplora-async"] }
+#lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std"] }
+#lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+#lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["esplora-async"] }
+
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518", features = ["max_level_trace", "std"] }
+lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518" }
+lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518" }
+lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518" }
+lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518" }
+lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518" }
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518", features = ["esplora-async"] }
 
 #lightning = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common", features = ["max_level_trace", "std"] }
 #lightning-invoice = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common" }
