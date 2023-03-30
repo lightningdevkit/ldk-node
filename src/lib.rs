@@ -103,9 +103,9 @@ use logger::{log_error, log_info, FilesystemLogger, Logger};
 
 use lightning::chain::keysinterface::EntropySource;
 use lightning::chain::{chainmonitor, BestBlock, Confirm, Watch};
-use lightning::ln::channelmanager::{self, RecipientOnionFields};
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelDetails, ChannelManagerReadArgs, PaymentId, Retry,
+	self, ChainParameters, ChannelDetails, ChannelManagerReadArgs, PaymentId, RecipientOnionFields,
+	Retry,
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -843,7 +843,74 @@ impl Node {
 		self.channel_manager.list_channels()
 	}
 
-	/// Connect to a node and opens a new channel.
+	/// Connect to a node on the peer-to-peer network.
+	///
+	/// If `permanently` is set to `true`, we'll remember the peer and reconnect to it on restart.
+	pub fn connect(
+		&self, node_id: PublicKey, address: SocketAddr, permanently: bool,
+	) -> Result<(), Error> {
+		let runtime_lock = self.running.read().unwrap();
+		if runtime_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		let runtime = runtime_lock.as_ref().unwrap();
+
+		let peer_info = PeerInfo { pubkey: node_id, address };
+
+		let con_peer_pubkey = peer_info.pubkey;
+		let con_peer_addr = peer_info.address;
+		let con_success = Arc::new(AtomicBool::new(false));
+		let con_success_cloned = Arc::clone(&con_success);
+		let con_logger = Arc::clone(&self.logger);
+		let con_pm = Arc::clone(&self.peer_manager);
+
+		tokio::task::block_in_place(move || {
+			runtime.tokio_runtime.block_on(async move {
+				let res =
+					connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger)
+						.await;
+				con_success_cloned.store(res.is_ok(), Ordering::Release);
+			})
+		});
+
+		if !con_success.load(Ordering::Acquire) {
+			return Err(Error::ConnectionFailed);
+		}
+
+		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.pubkey, peer_info.address,);
+
+		if permanently {
+			self.peer_store.add_peer(peer_info)?;
+		}
+
+		Ok(())
+	}
+
+	/// Disconnects the peer with the given node id.
+	///
+	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
+	/// try to reconnect on restart.
+	pub fn disconnect(&self, counterparty_node_id: &PublicKey) -> Result<(), Error> {
+		let runtime_lock = self.running.read().unwrap();
+		if runtime_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
+
+		match self.peer_store.remove_peer(&counterparty_node_id) {
+			Ok(()) => {}
+			Err(e) => {
+				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
+			}
+		}
+
+		self.peer_manager.disconnect_by_node_id(*counterparty_node_id);
+		Ok(())
+	}
+
+	/// Connect to a node and open a new channel. Disconnects and re-connects are handled automatically
 	///
 	/// Disconnects and reconnects are handled automatically.
 	///
@@ -871,8 +938,8 @@ impl Node {
 
 		let peer_info = PeerInfo { pubkey: node_id, address };
 
-		let con_peer_pubkey = peer_info.pubkey.clone();
-		let con_peer_addr = peer_info.address.clone();
+		let con_peer_pubkey = peer_info.pubkey;
+		let con_peer_addr = peer_info.address;
 		let con_success = Arc::new(AtomicBool::new(false));
 		let con_success_cloned = Arc::clone(&con_success);
 		let con_logger = Arc::clone(&self.logger);
@@ -915,12 +982,12 @@ impl Node {
 			Some(user_config),
 		) {
 			Ok(_) => {
-				self.peer_store.add_peer(peer_info.clone())?;
 				log_info!(
 					self.logger,
 					"Initiated channel creation with peer {}. ",
 					peer_info.pubkey
 				);
+				self.peer_store.add_peer(peer_info)?;
 				Ok(())
 			}
 			Err(e) => {
