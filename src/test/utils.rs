@@ -294,8 +294,8 @@ pub fn random_config(esplora_url: &str) -> Config {
 
 	let rand_port = random_port();
 	println!("Setting random LDK listening port: {}", rand_port);
-	let listening_address = format!("127.0.0.1:{}", rand_port);
-	config.listening_address = Some(listening_address);
+	let listening_address_str = format!("127.0.0.1:{}", rand_port);
+	config.listening_address = Some(listening_address_str.parse().unwrap());
 
 	config
 }

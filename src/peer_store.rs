@@ -1,4 +1,3 @@
-use crate::hex_utils;
 use crate::io::{
 	KVStore, TransactionalWrite, PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_NAMESPACE,
 };
@@ -10,8 +9,7 @@ use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use bitcoin::secp256k1::PublicKey;
 
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Deref;
 use std::sync::RwLock;
 
@@ -196,28 +194,10 @@ impl Writeable for PeerInfo {
 	}
 }
 
-impl TryFrom<String> for PeerInfo {
-	type Error = Error;
-
-	fn try_from(peer_pubkey_and_ip_addr: String) -> Result<Self, Self::Error> {
-		if let Some((pubkey_str, peer_str)) = peer_pubkey_and_ip_addr.split_once('@') {
-			if let Some(pubkey) = hex_utils::to_compressed_pubkey(pubkey_str) {
-				if let Some(peer_addr) =
-					peer_str.to_socket_addrs().ok().and_then(|mut r| r.next()).map(|pa| pa)
-				{
-					return Ok(PeerInfo { pubkey, address: peer_addr });
-				}
-			}
-		}
-		Err(Error::PeerInfoParseFailed)
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::test::utils::{TestLogger, TestStore};
-	use proptest::prelude::*;
 	use std::str::FromStr;
 	use std::sync::Arc;
 
@@ -248,43 +228,5 @@ mod tests {
 		assert_eq!(peers[0], expected_peer_info);
 		assert_eq!(deser_peer_store.get_peer(&pubkey), Some(expected_peer_info));
 		assert!(!store.get_and_clear_did_persist());
-	}
-
-	#[test]
-	fn peer_info_parsing() {
-		let valid_peer_info_str =
-			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993@127.0.0.1:9738"
-				.to_string();
-
-		let pubkey = PublicKey::from_str(
-			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
-		)
-		.unwrap();
-		let address: SocketAddr = "127.0.0.1:9738".parse().unwrap();
-		let expected_peer_info = PeerInfo { pubkey, address };
-
-		assert_eq!(Ok(expected_peer_info), PeerInfo::try_from(valid_peer_info_str));
-
-		let invalid_peer_info_str1 =
-			"02-76607124-ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993@127.0.0.1:9738"
-				.to_string();
-		assert_eq!(Err(Error::PeerInfoParseFailed), PeerInfo::try_from(invalid_peer_info_str1));
-
-		let invalid_peer_info_str2 =
-			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993@333.0.0.1:9738"
-				.to_string();
-		assert_eq!(Err(Error::PeerInfoParseFailed), PeerInfo::try_from(invalid_peer_info_str2));
-
-		let invalid_peer_info_str3 =
-			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993@127.0.0.19738"
-				.to_string();
-		assert_eq!(Err(Error::PeerInfoParseFailed), PeerInfo::try_from(invalid_peer_info_str3));
-	}
-
-	proptest! {
-		#[test]
-		fn peer_info_parsing_doesnt_crash(s in "\\PC*") {
-			let _ = PeerInfo::try_from(s.to_string());
-		}
 	}
 }

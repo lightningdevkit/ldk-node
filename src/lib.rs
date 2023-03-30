@@ -28,6 +28,7 @@
 //! ```no_run
 //! use ldk_node::Builder;
 //! use ldk_node::lightning_invoice::Invoice;
+//! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use std::str::FromStr;
 //!
 //! fn main() {
@@ -44,10 +45,12 @@
 //!
 //! 	node.sync_wallets().unwrap();
 //!
-//! 	node.connect_open_channel("NODE_ID@PEER_ADDR:PORT", 10000, None, false).unwrap();
+//! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
+//! 	let node_addr = "IP_ADDR:PORT".parse().unwrap();
+//! 	node.connect_open_channel(node_id, node_addr, 10000, None, false).unwrap();
 //!
 //! 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
-//! 	node.send_payment(invoice).unwrap();
+//! 	node.send_payment(&invoice).unwrap();
 //!
 //! 	node.stop().unwrap();
 //! }
@@ -60,8 +63,8 @@
 //! [`send_payment`]: Node::send_payment
 //!
 #![deny(missing_docs)]
-#![deny(broken_intra_doc_links)]
-#![deny(private_intra_doc_links)]
+#![deny(rustdoc::broken_intra_doc_links)]
+#![deny(rustdoc::private_intra_doc_links)]
 #![allow(bare_trait_objects)]
 #![allow(ellipsis_inclusive_range_patterns)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
@@ -133,7 +136,7 @@ use bitcoin::BlockHash;
 
 use rand::Rng;
 
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryInto;
 use std::default::Default;
 use std::fs;
 use std::net::SocketAddr;
@@ -167,7 +170,7 @@ pub struct Config {
 	/// The used Bitcoin network.
 	pub network: bitcoin::Network,
 	/// The IP address and TCP port the node will listen on.
-	pub listening_address: Option<String>,
+	pub listening_address: Option<SocketAddr>,
 	/// The default CLTV expiry delta to be used for payments.
 	pub default_cltv_expiry_delta: u32,
 }
@@ -178,7 +181,7 @@ impl Default for Config {
 			storage_dir_path: "/tmp/ldk_node/".to_string(),
 			esplora_server_url: "http://localhost:3002".to_string(),
 			network: bitcoin::Network::Regtest,
-			listening_address: Some("0.0.0.0:9735".to_string()),
+			listening_address: Some("0.0.0.0:9735".parse().unwrap()),
 			default_cltv_expiry_delta: 144,
 		}
 	}
@@ -262,9 +265,8 @@ impl Builder {
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	///
-	/// Format: `ADDR:PORT`
 	/// Default: `0.0.0.0:9735`
-	pub fn set_listening_address(&mut self, listening_address: String) -> &mut Self {
+	pub fn set_listening_address(&mut self, listening_address: SocketAddr) -> &mut Self {
 		self.config.listening_address = Some(listening_address);
 		self
 	}
@@ -819,9 +821,9 @@ impl Node {
 		self.channel_manager.get_our_node_id()
 	}
 
-	/// Returns our own listening address and port.
-	pub fn listening_address(&self) -> Option<String> {
-		self.config.listening_address.clone()
+	/// Returns our own listening address.
+	pub fn listening_address(&self) -> Option<&SocketAddr> {
+		self.config.listening_address.as_ref()
 	}
 
 	/// Retrieve a new on-chain/funding address.
@@ -851,7 +853,7 @@ impl Node {
 	///
 	/// Returns a temporary channel id.
 	pub fn connect_open_channel(
-		&self, node_pubkey_and_address: &str, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: SocketAddr, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, announce_channel: bool,
 	) -> Result<(), Error> {
 		let runtime_lock = self.running.read().unwrap();
@@ -867,7 +869,7 @@ impl Node {
 			return Err(Error::InsufficientFunds);
 		}
 
-		let peer_info = PeerInfo::try_from(node_pubkey_and_address.to_string())?;
+		let peer_info = PeerInfo { pubkey: node_id, address };
 
 		let con_peer_pubkey = peer_info.pubkey.clone();
 		let con_peer_addr = peer_info.address.clone();
@@ -1005,7 +1007,7 @@ impl Node {
 	}
 
 	/// Send a payement given an invoice.
-	pub fn send_payment(&self, invoice: Invoice) -> Result<PaymentHash, Error> {
+	pub fn send_payment(&self, invoice: &Invoice) -> Result<PaymentHash, Error> {
 		if self.running.read().unwrap().is_none() {
 			return Err(Error::NotRunning);
 		}
@@ -1070,7 +1072,7 @@ impl Node {
 	/// This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
 	/// amount paid to be determined by the user.
 	pub fn send_payment_using_amount(
-		&self, invoice: Invoice, amount_msat: u64,
+		&self, invoice: &Invoice, amount_msat: u64,
 	) -> Result<PaymentHash, Error> {
 		if self.running.read().unwrap().is_none() {
 			return Err(Error::NotRunning);
@@ -1158,20 +1160,18 @@ impl Node {
 
 	/// Send a spontaneous, aka. "keysend", payment
 	pub fn send_spontaneous_payment(
-		&self, amount_msat: u64, node_id: &str,
+		&self, amount_msat: u64, node_id: &PublicKey,
 	) -> Result<PaymentHash, Error> {
 		if self.running.read().unwrap().is_none() {
 			return Err(Error::NotRunning);
 		}
-
-		let pubkey = hex_utils::to_compressed_pubkey(node_id).ok_or(Error::PeerInfoParseFailed)?;
 
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
 		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
 
 		let route_params = RouteParameters {
 			payment_params: PaymentParameters::from_node_id(
-				pubkey,
+				*node_id,
 				self.config.default_cltv_expiry_delta,
 			),
 			final_value_msat: amount_msat,
@@ -1330,7 +1330,7 @@ async fn do_connect_peer(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
-	log_info!(logger, "connecting to peer: {}@{}", pubkey, peer_addr);
+	log_info!(logger, "Connecting to peer: {}@{}", pubkey, peer_addr);
 	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
 	{
 		Some(connection_closed_future) => {
@@ -1338,7 +1338,7 @@ async fn do_connect_peer(
 			loop {
 				match futures::poll!(&mut connection_closed_future) {
 					std::task::Poll::Ready(_) => {
-						log_info!(logger, "peer connection closed: {}@{}", pubkey, peer_addr);
+						log_info!(logger, "Peer connection closed: {}@{}", pubkey, peer_addr);
 						return Err(Error::ConnectionFailed);
 					}
 					std::task::Poll::Pending => {}
@@ -1351,7 +1351,7 @@ async fn do_connect_peer(
 			}
 		}
 		None => {
-			log_error!(logger, "failed to connect to peer: {}@{}", pubkey, peer_addr);
+			log_error!(logger, "Failed to connect to peer: {}@{}", pubkey, peer_addr);
 			Err(Error::ConnectionFailed)
 		}
 	}
