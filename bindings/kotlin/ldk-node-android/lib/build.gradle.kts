@@ -60,7 +60,7 @@ afterEvaluate {
     publishing {
         publications {
             create<MavenPublication>("maven") {
-                groupId = "co.jurvis"
+                groupId = "org.lightningdevkit"
                 artifactId = "ldk-node-android"
                 version = libraryVersion
 
@@ -68,7 +68,7 @@ afterEvaluate {
                 pom {
                     name.set("ldk-node-android")
                     description.set(
-                        "Kotlin language bindings for LdkNode, a ready-to-go LDK node implementation"
+                        "LDK Node, a ready-to-go node implementation built using LDK."
                     )
                     url.set("https://lightningdevkit.org")
                     licenses {
@@ -94,9 +94,9 @@ afterEvaluate {
                         }
                     }
                     scm {
-                        connection.set("scm:git:github.com/jurvis/ldk-node.git")
-                        developerConnection.set("scm:git:ssh://github.com/jurvis/ldk-node.git")
-                        url.set("https://github.com/jurvis/ldk-node/tree/main")
+                        connection.set("scm:git:github.com/lightningdevkit/ldk-node.git")
+                        developerConnection.set("scm:git:ssh://github.com/lightningdevkit/ldk-node.git")
+                        url.set("https://github.com/lightningdevkit/ldk-node/tree/main")
                     }
                 }
             }
