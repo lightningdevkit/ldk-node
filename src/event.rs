@@ -19,7 +19,8 @@ use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
-use bitcoin::secp256k1::Secp256k1;
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bitcoin::OutPoint;
 use rand::{thread_rng, Rng};
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -47,6 +48,19 @@ pub enum Event {
 		payment_hash: PaymentHash,
 		/// The value, in thousandths of a satoshi, that has been received.
 		amount_msat: u64,
+	},
+	/// A channel has been created and is pending confirmation on-chain.
+	ChannelPending {
+		/// The `channel_id` of the channel.
+		channel_id: [u8; 32],
+		/// The `user_channel_id` of the channel.
+		user_channel_id: u128,
+		/// The `temporary_channel_id` this channel used to be known by during channel establishment.
+		former_temporary_channel_id: [u8; 32],
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The outpoint of the channel's funding transaction.
+		funding_txo: OutPoint,
 	},
 	/// A channel is ready to be used.
 	ChannelReady {
@@ -79,7 +93,14 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, channel_id, required),
 		(1, user_channel_id, required),
 	},
-	(4, ChannelClosed) => {
+	(4, ChannelPending) => {
+		(0, channel_id, required),
+		(1, user_channel_id, required),
+		(2, former_temporary_channel_id, required),
+		(3, counterparty_node_id, required),
+		(4, funding_txo, required),
+	},
+	(5, ChannelClosed) => {
 		(0, channel_id, required),
 		(1, user_channel_id, required),
 	};
@@ -607,20 +628,34 @@ where
 				}
 			}
 			LdkEvent::ChannelPending {
-				channel_id: _,
-				user_channel_id: _,
-				former_temporary_channel_id: _,
-				counterparty_node_id: _,
-				funding_txo: _,
+				channel_id,
+				user_channel_id,
+				former_temporary_channel_id,
+				counterparty_node_id,
+				funding_txo,
 			} => {
-				// TODO!
+				log_info!(
+					self.logger,
+					"New channel {} with counterparty {} has been created and is pending confirmation on chain.",
+					hex_utils::to_string(&channel_id),
+					counterparty_node_id,
+				);
+				self.event_queue
+					.add_event(Event::ChannelPending {
+						channel_id,
+						user_channel_id,
+						former_temporary_channel_id: former_temporary_channel_id.unwrap(),
+						counterparty_node_id,
+						funding_txo,
+					})
+					.expect("Failed to push to event queue");
 			}
 			LdkEvent::ChannelReady {
 				channel_id, user_channel_id, counterparty_node_id, ..
 			} => {
 				log_info!(
 					self.logger,
-					"Channel {} with {} ready to be used.",
+					"Channel {} with counterparty {} ready to be used.",
 					hex_utils::to_string(&channel_id),
 					counterparty_node_id,
 				);
