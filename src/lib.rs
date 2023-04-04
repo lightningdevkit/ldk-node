@@ -133,7 +133,7 @@ use bdk::template::Bip84;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, Txid};
 
 use rand::Rng;
 
@@ -850,8 +850,35 @@ impl Node {
 	}
 
 	/// Retrieve the current on-chain balance.
-	pub fn on_chain_balance(&self) -> Result<bdk::Balance, Error> {
+	pub fn onchain_balance(&self) -> Result<bdk::Balance, Error> {
 		self.wallet.get_balance()
+	}
+
+	/// Send an on-chain payment to the given address.
+	pub fn send_to_onchain_address(
+		&self, address: &bitcoin::Address, amount_sats: u64,
+	) -> Result<Txid, Error> {
+		let runtime_lock = self.running.read().unwrap();
+		if runtime_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		let cur_balance = self.wallet.get_balance()?;
+		if cur_balance.get_spendable() < amount_sats {
+			log_error!(self.logger, "Unable to send payment due to insufficient funds.");
+			return Err(Error::InsufficientFunds);
+		}
+		self.wallet.send_to_address(address, Some(amount_sats))
+	}
+
+	/// Send an on-chain payment to the given address, draining all the available funds.
+	pub fn send_all_to_onchain_address(&self, address: &bitcoin::Address) -> Result<Txid, Error> {
+		let runtime_lock = self.running.read().unwrap();
+		if runtime_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		self.wallet.send_to_address(address, None)
 	}
 
 	/// Retrieve a list of known channels.
