@@ -22,7 +22,7 @@ use bitcoin::bech32::u5;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, Signing};
-use bitcoin::{Script, Transaction, TxOut};
+use bitcoin::{Script, Transaction, TxOut, Txid};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -187,7 +187,7 @@ where
 		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
 			Ok(finalized) => {
 				if !finalized {
-					return Err(Error::FundingTxCreationFailed);
+					return Err(Error::OnchainTxCreationFailed);
 				}
 			}
 			Err(err) => {
@@ -206,6 +206,82 @@ where
 
 	pub(crate) fn get_balance(&self) -> Result<bdk::Balance, Error> {
 		Ok(self.inner.lock().unwrap().get_balance()?)
+	}
+
+	/// Send funds to the given address.
+	///
+	/// If `amount_msat_or_drain` is `None` the wallet will be drained, i.e., all available funds will be
+	/// spent.
+	pub(crate) fn send_to_address(
+		&self, address: &bitcoin::Address, amount_msat_or_drain: Option<u64>,
+	) -> Result<Txid, Error> {
+		let confirmation_target = ConfirmationTarget::Normal;
+		let fee_rate = self.estimate_fee_rate(confirmation_target);
+
+		let tx = {
+			let locked_wallet = self.inner.lock().unwrap();
+			let mut tx_builder = locked_wallet.build_tx();
+
+			if let Some(amount_sats) = amount_msat_or_drain {
+				tx_builder
+					.add_recipient(address.script_pubkey(), amount_sats)
+					.fee_rate(fee_rate)
+					.enable_rbf();
+			} else {
+				tx_builder
+					.drain_wallet()
+					.drain_to(address.script_pubkey())
+					.fee_rate(fee_rate)
+					.enable_rbf();
+			}
+
+			let mut psbt = match tx_builder.finish() {
+				Ok((psbt, _)) => {
+					log_trace!(self.logger, "Created PSBT: {:?}", psbt);
+					psbt
+				}
+				Err(err) => {
+					log_error!(self.logger, "Failed to create transaction: {}", err);
+					return Err(err.into());
+				}
+			};
+
+			match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+				Ok(finalized) => {
+					if !finalized {
+						return Err(Error::OnchainTxCreationFailed);
+					}
+				}
+				Err(err) => {
+					log_error!(self.logger, "Failed to create transaction: {}", err);
+					return Err(err.into());
+				}
+			}
+			psbt.extract_tx()
+		};
+
+		self.broadcast_transaction(&tx);
+
+		let txid = tx.txid();
+
+		if let Some(amount_sats) = amount_msat_or_drain {
+			log_info!(
+				self.logger,
+				"Created new transaction {} sending {}sats on-chain to address {}",
+				txid,
+				amount_sats,
+				address
+			);
+		} else {
+			log_info!(
+				self.logger,
+				"Created new transaction {} sending all available on-chain funds to address {}",
+				txid,
+				address
+			);
+		}
+
+		Ok(txid)
 	}
 
 	fn estimate_fee_rate(&self, confirmation_target: ConfirmationTarget) -> FeeRate {

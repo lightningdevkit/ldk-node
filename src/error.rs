@@ -7,8 +7,8 @@ pub enum Error {
 	AlreadyRunning,
 	/// Returned when trying to stop [`crate::Node`] while it is not running.
 	NotRunning,
-	/// The funding transaction could not be created.
-	FundingTxCreationFailed,
+	/// An on-chain transaction could not be created.
+	OnchainTxCreationFailed,
 	/// A network connection has been closed.
 	ConnectionFailed,
 	/// Payment of the given invoice has already been intiated.
@@ -44,8 +44,8 @@ impl fmt::Display for Error {
 		match *self {
 			Self::AlreadyRunning => write!(f, "Node is already running."),
 			Self::NotRunning => write!(f, "Node is not running."),
-			Self::FundingTxCreationFailed => {
-				write!(f, "Funding transaction could not be created.")
+			Self::OnchainTxCreationFailed => {
+				write!(f, "On-chain transaction could not be created.")
 			}
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::NonUniquePaymentHash => write!(f, "An invoice must not get payed twice."),
