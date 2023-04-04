@@ -4,7 +4,6 @@ use crate::{Builder, Error, Event, PaymentDirection, PaymentStatus};
 
 use bitcoin::Amount;
 
-use std::time::Duration;
 #[test]
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -36,13 +35,16 @@ fn channel_full_cycle() {
 	let node_b_addr = format!("{}@{}", node_b.node_id(), node_b.listening_address().unwrap());
 	node_a.connect_open_channel(&node_b_addr, 50000, true).unwrap();
 
-	let funding_txo = loop {
-		let details = node_a.list_channels();
+	expect_event!(node_a, ChannelPending);
 
-		if details.is_empty() || details[0].funding_txo.is_none() {
-			std::thread::sleep(Duration::from_secs(1));
-		} else {
-			break details[0].funding_txo.unwrap();
+	let funding_txo = match node_b.next_event() {
+		ref e @ Event::ChannelPending { funding_txo, .. } => {
+			println!("{} got event {:?}", std::stringify!(node_b), e);
+			node_b.event_handled();
+			funding_txo
+		}
+		ref e => {
+			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
 		}
 	};
 
@@ -168,7 +170,7 @@ fn channel_full_cycle() {
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(&electrsd, funding_txo.into_bitcoin_outpoint());
+	wait_for_outpoint_spend(&electrsd, funding_txo);
 
 	generate_blocks_and_wait(&bitcoind, &electrsd, 1);
 	node_a.sync_wallets().unwrap();
