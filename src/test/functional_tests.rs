@@ -20,20 +20,24 @@ fn channel_full_cycle() {
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
+	let premine_amount_sat = 100_000;
+
 	premine_and_distribute_funds(
 		&bitcoind,
 		&electrsd,
 		vec![addr_a, addr_b],
-		Amount::from_sat(100000),
+		Amount::from_sat(premine_amount_sat),
 	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_a.on_chain_balance().unwrap().get_spendable(), 100000);
-	assert_eq!(node_b.on_chain_balance().unwrap().get_spendable(), 100000);
+	assert_eq!(node_a.on_chain_balance().unwrap().get_spendable(), premine_amount_sat);
+	assert_eq!(node_b.on_chain_balance().unwrap().get_spendable(), premine_amount_sat);
 
 	println!("\nA -- connect_open_channel -> B");
+	let funding_amount_sat = 80_000;
+	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
 	let node_b_addr = format!("{}@{}", node_b.node_id(), node_b.listening_address().unwrap());
-	node_a.connect_open_channel(&node_b_addr, 50000, true).unwrap();
+	node_a.connect_open_channel(&node_b_addr, funding_amount_sat, Some(push_msat), true).unwrap();
 
 	expect_event!(node_a, ChannelPending);
 
@@ -55,10 +59,13 @@ fn channel_full_cycle() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
+	let onchain_fee_buffer_sat = 1500;
 	let node_a_balance = node_a.on_chain_balance().unwrap();
-	assert!(node_a_balance.get_spendable() < 50000);
-	assert!(node_a_balance.get_spendable() > 40000);
-	assert_eq!(node_b.on_chain_balance().unwrap().get_spendable(), 100000);
+	let node_a_upper_bound_sat = premine_amount_sat - funding_amount_sat;
+	let node_a_lower_bound_sat = premine_amount_sat - funding_amount_sat - onchain_fee_buffer_sat;
+	assert!(node_a_balance.get_spendable() < node_a_upper_bound_sat);
+	assert!(node_a_balance.get_spendable() > node_a_lower_bound_sat);
+	assert_eq!(node_b.on_chain_balance().unwrap().get_spendable(), premine_amount_sat);
 
 	expect_event!(node_a, ChannelReady);
 
@@ -74,8 +81,8 @@ fn channel_full_cycle() {
 	};
 
 	println!("\nB receive_payment");
-	let invoice_amount = 1000000;
-	let invoice = node_b.receive_payment(invoice_amount, &"asdf", 9217).unwrap();
+	let invoice_amount_1_msat = 1000000;
+	let invoice = node_b.receive_payment(invoice_amount_1_msat, &"asdf", 9217).unwrap();
 
 	println!("\nA send_payment");
 	let payment_hash = node_a.send_payment(invoice.clone()).unwrap();
@@ -100,27 +107,27 @@ fn channel_full_cycle() {
 	expect_event!(node_b, PaymentReceived);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
 	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Assert we fail duplicate outbound payments.
 	assert_eq!(Err(Error::NonUniquePaymentHash), node_a.send_payment(invoice));
 
 	// Test under-/overpayment
-	let invoice_amount = 1000000;
-	let invoice = node_b.receive_payment(invoice_amount, &"asdf", 9217).unwrap();
+	let invoice_amount_2_msat = 1000_000;
+	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 
-	let underpaid_amount = invoice_amount - 1;
+	let underpaid_amount = invoice_amount_2_msat - 1;
 	assert_eq!(
 		Err(Error::InvalidAmount),
 		node_a.send_payment_using_amount(invoice, underpaid_amount)
 	);
 
-	let invoice = node_b.receive_payment(invoice_amount, &"asdf", 9217).unwrap();
-	let overpaid_amount = invoice_amount + 100;
-	let payment_hash = node_a.send_payment_using_amount(invoice, overpaid_amount).unwrap();
+	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let overpaid_amount_msat = invoice_amount_2_msat + 100;
+	let payment_hash = node_a.send_payment_using_amount(invoice, overpaid_amount_msat).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
@@ -132,20 +139,20 @@ fn channel_full_cycle() {
 			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
 		}
 	};
-	assert_eq!(received_amount, overpaid_amount);
+	assert_eq!(received_amount, overpaid_amount_msat);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
 	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
 
 	// Test "zero-amount" invoice payment
 	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
-	let determined_amount = 1234567;
+	let determined_amount_msat = 1234_567;
 	assert_eq!(Err(Error::InvalidInvoice), node_a.send_payment(variable_amount_invoice.clone()));
 	let payment_hash =
-		node_a.send_payment_using_amount(variable_amount_invoice, determined_amount).unwrap();
+		node_a.send_payment_using_amount(variable_amount_invoice, determined_amount_msat).unwrap();
 
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.next_event() {
@@ -158,13 +165,13 @@ fn channel_full_cycle() {
 			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
 		}
 	};
-	assert_eq!(received_amount, determined_amount);
+	assert_eq!(received_amount, determined_amount_msat);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
 	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
 
 	node_b.close_channel(&channel_id, &node_a.node_id()).unwrap();
 	expect_event!(node_a, ChannelClosed);
@@ -176,8 +183,18 @@ fn channel_full_cycle() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert!(node_a.on_chain_balance().unwrap().get_spendable() > 90000);
-	assert_eq!(node_b.on_chain_balance().unwrap().get_spendable(), 103234);
+	let sum_of_all_payments_sat =
+		(push_msat + invoice_amount_1_msat + overpaid_amount_msat + determined_amount_msat) / 1000;
+	let node_a_upper_bound_sat =
+		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
+	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
+	assert!(node_a.on_chain_balance().unwrap().get_spendable() > node_a_lower_bound_sat);
+	assert!(node_a.on_chain_balance().unwrap().get_spendable() < node_a_upper_bound_sat);
+	let expected_final_amount_node_b_sat = premine_amount_sat + sum_of_all_payments_sat;
+	assert_eq!(
+		node_b.on_chain_balance().unwrap().get_spendable(),
+		expected_final_amount_node_b_sat
+	);
 
 	node_a.stop().unwrap();
 	println!("\nA stopped");
@@ -201,22 +218,24 @@ fn channel_open_fails_when_funds_insufficient() {
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
+	let premine_amount_sat = 100_000;
+
 	premine_and_distribute_funds(
 		&bitcoind,
 		&electrsd,
 		vec![addr_a, addr_b],
-		Amount::from_sat(100000),
+		Amount::from_sat(premine_amount_sat),
 	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_a.on_chain_balance().unwrap().get_spendable(), 100000);
-	assert_eq!(node_b.on_chain_balance().unwrap().get_spendable(), 100000);
+	assert_eq!(node_a.on_chain_balance().unwrap().get_spendable(), premine_amount_sat);
+	assert_eq!(node_b.on_chain_balance().unwrap().get_spendable(), premine_amount_sat);
 
 	println!("\nA -- connect_open_channel -> B");
 	let node_b_addr = format!("{}@{}", node_b.node_id(), node_b.listening_address().unwrap());
 	assert_eq!(
 		Err(Error::InsufficientFunds),
-		node_a.connect_open_channel(&node_b_addr, 120000, true)
+		node_a.connect_open_channel(&node_b_addr, 120000, None, true)
 	);
 }
 
