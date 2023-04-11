@@ -44,7 +44,7 @@
 //!
 //! 	node.sync_wallets().unwrap();
 //!
-//! 	node.connect_open_channel("NODE_ID@PEER_ADDR:PORT", 10000, false).unwrap();
+//! 	node.connect_open_channel("NODE_ID@PEER_ADDR:PORT", 10000, None, false).unwrap();
 //!
 //! 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
 //! 	node.send_payment(invoice).unwrap();
@@ -841,11 +841,18 @@ impl Node {
 		self.channel_manager.list_channels()
 	}
 
-	/// Connect to a node and open a new channel. Disconnects and re-connects are handled automatically
+	/// Connect to a node and opens a new channel.
 	///
-	/// Returns a temporary channel id
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// Returns a temporary channel id.
 	pub fn connect_open_channel(
-		&self, node_pubkey_and_address: &str, channel_amount_sats: u64, announce_channel: bool,
+		&self, node_pubkey_and_address: &str, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, announce_channel: bool,
 	) -> Result<(), Error> {
 		let runtime_lock = self.running.read().unwrap();
 		if runtime_lock.is_none() {
@@ -895,12 +902,13 @@ impl Node {
 			..Default::default()
 		};
 
+		let push_msat = push_to_counterparty_msat.unwrap_or(0);
 		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
 
 		match self.channel_manager.create_channel(
 			peer_info.pubkey,
 			channel_amount_sats,
-			0,
+			push_msat,
 			user_channel_id,
 			Some(user_config),
 		) {

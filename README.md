@@ -26,7 +26,7 @@ fn main() {
 	
 	node.sync_wallets().unwrap();
 
-	node.connect_open_channel("NODE_ID@PEER_ADDR:PORT", 10000, false).unwrap();
+	node.connect_open_channel("NODE_ID@PEER_ADDR:PORT", 10000, None, false).unwrap();
 
 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
 	node.send_payment(invoice).unwrap();
