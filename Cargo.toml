@@ -33,14 +33,6 @@ lightning-background-processor = { git = "https://github.com/lightningdevkit/rus
 lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518" }
 lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev="7b85ebadb64058127350b83fb4b76dcb409ea518", features = ["esplora-async"] }
 
-#lightning = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common", features = ["max_level_trace", "std"] }
-#lightning-invoice = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common" }
-#lightning-net-tokio = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common" }
-#lightning-persister = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common" }
-#lightning-background-processor = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common" }
-#lightning-rapid-gossip-sync = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common" }
-#lightning-transaction-sync = { git = "https://github.com/tnull/rust-lightning", branch="2023-03-expose-impl-writeable-tlv-based-enum-common", features = ["esplora-async"] }
-
 #lightning = { path = "../rust-lightning/lightning", features = ["max_level_trace", "std"] }
 #lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
 #lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
@@ -49,7 +41,7 @@ lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-li
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
 
-bdk = { version = "=0.27.1", default-features = false, features = ["async-interface", "use-esplora-async", "sqlite-bundled"]}
+bdk = { version = "0.27.1", default-features = false, features = ["async-interface", "use-esplora-async", "sqlite-bundled"]}
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.28.0", features = ["bundled"] }
 bitcoin = "0.29.2"
@@ -59,13 +51,14 @@ chrono = "0.4"
 futures = "0.3"
 serde_json = { version = "1.0" }
 tokio = { version = "1", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
-esplora-client = { version = "=0.3", default-features = false }
+esplora-client = { version = "0.4", default-features = false }
+libc = "0.2"
 
 [dev-dependencies]
 electrsd = { version = "0.22.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_23_0"] }
 electrum-client = "0.12.0"
-once_cell = "1.16.0"
 proptest = "1.0.0"
+regex = "1.5.6"
 
 [profile.release]
 panic = "abort"
