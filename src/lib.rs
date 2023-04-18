@@ -100,7 +100,7 @@ use logger::{log_error, log_info, FilesystemLogger, Logger};
 
 use lightning::chain::keysinterface::EntropySource;
 use lightning::chain::{chainmonitor, BestBlock, Confirm, Watch};
-use lightning::ln::channelmanager;
+use lightning::ln::channelmanager::{self, RecipientOnionFields};
 use lightning::ln::channelmanager::{
 	ChainParameters, ChannelDetails, ChannelManagerReadArgs, PaymentId, Retry,
 };
@@ -1098,16 +1098,11 @@ impl Node {
 		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
 
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let recipient_fields = RecipientOnionFields { payment_secret };
 
 		match self
 			.channel_manager
-			.send_payment_with_retry(
-				payment_hash,
-				&payment_secret,
-				payment_id,
-				route_params,
-				retry_strategy,
-			)
+			.send_payment(payment_hash, recipient_fields, payment_id, route_params, retry_strategy)
 			.map_err(payment::PaymentError::Sending)
 		{
 			Ok(_payment_id) => {
@@ -1173,9 +1168,11 @@ impl Node {
 			),
 			final_value_msat: amount_msat,
 		};
+		let recipient_fields = RecipientOnionFields { payment_secret: None };
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(
 			Some(payment_preimage),
+			recipient_fields,
 			PaymentId(payment_hash.0),
 			route_params,
 			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
