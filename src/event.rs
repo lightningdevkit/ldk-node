@@ -10,13 +10,13 @@ use crate::io::{
 use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
+use lightning::events::Event as LdkEvent;
+use lightning::events::EventHandler as LdkEventHandler;
+use lightning::events::PaymentPurpose;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::PaymentHash;
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
-use lightning::util::events::Event as LdkEvent;
-use lightning::util::events::EventHandler as LdkEventHandler;
-use lightning::util::events::PaymentPurpose;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use bitcoin::secp256k1::Secp256k1;
@@ -329,6 +329,7 @@ where
 				receiver_node_id: _,
 				via_channel_id: _,
 				via_user_channel_id: _,
+				claim_deadline: _,
 			} => {
 				if let Some(info) = self.payment_store.get(&payment_hash) {
 					if info.status == PaymentStatus::Succeeded {
@@ -548,6 +549,7 @@ where
 				next_channel_id,
 				fee_earned_msat,
 				claim_from_onchain_tx,
+				outbound_amount_forwarded_msat,
 			} => {
 				let read_only_network_graph = self.network_graph.read_only();
 				let nodes = read_only_network_graph.nodes();
@@ -583,23 +585,35 @@ where
 					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
 				let fee_earned = fee_earned_msat.unwrap_or(0);
+				let outbound_amount_forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
 				if claim_from_onchain_tx {
 					log_info!(
 						self.logger,
-						"Forwarded payment{}{}, earning {}msat in fees from claiming onchain.",
+						"Forwarded payment{}{} of {}msat, earning {}msat in fees from claiming onchain.",
 						from_prev_str,
 						to_next_str,
+						outbound_amount_forwarded_msat,
 						fee_earned,
 					);
 				} else {
 					log_info!(
 						self.logger,
-						"Forwarded payment{}{}, earning {}msat in fees.",
+						"Forwarded payment{}{} of {}msat, earning {}msat in fees.",
 						from_prev_str,
 						to_next_str,
+						outbound_amount_forwarded_msat,
 						fee_earned,
 					);
 				}
+			}
+			LdkEvent::ChannelPending {
+				channel_id: _,
+				user_channel_id: _,
+				former_temporary_channel_id: _,
+				counterparty_node_id: _,
+				funding_txo: _,
+			} => {
+				// TODO!
 			}
 			LdkEvent::ChannelReady {
 				channel_id, user_channel_id, counterparty_node_id, ..
