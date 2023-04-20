@@ -78,6 +78,7 @@ mod test;
 mod types;
 mod wallet;
 
+pub use bip39;
 pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
@@ -188,6 +189,7 @@ impl Default for Config {
 enum WalletEntropySource {
 	SeedFile(String),
 	SeedBytes([u8; WALLET_KEYS_SEED_LEN]),
+	Bip39Mnemonic { mnemonic: bip39::Mnemonic, passphrase: Option<String> },
 }
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
@@ -224,6 +226,16 @@ impl Builder {
 	/// Configures the [`Node`] instance to source its wallet entropy from the given seed bytes.
 	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: [u8; WALLET_KEYS_SEED_LEN]) -> &mut Self {
 		self.entropy_source = Some(WalletEntropySource::SeedBytes(seed_bytes));
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
+	///
+	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+	pub fn set_entropy_bip39_mnemonic(
+		&mut self, mnemonic: bip39::Mnemonic, passphrase: Option<String>,
+	) -> &mut Self {
+		self.entropy_source = Some(WalletEntropySource::Bip39Mnemonic { mnemonic, passphrase });
 		self
 	}
 
@@ -291,6 +303,10 @@ impl Builder {
 				WalletEntropySource::SeedFile(seed_path) => {
 					io::utils::read_or_generate_seed_file(seed_path)
 				}
+				WalletEntropySource::Bip39Mnemonic { mnemonic, passphrase } => match passphrase {
+					Some(passphrase) => mnemonic.to_seed(passphrase),
+					None => mnemonic.to_seed(""),
+				},
 			}
 		} else {
 			// Default to read or generate from the default location generate a seed file.

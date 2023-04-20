@@ -41,10 +41,11 @@ lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-li
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
 
-bdk = { version = "0.28.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled"]}
+bdk = { version = "0.28.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.28.0", features = ["bundled"] }
 bitcoin = "0.29.2"
+bip39 = "2.0.0"
 
 rand = "0.8.5"
 chrono = "0.4"
