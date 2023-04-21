@@ -224,6 +224,7 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `onchain_wallet_sync_interval_secs`    | 60               |
 /// | `wallet_sync_interval_secs`            | 20               |
 /// | `fee_rate_cache_update_interval_secs`  | 600              |
+/// | `trusted_peers_0conf`                  | []               |
 /// | `log_level`                            | `Debug`          |
 ///
 pub struct Config {
@@ -247,6 +248,12 @@ pub struct Config {
 	///
 	/// **Note:** A minimum of 10 seconds is always enforced.
 	pub fee_rate_cache_update_interval_secs: u64,
+	/// A list of peers that we allow to establish zero confirmation channels to us.
+	///
+	/// **Note:** Allowing payments via zero-confirmation channels is potentially insecure if the
+	/// funding transaction ends up never being confirmed on-chain. Zero-confirmation channels
+	/// should therefore only be accepted from trusted peers.
+	pub trusted_peers_0conf: Vec<PublicKey>,
 	/// The level at which we log messages.
 	///
 	/// Any messages below this level will be excluded from the logs.
@@ -263,6 +270,7 @@ impl Default for Config {
 			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
 			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
 			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
+			trusted_peers_0conf: Vec::new(),
 			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
@@ -569,6 +577,11 @@ impl Builder {
 		// Initialize the ChannelManager
 		let mut user_config = UserConfig::default();
 		user_config.channel_handshake_limits.force_announced_channel_preference = false;
+		if !config.trusted_peers_0conf.is_empty() {
+			// Manually accept inbound channels if we expect 0conf channel requests, avoid
+			// generating the events otherwise.
+			user_config.manually_accept_inbound_channels = true;
+		}
 		let channel_manager = {
 			if let Ok(mut reader) = kv_store
 				.read(CHANNEL_MANAGER_PERSISTENCE_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_KEY)

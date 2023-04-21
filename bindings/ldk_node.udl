@@ -10,6 +10,7 @@ dictionary Config {
 	u64 wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;
 	LogLevel log_level;
+	sequence<PublicKey> trusted_peers_0conf;
 };
 
 interface Builder {
