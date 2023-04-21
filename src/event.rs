@@ -23,7 +23,7 @@ use bitcoin::OutPoint;
 use rand::{thread_rng, Rng};
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 /// An event emitted by [`Node`], which should be handled by the user.
@@ -247,7 +247,7 @@ where
 	network_graph: Arc<NetworkGraph>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore<K, L>>,
-	tokio_runtime: Arc<tokio::runtime::Runtime>,
+	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	_config: Arc<Config>,
 }
@@ -261,7 +261,7 @@ where
 		wallet: Arc<Wallet<bdk::database::SqliteDatabase>>, event_queue: Arc<EventQueue<K, L>>,
 		channel_manager: Arc<ChannelManager>, network_graph: Arc<NetworkGraph>,
 		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
-		tokio_runtime: Arc<tokio::runtime::Runtime>, logger: L, _config: Arc<Config>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, _config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -271,7 +271,7 @@ where
 			keys_manager,
 			payment_store,
 			logger,
-			tokio_runtime,
+			runtime,
 			_config,
 		}
 	}
@@ -531,12 +531,17 @@ where
 				let forwarding_channel_manager = self.channel_manager.clone();
 				let min = time_forwardable.as_millis() as u64;
 
-				self.tokio_runtime.spawn(async move {
-					let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
-					tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
+				let runtime_lock = self.runtime.read().unwrap();
+				debug_assert!(runtime_lock.is_some());
 
-					forwarding_channel_manager.process_pending_htlc_forwards();
-				});
+				if let Some(runtime) = runtime_lock.as_ref() {
+					runtime.spawn(async move {
+						let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
+						tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
+
+						forwarding_channel_manager.process_pending_htlc_forwards();
+					});
+				}
 			}
 			LdkEvent::SpendableOutputs { outputs } => {
 				// TODO: We should eventually remember the outputs and supply them to the wallet's coin selection, once BDK allows us to do so.

@@ -347,7 +347,13 @@ impl Builder {
 			EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
 				.with_concurrency(BDK_CLIENT_CONCURRENCY);
 
-		let wallet = Arc::new(Wallet::new(blockchain, bdk_wallet, Arc::clone(&logger)));
+		let runtime = Arc::new(RwLock::new(None));
+		let wallet = Arc::new(Wallet::new(
+			blockchain,
+			bdk_wallet,
+			Arc::clone(&runtime),
+			Arc::clone(&logger),
+		));
 
 		let kv_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
 
@@ -556,10 +562,11 @@ impl Builder {
 			}
 		};
 
-		let running = RwLock::new(None);
+		let stop_running = Arc::new(AtomicBool::new(false));
 
 		Node {
-			running,
+			runtime,
+			stop_running,
 			config,
 			wallet,
 			tx_sync,
@@ -579,18 +586,12 @@ impl Builder {
 	}
 }
 
-/// Wraps all objects that need to be preserved during the run time of [`Node`]. Will be dropped
-/// upon [`Node::stop()`].
-struct Runtime {
-	tokio_runtime: Arc<tokio::runtime::Runtime>,
-	stop_runtime: Arc<AtomicBool>,
-}
-
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
 pub struct Node {
-	running: RwLock<Option<Runtime>>,
+	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+	stop_running: Arc<AtomicBool>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
@@ -616,49 +617,15 @@ impl Node {
 	/// a thread-safe manner.
 	pub fn start(&self) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
-		let mut run_lock = self.running.write().unwrap();
-		if run_lock.is_some() {
+		let mut runtime_lock = self.runtime.write().unwrap();
+		if runtime_lock.is_some() {
 			// We're already running.
 			return Err(Error::AlreadyRunning);
 		}
 
-		let runtime = self.setup_runtime()?;
-		*run_lock = Some(runtime);
-		Ok(())
-	}
+		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
-	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].
-	///
-	/// After this returns most API methods will return [`Error::NotRunning`].
-	pub fn stop(&self) -> Result<(), Error> {
-		let mut run_lock = self.running.write().unwrap();
-		if run_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let runtime = run_lock.as_ref().unwrap();
-
-		// Stop the runtime.
-		runtime.stop_runtime.store(true, Ordering::Release);
-
-		// Stop disconnect peers.
-		self.peer_manager.disconnect_all_peers();
-
-		// Drop the held runtimes.
-		self.wallet.drop_runtime();
-
-		// Drop the runtime, which stops the background processor and any possibly remaining tokio threads.
-		*run_lock = None;
-		Ok(())
-	}
-
-	fn setup_runtime(&self) -> Result<Runtime, Error> {
-		let tokio_runtime =
-			Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
-
-		self.wallet.set_runtime(Arc::clone(&tokio_runtime));
-
-		let stop_runtime = Arc::new(AtomicBool::new(false));
+		let stop_running = Arc::new(AtomicBool::new(false));
 
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.wallet),
@@ -667,7 +634,7 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
-			Arc::clone(&tokio_runtime),
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
 		));
@@ -678,7 +645,7 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_logger = Arc::clone(&self.logger);
-		let stop_sync = Arc::clone(&stop_runtime);
+		let stop_sync = Arc::clone(&stop_running);
 
 		std::thread::spawn(move || {
 			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
@@ -709,8 +676,8 @@ impl Node {
 		});
 
 		let sync_logger = Arc::clone(&self.logger);
-		let stop_sync = Arc::clone(&stop_runtime);
-		tokio_runtime.spawn(async move {
+		let stop_sync = Arc::clone(&stop_running);
+		runtime.spawn(async move {
 			loop {
 				if stop_sync.load(Ordering::Acquire) {
 					return;
@@ -737,10 +704,10 @@ impl Node {
 		if let Some(listening_address) = &self.config.listening_address {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
-			let stop_listen = Arc::clone(&stop_runtime);
+			let stop_listen = Arc::clone(&stop_running);
 			let listening_address = listening_address.clone();
 
-			tokio_runtime.spawn(async move {
+			runtime.spawn(async move {
 				let listener =
 					tokio::net::TcpListener::bind(listening_address).await.expect(
 						"Failed to bind to listen address/port - is something else already listening on it?",
@@ -767,8 +734,8 @@ impl Node {
 		let connect_pm = Arc::clone(&self.peer_manager);
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
-		let stop_connect = Arc::clone(&stop_runtime);
-		tokio_runtime.spawn(async move {
+		let stop_connect = Arc::clone(&stop_running);
+		runtime.spawn(async move {
 			let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
 			loop {
 				if stop_connect.load(Ordering::Acquire) {
@@ -808,7 +775,7 @@ impl Node {
 		let background_peer_man = Arc::clone(&self.peer_manager);
 		let background_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
-		let stop_background_processing = Arc::clone(&stop_runtime);
+		let stop_background_processing = Arc::clone(&stop_running);
 		let sleeper = move |d| {
 			let stop = Arc::clone(&stop_background_processing);
 			Box::pin(async move {
@@ -821,7 +788,7 @@ impl Node {
 			})
 		};
 
-		tokio_runtime.spawn(async move {
+		runtime.spawn(async move {
 			process_events_async(
 				background_persister,
 				|e| background_event_handler.handle_event(e),
@@ -838,7 +805,23 @@ impl Node {
 			.expect("Failed to process events");
 		});
 
-		Ok(Runtime { tokio_runtime, stop_runtime })
+		*runtime_lock = Some(runtime);
+		Ok(())
+	}
+
+	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].
+	///
+	/// After this returns most API methods will return [`Error::NotRunning`].
+	pub fn stop(&self) -> Result<(), Error> {
+		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
+		// Stop the runtime.
+		self.stop_running.store(true, Ordering::Release);
+
+		// Stop disconnect peers.
+		self.peer_manager.disconnect_all_peers();
+
+		runtime.shutdown_timeout(Duration::from_secs(10));
+		Ok(())
 	}
 
 	/// Blocks until the next event is available.
@@ -915,12 +898,11 @@ impl Node {
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddr, permanently: bool,
 	) -> Result<(), Error> {
-		let runtime_lock = self.running.read().unwrap();
-		if runtime_lock.is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
-
-		let runtime = runtime_lock.as_ref().unwrap();
+		let runtime = rt_lock.as_ref().unwrap();
 
 		let peer_info = PeerInfo { pubkey: node_id, address };
 
@@ -932,7 +914,7 @@ impl Node {
 		let con_pm = Arc::clone(&self.peer_manager);
 
 		tokio::task::block_in_place(move || {
-			runtime.tokio_runtime.block_on(async move {
+			runtime.block_on(async move {
 				let res =
 					connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger)
 						.await;
@@ -958,8 +940,8 @@ impl Node {
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
 	pub fn disconnect(&self, counterparty_node_id: &PublicKey) -> Result<(), Error> {
-		let runtime_lock = self.running.read().unwrap();
-		if runtime_lock.is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
@@ -989,12 +971,11 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddr, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, announce_channel: bool,
 	) -> Result<(), Error> {
-		let runtime_lock = self.running.read().unwrap();
-		if runtime_lock.is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
-
-		let runtime = runtime_lock.as_ref().unwrap();
+		let runtime = rt_lock.as_ref().unwrap();
 
 		let cur_balance = self.wallet.get_balance()?;
 		if cur_balance.get_spendable() < channel_amount_sats {
@@ -1012,7 +993,7 @@ impl Node {
 		let con_pm = Arc::clone(&self.peer_manager);
 
 		tokio::task::block_in_place(move || {
-			runtime.tokio_runtime.block_on(async move {
+			runtime.block_on(async move {
 				let res =
 					connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger)
 						.await;
@@ -1067,10 +1048,12 @@ impl Node {
 	///
 	/// Note that the wallets will be also synced regularly in the background.
 	pub fn sync_wallets(&self) -> Result<(), Error> {
-		let runtime_lock = self.running.read().unwrap();
-		if runtime_lock.is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
+		let runtime = rt_lock.as_ref().unwrap();
+
 		let wallet = Arc::clone(&self.wallet);
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
@@ -1081,7 +1064,6 @@ impl Node {
 			&*sync_cmon as &(dyn Confirm + Sync + Send),
 		];
 
-		let runtime = runtime_lock.as_ref().unwrap();
 		tokio::task::block_in_place(move || {
 			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
 				async move {
@@ -1106,7 +1088,7 @@ impl Node {
 
 		let sync_logger = Arc::clone(&self.logger);
 		tokio::task::block_in_place(move || {
-			runtime.tokio_runtime.block_on(async move {
+			runtime.block_on(async move {
 				let now = Instant::now();
 				match tx_sync.sync(confirmables).await {
 					Ok(()) => {
@@ -1141,7 +1123,8 @@ impl Node {
 
 	/// Send a payement given an invoice.
 	pub fn send_payment(&self, invoice: &Invoice) -> Result<PaymentHash, Error> {
-		if self.running.read().unwrap().is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
@@ -1207,7 +1190,8 @@ impl Node {
 	pub fn send_payment_using_amount(
 		&self, invoice: &Invoice, amount_msat: u64,
 	) -> Result<PaymentHash, Error> {
-		if self.running.read().unwrap().is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
@@ -1295,7 +1279,8 @@ impl Node {
 	pub fn send_spontaneous_payment(
 		&self, amount_msat: u64, node_id: &PublicKey,
 	) -> Result<PaymentHash, Error> {
-		if self.running.read().unwrap().is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
