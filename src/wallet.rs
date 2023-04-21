@@ -38,7 +38,7 @@ where
 	inner: Mutex<bdk::Wallet<D>>,
 	// A cache storing the most recently retrieved fee rate estimations.
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
-	tokio_runtime: RwLock<Option<Arc<tokio::runtime::Runtime>>>,
+	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	sync_lock: (Mutex<()>, Condvar),
 	logger: Arc<FilesystemLogger>,
 }
@@ -48,13 +48,13 @@ where
 	D: BatchDatabase,
 {
 	pub(crate) fn new(
-		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>, logger: Arc<FilesystemLogger>,
+		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: Arc<FilesystemLogger>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let fee_rate_cache = RwLock::new(HashMap::new());
-		let tokio_runtime = RwLock::new(None);
 		let sync_lock = (Mutex::new(()), Condvar::new());
-		Self { blockchain, inner, fee_rate_cache, tokio_runtime, sync_lock, logger }
+		Self { blockchain, inner, fee_rate_cache, runtime, sync_lock, logger }
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
@@ -113,14 +113,6 @@ where
 		drop(guard);
 		cvar.notify_all();
 		res
-	}
-
-	pub(crate) fn set_runtime(&self, tokio_runtime: Arc<tokio::runtime::Runtime>) {
-		*self.tokio_runtime.write().unwrap() = Some(tokio_runtime);
-	}
-
-	pub(crate) fn drop_runtime(&self) {
-		*self.tokio_runtime.write().unwrap() = None;
 	}
 
 	pub(crate) async fn update_fee_estimates(&self) -> Result<(), Error> {
@@ -239,7 +231,7 @@ where
 	D: BatchDatabase,
 {
 	fn broadcast_transaction(&self, tx: &Transaction) {
-		let locked_runtime = self.tokio_runtime.read().unwrap();
+		let locked_runtime = self.runtime.read().unwrap();
 		if locked_runtime.as_ref().is_none() {
 			log_error!(self.logger, "Failed to broadcast transaction: No runtime.");
 			return;
