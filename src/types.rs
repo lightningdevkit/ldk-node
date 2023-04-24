@@ -7,6 +7,7 @@ use crate::UniffiCustomTypeConverter;
 
 use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::InMemorySigner;
+use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::gossip;
@@ -22,7 +23,7 @@ use lightning_transaction_sync::EsploraSyncClient;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Network, Txid};
+use bitcoin::{Address, Network, OutPoint, Txid};
 
 use std::convert::TryInto;
 use std::net::SocketAddr;
@@ -289,4 +290,114 @@ impl UniffiCustomTypeConverter for Txid {
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.to_string()
 	}
+}
+
+/// Details of a channel as returned by [`Node::list_channels`].
+///
+/// [`Node::list_channels`]: [`crate::Node::list_channels`]
+pub struct ChannelDetails {
+	/// The channel's ID (prior to funding transaction generation, this is a random 32 bytes,
+	/// thereafter this is the transaction ID of the funding transaction XOR the funding transaction
+	/// output).
+	///
+	/// Note that this means this value is *not* persistent - it can change once during the
+	/// lifetime of the channel.
+	pub channel_id: ChannelId,
+	/// The `node_id` of our channel's counterparty.
+	pub counterparty_node_id: PublicKey,
+	/// The channel's funding transaction output, if we've negotiated the funding transaction with
+	/// our counterparty already.
+	pub funding_txo: Option<OutPoint>,
+	/// The value, in satoshis, of this channel as appears in the funding output.
+	pub channel_value_satoshis: u64,
+	/// The value, in satoshis, that must always be held in the channel for us. This value ensures
+	/// that if we broadcast a revoked state, our counterparty can punish us by claiming at least
+	/// this value on chain.
+	///
+	/// This value is not included in [`outbound_capacity_msat`] as it can never be spent.
+	///
+	/// This value will be `None` for outbound channels until the counterparty accepts the channel.
+	///
+	/// [`outbound_capacity_msat`]: Self::outbound_capacity_msat
+	pub unspendable_punishment_reserve: Option<u64>,
+	/// The local `user_channel_id` of this channel.
+	pub user_channel_id: UserChannelId,
+	/// Total balance of the channel. This is the amount that will be returned to the user if the
+	/// channel is closed.
+	///
+	/// The value is not exact, due to potential in-flight and fee-rate changes. Therefore, exactly
+	/// this amount is likely irrecoverable on close.
+	pub balance_msat: u64,
+	/// Available outbound capacity for sending HTLCs to the remote peer.
+	///
+	/// The amount does not include any pending HTLCs which are not yet resolved (and, thus, whose
+	/// balance is not available for inclusion in new outbound HTLCs). This further does not include
+	/// any pending outgoing HTLCs which are awaiting some other resolution to be sent.
+	pub outbound_capacity_msat: u64,
+	/// Available outbound capacity for sending HTLCs to the remote peer.
+	///
+	/// The amount does not include any pending HTLCs which are not yet resolved
+	/// (and, thus, whose balance is not available for inclusion in new inbound HTLCs). This further
+	/// does not include any pending outgoing HTLCs which are awaiting some other resolution to be
+	/// sent.
+	pub inbound_capacity_msat: u64,
+	/// The number of required confirmations on the funding transactions before the funding is
+	/// considered "locked". The amount is selected by the channel fundee.
+	///
+	/// The value will be `None` for outbound channels until the counterparty accepts the channel.
+	pub confirmations_required: Option<u32>,
+	/// The current number of confirmations on the funding transaction.
+	pub confirmations: Option<u32>,
+	/// Returns `true` if the channel was initiated (and therefore funded) by us.
+	pub is_outbound: bool,
+	/// Returns `true` if the channel is confirmed, both parties have exchanged `channel_ready`
+	/// messages, and the channel is not currently being shut down. Both parties exchange
+	/// `channel_ready` messages upon independently verifying that the required confirmations count
+	/// provided by `confirmations_required` has been reached.
+	pub is_channel_ready: bool,
+	/// Returns `true` if the channel is (a) confirmed and `channel_ready` has been exchanged,
+	/// (b) the peer is connected, and (c) the channel is not currently negotiating shutdown.
+	///
+	/// This is a strict superset of `is_channel_ready`.
+	pub is_usable: bool,
+	/// Returns `true` if this channel is (or will be) publicly-announced
+	pub is_public: bool,
+	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
+	/// the channel.
+	pub cltv_expiry_delta: Option<u16>,
+}
+
+impl From<LdkChannelDetails> for ChannelDetails {
+	fn from(value: LdkChannelDetails) -> Self {
+		ChannelDetails {
+			channel_id: ChannelId(value.channel_id),
+			counterparty_node_id: value.counterparty.node_id,
+			funding_txo: value.funding_txo.and_then(|o| Some(o.into_bitcoin_outpoint())),
+			channel_value_satoshis: value.channel_value_satoshis,
+			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
+			user_channel_id: UserChannelId(value.user_channel_id),
+			balance_msat: value.balance_msat,
+			outbound_capacity_msat: value.outbound_capacity_msat,
+			inbound_capacity_msat: value.inbound_capacity_msat,
+			confirmations_required: value.confirmations_required,
+			confirmations: value.confirmations,
+			is_outbound: value.is_outbound,
+			is_channel_ready: value.is_channel_ready,
+			is_usable: value.is_usable,
+			is_public: value.is_public,
+			cltv_expiry_delta: value.config.and_then(|c| Some(c.cltv_expiry_delta)),
+		}
+	}
+}
+
+/// Details of a known Lightning peer as returned by [`Node::list_peers`].
+///
+/// [`Node::list_peers`]: [`crate::Node::list_peers`]
+pub struct PeerDetails {
+	/// Our peer's node ID.
+	pub node_id: PublicKey,
+	/// The IP address and TCP port of the peer.
+	pub address: SocketAddr,
+	/// Indicates whether or not the user is currently has an active connection with the peer.
+	pub is_connected: bool,
 }
