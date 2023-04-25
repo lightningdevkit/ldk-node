@@ -8,13 +8,12 @@ use crate::UniffiCustomTypeConverter;
 use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::InMemorySigner;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
+use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::gossip;
-use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
-use lightning::routing::utxo::UtxoLookup;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_invoice::{Invoice, SignedRawInvoice};
 use lightning_net_tokio::SocketDescriptor;
@@ -42,7 +41,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
 	Arc<ChannelManager>,
-	Arc<GossipSync>,
+	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
 	IgnoringMessageHandler,
@@ -66,10 +65,25 @@ pub(crate) type Router =
 	DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<Mutex<Scorer>>>;
 pub(crate) type Scorer = ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
 
-pub(crate) type GossipSync =
-	P2PGossipSync<Arc<NetworkGraph>, Arc<dyn UtxoLookup + Send + Sync>, Arc<FilesystemLogger>>;
-
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
+
+pub(crate) type UtxoLookup = dyn lightning::routing::utxo::UtxoLookup + Send + Sync;
+
+pub(crate) type P2PGossipSync = lightning::routing::gossip::P2PGossipSync<
+	Arc<NetworkGraph>,
+	Arc<UtxoLookup>,
+	Arc<FilesystemLogger>,
+>;
+pub(crate) type RapidGossipSync =
+	lightning_rapid_gossip_sync::RapidGossipSync<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
+
+pub(crate) type GossipSync = lightning_background_processor::GossipSync<
+	Arc<P2PGossipSync>,
+	Arc<RapidGossipSync>,
+	Arc<NetworkGraph>,
+	Arc<UtxoLookup>,
+	Arc<FilesystemLogger>,
+>;
 
 pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
 	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
