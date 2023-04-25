@@ -10,6 +10,7 @@ The primary abstraction of the library is the `Node`, which can be retrieved by 
 ```rust
 use ldk_node::Builder;
 use ldk_node::lightning_invoice::Invoice;
+use ldk_node::bitcoin::secp256k1::PublicKey;
 use std::str::FromStr;
 
 fn main() {
@@ -23,13 +24,15 @@ fn main() {
 	let _funding_address = node.new_funding_address();
 
 	// .. fund address ..
-	
+
 	node.sync_wallets().unwrap();
 
-	node.connect_open_channel("NODE_ID@PEER_ADDR:PORT", 10000, None, false).unwrap();
+	let node_id = PublicKey::from_str("NODE_ID").unwrap();
+	let node_addr = "IP_ADDR:PORT".parse().unwrap();
+	node.connect_open_channel(node_id, node_addr, 10000, None, false).unwrap();
 
 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
-	node.send_payment(invoice).unwrap();
+	node.send_payment(&invoice).unwrap();
 
 	node.stop().unwrap();
 }
