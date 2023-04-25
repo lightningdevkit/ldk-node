@@ -22,7 +22,9 @@ jobs:
           profile: minimal
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
-      - name: Check formatting
+      - name: Check release build on Rust ${{ matrix.toolchain }}
+        run: cargo check --release --verbose --color always
+      - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check
       - name: Test on Rust ${{ matrix.toolchain }}

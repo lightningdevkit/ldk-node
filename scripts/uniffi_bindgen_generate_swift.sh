@@ -2,8 +2,8 @@
 BINDINGS_DIR="./bindings/swift"
 UNIFFI_BINDGEN_BIN="cargo run --features=uniffi/cli --bin uniffi-bindgen"
 
-cargo build --release
-$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language swift -o "$BINDINGS_DIR"
+cargo build --release || exit 1
+$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language swift -o "$BINDINGS_DIR" || exit 1
 
 mkdir -p $BINDINGS_DIR
 
