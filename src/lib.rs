@@ -1191,7 +1191,7 @@ impl Node {
 		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
 
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let recipient_fields = RecipientOnionFields { payment_secret };
+		let recipient_fields = RecipientOnionFields { payment_secret, payment_metadata: None };
 
 		match self
 			.channel_manager
@@ -1259,7 +1259,7 @@ impl Node {
 			),
 			final_value_msat: amount_msat,
 		};
-		let recipient_fields = RecipientOnionFields { payment_secret: None };
+		let recipient_fields = RecipientOnionFields::spontaneous_empty();
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(
 			Some(payment_preimage),
