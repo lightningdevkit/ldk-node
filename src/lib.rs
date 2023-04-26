@@ -864,8 +864,8 @@ impl Node {
 	pub fn send_to_onchain_address(
 		&self, address: &bitcoin::Address, amount_sats: u64,
 	) -> Result<Txid, Error> {
-		let runtime_lock = self.running.read().unwrap();
-		if runtime_lock.is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
@@ -879,8 +879,8 @@ impl Node {
 
 	/// Send an on-chain payment to the given address, draining all the available funds.
 	pub fn send_all_to_onchain_address(&self, address: &bitcoin::Address) -> Result<Txid, Error> {
-		let runtime_lock = self.running.read().unwrap();
-		if runtime_lock.is_none() {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
