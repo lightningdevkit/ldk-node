@@ -11,6 +11,16 @@ pub enum Error {
 	OnchainTxCreationFailed,
 	/// A network connection has been closed.
 	ConnectionFailed,
+	/// The given address is invalid.
+	AddressInvalid,
+	/// The given public key is invalid.
+	PublicKeyInvalid,
+	/// The given payment hash is invalid.
+	PaymentHashInvalid,
+	/// The given payment preimage is invalid.
+	PaymentPreimageInvalid,
+	/// The given payment secret is invalid.
+	PaymentSecretInvalid,
 	/// Payment of the given invoice has already been intiated.
 	NonUniquePaymentHash,
 	/// The given amount is invalid.
@@ -23,6 +33,10 @@ pub enum Error {
 	InsufficientFunds,
 	/// An attempted payment has failed.
 	PaymentFailed,
+	/// The given channel ID is invalid.
+	ChannelIdInvalid,
+	/// The given network is invalid.
+	NetworkInvalid,
 	/// A given peer info could not be parsed.
 	PeerInfoParseFailed,
 	/// A channel could not be opened.
@@ -48,6 +62,11 @@ impl fmt::Display for Error {
 				write!(f, "On-chain transaction could not be created.")
 			}
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
+			Self::AddressInvalid => write!(f, "The given address is invalid."),
+			Self::PublicKeyInvalid => write!(f, "The given public key is invalid."),
+			Self::PaymentHashInvalid => write!(f, "The given payment hash is invalid."),
+			Self::PaymentPreimageInvalid => write!(f, "The given payment preimage is invalid."),
+			Self::PaymentSecretInvalid => write!(f, "The given payment secret is invalid."),
 			Self::NonUniquePaymentHash => write!(f, "An invoice must not get payed twice."),
 			Self::InvalidAmount => write!(f, "The given amount is invalid."),
 			Self::InvalidInvoice => write!(f, "The given invoice is invalid."),
@@ -56,6 +75,8 @@ impl fmt::Display for Error {
 				write!(f, "There are insufficient funds to complete the given operation.")
 			}
 			Self::PaymentFailed => write!(f, "Failed to send the given payment."),
+			Self::ChannelIdInvalid => write!(f, "The given channel ID is invalid."),
+			Self::NetworkInvalid => write!(f, "The given network is invalid."),
 			Self::PeerInfoParseFailed => write!(f, "Failed to parse the given peer information."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),

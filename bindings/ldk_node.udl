@@ -1,0 +1,153 @@
+namespace ldk_node {
+};
+
+dictionary Config {
+	string storage_dir_path;
+	string esplora_server_url;
+	Network network;
+	SocketAddr? listening_address;
+	u32 default_cltv_expiry_delta;
+};
+
+interface Builder {
+	constructor();
+	[Name=from_config]
+	constructor(Config config);
+	Node build();
+};
+
+interface Node {
+	[Throws=NodeError]
+	void start();
+	[Throws=NodeError]
+	void stop();
+	Event next_event();
+	void event_handled();
+	PublicKey node_id();
+	SocketAddr? listening_address();
+	[Throws=NodeError]
+	Address new_funding_address();
+	[Throws=NodeError]
+	Txid send_to_onchain_address([ByRef]Address address, u64 amount_msat);
+	[Throws=NodeError]
+	Txid send_all_to_onchain_address([ByRef]Address address);
+	[Throws=NodeError]
+	void connect(PublicKey node_id, SocketAddr address, boolean permanently);
+	[Throws=NodeError]
+	void disconnect([ByRef]PublicKey node_id);
+	[Throws=NodeError]
+	void connect_open_channel(PublicKey node_id, SocketAddr address, u64 channel_amount_sats, u64? push_to_counterparty_msat, boolean announce_channel);
+	[Throws=NodeError]
+	void close_channel([ByRef]ChannelId channel_id, [ByRef]PublicKey counterparty_node_id);
+	[Throws=NodeError]
+	void sync_wallets();
+	[Throws=NodeError]
+	PaymentHash send_payment([ByRef]Invoice invoice);
+	[Throws=NodeError]
+	PaymentHash send_payment_using_amount([ByRef]Invoice invoice, u64 amount_msat);
+	[Throws=NodeError]
+	PaymentHash send_spontaneous_payment(u64 amount_msat, [ByRef]PublicKey node_id);
+	[Throws=NodeError]
+	Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
+	[Throws=NodeError]
+	Invoice receive_variable_amount_payment([ByRef]string description, u32 expiry_secs);
+	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
+	[Throws=NodeError]
+	boolean remove_payment([ByRef]PaymentHash payment_hash);
+};
+
+[Error]
+enum NodeError {
+	"AlreadyRunning",
+	"NotRunning",
+	"OnchainTxCreationFailed",
+	"ConnectionFailed",
+	"AddressInvalid",
+	"PublicKeyInvalid",
+	"PaymentHashInvalid",
+	"PaymentPreimageInvalid",
+	"PaymentSecretInvalid",
+	"NonUniquePaymentHash",
+	"InvalidAmount",
+	"InvalidInvoice",
+	"InvoiceCreationFailed",
+	"InsufficientFunds",
+	"PaymentFailed",
+	"ChannelIdInvalid",
+	"NetworkInvalid",
+	"PeerInfoParseFailed",
+	"ChannelCreationFailed",
+	"ChannelClosingFailed",
+	"PersistenceFailed",
+	"WalletOperationFailed",
+	"WalletSigningFailed",
+	"TxSyncFailed",
+};
+
+[Enum]
+interface Event {
+	PaymentSuccessful( PaymentHash payment_hash );
+	PaymentFailed( PaymentHash payment_hash );
+	PaymentReceived( PaymentHash payment_hash, u64 amount_msat);
+	ChannelPending ( ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo );
+	ChannelReady ( ChannelId channel_id, UserChannelId user_channel_id );
+	ChannelClosed ( ChannelId channel_id, UserChannelId user_channel_id );
+};
+
+enum PaymentDirection {
+	"Inbound",
+	"Outbound",
+};
+
+enum PaymentStatus {
+	"Pending",
+	"Succeeded",
+	"Failed",
+};
+
+dictionary PaymentDetails {
+	PaymentHash hash;
+	PaymentPreimage? preimage;
+	PaymentSecret? secret;
+	u64? amount_msat;
+	PaymentDirection direction;
+	PaymentStatus status;
+};
+
+dictionary OutPoint {
+    Txid txid;
+    u32 vout;
+};
+
+[Custom]
+typedef string Txid;
+
+[Custom]
+typedef string SocketAddr;
+
+[Custom]
+typedef string PublicKey;
+
+[Custom]
+typedef string Address;
+
+[Custom]
+typedef string Invoice;
+
+[Custom]
+typedef string PaymentHash;
+
+[Custom]
+typedef string PaymentPreimage;
+
+[Custom]
+typedef string PaymentSecret;
+
+[Custom]
+typedef string ChannelId;
+
+[Custom]
+typedef string UserChannelId;
+
+[Custom]
+typedef string Network;
