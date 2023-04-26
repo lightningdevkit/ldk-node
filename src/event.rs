@@ -351,6 +351,7 @@ where
 				via_channel_id: _,
 				via_user_channel_id: _,
 				claim_deadline: _,
+				onion_fields: _,
 			} => {
 				if let Some(info) = self.payment_store.get(&payment_hash) {
 					if info.status == PaymentStatus::Succeeded {
