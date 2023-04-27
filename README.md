@@ -46,7 +46,7 @@ LDK Node currently comes with a decidedly opionated set of design choices:
 - Chain data is accessed via Esplora (support for Electrum and `bitcoind` RPC will follow)
 - Wallet and channel state is persisted to file system (support for SQLite will follow)
 - Gossip data is sourced via Lightnings peer-to-peer network (support for [Rapid Gossip Sync](https://docs.rs/lightning-rapid-gossip-sync/*/lightning_rapid_gossip_sync/) will follow)
-- Entropy for the Lightning and on-chain wallets may be generated and persisted for or provided by the user (support for [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki) mnemonics will follow)
+- Entropy for the Lightning and on-chain wallets may be generated and persisted for or provided by the user (as raw bytes or [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki) mnemonic)
 
 
 ## Language Support
