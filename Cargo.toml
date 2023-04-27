@@ -1,10 +1,15 @@
 [package]
 name = "ldk-node"
-version = "0.1.0"
+version = "0.1.0-alpha"
 authors = ["Elias Rohrer <dev@tnull.de>"]
+homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
 edition = "2018"
 description = "A ready-to-go node implementation built using LDK."
+repository = "https://github.com/lightningdevkit/ldk-node/"
+readme = "README.md"
+keywords = ["bitcoin", "lightning", "ldk", "bdk"]
+categories = ["cryptography::cryptocurrencies"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
