@@ -181,7 +181,7 @@ fn channel_full_cycle() {
 	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
 
-	node_b.close_channel(&channel_id, &node_a.node_id()).unwrap();
+	node_b.close_channel(&channel_id, node_a.node_id()).unwrap();
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
