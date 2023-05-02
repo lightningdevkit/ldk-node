@@ -1440,6 +1440,12 @@ impl Node {
 	}
 }
 
+impl Drop for Node {
+	fn drop(&mut self) {
+		let _ = self.stop();
+	}
+}
+
 async fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
 	logger: Arc<FilesystemLogger>,
