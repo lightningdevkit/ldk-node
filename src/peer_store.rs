@@ -2,14 +2,14 @@ use crate::io::{
 	KVStore, TransactionalWrite, PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_NAMESPACE,
 };
 use crate::logger::{log_error, Logger};
-use crate::Error;
+use crate::{Error, NetAddress};
 
+use lightning::impl_writeable_tlv_based;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use bitcoin::secp256k1::PublicKey;
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Deref;
 use std::sync::RwLock;
 
@@ -36,14 +36,14 @@ where
 	pub(crate) fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let mut locked_peers = self.peers.write().unwrap();
 
-		locked_peers.insert(peer_info.pubkey, peer_info);
+		locked_peers.insert(peer_info.node_id, peer_info);
 		self.write_peers_and_commit(&*locked_peers)
 	}
 
-	pub(crate) fn remove_peer(&self, peer_pubkey: &PublicKey) -> Result<(), Error> {
+	pub(crate) fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
 		let mut locked_peers = self.peers.write().unwrap();
 
-		locked_peers.remove(peer_pubkey);
+		locked_peers.remove(node_id);
 		self.write_peers_and_commit(&*locked_peers)
 	}
 
@@ -51,8 +51,8 @@ where
 		self.peers.read().unwrap().values().cloned().collect()
 	}
 
-	pub(crate) fn get_peer(&self, peer_pubkey: &PublicKey) -> Option<PeerInfo> {
-		self.peers.read().unwrap().get(peer_pubkey).cloned()
+	pub(crate) fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
+		self.peers.read().unwrap().get(node_id).cloned()
 	}
 
 	fn write_peers_and_commit(
@@ -143,56 +143,14 @@ impl Writeable for PeerStoreSerWrapper<'_> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PeerInfo {
-	pub pubkey: PublicKey,
-	pub address: SocketAddr,
+	pub node_id: PublicKey,
+	pub address: NetAddress,
 }
 
-impl Readable for PeerInfo {
-	fn read<R: lightning::io::Read>(
-		reader: &mut R,
-	) -> Result<Self, lightning::ln::msgs::DecodeError> {
-		let pubkey = Readable::read(reader)?;
-
-		let ip_type: u8 = Readable::read(reader)?;
-
-		let ip_addr = if ip_type == 0 {
-			let v4bytes: u32 = Readable::read(reader)?;
-			let v4addr = Ipv4Addr::from(v4bytes);
-			IpAddr::from(v4addr)
-		} else {
-			let v6bytes: u128 = Readable::read(reader)?;
-			let v6addr = Ipv6Addr::from(v6bytes);
-			IpAddr::from(v6addr)
-		};
-
-		let port: u16 = Readable::read(reader)?;
-
-		let address = SocketAddr::new(ip_addr, port);
-
-		Ok(PeerInfo { pubkey, address })
-	}
-}
-
-impl Writeable for PeerInfo {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		self.pubkey.write(writer)?;
-
-		match self.address.ip() {
-			IpAddr::V4(v4addr) => {
-				0u8.write(writer)?;
-				u32::from(v4addr).write(writer)?;
-			}
-			IpAddr::V6(v6addr) => {
-				1u8.write(writer)?;
-				u128::from(v6addr).write(writer)?;
-			}
-		}
-
-		self.address.port().write(writer)?;
-
-		Ok(())
-	}
-}
+impl_writeable_tlv_based!(PeerInfo, {
+	(0, node_id, required),
+	(2, address, required),
+});
 
 #[cfg(test)]
 mod tests {
@@ -207,12 +165,12 @@ mod tests {
 		let logger = Arc::new(TestLogger::new());
 		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
 
-		let pubkey = PublicKey::from_str(
+		let node_id = PublicKey::from_str(
 			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
 		)
 		.unwrap();
-		let address: SocketAddr = "127.0.0.1:9738".parse().unwrap();
-		let expected_peer_info = PeerInfo { pubkey, address };
+		let address = NetAddress::from_str("127.0.0.1:9738").unwrap();
+		let expected_peer_info = PeerInfo { node_id, address };
 		peer_store.add_peer(expected_peer_info.clone()).unwrap();
 		assert!(store.get_and_clear_did_persist());
 
@@ -226,7 +184,7 @@ mod tests {
 		let peers = deser_peer_store.list_peers();
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
-		assert_eq!(deser_peer_store.get_peer(&pubkey), Some(expected_peer_info));
+		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
 		assert!(!store.get_and_clear_did_persist());
 	}
 }

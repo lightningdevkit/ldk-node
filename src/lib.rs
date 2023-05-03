@@ -26,7 +26,7 @@
 //! [`send_payment`], etc.:
 //!
 //! ```no_run
-//! use ldk_node::Builder;
+//! use ldk_node::{Builder, NetAddress};
 //! use ldk_node::lightning_invoice::Invoice;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use std::str::FromStr;
@@ -46,7 +46,7 @@
 //! 	node.sync_wallets().unwrap();
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
-//! 	let node_addr = "IP_ADDR:PORT".parse().unwrap();
+//! 	let node_addr = NetAddress::from_str("IP_ADDR:PORT").unwrap();
 //! 	node.connect_open_channel(node_id, node_addr, 10000, None, false).unwrap();
 //!
 //! 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
@@ -97,6 +97,8 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
+pub use types::NetAddress;
+
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use io::fs_store::FilesystemStore;
@@ -149,7 +151,7 @@ use rand::Rng;
 use std::convert::TryInto;
 use std::default::Default;
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -861,7 +863,7 @@ impl Node {
 				{
 					if let Some(peer_info) = connect_peer_store.get_peer(&node_id) {
 						let _ = do_connect_peer(
-							peer_info.pubkey,
+							peer_info.node_id,
 							peer_info.address,
 							Arc::clone(&connect_pm),
 							Arc::clone(&connect_logger),
@@ -1024,7 +1026,7 @@ impl Node {
 	///
 	/// If `permanently` is set to `true`, we'll remember the peer and reconnect to it on restart.
 	pub fn connect(
-		&self, node_id: PublicKey, address: SocketAddr, permanently: bool,
+		&self, node_id: PublicKey, address: NetAddress, permanently: bool,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1032,10 +1034,10 @@ impl Node {
 		}
 		let runtime = rt_lock.as_ref().unwrap();
 
-		let peer_info = PeerInfo { pubkey: node_id, address };
+		let peer_info = PeerInfo { node_id, address };
 
-		let con_peer_pubkey = peer_info.pubkey;
-		let con_peer_addr = peer_info.address;
+		let con_node_id = peer_info.node_id;
+		let con_addr = peer_info.address.clone();
 		let con_success = Arc::new(AtomicBool::new(false));
 		let con_success_cloned = Arc::clone(&con_success);
 		let con_logger = Arc::clone(&self.logger);
@@ -1044,8 +1046,7 @@ impl Node {
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
 				let res =
-					connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger)
-						.await;
+					connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await;
 				con_success_cloned.store(res.is_ok(), Ordering::Release);
 			})
 		});
@@ -1054,7 +1055,7 @@ impl Node {
 			return Err(Error::ConnectionFailed);
 		}
 
-		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.pubkey, peer_info.address,);
+		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if permanently {
 			self.peer_store.add_peer(peer_info)?;
@@ -1096,7 +1097,7 @@ impl Node {
 	///
 	/// Returns a temporary channel id.
 	pub fn connect_open_channel(
-		&self, node_id: PublicKey, address: SocketAddr, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: NetAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, announce_channel: bool,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
@@ -1111,10 +1112,10 @@ impl Node {
 			return Err(Error::InsufficientFunds);
 		}
 
-		let peer_info = PeerInfo { pubkey: node_id, address };
+		let peer_info = PeerInfo { node_id, address };
 
-		let con_peer_pubkey = peer_info.pubkey;
-		let con_peer_addr = peer_info.address;
+		let con_node_id = peer_info.node_id;
+		let con_addr = peer_info.address.clone();
 		let con_success = Arc::new(AtomicBool::new(false));
 		let con_success_cloned = Arc::clone(&con_success);
 		let con_logger = Arc::clone(&self.logger);
@@ -1123,8 +1124,7 @@ impl Node {
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
 				let res =
-					connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger)
-						.await;
+					connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await;
 				con_success_cloned.store(res.is_ok(), Ordering::Release);
 			})
 		});
@@ -1150,7 +1150,7 @@ impl Node {
 		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
 
 		match self.channel_manager.create_channel(
-			peer_info.pubkey,
+			peer_info.node_id,
 			channel_amount_sats,
 			push_msat,
 			user_channel_id,
@@ -1160,7 +1160,7 @@ impl Node {
 				log_info!(
 					self.logger,
 					"Initiated channel creation with peer {}. ",
-					peer_info.pubkey
+					peer_info.node_id
 				);
 				self.peer_store.add_peer(peer_info)?;
 				Ok(())
@@ -1561,9 +1561,9 @@ impl Node {
 			.list_peers()
 			.iter()
 			.map(|p| PeerDetails {
-				node_id: p.pubkey,
-				address: p.address,
-				is_connected: active_connected_peers.contains(&p.pubkey),
+				node_id: p.node_id,
+				address: p.address.clone(),
+				is_connected: active_connected_peers.contains(&p.node_id),
 			})
 			.collect()
 	}
@@ -1592,44 +1592,55 @@ impl Drop for Node {
 }
 
 async fn connect_peer_if_necessary(
-	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
-	for (node_pubkey, _addr) in peer_manager.get_peer_node_ids() {
-		if node_pubkey == pubkey {
+	for (pman_node_id, _pman_addr) in peer_manager.get_peer_node_ids() {
+		if node_id == pman_node_id {
 			return Ok(());
 		}
 	}
 
-	do_connect_peer(pubkey, peer_addr, peer_manager, logger).await
+	do_connect_peer(node_id, addr, peer_manager, logger).await
 }
 
 async fn do_connect_peer(
-	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
-	log_info!(logger, "Connecting to peer: {}@{}", pubkey, peer_addr);
-	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
+	log_info!(logger, "Connecting to peer: {}@{}", node_id, addr);
+
+	let socket_addr = addr
+		.to_socket_addrs()
+		.map_err(|e| {
+			log_error!(logger, "Failed to resolve network address: {}", e);
+			Error::InvalidNetAddress
+		})?
+		.next()
+		.ok_or(Error::ConnectionFailed)?;
+
+	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), node_id, socket_addr)
+		.await
 	{
 		Some(connection_closed_future) => {
 			let mut connection_closed_future = Box::pin(connection_closed_future);
 			loop {
 				match futures::poll!(&mut connection_closed_future) {
 					std::task::Poll::Ready(_) => {
-						log_info!(logger, "Peer connection closed: {}@{}", pubkey, peer_addr);
+						log_info!(logger, "Peer connection closed: {}@{}", node_id, addr);
 						return Err(Error::ConnectionFailed);
 					}
 					std::task::Poll::Pending => {}
 				}
 				// Avoid blocking the tokio context by sleeping a bit
-				match peer_manager.get_peer_node_ids().iter().find(|(id, _addr)| *id == pubkey) {
+				match peer_manager.get_peer_node_ids().iter().find(|(id, _addr)| *id == node_id) {
 					Some(_) => return Ok(()),
 					None => tokio::time::sleep(Duration::from_millis(10)).await,
 				}
 			}
 		}
 		None => {
-			log_error!(logger, "Failed to connect to peer: {}@{}", pubkey, peer_addr);
+			log_error!(logger, "Failed to connect to peer: {}@{}", node_id, addr);
 			Err(Error::ConnectionFailed)
 		}
 	}

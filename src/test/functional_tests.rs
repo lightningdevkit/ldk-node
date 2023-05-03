@@ -43,7 +43,7 @@ fn channel_full_cycle() {
 	node_a
 		.connect_open_channel(
 			node_b.node_id(),
-			node_b.listening_address().unwrap(),
+			node_b.listening_address().unwrap().into(),
 			funding_amount_sat,
 			Some(push_msat),
 			true,
@@ -251,7 +251,7 @@ fn channel_open_fails_when_funds_insufficient() {
 		Err(Error::InsufficientFunds),
 		node_a.connect_open_channel(
 			node_b.node_id(),
-			node_b.listening_address().unwrap(),
+			node_b.listening_address().unwrap().into(),
 			120000,
 			None,
 			true
