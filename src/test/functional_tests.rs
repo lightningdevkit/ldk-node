@@ -336,9 +336,9 @@ fn onchain_spend_receive() {
 	node_b.sync_wallets().unwrap();
 	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), 100000);
 
-	assert_eq!(Err(Error::InsufficientFunds), node_a.send_to_onchain_address(&addr_b, 1000));
+	assert_eq!(Err(Error::InsufficientFunds), node_a.send_to_onchain_address(&addr_b, Some(1000)));
 
-	let txid = node_b.send_to_onchain_address(&addr_a, 1000).unwrap();
+	let txid = node_b.send_to_onchain_address(&addr_a, Some(1000)).unwrap();
 	generate_blocks_and_wait(&bitcoind, &electrsd, 6);
 	wait_for_tx(&electrsd, txid);
 
@@ -350,7 +350,7 @@ fn onchain_spend_receive() {
 	assert!(node_b.onchain_balance().unwrap().get_spendable() < 100000);
 
 	let addr_b = node_b.new_funding_address().unwrap();
-	let txid = node_a.send_all_to_onchain_address(&addr_b).unwrap();
+	let txid = node_a.send_to_onchain_address(&addr_b, None).unwrap();
 	generate_blocks_and_wait(&bitcoind, &electrsd, 6);
 	wait_for_tx(&electrsd, txid);
 

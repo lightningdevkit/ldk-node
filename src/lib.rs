@@ -861,8 +861,10 @@ impl Node {
 	}
 
 	/// Send an on-chain payment to the given address.
+	/// If `amount_sats` is `None` the wallet will be drained, i.e., all available funds will be
+	/// spent.
 	pub fn send_to_onchain_address(
-		&self, address: &bitcoin::Address, amount_sats: u64,
+		&self, address: &bitcoin::Address, amount_sats_or_drain: Option<u64>,
 	) -> Result<Txid, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -870,21 +872,15 @@ impl Node {
 		}
 
 		let cur_balance = self.wallet.get_balance()?;
-		if cur_balance.get_spendable() < amount_sats {
-			log_error!(self.logger, "Unable to send payment due to insufficient funds.");
-			return Err(Error::InsufficientFunds);
-		}
-		self.wallet.send_to_address(address, Some(amount_sats))
-	}
+		let amount_sats = match amount_sats_or_drain {
+			Some(sats) if sats > cur_balance.get_spendable() => {
+				log_error!(self.logger, "Unable to send payment due to insufficient funds.");
+				return Err(Error::InsufficientFunds);
+			}
+			other => other,
+		};
 
-	/// Send an on-chain payment to the given address, draining all the available funds.
-	pub fn send_all_to_onchain_address(&self, address: &bitcoin::Address) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		self.wallet.send_to_address(address, None)
+		self.wallet.send_to_address(address, amount_sats)
 	}
 
 	/// Retrieve a list of known channels.
