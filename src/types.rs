@@ -85,7 +85,7 @@ impl UniffiCustomTypeConverter for SocketAddr {
 			return Ok(addr);
 		}
 
-		Err(Error::PublicKeyInvalid.into())
+		Err(Error::InvalidPublicKey.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -101,7 +101,7 @@ impl UniffiCustomTypeConverter for PublicKey {
 			return Ok(key);
 		}
 
-		Err(Error::PublicKeyInvalid.into())
+		Err(Error::InvalidPublicKey.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -117,7 +117,7 @@ impl UniffiCustomTypeConverter for Address {
 			return Ok(addr);
 		}
 
-		Err(Error::AddressInvalid.into())
+		Err(Error::InvalidAddress.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -150,7 +150,7 @@ impl UniffiCustomTypeConverter for PaymentHash {
 		if let Ok(hash) = Sha256::from_str(&val) {
 			Ok(PaymentHash(hash.into_inner()))
 		} else {
-			Err(Error::PaymentHashInvalid.into())
+			Err(Error::InvalidPaymentHash.into())
 		}
 	}
 
@@ -169,7 +169,7 @@ impl UniffiCustomTypeConverter for PaymentPreimage {
 				return Ok(PaymentPreimage(bytes));
 			}
 		}
-		Err(Error::PaymentPreimageInvalid.into())
+		Err(Error::InvalidPaymentPreimage.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -187,7 +187,7 @@ impl UniffiCustomTypeConverter for PaymentSecret {
 				return Ok(PaymentSecret(bytes));
 			}
 		}
-		Err(Error::PaymentSecretInvalid.into())
+		Err(Error::InvalidPaymentSecret.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -214,7 +214,7 @@ impl UniffiCustomTypeConverter for ChannelId {
 				return Ok(Self(channel_id));
 			}
 		}
-		Err(Error::ChannelIdInvalid.into())
+		Err(Error::InvalidChannelId.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -246,7 +246,7 @@ impl UniffiCustomTypeConverter for UserChannelId {
 	type Builtin = String;
 
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Ok(UserChannelId(u128::from_str(&val).map_err(|_| Error::ChannelIdInvalid)?))
+		Ok(UserChannelId(u128::from_str(&val).map_err(|_| Error::InvalidChannelId)?))
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -272,7 +272,7 @@ impl UniffiCustomTypeConverter for Network {
 	type Builtin = String;
 
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Ok(Network::from_str(&val).map_err(|_| Error::NetworkInvalid)?)
+		Ok(Network::from_str(&val).map_err(|_| Error::InvalidNetwork)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
