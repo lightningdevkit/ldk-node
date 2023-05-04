@@ -32,6 +32,10 @@ interface Node {
 	[Throws=NodeError]
 	Txid send_all_to_onchain_address([ByRef]Address address);
 	[Throws=NodeError]
+	u64 spendable_onchain_balance_sats();
+	[Throws=NodeError]
+	u64 total_onchain_balance_sats();
+	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddr address, boolean permanently);
 	[Throws=NodeError]
 	void disconnect([ByRef]PublicKey node_id);
