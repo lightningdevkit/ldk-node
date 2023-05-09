@@ -39,7 +39,7 @@ fn channel_full_cycle() {
 	node_a
 		.connect_open_channel(
 			node_b.node_id(),
-			*node_b.listening_address().unwrap(),
+			node_b.listening_address().unwrap(),
 			funding_amount_sat,
 			Some(push_msat),
 			true,
@@ -76,8 +76,9 @@ fn channel_full_cycle() {
 
 	expect_event!(node_a, ChannelReady);
 
-	let channel_id = match node_b.next_event() {
-		ref e @ Event::ChannelReady { channel_id, .. } => {
+	let ev = node_b.next_event();
+	let channel_id = match ev {
+		ref e @ Event::ChannelReady { ref channel_id, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled();
 			channel_id
@@ -240,7 +241,7 @@ fn channel_open_fails_when_funds_insufficient() {
 		Err(Error::InsufficientFunds),
 		node_a.connect_open_channel(
 			node_b.node_id(),
-			*node_b.listening_address().unwrap(),
+			node_b.listening_address().unwrap(),
 			120000,
 			None,
 			true

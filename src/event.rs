@@ -1,4 +1,7 @@
-use crate::{hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, Wallet};
+use crate::{
+	hex_utils, ChannelId, ChannelManager, Config, Error, KeysManager, NetworkGraph, UserChannelId,
+	Wallet,
+};
 
 use crate::payment_store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentStatus, PaymentStore,
@@ -51,11 +54,11 @@ pub enum Event {
 	/// A channel has been created and is pending confirmation on-chain.
 	ChannelPending {
 		/// The `channel_id` of the channel.
-		channel_id: [u8; 32],
+		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
-		user_channel_id: u128,
+		user_channel_id: UserChannelId,
 		/// The `temporary_channel_id` this channel used to be known by during channel establishment.
-		former_temporary_channel_id: [u8; 32],
+		former_temporary_channel_id: ChannelId,
 		/// The `node_id` of the channel counterparty.
 		counterparty_node_id: PublicKey,
 		/// The outpoint of the channel's funding transaction.
@@ -64,16 +67,16 @@ pub enum Event {
 	/// A channel is ready to be used.
 	ChannelReady {
 		/// The `channel_id` of the channel.
-		channel_id: [u8; 32],
+		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
-		user_channel_id: u128,
+		user_channel_id: UserChannelId,
 	},
 	/// A channel has been closed.
 	ChannelClosed {
 		/// The `channel_id` of the channel.
-		channel_id: [u8; 32],
+		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
-		user_channel_id: u128,
+		user_channel_id: UserChannelId,
 	},
 }
 
@@ -641,9 +644,11 @@ where
 				);
 				self.event_queue
 					.add_event(Event::ChannelPending {
-						channel_id,
-						user_channel_id,
-						former_temporary_channel_id: former_temporary_channel_id.unwrap(),
+						channel_id: ChannelId(channel_id),
+						user_channel_id: UserChannelId(user_channel_id),
+						former_temporary_channel_id: ChannelId(
+							former_temporary_channel_id.unwrap(),
+						),
 						counterparty_node_id,
 						funding_txo,
 					})
@@ -659,7 +664,10 @@ where
 					counterparty_node_id,
 				);
 				self.event_queue
-					.add_event(Event::ChannelReady { channel_id, user_channel_id })
+					.add_event(Event::ChannelReady {
+						channel_id: ChannelId(channel_id),
+						user_channel_id: UserChannelId(user_channel_id),
+					})
 					.expect("Failed to push to event queue");
 			}
 			LdkEvent::ChannelClosed { channel_id, reason, user_channel_id } => {
@@ -670,7 +678,10 @@ where
 					reason
 				);
 				self.event_queue
-					.add_event(Event::ChannelClosed { channel_id, user_channel_id })
+					.add_event(Event::ChannelClosed {
+						channel_id: ChannelId(channel_id),
+						user_channel_id: UserChannelId(user_channel_id),
+					})
 					.expect("Failed to push to event queue");
 			}
 			LdkEvent::DiscardFunding { .. } => {}
@@ -690,7 +701,10 @@ mod tests {
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = EventQueue::new(Arc::clone(&store), Arc::clone(&logger));
 
-		let expected_event = Event::ChannelReady { channel_id: [23u8; 32], user_channel_id: 2323 };
+		let expected_event = Event::ChannelReady {
+			channel_id: ChannelId([23u8; 32]),
+			user_channel_id: UserChannelId(2323),
+		};
 		event_queue.add_event(expected_event.clone()).unwrap();
 		assert!(store.get_and_clear_did_persist());
 

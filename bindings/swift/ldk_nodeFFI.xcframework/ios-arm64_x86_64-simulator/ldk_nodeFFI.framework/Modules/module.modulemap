@@ -1,0 +1,6 @@
+framework module ldk_nodeFFI {
+  umbrella header "ldk_nodeFFI-umbrella.h"
+
+  export *
+  module * { export * }
+}

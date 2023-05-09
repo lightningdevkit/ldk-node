@@ -13,6 +13,22 @@ categories = ["cryptography::cryptocurrencies"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+crate-type = ["staticlib", "cdylib"]
+name = "ldk_node"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[profile.release-smaller]
+inherits = "release"
+opt-level = 'z'     # Optimize for size.
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Reduce number of codegen units to increase optimizations.
+panic = 'abort'     # Abort on panic
+strip = true        # Strip symbols from binary*
+
 [dependencies]
 lightning = { version = "0.0.115", features = ["max_level_trace", "std"] }
 lightning-invoice = { version = "0.23" }
@@ -51,12 +67,17 @@ serde_json = { version = "1.0" }
 tokio = { version = "1", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
 esplora-client = { version = "0.4", default-features = false }
 libc = "0.2"
+uniffi = { version = "0.23.0", features = ["build"] }
 
 [dev-dependencies]
 electrsd = { version = "0.22.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_23_0"] }
 electrum-client = "0.12.0"
 proptest = "1.0.0"
 regex = "1.5.6"
+
+[build-dependencies]
+uniffi = { version = "0.23.0", features = ["build", "cli"] }
+
 
 [profile.release]
 panic = "abort"
