@@ -24,8 +24,9 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Network, OutPoint, Txid};
 
-use core::convert::TryFrom;
-use std::convert::TryInto;
+use bip39::Mnemonic;
+
+use std::convert::{TryFrom, TryInto};
 use std::fmt::Display;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::str::FromStr;
@@ -433,6 +434,17 @@ impl Display for NetAddress {
 				ed25519_pubkey, checksum, version, port
 			),
 		}
+	}
+}
+
+impl UniffiCustomTypeConverter for Mnemonic {
+	type Builtin = String;
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(Mnemonic::from_str(&val).map_err(|_| Error::InvalidSecretKey)?)
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
 	}
 }
 

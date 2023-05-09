@@ -11,14 +11,15 @@ The primary abstraction of the library is the `Node`, which can be retrieved by 
 use ldk_node::{Builder, NetAddress};
 use ldk_node::lightning_invoice::Invoice;
 use ldk_node::bitcoin::secp256k1::PublicKey;
+use ldk_node::bitcoin::Network;
 use std::str::FromStr;
 
 fn main() {
-	let node = Builder::new()
-		.set_network("testnet")
-		.set_esplora_server_url("https://blockstream.info/testnet/api".to_string())
-		.build();
+	let mut builder = Builder::new();
+	builder.set_network(Network::Testnet);
+	builder.set_esplora_server_url("https://blockstream.info/testnet/api".to_string());
 
+	let node = builder.build();
 	node.start().unwrap();
 
 	let _funding_address = node.new_funding_address();
