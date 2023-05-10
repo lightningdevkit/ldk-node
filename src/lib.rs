@@ -1070,56 +1070,56 @@ impl Node {
 
 		let wallet = Arc::clone(&self.wallet);
 		let tx_sync = Arc::clone(&self.tx_sync);
+		let sync_logger = Arc::clone(&self.logger);
+
+		let local_runtime =
+			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+		local_runtime.block_on(async move {
+			let now = Instant::now();
+			match wallet.sync().await {
+				Ok(()) => {
+					log_info!(
+						sync_logger,
+						"Sync of on-chain wallet finished in {}ms.",
+						now.elapsed().as_millis()
+					);
+					Ok(())
+				}
+				Err(e) => {
+					log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
+					Err(e)
+				}
+			}
+		})?;
+
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_logger = Arc::clone(&self.logger);
-		let confirmables = vec![
-			&*sync_cman as &(dyn Confirm + Sync + Send),
-			&*sync_cmon as &(dyn Confirm + Sync + Send),
-		];
+		let (sender, receiver) = std::sync::mpsc::sync_channel(1);
 
-		tokio::task::block_in_place(move || {
-			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
-				async move {
-					let now = Instant::now();
-					match wallet.sync().await {
-						Ok(()) => {
-							log_info!(
-								sync_logger,
-								"Sync of on-chain wallet finished in {}ms.",
-								now.elapsed().as_millis()
-							);
-							Ok(())
-						}
-						Err(e) => {
-							log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
-							Err(e)
-						}
-					}
-				},
-			)
-		})?;
-
-		let sync_logger = Arc::clone(&self.logger);
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				let now = Instant::now();
-				match tx_sync.sync(confirmables).await {
-					Ok(()) => {
-						log_info!(
-							sync_logger,
-							"Sync of Lightning wallet finished in {}ms.",
-							now.elapsed().as_millis()
-						);
-						Ok(())
-					}
-					Err(e) => {
-						log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
-						Err(e)
-					}
+		runtime.spawn(async move {
+			let confirmables = vec![
+				&*sync_cman as &(dyn Confirm + Sync + Send),
+				&*sync_cmon as &(dyn Confirm + Sync + Send),
+			];
+			let now = Instant::now();
+			match tx_sync.sync(confirmables).await {
+				Ok(()) => {
+					log_info!(
+						sync_logger,
+						"Sync of Lightning wallet finished in {}ms.",
+						now.elapsed().as_millis()
+					);
+					let _ = sender.send(Ok(()));
 				}
-			})
-		})?;
+				Err(e) => {
+					log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
+					let _ = sender.send(Err(e));
+				}
+			}
+		});
+
+		receiver.recv().map_err(|_| Error::TxSyncFailed)??;
 
 		Ok(())
 	}
