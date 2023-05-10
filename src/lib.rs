@@ -922,23 +922,12 @@ impl Node {
 
 		let con_peer_pubkey = peer_info.pubkey;
 		let con_peer_addr = peer_info.address;
-		let con_success = Arc::new(AtomicBool::new(false));
-		let con_success_cloned = Arc::clone(&con_success);
 		let con_logger = Arc::clone(&self.logger);
 		let con_pm = Arc::clone(&self.peer_manager);
 
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				let res =
-					connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger)
-						.await;
-				con_success_cloned.store(res.is_ok(), Ordering::Release);
-			})
-		});
-
-		if !con_success.load(Ordering::Acquire) {
-			return Err(Error::ConnectionFailed);
-		}
+		runtime.block_on(async move {
+			connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger).await
+		})?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.pubkey, peer_info.address,);
 
@@ -1001,23 +990,12 @@ impl Node {
 
 		let con_peer_pubkey = peer_info.pubkey;
 		let con_peer_addr = peer_info.address;
-		let con_success = Arc::new(AtomicBool::new(false));
-		let con_success_cloned = Arc::clone(&con_success);
 		let con_logger = Arc::clone(&self.logger);
 		let con_pm = Arc::clone(&self.peer_manager);
 
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				let res =
-					connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger)
-						.await;
-				con_success_cloned.store(res.is_ok(), Ordering::Release);
-			})
-		});
-
-		if !con_success.load(Ordering::Acquire) {
-			return Err(Error::ConnectionFailed);
-		}
+		runtime.block_on(async move {
+			connect_peer_if_necessary(con_peer_pubkey, con_peer_addr, con_pm, con_logger).await
+		})?;
 
 		let user_config = UserConfig {
 			channel_handshake_limits: ChannelHandshakeLimits {
