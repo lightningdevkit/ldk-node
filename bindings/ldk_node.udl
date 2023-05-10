@@ -127,6 +127,13 @@ enum PaymentStatus {
 	"Failed",
 };
 
+enum Network {
+	"Bitcoin",
+	"Testnet",
+	"Signet",
+	"Regtest",
+};
+
 dictionary PaymentDetails {
 	PaymentHash hash;
 	PaymentPreimage? preimage;
@@ -195,9 +202,6 @@ typedef string ChannelId;
 
 [Custom]
 typedef string UserChannelId;
-
-[Custom]
-typedef string Network;
 
 [Custom]
 typedef string Mnemonic;

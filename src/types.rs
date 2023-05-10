@@ -22,7 +22,7 @@ use lightning_transaction_sync::EsploraSyncClient;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Network, OutPoint, Txid};
+use bitcoin::{Address, OutPoint, Txid};
 
 use bip39::Mnemonic;
 
@@ -267,18 +267,6 @@ impl Readable for UserChannelId {
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		Ok(Self(Readable::read(reader)?))
-	}
-}
-
-impl UniffiCustomTypeConverter for Network {
-	type Builtin = String;
-
-	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Ok(Network::from_str(&val).map_err(|_| Error::InvalidNetwork)?)
-	}
-
-	fn from_custom(obj: Self) -> Self::Builtin {
-		obj.to_string()
 	}
 }
 
