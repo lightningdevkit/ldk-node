@@ -953,7 +953,7 @@ impl Node {
 	///
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
-	pub fn disconnect(&self, counterparty_node_id: &PublicKey) -> Result<(), Error> {
+	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -968,7 +968,7 @@ impl Node {
 			}
 		}
 
-		self.peer_manager.disconnect_by_node_id(*counterparty_node_id);
+		self.peer_manager.disconnect_by_node_id(counterparty_node_id);
 		Ok(())
 	}
 
@@ -1126,10 +1126,10 @@ impl Node {
 
 	/// Close a previously opened channel.
 	pub fn close_channel(
-		&self, channel_id: &ChannelId, counterparty_node_id: &PublicKey,
+		&self, channel_id: &ChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.peer_store.remove_peer(counterparty_node_id)?;
-		match self.channel_manager.close_channel(&channel_id.0, counterparty_node_id) {
+		self.peer_store.remove_peer(&counterparty_node_id)?;
+		match self.channel_manager.close_channel(&channel_id.0, &counterparty_node_id) {
 			Ok(_) => Ok(()),
 			Err(_) => Err(Error::ChannelClosingFailed),
 		}
@@ -1291,7 +1291,7 @@ impl Node {
 
 	/// Send a spontaneous, aka. "keysend", payment
 	pub fn send_spontaneous_payment(
-		&self, amount_msat: u64, node_id: &PublicKey,
+		&self, amount_msat: u64, node_id: PublicKey,
 	) -> Result<PaymentHash, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1303,7 +1303,7 @@ impl Node {
 
 		let route_params = RouteParameters {
 			payment_params: PaymentParameters::from_node_id(
-				*node_id,
+				node_id,
 				self.config.default_cltv_expiry_delta,
 			),
 			final_value_msat: amount_msat,
@@ -1437,6 +1437,12 @@ impl Node {
 		&self, f: F,
 	) -> Vec<PaymentDetails> {
 		self.payment_store.list_filter(f)
+	}
+}
+
+impl Drop for Node {
+	fn drop(&mut self) {
+		let _ = self.stop();
 	}
 }
 

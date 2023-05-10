@@ -38,11 +38,11 @@ interface Node {
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddr address, boolean permanently);
 	[Throws=NodeError]
-	void disconnect([ByRef]PublicKey node_id);
+	void disconnect(PublicKey node_id);
 	[Throws=NodeError]
 	void connect_open_channel(PublicKey node_id, SocketAddr address, u64 channel_amount_sats, u64? push_to_counterparty_msat, boolean announce_channel);
 	[Throws=NodeError]
-	void close_channel([ByRef]ChannelId channel_id, [ByRef]PublicKey counterparty_node_id);
+	void close_channel([ByRef]ChannelId channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
 	void sync_wallets();
 	[Throws=NodeError]
@@ -50,7 +50,7 @@ interface Node {
 	[Throws=NodeError]
 	PaymentHash send_payment_using_amount([ByRef]Invoice invoice, u64 amount_msat);
 	[Throws=NodeError]
-	PaymentHash send_spontaneous_payment(u64 amount_msat, [ByRef]PublicKey node_id);
+	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
 	Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
 	[Throws=NodeError]
