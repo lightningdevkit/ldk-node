@@ -1123,7 +1123,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
 	pub fn event_handled(&self) {
-		self.event_queue.event_handled().unwrap();
+		self.event_queue
+			.event_handled()
+			.expect("Couldn't mark event handled due to persistence failure");
 	}
 
 	/// Returns our own node id

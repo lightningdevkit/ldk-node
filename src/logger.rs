@@ -17,7 +17,7 @@ pub(crate) struct FilesystemLogger {
 impl FilesystemLogger {
 	pub(crate) fn new(file_path: String, level: Level) -> Self {
 		if let Some(parent_dir) = Path::new(&file_path).parent() {
-			fs::create_dir_all(parent_dir).unwrap();
+			fs::create_dir_all(parent_dir).expect("Failed to create log parent directory");
 		}
 		Self { file_path, level }
 	}
@@ -40,8 +40,8 @@ impl Logger for FilesystemLogger {
 			.create(true)
 			.append(true)
 			.open(self.file_path.clone())
-			.unwrap()
+			.expect("Failed to open log file")
 			.write_all(log.as_bytes())
-			.unwrap();
+			.expect("Failed to write to log file")
 	}
 }
