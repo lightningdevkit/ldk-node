@@ -548,7 +548,8 @@ where
 			}
 			LdkEvent::SpendableOutputs { outputs } => {
 				// TODO: We should eventually remember the outputs and supply them to the wallet's coin selection, once BDK allows us to do so.
-				let destination_address = self.wallet.get_new_address().unwrap();
+				let destination_address =
+					self.wallet.get_new_address().expect("Failed to get destination address");
 				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
 				let tx_feerate =
 					self.wallet.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);

@@ -283,7 +283,7 @@ impl UniffiCustomTypeConverter for Network {
 impl UniffiCustomTypeConverter for Txid {
 	type Builtin = String;
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Ok(Txid::from_str(&val).unwrap())
+		Ok(Txid::from_str(&val)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
