@@ -21,7 +21,8 @@ interface Node {
 	void start();
 	[Throws=NodeError]
 	void stop();
-	Event next_event();
+	Event? next_event();
+	Event wait_next_event();
 	void event_handled();
 	PublicKey node_id();
 	SocketAddr? listening_address();

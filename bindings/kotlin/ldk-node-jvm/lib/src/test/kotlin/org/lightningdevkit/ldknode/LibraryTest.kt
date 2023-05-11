@@ -123,12 +123,12 @@ class LibraryTest {
 
         node1.connectOpenChannel(nodeId2, listenAddress2, 50000u, null, true)
 
-        val channelPendingEvent1 = node1.nextEvent()
+        val channelPendingEvent1 = node1.waitNextEvent()
         println("Got event: $channelPendingEvent1")
         assert(channelPendingEvent1 is Event.ChannelPending)
         node1.eventHandled()
 
-        val channelPendingEvent2 = node2.nextEvent()
+        val channelPendingEvent2 = node2.waitNextEvent()
         println("Got event: $channelPendingEvent2")
         assert(channelPendingEvent2 is Event.ChannelPending)
         node2.eventHandled()
@@ -153,12 +153,12 @@ class LibraryTest {
         assert(spendableBalance1AfterOpen < 50000u)
         assertEquals(100000u, spendableBalance2AfterOpen)
 
-        val channelReadyEvent1 = node1.nextEvent()
+        val channelReadyEvent1 = node1.waitNextEvent()
         println("Got event: $channelReadyEvent1")
         assert(channelReadyEvent1 is Event.ChannelReady)
         node1.eventHandled()
 
-        val channelReadyEvent2 = node2.nextEvent()
+        val channelReadyEvent2 = node2.waitNextEvent()
         println("Got event: $channelReadyEvent2")
         assert(channelReadyEvent2 is Event.ChannelReady)
         node2.eventHandled()
@@ -172,24 +172,24 @@ class LibraryTest {
 
         node1.sendPayment(invoice)
 
-        val paymentSuccessfulEvent = node1.nextEvent()
+        val paymentSuccessfulEvent = node1.waitNextEvent()
         println("Got event: $paymentSuccessfulEvent")
         assert(paymentSuccessfulEvent is Event.PaymentSuccessful)
         node1.eventHandled()
 
-        val paymentReceivedEvent = node2.nextEvent()
+        val paymentReceivedEvent = node2.waitNextEvent()
         println("Got event: $paymentReceivedEvent")
         assert(paymentReceivedEvent is Event.PaymentReceived)
         node2.eventHandled()
 
         node2.closeChannel(channelId, nodeId1)
 
-        val channelClosedEvent1 = node1.nextEvent()
+        val channelClosedEvent1 = node1.waitNextEvent()
         println("Got event: $channelClosedEvent1")
         assert(channelClosedEvent1 is Event.ChannelClosed)
         node1.eventHandled()
 
-        val channelClosedEvent2 = node2.nextEvent()
+        val channelClosedEvent2 = node2.waitNextEvent()
         println("Got event: $channelClosedEvent2")
         assert(channelClosedEvent2 is Event.ChannelClosed)
         node2.eventHandled()

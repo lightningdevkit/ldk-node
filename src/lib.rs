@@ -828,11 +828,22 @@ impl Node {
 		Ok(())
 	}
 
-	/// Blocks until the next event is available.
+	/// Returns the next event in the event queue, if currently available.
+	///
+	/// Will return `Some(..)` if an event is available and `None` otherwise.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
-	pub fn next_event(&self) -> Event {
+	pub fn next_event(&self) -> Option<Event> {
 		self.event_queue.next_event()
+	}
+
+	/// Returns the next event in the event queue.
+	///
+	/// Will block the current thread until the next event is available.
+	///
+	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	pub fn wait_next_event(&self) -> Event {
+		self.event_queue.wait_next_event()
 	}
 
 	/// Confirm the last retrieved event handled.

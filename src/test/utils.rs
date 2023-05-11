@@ -27,7 +27,7 @@ use std::time::Duration;
 
 macro_rules! expect_event {
 	($node: expr, $event_type: ident) => {{
-		match $node.next_event() {
+		match $node.wait_next_event() {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", std::stringify!($node), e);
 				$node.event_handled();
