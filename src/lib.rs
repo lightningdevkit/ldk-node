@@ -151,7 +151,7 @@ use rand::Rng;
 use std::convert::TryInto;
 use std::default::Default;
 use std::fs;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -185,7 +185,7 @@ pub struct Config {
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The IP address and TCP port the node will listen on.
-	pub listening_address: Option<SocketAddr>,
+	pub listening_address: Option<NetAddress>,
 	/// The default CLTV expiry delta to be used for payments.
 	pub default_cltv_expiry_delta: u32,
 }
@@ -309,7 +309,7 @@ impl Builder {
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	///
 	/// Default: `0.0.0.0:9735`
-	pub fn set_listening_address(&mut self, listening_address: SocketAddr) -> &mut Self {
+	pub fn set_listening_address(&mut self, listening_address: NetAddress) -> &mut Self {
 		self.config.listening_address = Some(listening_address);
 		self
 	}
@@ -816,9 +816,15 @@ impl Node {
 			let stop_listen = Arc::clone(&stop_running);
 			let listening_address = listening_address.clone();
 
+			let bind_addr = listening_address
+				.to_socket_addrs()
+				.expect("Unable to resolve listing address")
+				.next()
+				.expect("Unable to resolve listing address");
+
 			runtime.spawn(async move {
 				let listener =
-					tokio::net::TcpListener::bind(listening_address).await.expect(
+					tokio::net::TcpListener::bind(bind_addr).await.expect(
 						"Failed to bind to listen address/port - is something else already listening on it?",
 						);
 				loop {
@@ -964,8 +970,8 @@ impl Node {
 	}
 
 	/// Returns our own listening address.
-	pub fn listening_address(&self) -> Option<SocketAddr> {
-		self.config.listening_address
+	pub fn listening_address(&self) -> Option<NetAddress> {
+		self.config.listening_address.clone()
 	}
 
 	/// Retrieve a new on-chain/funding address.
