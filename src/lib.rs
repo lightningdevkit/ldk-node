@@ -169,11 +169,14 @@ const BDK_CLIENT_CONCURRENCY: u8 = 8;
 // The timeout after which we abandon retrying failed payments.
 const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
-// The time in between peer reconnection attempts.
+// The time in-between peer reconnection attempts.
 const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(10);
 
 // The time in-between RGS sync attempts.
 const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+// The time in-between node announcement broadcast attempts.
+const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 // The length in bytes of our wallets' keys seed.
 const WALLET_KEYS_SEED_LEN: usize = 64;
@@ -870,6 +873,7 @@ impl Node {
 		let mut stop_connect = self.stop_receiver.clone();
 		runtime.spawn(async move {
 			let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 			loop {
 				tokio::select! {
 						_ = stop_connect.changed() => {
@@ -897,6 +901,39 @@ impl Node {
 												.await;
 										}
 									}
+						}
+				}
+			}
+		});
+
+		// Regularly broadcast node announcements.
+		let bcast_cm = Arc::clone(&self.channel_manager);
+		let bcast_pm = Arc::clone(&self.peer_manager);
+		let bcast_config = Arc::clone(&self.config);
+		let mut stop_bcast = self.stop_receiver.clone();
+		runtime.spawn(async move {
+			let mut interval = tokio::time::interval(NODE_ANN_BCAST_INTERVAL);
+			loop {
+				tokio::select! {
+						_ = stop_bcast.changed() => {
+							return;
+						}
+						_ = interval.tick(), if bcast_cm.list_channels().iter().any(|chan| chan.is_public) => {
+							while bcast_pm.get_peer_node_ids().is_empty() {
+								// Sleep a bit and retry if we don't have any peers yet.
+								tokio::time::sleep(Duration::from_secs(5)).await;
+
+								// Check back if we need to stop.
+								match stop_bcast.has_changed() {
+									Ok(false) => {},
+									Ok(true) => return,
+									Err(_) => return,
+								}
+							}
+
+							let addresses =
+								bcast_config.listening_address.iter().cloned().map(|a| a.0).collect();
+							bcast_pm.broadcast_node_announcement([0; 3], [0; 32], addresses);
 						}
 				}
 			}
