@@ -130,26 +130,26 @@ impl Readable for UserChannelId {
 
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
-/// [`Node::list_channels`]: [`crate::Node::list_channels`]
+/// [`Node::list_channels`]: crate::Node::list_channels
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelDetails {
-	/// The channel's ID (prior to funding transaction generation, this is a random 32 bytes,
-	/// thereafter this is the transaction ID of the funding transaction XOR the funding transaction
-	/// output).
+	/// The channel ID (prior to funding transaction generation, this is a random 32-byte
+	/// identifier, afterwards this is the transaction ID of the funding transaction XOR the
+	/// funding transaction output).
 	///
 	/// Note that this means this value is *not* persistent - it can change once during the
 	/// lifetime of the channel.
 	pub channel_id: ChannelId,
-	/// The `node_id` of our channel's counterparty.
+	/// The node ID of our the channel's counterparty.
 	pub counterparty_node_id: PublicKey,
 	/// The channel's funding transaction output, if we've negotiated the funding transaction with
 	/// our counterparty already.
 	pub funding_txo: Option<OutPoint>,
-	/// The value, in satoshis, of this channel as appears in the funding output.
-	pub channel_value_satoshis: u64,
-	/// The value, in satoshis, that must always be held in the channel for us. This value ensures
-	/// that if we broadcast a revoked state, our counterparty can punish us by claiming at least
-	/// this value on chain.
+	/// The value, in satoshis, of this channel as it appears in the funding output.
+	pub channel_value_sats: u64,
+	/// The value, in satoshis, that must always be held as a reserve in the channel for us. This
+	/// value ensures that if we broadcast a revoked state, our counterparty can punish us by
+	/// claiming at least this value on chain.
 	///
 	/// This value is not included in [`outbound_capacity_msat`] as it can never be spent.
 	///
@@ -162,19 +162,19 @@ pub struct ChannelDetails {
 	/// The currently negotiated fee rate denominated in satoshi per 1000 weight units,
 	/// which is applied to commitment and HTLC transactions.
 	pub feerate_sat_per_1000_weight: u32,
-	/// Total balance of the channel. This is the amount that will be returned to the user if the
-	/// channel is closed.
+	/// The total balance of the channel. This is the amount that will be returned to
+	/// the user if the channel is closed.
 	///
 	/// The value is not exact, due to potential in-flight and fee-rate changes. Therefore, exactly
 	/// this amount is likely irrecoverable on close.
 	pub balance_msat: u64,
-	/// Available outbound capacity for sending HTLCs to the remote peer.
+	/// The available outbound capacity for sending HTLCs to the remote peer.
 	///
 	/// The amount does not include any pending HTLCs which are not yet resolved (and, thus, whose
 	/// balance is not available for inclusion in new outbound HTLCs). This further does not include
 	/// any pending outgoing HTLCs which are awaiting some other resolution to be sent.
 	pub outbound_capacity_msat: u64,
-	/// Available outbound capacity for sending HTLCs to the remote peer.
+	/// The available outbound capacity for sending HTLCs to the remote peer.
 	///
 	/// The amount does not include any pending HTLCs which are not yet resolved
 	/// (and, thus, whose balance is not available for inclusion in new inbound HTLCs). This further
@@ -190,13 +190,13 @@ pub struct ChannelDetails {
 	pub confirmations: Option<u32>,
 	/// Returns `true` if the channel was initiated (and therefore funded) by us.
 	pub is_outbound: bool,
-	/// Returns `true` if the channel is confirmed, both parties have exchanged `channel_ready`
-	/// messages, and the channel is not currently being shut down. Both parties exchange
-	/// `channel_ready` messages upon independently verifying that the required confirmations count
-	/// provided by `confirmations_required` has been reached.
+	/// Returns `true` if both parties have exchanged `channel_ready` messages, and the channel is
+	/// not currently being shut down. Both parties exchange `channel_ready` messages upon
+	/// independently verifying that the required confirmations count provided by
+	/// `confirmations_required` has been reached.
 	pub is_channel_ready: bool,
-	/// Returns `true` if the channel is (a) confirmed and `channel_ready` has been exchanged,
-	/// (b) the peer is connected, and (c) the channel is not currently negotiating shutdown.
+	/// Returns `true` if the channel (a) `channel_ready` messages have been exchanged, (b) the
+	/// peer is connected, and (c) the channel is not currently negotiating shutdown.
 	///
 	/// This is a strict superset of `is_channel_ready`.
 	pub is_usable: bool,
@@ -213,7 +213,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			channel_id: ChannelId(value.channel_id),
 			counterparty_node_id: value.counterparty.node_id,
 			funding_txo: value.funding_txo.and_then(|o| Some(o.into_bitcoin_outpoint())),
-			channel_value_satoshis: value.channel_value_satoshis,
+			channel_value_sats: value.channel_value_satoshis,
 			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
 			user_channel_id: UserChannelId(value.user_channel_id),
 			balance_msat: value.balance_msat,
@@ -233,7 +233,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 
 /// Details of a known Lightning peer as returned by [`Node::list_peers`].
 ///
-/// [`Node::list_peers`]: [`crate::Node::list_peers`]
+/// [`Node::list_peers`]: crate::Node::list_peers
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDetails {
 	/// The node ID of the peer.

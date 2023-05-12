@@ -157,7 +157,7 @@ dictionary ChannelDetails {
 	ChannelId channel_id;
 	PublicKey counterparty_node_id;
 	OutPoint? funding_txo;
-	u64 channel_value_satoshis;
+	u64 channel_value_sats;
 	u64? unspendable_punishment_reserve;
 	UserChannelId user_channel_id;
 	u32 feerate_sat_per_1000_weight;
