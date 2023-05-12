@@ -1728,6 +1728,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		self.payment_store.list_filter(f)
 	}
 
+	/// Retrieves all payments.
+	pub fn list_payments(&self) -> Vec<PaymentDetails> {
+		self.payment_store.list_filter(|_| true)
+	}
+
 	/// Retrieves a list of known peers.
 	pub fn list_peers(&self) -> Vec<PeerDetails> {
 		let active_connected_peers: Vec<PublicKey> =

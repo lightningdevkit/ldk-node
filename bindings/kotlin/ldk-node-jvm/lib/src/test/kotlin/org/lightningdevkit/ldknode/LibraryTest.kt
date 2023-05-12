@@ -181,6 +181,9 @@ class LibraryTest {
         assert(paymentReceivedEvent is Event.PaymentReceived)
         node2.eventHandled()
 
+        assert(node1.listPayments().size == 1)
+        assert(node2.listPayments().size == 1)
+
         node2.closeChannel(channelId, nodeId1)
 
         val channelClosedEvent1 = node1.waitNextEvent()
@@ -196,7 +199,7 @@ class LibraryTest {
         mine(1u)
 
         // Sleep a bit to allow for the block to propagate to esplora
-        Thread.sleep(3_000)
+        Thread.sleep(5_000)
 
         node1.syncWallets()
         node2.syncWallets()

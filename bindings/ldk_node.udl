@@ -67,6 +67,7 @@ interface LDKNode {
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	boolean remove_payment([ByRef]PaymentHash payment_hash);
+	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
 	[Throws=NodeError]

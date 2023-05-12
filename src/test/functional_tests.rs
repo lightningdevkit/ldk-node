@@ -106,6 +106,8 @@ fn channel_full_cycle() {
 	let payment_hash = node_a.send_payment(&invoice).unwrap();
 	assert_eq!(node_a.send_payment(&invoice), Err(Error::DuplicatePayment));
 
+	assert_eq!(node_a.list_payments().first().unwrap().hash, payment_hash);
+
 	let outbound_payments_a =
 		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
 	assert_eq!(outbound_payments_a.len(), 1);
