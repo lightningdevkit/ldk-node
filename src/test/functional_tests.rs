@@ -131,7 +131,7 @@ fn channel_full_cycle() {
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Assert we fail duplicate outbound payments.
-	assert_eq!(Err(Error::NonUniquePaymentHash), node_a.send_payment(&invoice));
+	assert_eq!(Err(Error::DuplicatePayment), node_a.send_payment(&invoice));
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 1000_000;

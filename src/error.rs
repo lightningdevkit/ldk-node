@@ -53,8 +53,8 @@ pub enum Error {
 	InvalidChannelId,
 	/// The given network is invalid.
 	InvalidNetwork,
-	/// Payment of the given invoice has already been intiated.
-	NonUniquePaymentHash,
+	/// A payment with the given hash has already been intiated.
+	DuplicatePayment,
 	/// There are insufficient funds to complete the given operation.
 	InsufficientFunds,
 }
@@ -89,7 +89,9 @@ impl fmt::Display for Error {
 			Self::InvalidInvoice => write!(f, "The given invoice is invalid."),
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
-			Self::NonUniquePaymentHash => write!(f, "An invoice must not get payed twice."),
+			Self::DuplicatePayment => {
+				write!(f, "A payment with the given hash has already been initiated.")
+			}
 			Self::InsufficientFunds => {
 				write!(f, "There are insufficient funds to complete the given operation.")
 			}

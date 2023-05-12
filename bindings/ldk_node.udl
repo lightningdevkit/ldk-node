@@ -101,7 +101,7 @@ enum NodeError {
 	"InvalidInvoice",
 	"InvalidChannelId",
 	"InvalidNetwork",
-	"NonUniquePaymentHash",
+	"DuplicatePayment",
 	"InsufficientFunds",
 };
 

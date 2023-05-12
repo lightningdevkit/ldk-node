@@ -1404,7 +1404,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		if self.payment_store.contains(&payment_hash) {
 			log_error!(self.logger, "Payment error: an invoice must not get paid twice.");
-			return Err(Error::NonUniquePaymentHash);
+			return Err(Error::DuplicatePayment);
 		}
 
 		let payment_secret = Some(*invoice.payment_secret());
@@ -1479,7 +1479,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
 		if self.payment_store.contains(&payment_hash) {
 			log_error!(self.logger, "Payment error: an invoice must not get paid twice.");
-			return Err(Error::NonUniquePaymentHash);
+			return Err(Error::DuplicatePayment);
 		}
 
 		let payment_id = PaymentId(invoice.payment_hash().into_inner());
