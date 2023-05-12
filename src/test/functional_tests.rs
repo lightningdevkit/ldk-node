@@ -46,6 +46,7 @@ fn channel_full_cycle() {
 		)
 		.unwrap();
 
+	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
 	expect_event!(node_a, ChannelPending);
 
 	let funding_txo = match node_b.next_event() {

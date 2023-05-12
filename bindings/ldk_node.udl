@@ -58,6 +58,8 @@ interface Node {
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	boolean remove_payment([ByRef]PaymentHash payment_hash);
+	sequence<PeerDetails> list_peers();
+	sequence<ChannelDetails> list_channels();
 };
 
 [Error]
@@ -119,8 +121,33 @@ dictionary PaymentDetails {
 };
 
 dictionary OutPoint {
-    Txid txid;
-    u32 vout;
+	Txid txid;
+	u32 vout;
+};
+
+dictionary ChannelDetails {
+	ChannelId channel_id;
+	PublicKey counterparty_node_id;
+	OutPoint? funding_txo;
+	u64 channel_value_satoshis;
+	u64? unspendable_punishment_reserve;
+	UserChannelId user_channel_id;
+	u64 balance_msat;
+	u64 outbound_capacity_msat;
+	u64 inbound_capacity_msat;
+	u32? confirmations_required;
+	u32? confirmations;
+	boolean is_outbound;
+	boolean is_channel_ready;
+	boolean is_usable;
+	boolean is_public;
+	u16? cltv_expiry_delta;
+};
+
+dictionary PeerDetails {
+	PublicKey node_id;
+	SocketAddr address;
+	boolean is_connected;
 };
 
 [Custom]
