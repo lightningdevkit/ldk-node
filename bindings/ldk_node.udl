@@ -49,7 +49,7 @@ interface LDKNode {
 	[Throws=NodeError]
 	u64 total_onchain_balance_sats();
 	[Throws=NodeError]
-	void connect(PublicKey node_id, NetAddress address, boolean permanently);
+	void connect(PublicKey node_id, NetAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
 	[Throws=NodeError]
@@ -176,6 +176,7 @@ dictionary ChannelDetails {
 dictionary PeerDetails {
 	PublicKey node_id;
 	NetAddress address;
+	boolean is_persisted;
 	boolean is_connected;
 };
 

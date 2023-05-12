@@ -1284,9 +1284,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	/// Connect to a node on the peer-to-peer network.
 	///
-	/// If `permanently` is set to `true`, we'll remember the peer and reconnect to it on restart.
+	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
 	pub fn connect(
-		&self, node_id: PublicKey, address: NetAddress, permanently: bool,
+		&self, node_id: PublicKey, address: NetAddress, persist: bool,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1311,7 +1311,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
-		if permanently {
+		if persist {
 			self.peer_store.add_peer(peer_info)?;
 		}
 
@@ -1833,17 +1833,43 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	/// Retrieves a list of known peers.
 	pub fn list_peers(&self) -> Vec<PeerDetails> {
-		let active_connected_peers: Vec<PublicKey> =
-			self.peer_manager.get_peer_node_ids().iter().map(|p| p.0).collect();
-		self.peer_store
-			.list_peers()
-			.iter()
-			.map(|p| PeerDetails {
+		let mut peers = Vec::new();
+
+		// First add all connected peers, preferring to list the connected address if available.
+		let connected_peers = self.peer_manager.get_peer_node_ids();
+		let connected_peers_len = connected_peers.len();
+		for (node_id, con_addr_opt) in connected_peers {
+			let stored_peer = self.peer_store.get_peer(&node_id);
+			let stored_addr_opt = stored_peer.as_ref().map(|p| p.address.clone());
+			let address = match (con_addr_opt, stored_addr_opt) {
+				(Some(con_addr), _) => NetAddress(con_addr),
+				(None, Some(stored_addr)) => stored_addr,
+				(None, None) => continue,
+			};
+
+			let is_persisted = stored_peer.is_some();
+			let is_connected = true;
+			let details = PeerDetails { node_id, address, is_persisted, is_connected };
+			peers.push(details);
+		}
+
+		// Now add all known-but-offline peers, too.
+		for p in self.peer_store.list_peers() {
+			if peers.iter().take(connected_peers_len).find(|d| d.node_id == p.node_id).is_some() {
+				continue;
+			}
+
+			let details = PeerDetails {
 				node_id: p.node_id,
-				address: p.address.clone(),
-				is_connected: active_connected_peers.contains(&p.node_id),
-			})
-			.collect()
+				address: p.address,
+				is_persisted: true,
+				is_connected: false,
+			};
+
+			peers.push(details);
+		}
+
+		peers
 	}
 
 	/// Creates a digital ECDSA signature of a message with the node's secret key.

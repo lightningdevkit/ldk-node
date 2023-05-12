@@ -236,11 +236,13 @@ impl From<LdkChannelDetails> for ChannelDetails {
 /// [`Node::list_peers`]: [`crate::Node::list_peers`]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDetails {
-	/// Our peer's node ID.
+	/// The node ID of the peer.
 	pub node_id: PublicKey,
-	/// The IP address and TCP port of the peer.
+	/// The network address of the peer.
 	pub address: NetAddress,
-	/// Indicates whether or not the user is currently has an active connection with the peer.
+	/// Indicates whether we'll try to reconnect to this peer after restarts.
+	pub is_persisted: bool,
+	/// Indicates whether we currently have an active connection with the peer.
 	pub is_connected: bool,
 }
 
