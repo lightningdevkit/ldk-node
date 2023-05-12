@@ -104,6 +104,7 @@ fn channel_full_cycle() {
 
 	println!("\nA send_payment");
 	let payment_hash = node_a.send_payment(&invoice).unwrap();
+	assert_eq!(node_a.send_payment(&invoice), Err(Error::DuplicatePayment));
 
 	let outbound_payments_a =
 		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
@@ -130,8 +131,14 @@ fn channel_full_cycle() {
 	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
-	// Assert we fail duplicate outbound payments.
+	// Assert we fail duplicate outbound payments and check the status hasn't changed.
 	assert_eq!(Err(Error::DuplicatePayment), node_a.send_payment(&invoice));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 1000_000;

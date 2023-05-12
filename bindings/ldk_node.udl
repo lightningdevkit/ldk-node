@@ -81,7 +81,7 @@ enum NodeError {
 	"OnchainTxCreationFailed",
 	"ConnectionFailed",
 	"InvoiceCreationFailed",
-	"PaymentFailed",
+	"PaymentSendingFailed",
 	"ChannelCreationFailed",
 	"ChannelClosingFailed",
 	"PersistenceFailed",
@@ -122,6 +122,7 @@ enum PaymentDirection {
 
 enum PaymentStatus {
 	"Pending",
+	"SendingFailed",
 	"Succeeded",
 	"Failed",
 };
