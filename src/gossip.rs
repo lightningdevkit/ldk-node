@@ -30,10 +30,11 @@ impl GossipSource {
 	}
 
 	pub fn new_rgs(
-		server_url: String, network_graph: Arc<NetworkGraph>, logger: Arc<FilesystemLogger>,
+		server_url: String, latest_sync_timestamp: u32, network_graph: Arc<NetworkGraph>,
+		logger: Arc<FilesystemLogger>,
 	) -> Self {
 		let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
-		let latest_sync_timestamp = AtomicU32::new(0);
+		let latest_sync_timestamp = AtomicU32::new(latest_sync_timestamp);
 		Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger }
 	}
 
@@ -54,9 +55,9 @@ impl GossipSource {
 		}
 	}
 
-	pub async fn update_rgs_snapshot(&self) -> Result<(), Error> {
+	pub async fn update_rgs_snapshot(&self) -> Result<u32, Error> {
 		match self {
-			Self::P2PNetwork { gossip_sync: _ } => Ok(()),
+			Self::P2PNetwork { gossip_sync: _ } => Ok(0),
 			Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger } => {
 				let query_timestamp = latest_sync_timestamp.load(Ordering::Acquire);
 				let query_url = format!("{}/{}", server_url, query_timestamp);
@@ -76,7 +77,7 @@ impl GossipSource {
 							.update_network_graph(&update_data)
 							.map_err(|_| Error::GossipUpdateFailed)?;
 						latest_sync_timestamp.store(new_latest_sync_timestamp, Ordering::Release);
-						Ok(())
+						Ok(new_latest_sync_timestamp)
 					}
 					Err(e) => {
 						log_trace!(logger, "Failed to retrieve RGS gossip update: {}", e);

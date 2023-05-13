@@ -539,13 +539,30 @@ impl Builder {
 
 		let gossip_source = match gossip_source_config {
 			GossipSourceConfig::P2PNetwork => {
-				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)))
+				let p2p_source = Arc::new(GossipSource::new_p2p(
+					Arc::clone(&network_graph),
+					Arc::clone(&logger),
+				));
+
+				// Reset the RGS sync timestamp in case we somehow switch gossip sources
+				io::utils::write_rgs_latest_sync_timestamp(
+					0,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)
+				.expect("Persistence failed");
+				p2p_source
 			}
-			GossipSourceConfig::RapidGossipSync(rgs_server) => Arc::new(GossipSource::new_rgs(
-				rgs_server.clone(),
-				Arc::clone(&network_graph),
-				Arc::clone(&logger),
-			)),
+			GossipSourceConfig::RapidGossipSync(rgs_server) => {
+				let latest_sync_timestamp =
+					io::utils::read_rgs_latest_sync_timestamp(Arc::clone(&kv_store)).unwrap_or(0);
+				Arc::new(GossipSource::new_rgs(
+					rgs_server.clone(),
+					latest_sync_timestamp,
+					Arc::clone(&network_graph),
+					Arc::clone(&logger),
+				))
+			}
 		};
 
 		let msg_handler = match gossip_source.as_gossip_sync() {
@@ -727,6 +744,7 @@ impl Node {
 
 		if self.gossip_source.is_rgs() {
 			let gossip_source = Arc::clone(&self.gossip_source);
+			let gossip_sync_store = Arc::clone(&self.kv_store);
 			let gossip_sync_logger = Arc::clone(&self.logger);
 			let stop_gossip_sync = Arc::clone(&stop_running);
 			runtime.spawn(async move {
@@ -739,11 +757,19 @@ impl Node {
 
 					let now = Instant::now();
 					match gossip_source.update_rgs_snapshot().await {
-						Ok(()) => log_info!(
-							gossip_sync_logger,
-							"Background sync of RGS gossip data finished in {}ms.",
-							now.elapsed().as_millis()
-						),
+						Ok(updated_timestamp) => {
+							log_info!(
+								gossip_sync_logger,
+								"Background sync of RGS gossip data finished in {}ms.",
+								now.elapsed().as_millis()
+							);
+							io::utils::write_rgs_latest_sync_timestamp(
+								updated_timestamp,
+								Arc::clone(&gossip_sync_store),
+								Arc::clone(&gossip_sync_logger),
+							)
+							.expect("Persistence failed");
+						}
 						Err(e) => log_error!(
 							gossip_sync_logger,
 							"Background sync of RGS gossip data failed: {}",
