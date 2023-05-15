@@ -1,5 +1,5 @@
 use crate::hex_utils;
-use crate::io::{KVStore, TransactionalWrite, PAYMENT_INFO_PERSISTENCE_NAMESPACE};
+use crate::io::{KVStore, PAYMENT_INFO_PERSISTENCE_NAMESPACE};
 use crate::logger::{log_error, Logger};
 use crate::Error;
 
@@ -119,7 +119,7 @@ where
 
 		let hash = payment.hash.clone();
 		let updated = locked_payments.insert(hash.clone(), payment.clone()).is_some();
-		self.write_info_and_commit(&hash, &payment)?;
+		self.persist_info(&hash, &payment)?;
 		Ok(updated)
 	}
 
@@ -166,7 +166,7 @@ where
 				payment.status = status;
 			}
 
-			self.write_info_and_commit(&update.hash, payment)?;
+			self.persist_info(&update.hash, payment)?;
 			updated = true;
 		}
 
@@ -186,41 +186,22 @@ where
 			.collect::<Vec<PaymentDetails>>()
 	}
 
-	fn write_info_and_commit(
-		&self, hash: &PaymentHash, payment: &PaymentDetails,
-	) -> Result<(), Error> {
+	fn persist_info(&self, hash: &PaymentHash, payment: &PaymentDetails) -> Result<(), Error> {
 		let store_key = hex_utils::to_string(&hash.0);
-		let mut writer =
-			self.kv_store.write(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &store_key).map_err(|e| {
+		let data = payment.encode();
+		self.kv_store.write(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &store_key, &data).map_err(
+			|e| {
 				log_error!(
 					self.logger,
-					"Getting writer for key {}/{} failed due to: {}",
+					"Write for key {}/{} failed due to: {}",
 					PAYMENT_INFO_PERSISTENCE_NAMESPACE,
 					store_key,
 					e
 				);
 				Error::PersistenceFailed
-			})?;
-		payment.write(&mut writer).map_err(|e| {
-			log_error!(
-				self.logger,
-				"Writing payment data for key {}/{} failed due to: {}",
-				PAYMENT_INFO_PERSISTENCE_NAMESPACE,
-				store_key,
-				e
-			);
-			Error::PersistenceFailed
-		})?;
-		writer.commit().map_err(|e| {
-			log_error!(
-				self.logger,
-				"Committing payment data for key {}/{} failed due to: {}",
-				PAYMENT_INFO_PERSISTENCE_NAMESPACE,
-				store_key,
-				e
-			);
-			Error::PersistenceFailed
-		})
+			},
+		)?;
+		Ok(())
 	}
 }
 

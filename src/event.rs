@@ -7,9 +7,7 @@ use crate::payment_store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentStatus, PaymentStore,
 };
 
-use crate::io::{
-	KVStore, TransactionalWrite, EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_NAMESPACE,
-};
+use crate::io::{KVStore, EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_NAMESPACE};
 use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
@@ -134,7 +132,7 @@ where
 		{
 			let mut locked_queue = self.queue.lock().unwrap();
 			locked_queue.push_back(event);
-			self.write_queue_and_commit(&locked_queue)?;
+			self.persist_queue(&locked_queue)?;
 		}
 
 		self.notifier.notify_one();
@@ -156,46 +154,26 @@ where
 		{
 			let mut locked_queue = self.queue.lock().unwrap();
 			locked_queue.pop_front();
-			self.write_queue_and_commit(&locked_queue)?;
+			self.persist_queue(&locked_queue)?;
 		}
 		self.notifier.notify_one();
 		Ok(())
 	}
 
-	fn write_queue_and_commit(&self, locked_queue: &VecDeque<Event>) -> Result<(), Error> {
-		let mut writer = self
-			.kv_store
-			.write(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY)
+	fn persist_queue(&self, locked_queue: &VecDeque<Event>) -> Result<(), Error> {
+		let data = EventQueueSerWrapper(locked_queue).encode();
+		self.kv_store
+			.write(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY, &data)
 			.map_err(|e| {
 				log_error!(
 					self.logger,
-					"Getting writer for key {}/{} failed due to: {}",
+					"Write for key {}/{} failed due to: {}",
 					EVENT_QUEUE_PERSISTENCE_NAMESPACE,
 					EVENT_QUEUE_PERSISTENCE_KEY,
 					e
 				);
 				Error::PersistenceFailed
 			})?;
-		EventQueueSerWrapper(locked_queue).write(&mut writer).map_err(|e| {
-			log_error!(
-				self.logger,
-				"Writing event queue data to key {}/{} failed due to: {}",
-				EVENT_QUEUE_PERSISTENCE_NAMESPACE,
-				EVENT_QUEUE_PERSISTENCE_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})?;
-		writer.commit().map_err(|e| {
-			log_error!(
-				self.logger,
-				"Committing event queue data to key {}/{} failed due to: {}",
-				EVENT_QUEUE_PERSISTENCE_NAMESPACE,
-				EVENT_QUEUE_PERSISTENCE_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})?;
 		Ok(())
 	}
 }

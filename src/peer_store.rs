@@ -1,6 +1,4 @@
-use crate::io::{
-	KVStore, TransactionalWrite, PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_NAMESPACE,
-};
+use crate::io::{KVStore, PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_NAMESPACE};
 use crate::logger::{log_error, Logger};
 use crate::{Error, NetAddress};
 
@@ -37,14 +35,14 @@ where
 		let mut locked_peers = self.peers.write().unwrap();
 
 		locked_peers.insert(peer_info.node_id, peer_info);
-		self.write_peers_and_commit(&*locked_peers)
+		self.persist_peers(&*locked_peers)
 	}
 
 	pub(crate) fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
 		let mut locked_peers = self.peers.write().unwrap();
 
 		locked_peers.remove(node_id);
-		self.write_peers_and_commit(&*locked_peers)
+		self.persist_peers(&*locked_peers)
 	}
 
 	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
@@ -55,42 +53,21 @@ where
 		self.peers.read().unwrap().get(node_id).cloned()
 	}
 
-	fn write_peers_and_commit(
-		&self, locked_peers: &HashMap<PublicKey, PeerInfo>,
-	) -> Result<(), Error> {
-		let mut writer = self
-			.kv_store
-			.write(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY)
+	fn persist_peers(&self, locked_peers: &HashMap<PublicKey, PeerInfo>) -> Result<(), Error> {
+		let data = PeerStoreSerWrapper(&*locked_peers).encode();
+		self.kv_store
+			.write(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY, &data)
 			.map_err(|e| {
 				log_error!(
 					self.logger,
-					"Getting writer for key {}/{} failed due to: {}",
+					"Write for key {}/{} failed due to: {}",
 					PEER_INFO_PERSISTENCE_NAMESPACE,
 					PEER_INFO_PERSISTENCE_KEY,
 					e
 				);
 				Error::PersistenceFailed
 			})?;
-		PeerStoreSerWrapper(&*locked_peers).write(&mut writer).map_err(|e| {
-			log_error!(
-				self.logger,
-				"Writing peer data to key {}/{} failed due to: {}",
-				PEER_INFO_PERSISTENCE_NAMESPACE,
-				PEER_INFO_PERSISTENCE_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})?;
-		writer.commit().map_err(|e| {
-			log_error!(
-				self.logger,
-				"Committing peer data to key {}/{} failed due to: {}",
-				PEER_INFO_PERSISTENCE_NAMESPACE,
-				PEER_INFO_PERSISTENCE_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})
+		Ok(())
 	}
 }
 

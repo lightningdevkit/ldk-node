@@ -195,38 +195,20 @@ where
 	K::Target: KVStore,
 	L::Target: Logger,
 {
-	let mut writer = kv_store
-		.write(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY)
+	let data = updated_timestamp.encode();
+	kv_store
+		.write(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY, &data)
 		.map_err(|e| {
 			log_error!(
 				logger,
-				"Getting writer for key {}/{} failed due to: {}",
+				"Writing data to key {}/{} failed due to: {}",
 				LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
 				LATEST_RGS_SYNC_TIMESTAMP_KEY,
 				e
 			);
 			Error::PersistenceFailed
 		})?;
-	updated_timestamp.write(&mut writer).map_err(|e| {
-		log_error!(
-			logger,
-			"Writing data to key {}/{} failed due to: {}",
-			LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_KEY,
-			e
-		);
-		Error::PersistenceFailed
-	})?;
-	writer.commit().map_err(|e| {
-		log_error!(
-			logger,
-			"Committing data to key {}/{} failed due to: {}",
-			LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_KEY,
-			e
-		);
-		Error::PersistenceFailed
-	})
+	Ok(())
 }
 
 pub(crate) fn read_latest_node_ann_bcast_timestamp<K: Deref>(
