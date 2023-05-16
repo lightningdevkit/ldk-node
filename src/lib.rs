@@ -135,7 +135,7 @@ use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 
-use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
+use lightning::util::config::{ChannelConfig, ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
 use lightning::util::ser::ReadableArgs;
 
@@ -1502,6 +1502,16 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			Ok(_) => Ok(()),
 			Err(_) => Err(Error::ChannelClosingFailed),
 		}
+	}
+
+	/// Update the config for a previously opened channel.
+	pub fn update_channel_config(
+		&self, channel_id: &ChannelId, counterparty_node_id: PublicKey,
+		channel_config: &ChannelConfig,
+	) -> Result<(), Error> {
+		self.channel_manager
+			.update_channel_config(&counterparty_node_id, &[channel_id.0], channel_config)
+			.map_err(|_| Error::ChannelConfigUpdateFailed)
 	}
 
 	/// Send a payement given an invoice.

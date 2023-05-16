@@ -19,6 +19,8 @@ pub enum Error {
 	ChannelCreationFailed,
 	/// A channel could not be closed.
 	ChannelClosingFailed,
+	/// A channel config could not be updated.
+	ChannelConfigUpdateFailed,
 	/// Persistence failed.
 	PersistenceFailed,
 	/// A wallet operation failed.
@@ -72,6 +74,7 @@ impl fmt::Display for Error {
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
+			Self::ChannelConfigUpdateFailed => write!(f, "Failed to update channel config."),
 			Self::PersistenceFailed => write!(f, "Failed to persist data."),
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),

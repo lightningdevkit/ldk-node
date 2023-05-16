@@ -58,6 +58,8 @@ interface LDKNode {
 	[Throws=NodeError]
 	void close_channel([ByRef]ChannelId channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
+	void update_channel_config([ByRef]ChannelId channel_id, PublicKey counterparty_node_id, [ByRef]ChannelConfig channel_config);
+	[Throws=NodeError]
 	void sync_wallets();
 	[Throws=NodeError]
 	PaymentHash send_payment([ByRef]Invoice invoice);
@@ -90,6 +92,7 @@ enum NodeError {
 	"PaymentSendingFailed",
 	"ChannelCreationFailed",
 	"ChannelClosingFailed",
+	"ChannelConfigUpdateFailed",
 	"PersistenceFailed",
 	"WalletOperationFailed",
 	"OnchainTxSigningFailed",
@@ -179,6 +182,14 @@ dictionary PeerDetails {
 	NetAddress address;
 	boolean is_persisted;
 	boolean is_connected;
+};
+
+dictionary ChannelConfig {
+	u32 forwarding_fee_proportional_millionths;
+	u32 forwarding_fee_base_msat;
+	u16 cltv_expiry_delta;
+	u64 max_dust_htlc_exposure_msat;
+	u64 force_close_avoidance_max_fee_satoshis;
 };
 
 enum LogLevel {
