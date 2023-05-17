@@ -26,6 +26,10 @@ pub(crate) const PEER_INFO_PERSISTENCE_KEY: &str = "peers";
 /// The payment information will be persisted under this prefix.
 pub(crate) const PAYMENT_INFO_PERSISTENCE_NAMESPACE: &str = "payments";
 
+/// RapidGossipSync's `latest_sync_timestamp` will be persisted under this key.
+pub(crate) const RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE: &str = "";
+pub(crate) const RGS_LATEST_SYNC_TIMESTAMP_KEY: &str = "rgs_latest_sync_timestamp";
+
 /// Provides an interface that allows to store and retrieve persisted values that are associated
 /// with given keys.
 ///

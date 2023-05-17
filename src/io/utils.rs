@@ -1,15 +1,16 @@
 use super::*;
 use crate::WALLET_KEYS_SEED_LEN;
 
+use crate::logger::log_error;
 use crate::peer_store::PeerStore;
-use crate::{EventQueue, PaymentDetails};
+use crate::{Error, EventQueue, PaymentDetails};
 
 use lightning::chain::channelmonitor::ChannelMonitor;
 use lightning::chain::keysinterface::{EntropySource, SignerProvider};
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::logger::Logger;
-use lightning::util::ser::{Readable, ReadableArgs};
+use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hex::FromHex;
@@ -171,4 +172,59 @@ where
 		res.push(payment);
 	}
 	Ok(res)
+}
+
+pub(crate) fn read_rgs_latest_sync_timestamp<K: Deref>(kv_store: K) -> Result<u32, std::io::Error>
+where
+	K::Target: KVStore,
+{
+	let mut reader =
+		kv_store.read(RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE, RGS_LATEST_SYNC_TIMESTAMP_KEY)?;
+	u32::read(&mut reader).map_err(|_| {
+		std::io::Error::new(
+			std::io::ErrorKind::InvalidData,
+			"Failed to deserialize latest RGS sync timestamp",
+		)
+	})
+}
+
+pub(crate) fn write_rgs_latest_sync_timestamp<K: Deref, L: Deref>(
+	updated_timestamp: u32, kv_store: K, logger: L,
+) -> Result<(), Error>
+where
+	K::Target: KVStore,
+	L::Target: Logger,
+{
+	let mut writer = kv_store
+		.write(RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE, RGS_LATEST_SYNC_TIMESTAMP_KEY)
+		.map_err(|e| {
+			log_error!(
+				logger,
+				"Getting writer for key {}/{} failed due to: {}",
+				RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE,
+				RGS_LATEST_SYNC_TIMESTAMP_KEY,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+	updated_timestamp.write(&mut writer).map_err(|e| {
+		log_error!(
+			logger,
+			"Writing data to key {}/{} failed due to: {}",
+			RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE,
+			RGS_LATEST_SYNC_TIMESTAMP_KEY,
+			e
+		);
+		Error::PersistenceFailed
+	})?;
+	writer.commit().map_err(|e| {
+		log_error!(
+			logger,
+			"Committing data to key {}/{} failed due to: {}",
+			RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE,
+			RGS_LATEST_SYNC_TIMESTAMP_KEY,
+			e
+		);
+		Error::PersistenceFailed
+	})
 }

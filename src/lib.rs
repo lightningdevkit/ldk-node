@@ -76,6 +76,7 @@
 
 mod error;
 mod event;
+mod gossip;
 mod hex_utils;
 mod io;
 mod logger;
@@ -89,6 +90,7 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
+use lightning::ln::msgs::RoutingMessageHandler;
 pub use lightning_invoice;
 
 pub use error::Error as NodeError;
@@ -96,6 +98,7 @@ use error::Error;
 
 pub use event::Event;
 use event::{EventHandler, EventQueue};
+use gossip::GossipSource;
 use io::fs_store::FilesystemStore;
 use io::{KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_NAMESPACE};
 use payment_store::PaymentStore;
@@ -117,15 +120,12 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
-use lightning::routing::utxo::UtxoLookup;
 
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::ser::ReadableArgs;
 
 use lightning_background_processor::process_events_async;
-use lightning_background_processor::GossipSync as BPGossipSync;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
@@ -201,10 +201,16 @@ impl Default for Config {
 }
 
 #[derive(Debug, Clone)]
-enum WalletEntropySource {
+enum EntropySourceConfig {
 	SeedFile(String),
 	SeedBytes([u8; WALLET_KEYS_SEED_LEN]),
 	Bip39Mnemonic { mnemonic: bip39::Mnemonic, passphrase: Option<String> },
+}
+
+#[derive(Debug, Clone)]
+enum GossipSourceConfig {
+	P2PNetwork,
+	RapidGossipSync(String),
 }
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
@@ -212,21 +218,24 @@ enum WalletEntropySource {
 #[derive(Debug, Clone)]
 pub struct Builder {
 	config: Config,
-	entropy_source: Option<WalletEntropySource>,
+	entropy_source_config: Option<EntropySourceConfig>,
+	gossip_source_config: Option<GossipSourceConfig>,
 }
 
 impl Builder {
 	/// Creates a new builder instance with the default configuration.
 	pub fn new() -> Self {
 		let config = Config::default();
-		let entropy_source = None;
-		Self { config, entropy_source }
+		let entropy_source_config = None;
+		let gossip_source_config = None;
+		Self { config, entropy_source_config, gossip_source_config }
 	}
 
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
-		let entropy_source = None;
-		Self { config, entropy_source }
+		let entropy_source_config = None;
+		let gossip_source_config = None;
+		Self { config, entropy_source_config, gossip_source_config }
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
@@ -234,13 +243,27 @@ impl Builder {
 	/// If the given file does not exist a new random seed file will be generated and
 	/// stored at the given location.
 	pub fn set_entropy_seed_path(&mut self, seed_path: String) -> &mut Self {
-		self.entropy_source = Some(WalletEntropySource::SeedFile(seed_path));
+		self.entropy_source_config = Some(EntropySourceConfig::SeedFile(seed_path));
 		self
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from the given seed bytes.
 	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: [u8; WALLET_KEYS_SEED_LEN]) -> &mut Self {
-		self.entropy_source = Some(WalletEntropySource::SeedBytes(seed_bytes));
+		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(seed_bytes));
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
+	/// network.
+	pub fn set_gossip_source_p2p(&mut self) -> &mut Self {
+		self.gossip_source_config = Some(GossipSourceConfig::P2PNetwork);
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its gossip data from the given RapidGossipSync
+	/// server.
+	pub fn set_gossip_source_rgs(&mut self, rgs_server_url: String) -> &mut Self {
+		self.gossip_source_config = Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
 		self
 	}
 
@@ -250,7 +273,8 @@ impl Builder {
 	pub fn set_entropy_bip39_mnemonic(
 		&mut self, mnemonic: bip39::Mnemonic, passphrase: Option<String>,
 	) -> &mut Self {
-		self.entropy_source = Some(WalletEntropySource::Bip39Mnemonic { mnemonic, passphrase });
+		self.entropy_source_config =
+			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
 		self
 	}
 
@@ -303,14 +327,14 @@ impl Builder {
 		let logger = Arc::new(FilesystemLogger::new(log_file_path));
 
 		// Initialize the on-chain wallet and chain access
-		let seed_bytes = if let Some(entropy_source) = &self.entropy_source {
+		let seed_bytes = if let Some(entropy_source_config) = &self.entropy_source_config {
 			// Use the configured entropy source, if the user set one.
-			match entropy_source {
-				WalletEntropySource::SeedBytes(bytes) => bytes.clone(),
-				WalletEntropySource::SeedFile(seed_path) => {
+			match entropy_source_config {
+				EntropySourceConfig::SeedBytes(bytes) => bytes.clone(),
+				EntropySourceConfig::SeedFile(seed_path) => {
 					io::utils::read_or_generate_seed_file(seed_path)
 				}
-				WalletEntropySource::Bip39Mnemonic { mnemonic, passphrase } => match passphrase {
+				EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase } => match passphrase {
 					Some(passphrase) => mnemonic.to_seed(passphrase),
 					None => mnemonic.to_seed(""),
 				},
@@ -495,13 +519,6 @@ impl Builder {
 			chain_monitor.watch_channel(funding_outpoint, channel_monitor);
 		}
 
-		// Initialize the P2PGossipSync
-		let gossip_sync = Arc::new(P2PGossipSync::new(
-			Arc::clone(&network_graph),
-			None::<Arc<dyn UtxoLookup + Send + Sync>>,
-			Arc::clone(&logger),
-		));
-
 		// Initialize the PeerManager
 		let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
 			Arc::clone(&keys_manager),
@@ -510,17 +527,64 @@ impl Builder {
 			IgnoringMessageHandler {},
 		));
 		let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
-		let lightning_msg_handler = MessageHandler {
-			chan_handler: Arc::clone(&channel_manager),
-			route_handler: Arc::clone(&gossip_sync),
-			onion_message_handler: onion_messenger,
-		};
 
 		let cur_time = SystemTime::now()
 			.duration_since(SystemTime::UNIX_EPOCH)
 			.expect("System time error: Clock may have gone backwards");
-		let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
-			lightning_msg_handler,
+
+		// Initialize the GossipSource
+		// Use the configured gossip source, if the user set one, otherwise default to P2PNetwork.
+		let gossip_source_config =
+			self.gossip_source_config.as_ref().unwrap_or(&GossipSourceConfig::P2PNetwork);
+
+		let gossip_source = match gossip_source_config {
+			GossipSourceConfig::P2PNetwork => {
+				let p2p_source = Arc::new(GossipSource::new_p2p(
+					Arc::clone(&network_graph),
+					Arc::clone(&logger),
+				));
+
+				// Reset the RGS sync timestamp in case we somehow switch gossip sources
+				io::utils::write_rgs_latest_sync_timestamp(
+					0,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)
+				.expect("Persistence failed");
+				p2p_source
+			}
+			GossipSourceConfig::RapidGossipSync(rgs_server) => {
+				let latest_sync_timestamp =
+					io::utils::read_rgs_latest_sync_timestamp(Arc::clone(&kv_store)).unwrap_or(0);
+				Arc::new(GossipSource::new_rgs(
+					rgs_server.clone(),
+					latest_sync_timestamp,
+					Arc::clone(&network_graph),
+					Arc::clone(&logger),
+				))
+			}
+		};
+
+		let msg_handler = match gossip_source.as_gossip_sync() {
+			GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
+				chan_handler: Arc::clone(&channel_manager),
+				route_handler: Arc::clone(&p2p_gossip_sync)
+					as Arc<dyn RoutingMessageHandler + Sync + Send>,
+				onion_message_handler: onion_messenger,
+			},
+			GossipSync::Rapid(_) => MessageHandler {
+				chan_handler: Arc::clone(&channel_manager),
+				route_handler: Arc::new(IgnoringMessageHandler {})
+					as Arc<dyn RoutingMessageHandler + Sync + Send>,
+				onion_message_handler: onion_messenger,
+			},
+			GossipSync::None => {
+				unreachable!("We must always have a gossip sync!");
+			}
+		};
+
+		let peer_manager = Arc::new(PeerManager::new(
+			msg_handler,
 			cur_time.as_secs().try_into().expect("System time error"),
 			&ephemeral_bytes,
 			Arc::clone(&logger),
@@ -579,7 +643,7 @@ impl Builder {
 			peer_manager,
 			keys_manager,
 			network_graph,
-			gossip_sync,
+			gossip_source,
 			kv_store,
 			logger,
 			scorer,
@@ -604,7 +668,7 @@ pub struct Node {
 	peer_manager: Arc<PeerManager>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
-	gossip_sync: Arc<GossipSync>,
+	gossip_source: Arc<GossipSource>,
 	kv_store: Arc<FilesystemStore>,
 	logger: Arc<FilesystemLogger>,
 	scorer: Arc<Mutex<Scorer>>,
@@ -677,6 +741,46 @@ impl Node {
 				},
 			);
 		});
+
+		if self.gossip_source.is_rgs() {
+			let gossip_source = Arc::clone(&self.gossip_source);
+			let gossip_sync_store = Arc::clone(&self.kv_store);
+			let gossip_sync_logger = Arc::clone(&self.logger);
+			let stop_gossip_sync = Arc::clone(&stop_running);
+			runtime.spawn(async move {
+				loop {
+					let gossip_sync_logger = Arc::clone(&gossip_sync_logger);
+					let stop_gossip_sync = Arc::clone(&stop_gossip_sync);
+					if stop_gossip_sync.load(Ordering::Acquire) {
+						return;
+					}
+
+					let now = Instant::now();
+					match gossip_source.update_rgs_snapshot().await {
+						Ok(updated_timestamp) => {
+							log_info!(
+								gossip_sync_logger,
+								"Background sync of RGS gossip data finished in {}ms.",
+								now.elapsed().as_millis()
+							);
+							io::utils::write_rgs_latest_sync_timestamp(
+								updated_timestamp,
+								Arc::clone(&gossip_sync_store),
+								Arc::clone(&gossip_sync_logger),
+							)
+							.expect("Persistence failed");
+						}
+						Err(e) => log_error!(
+							gossip_sync_logger,
+							"Background sync of RGS gossip data failed: {}",
+							e
+						),
+					}
+
+					tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+				}
+			});
+		}
 
 		let sync_logger = Arc::clone(&self.logger);
 		let stop_sync = Arc::clone(&stop_running);
@@ -774,7 +878,7 @@ impl Node {
 		let background_event_handler = Arc::clone(&event_handler);
 		let background_chain_mon = Arc::clone(&self.chain_monitor);
 		let background_chan_man = Arc::clone(&self.channel_manager);
-		let background_gossip_sync = BPGossipSync::p2p(Arc::clone(&self.gossip_sync));
+		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
 		let background_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);

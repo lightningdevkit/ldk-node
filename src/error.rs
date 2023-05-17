@@ -29,6 +29,8 @@ pub enum Error {
 	WalletSigningFailed,
 	/// A transaction sync operation failed.
 	TxSyncFailed,
+	/// A gossip updating operation failed.
+	GossipUpdateFailed,
 	/// The given address is invalid.
 	InvalidAddress,
 	/// The given public key is invalid.
@@ -71,6 +73,7 @@ impl fmt::Display for Error {
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
 			Self::WalletSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
+			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
