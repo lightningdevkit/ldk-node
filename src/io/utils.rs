@@ -228,3 +228,60 @@ where
 		Error::PersistenceFailed
 	})
 }
+
+pub(crate) fn read_latest_node_ann_bcast_timestamp<K: Deref>(
+	kv_store: K,
+) -> Result<u64, std::io::Error>
+where
+	K::Target: KVStore,
+{
+	let mut reader = kv_store
+		.read(LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE, LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY)?;
+	u64::read(&mut reader).map_err(|_| {
+		std::io::Error::new(
+			std::io::ErrorKind::InvalidData,
+			"Failed to deserialize latest node announcment broadcast timestamp",
+		)
+	})
+}
+
+pub(crate) fn write_latest_node_ann_bcast_timestamp<K: Deref, L: Deref>(
+	updated_timestamp: u64, kv_store: K, logger: L,
+) -> Result<(), Error>
+where
+	K::Target: KVStore,
+	L::Target: Logger,
+{
+	let mut writer = kv_store
+		.write(LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE, LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY)
+		.map_err(|e| {
+			log_error!(
+				logger,
+				"Getting writer for key {}/{} failed due to: {}",
+				LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE,
+				LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+	updated_timestamp.write(&mut writer).map_err(|e| {
+		log_error!(
+			logger,
+			"Writing data to key {}/{} failed due to: {}",
+			LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE,
+			LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY,
+			e
+		);
+		Error::PersistenceFailed
+	})?;
+	writer.commit().map_err(|e| {
+		log_error!(
+			logger,
+			"Committing data to key {}/{} failed due to: {}",
+			LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE,
+			LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY,
+			e
+		);
+		Error::PersistenceFailed
+	})
+}

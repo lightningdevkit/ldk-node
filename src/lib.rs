@@ -910,30 +910,51 @@ impl Node {
 		let bcast_cm = Arc::clone(&self.channel_manager);
 		let bcast_pm = Arc::clone(&self.peer_manager);
 		let bcast_config = Arc::clone(&self.config);
+		let bcast_store = Arc::clone(&self.kv_store);
+		let bcast_logger = Arc::clone(&self.logger);
 		let mut stop_bcast = self.stop_receiver.clone();
 		runtime.spawn(async move {
-			let mut interval = tokio::time::interval(NODE_ANN_BCAST_INTERVAL);
+			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
+			let mut interval = tokio::time::interval(Duration::from_secs(30));
 			loop {
 				tokio::select! {
 						_ = stop_bcast.changed() => {
 							return;
 						}
-						_ = interval.tick(), if bcast_cm.list_channels().iter().any(|chan| chan.is_public) => {
-							while bcast_pm.get_peer_node_ids().is_empty() {
-								// Sleep a bit and retry if we don't have any peers yet.
-								tokio::time::sleep(Duration::from_secs(5)).await;
-
-								// Check back if we need to stop.
-								match stop_bcast.has_changed() {
-									Ok(false) => {},
-									Ok(true) => return,
-									Err(_) => return,
+						_ = interval.tick() => {
+							let skip_broadcast = match io::utils::read_latest_node_ann_bcast_timestamp(Arc::clone(&bcast_store)) {
+								Ok(latest_bcast_time_secs) => {
+									// Skip if the time hasn't elapsed yet.
+									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
+									next_bcast_unix_time.elapsed().is_err()
 								}
+								Err(_) => {
+									// Don't skip if we haven't broadcasted before.
+									false
+								}
+							};
+
+							if skip_broadcast {
+								continue;
+							}
+
+							if bcast_cm.list_channels().iter().any(|chan| chan.is_public) {
+								// Skip if we don't have any public channels.
+								continue;
+							}
+
+							if bcast_pm.get_peer_node_ids().is_empty() {
+								// Skip if we don't have any connected peers to gossip to.
+								continue;
 							}
 
 							let addresses =
 								bcast_config.listening_address.iter().cloned().map(|a| a.0).collect();
 							bcast_pm.broadcast_node_announcement([0; 3], [0; 32], addresses);
+
+							let unix_time_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+							io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
+								.expect("Persistence failed");
 						}
 				}
 			}
