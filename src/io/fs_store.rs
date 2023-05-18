@@ -38,13 +38,14 @@ fn path_to_windows_str<T: AsRef<OsStr>>(path: T) -> Vec<winapi::shared::ntdef::W
 	path.as_ref().encode_wide().chain(Some(0)).collect()
 }
 
+/// A [`KVStore`] implementation that writes to and reads from the file system.
 pub struct FilesystemStore {
 	dest_dir: PathBuf,
 	locks: Mutex<HashMap<(String, String), Arc<RwLock<()>>>>,
 }
 
 impl FilesystemStore {
-	pub fn new(dest_dir: PathBuf) -> Self {
+	pub(crate) fn new(dest_dir: PathBuf) -> Self {
 		let locks = Mutex::new(HashMap::new());
 		Self { dest_dir, locks }
 	}

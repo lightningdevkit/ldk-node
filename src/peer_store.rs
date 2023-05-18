@@ -9,24 +9,22 @@ use bitcoin::secp256k1::PublicKey;
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-pub struct PeerStore<K: Deref, L: Deref>
+pub struct PeerStore<K: KVStore + Sync + Send, L: Deref>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	peers: RwLock<HashMap<PublicKey, PeerInfo>>,
-	kv_store: K,
+	kv_store: Arc<K>,
 	logger: L,
 }
 
-impl<K: Deref, L: Deref> PeerStore<K, L>
+impl<K: KVStore + Sync + Send, L: Deref> PeerStore<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
-	pub(crate) fn new(kv_store: K, logger: L) -> Self {
+	pub(crate) fn new(kv_store: Arc<K>, logger: L) -> Self {
 		let peers = RwLock::new(HashMap::new());
 		Self { peers, kv_store, logger }
 	}
@@ -71,14 +69,13 @@ where
 	}
 }
 
-impl<K: Deref, L: Deref> ReadableArgs<(K, L)> for PeerStore<K, L>
+impl<K: KVStore + Sync + Send, L: Deref> ReadableArgs<(Arc<K>, L)> for PeerStore<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
-		reader: &mut R, args: (K, L),
+		reader: &mut R, args: (Arc<K>, L),
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let (kv_store, logger) = args;
 		let read_peers: PeerStoreDeserWrapper = Readable::read(reader)?;

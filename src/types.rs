@@ -1,6 +1,5 @@
 use crate::error::Error;
 use crate::hex_utils;
-use crate::io::fs_store::FilesystemStore;
 use crate::logger::FilesystemLogger;
 use crate::wallet::{Wallet, WalletKeysManager};
 use crate::UniffiCustomTypeConverter;
@@ -32,18 +31,18 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSoc
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
+pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	Arc<Wallet<bdk::database::SqliteDatabase>>,
 	Arc<Wallet<bdk::database::SqliteDatabase>>,
 	Arc<FilesystemLogger>,
-	Arc<FilesystemStore>,
+	Arc<K>,
 >;
 
-pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
+pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
-	Arc<ChannelManager>,
+	Arc<ChannelManager<K>>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
@@ -51,8 +50,8 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
 >;
 
-pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
-	Arc<ChainMonitor>,
+pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
+	Arc<ChainMonitor<K>>,
 	Arc<Wallet<bdk::database::SqliteDatabase>>,
 	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
 	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,

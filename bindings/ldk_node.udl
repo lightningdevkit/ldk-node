@@ -13,10 +13,10 @@ interface Builder {
 	constructor();
 	[Name=from_config]
 	constructor(Config config);
-	Node build();
+	LDKNode build();
 };
 
-interface Node {
+interface LDKNode {
 	[Throws=NodeError]
 	void start();
 	[Throws=NodeError]

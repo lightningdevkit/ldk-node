@@ -10,7 +10,7 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ops::Deref;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,22 +92,20 @@ impl PaymentDetailsUpdate {
 	}
 }
 
-pub(crate) struct PaymentStore<K: Deref + Clone, L: Deref>
+pub(crate) struct PaymentStore<K: KVStore + Sync + Send, L: Deref>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	payments: Mutex<HashMap<PaymentHash, PaymentDetails>>,
-	kv_store: K,
+	kv_store: Arc<K>,
 	logger: L,
 }
 
-impl<K: Deref + Clone, L: Deref> PaymentStore<K, L>
+impl<K: KVStore + Sync + Send, L: Deref> PaymentStore<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
-	pub(crate) fn new(payments: Vec<PaymentDetails>, kv_store: K, logger: L) -> Self {
+	pub(crate) fn new(payments: Vec<PaymentDetails>, kv_store: Arc<K>, logger: L) -> Self {
 		let payments = Mutex::new(HashMap::from_iter(
 			payments.into_iter().map(|payment| (payment.hash, payment)),
 		));

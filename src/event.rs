@@ -106,23 +106,21 @@ impl_writeable_tlv_based_enum!(Event,
 	};
 );
 
-pub struct EventQueue<K: Deref, L: Deref>
+pub struct EventQueue<K: KVStore + Sync + Send, L: Deref>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	queue: Mutex<VecDeque<Event>>,
 	notifier: Condvar,
-	kv_store: K,
+	kv_store: Arc<K>,
 	logger: L,
 }
 
-impl<K: Deref, L: Deref> EventQueue<K, L>
+impl<K: KVStore + Sync + Send, L: Deref> EventQueue<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
-	pub(crate) fn new(kv_store: K, logger: L) -> Self {
+	pub(crate) fn new(kv_store: Arc<K>, logger: L) -> Self {
 		let queue: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
 		let notifier = Condvar::new();
 		Self { queue, notifier, kv_store, logger }
@@ -178,14 +176,13 @@ where
 	}
 }
 
-impl<K: Deref, L: Deref> ReadableArgs<(K, L)> for EventQueue<K, L>
+impl<K: KVStore + Sync + Send, L: Deref> ReadableArgs<(Arc<K>, L)> for EventQueue<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
-		reader: &mut R, args: (K, L),
+		reader: &mut R, args: (Arc<K>, L),
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let (kv_store, logger) = args;
 		let read_queue: EventQueueDeserWrapper = Readable::read(reader)?;
@@ -222,14 +219,13 @@ impl Writeable for EventQueueSerWrapper<'_> {
 	}
 }
 
-pub(crate) struct EventHandler<K: Deref + Clone, L: Deref>
+pub(crate) struct EventHandler<K: KVStore + Sync + Send, L: Deref>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
 	event_queue: Arc<EventQueue<K, L>>,
-	channel_manager: Arc<ChannelManager>,
+	channel_manager: Arc<ChannelManager<K>>,
 	network_graph: Arc<NetworkGraph>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore<K, L>>,
@@ -238,14 +234,13 @@ where
 	_config: Arc<Config>,
 }
 
-impl<K: Deref + Clone, L: Deref> EventHandler<K, L>
+impl<K: KVStore + Sync + Send + 'static, L: Deref> EventHandler<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	pub fn new(
 		wallet: Arc<Wallet<bdk::database::SqliteDatabase>>, event_queue: Arc<EventQueue<K, L>>,
-		channel_manager: Arc<ChannelManager>, network_graph: Arc<NetworkGraph>,
+		channel_manager: Arc<ChannelManager<K>>, network_graph: Arc<NetworkGraph>,
 		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
 		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, _config: Arc<Config>,
 	) -> Self {
