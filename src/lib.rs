@@ -1556,6 +1556,14 @@ impl Node {
 			})
 			.collect()
 	}
+
+	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
+		self.keys_manager.sign_message(msg)
+	}
+
+	pub fn verify_signature(&self, msg: &[u8], sig: &str) -> bool {
+		self.keys_manager.verify_signature(msg, sig)
+	}
 }
 
 impl Drop for Node {

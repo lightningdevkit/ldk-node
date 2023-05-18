@@ -13,6 +13,8 @@ use lightning::chain::keysinterface::{
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 
+use lightning::util::message_signing;
+
 use bdk::blockchain::{Blockchain, EsploraBlockchain};
 use bdk::database::BatchDatabase;
 use bdk::wallet::AddressIndex;
@@ -372,6 +374,17 @@ where
 			feerate_sat_per_1000_weight,
 			secp_ctx,
 		)
+	}
+
+	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
+		message_signing::sign(msg, &self.inner.get_node_secret_key())
+			.or(Err(Error::WalletSigningFailed))
+	}
+
+	pub fn verify_signature(&self, msg: &[u8], sig: &str) -> bool {
+		let pkey = PublicKey::from_secret_key(&Secp256k1::new(),
+			&self.inner.get_node_secret_key());
+		message_signing::verify(msg, sig, &pkey)
 	}
 }
 
