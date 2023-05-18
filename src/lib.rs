@@ -35,7 +35,7 @@
 //! fn main() {
 //! 	let mut builder = Builder::new();
 //! 	builder.set_network(Network::Testnet);
-//! 	builder.set_esplora_server_url("https://blockstream.info/testnet/api".to_string());
+//! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 //!
 //! 	let node = builder.build();
 //! 	node.start().unwrap();
@@ -161,6 +161,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 uniffi::include_scaffolding!("ldk_node");
 
+// Config defaults
+const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
+const DEFAULT_NETWORK: Network = Network::Regtest;
+const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
+const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
+const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
+
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of blocks after which BDK stops looking for scripts belonging to the wallet.
 const BDK_CLIENT_STOP_GAP: usize = 20;
@@ -185,11 +192,19 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
+///
+/// ### Defaults
+///
+/// | Parameter                   | Value            |
+/// |-----------------------------|------------------|
+/// | `storage_dir_path`          | /tmp/ldk_node/   |
+/// | `network`                   | Network::Regtest |
+/// | `listening_address`         | 0.0.0.0:9735     |
+/// | `default_cltv_expiry_delta` | 144              |
+///
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
-	/// The URL of the utilized Esplora server.
-	pub esplora_server_url: String,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The IP address and TCP port the node will listen on.
@@ -201,13 +216,17 @@ pub struct Config {
 impl Default for Config {
 	fn default() -> Self {
 		Self {
-			storage_dir_path: "/tmp/ldk_node/".to_string(),
-			esplora_server_url: "http://localhost:3002".to_string(),
-			network: Network::Regtest,
-			listening_address: Some("0.0.0.0:9735".parse().unwrap()),
-			default_cltv_expiry_delta: 144,
+			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
+			network: DEFAULT_NETWORK,
+			listening_address: Some(DEFAULT_LISTENING_ADDR.parse().unwrap()),
+			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
 		}
 	}
+}
+
+#[derive(Debug, Clone)]
+enum ChainDataSourceConfig {
+	Esplora(String),
 }
 
 #[derive(Debug, Clone)]
@@ -225,10 +244,16 @@ enum GossipSourceConfig {
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
 /// the getgo.
+///
+/// ### Defaults
+/// - Wallet entropy is sourced from a `keys_seed` file located under [`Config::storage_dir_path`]
+/// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
+/// - Gossip data is sourced via the peer-to-peer network
 #[derive(Debug)]
 pub struct Builder {
 	config: RwLock<Config>,
 	entropy_source_config: RwLock<Option<EntropySourceConfig>>,
+	chain_data_source_config: RwLock<Option<ChainDataSourceConfig>>,
 	gossip_source_config: RwLock<Option<GossipSourceConfig>>,
 }
 
@@ -237,16 +262,18 @@ impl Builder {
 	pub fn new() -> Self {
 		let config = RwLock::new(Config::default());
 		let entropy_source_config = RwLock::new(None);
+		let chain_data_source_config = RwLock::new(None);
 		let gossip_source_config = RwLock::new(None);
-		Self { config, entropy_source_config, gossip_source_config }
+		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
 		let config = RwLock::new(config);
 		let entropy_source_config = RwLock::new(None);
+		let chain_data_source_config = RwLock::new(None);
 		let gossip_source_config = RwLock::new(None);
-		Self { config, entropy_source_config, gossip_source_config }
+		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
@@ -278,6 +305,12 @@ impl Builder {
 			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
 	}
 
+	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
+	pub fn set_esplora_server(&self, esplora_server_url: String) {
+		*self.chain_data_source_config.write().unwrap() =
+			Some(ChainDataSourceConfig::Esplora(esplora_server_url));
+	}
+
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
 	/// network.
 	pub fn set_gossip_source_p2p(&self) {
@@ -292,19 +325,9 @@ impl Builder {
 	}
 
 	/// Sets the used storage directory path.
-	///
-	/// Default: `/tmp/ldk_node/`
 	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
 		let mut config = self.config.write().unwrap();
 		config.storage_dir_path = storage_dir_path;
-	}
-
-	/// Sets the Esplora server URL.
-	///
-	/// Default: `https://blockstream.info/api`
-	pub fn set_esplora_server_url(&self, esplora_server_url: String) {
-		let mut config = self.config.write().unwrap();
-		config.esplora_server_url = esplora_server_url;
 	}
 
 	/// Sets the Bitcoin network used.
@@ -314,8 +337,6 @@ impl Builder {
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
-	///
-	/// Default: `0.0.0.0:9735`
 	pub fn set_listening_address(&self, listening_address: NetAddress) {
 		let mut config = self.config.write().unwrap();
 		config.listening_address = Some(listening_address);
@@ -347,24 +368,20 @@ impl Builder {
 		let logger = Arc::new(FilesystemLogger::new(log_file_path));
 
 		// Initialize the on-chain wallet and chain access
-		let seed_bytes = if let Some(entropy_source_config) =
-			&*self.entropy_source_config.read().unwrap()
-		{
-			// Use the configured entropy source, if the user set one.
-			match entropy_source_config {
-				EntropySourceConfig::SeedBytes(bytes) => bytes.clone(),
-				EntropySourceConfig::SeedFile(seed_path) => {
-					io::utils::read_or_generate_seed_file(seed_path)
-				}
-				EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase } => match passphrase {
-					Some(passphrase) => mnemonic.to_seed(passphrase),
-					None => mnemonic.to_seed(""),
-				},
+		let seed_bytes = match &*self.entropy_source_config.read().unwrap() {
+			Some(EntropySourceConfig::SeedBytes(bytes)) => bytes.clone(),
+			Some(EntropySourceConfig::SeedFile(seed_path)) => {
+				io::utils::read_or_generate_seed_file(seed_path)
 			}
-		} else {
-			// Default to read or generate from the default location generate a seed file.
-			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			io::utils::read_or_generate_seed_file(&seed_path)
+			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
+				Some(passphrase) => mnemonic.to_seed(passphrase),
+				None => mnemonic.to_seed(""),
+			},
+			None => {
+				// Default to read or generate from the default location generate a seed file.
+				let seed_path = format!("{}/keys_seed", config.storage_dir_path);
+				io::utils::read_or_generate_seed_file(&seed_path)
+			}
 		};
 
 		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
@@ -389,14 +406,25 @@ impl Builder {
 		)
 		.expect("Failed to set up on-chain wallet");
 
-		let tx_sync = Arc::new(EsploraSyncClient::new(
-			config.esplora_server_url.clone(),
-			Arc::clone(&logger),
-		));
-
-		let blockchain =
-			EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
-				.with_concurrency(BDK_CLIENT_CONCURRENCY);
+		let (blockchain, tx_sync) = match &*self.chain_data_source_config.read().unwrap() {
+			Some(ChainDataSourceConfig::Esplora(server_url)) => {
+				let tx_sync =
+					Arc::new(EsploraSyncClient::new(server_url.clone(), Arc::clone(&logger)));
+				let blockchain =
+					EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
+						.with_concurrency(BDK_CLIENT_CONCURRENCY);
+				(blockchain, tx_sync)
+			}
+			None => {
+				// Default to Esplora client.
+				let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+				let tx_sync = Arc::new(EsploraSyncClient::new(server_url, Arc::clone(&logger)));
+				let blockchain =
+					EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
+						.with_concurrency(BDK_CLIENT_CONCURRENCY);
+				(blockchain, tx_sync)
+			}
+		};
 
 		let runtime = Arc::new(RwLock::new(None));
 		let wallet = Arc::new(Wallet::new(

@@ -8,15 +8,19 @@ use bitcoin::Amount;
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
-	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
-	let config_a = random_config(esplora_url);
-	let node_a = Builder::from_config(config_a).build();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let config_a = random_config();
+	let builder_a = Builder::from_config(config_a);
+	builder_a.set_esplora_server(esplora_url.clone());
+	let node_a = builder_a.build();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
 	println!("\n== Node B ==");
-	let config_b = random_config(esplora_url);
-	let node_b = Builder::from_config(config_b).build();
+	let config_b = random_config();
+	let builder_b = Builder::from_config(config_b);
+	builder_b.set_esplora_server(esplora_url);
+	let node_b = builder_b.build();
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
@@ -221,15 +225,19 @@ fn channel_full_cycle() {
 fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
-	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
-	let config_a = random_config(&esplora_url);
-	let node_a = Builder::from_config(config_a).build();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let config_a = random_config();
+	let builder_a = Builder::from_config(config_a);
+	builder_a.set_esplora_server(esplora_url.clone());
+	let node_a = builder_a.build();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
 	println!("\n== Node B ==");
-	let config_b = random_config(&esplora_url);
-	let node_b = Builder::from_config(config_b).build();
+	let config_b = random_config();
+	let builder_b = Builder::from_config(config_b);
+	builder_b.set_esplora_server(esplora_url);
+	let node_b = builder_b.build();
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
@@ -261,12 +269,11 @@ fn channel_open_fails_when_funds_insufficient() {
 
 #[test]
 fn connect_to_public_testnet_esplora() {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
-	let mut config = random_config(&esplora_url);
-	config.esplora_server_url = "https://blockstream.info/testnet/api".to_string();
+	let mut config = random_config();
 	config.network = bitcoin::Network::Testnet;
-	let node = Builder::from_config(config).build();
+	let builder = Builder::from_config(config);
+	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	let node = builder.build();
 	node.start().unwrap();
 	node.sync_wallets().unwrap();
 	node.stop().unwrap();
@@ -275,9 +282,11 @@ fn connect_to_public_testnet_esplora() {
 #[test]
 fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
-	let config = random_config(&esplora_url);
-	let node = Builder::from_config(config.clone()).build();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let config = random_config();
+	let builder = Builder::from_config(config.clone());
+	builder.set_esplora_server(esplora_url.clone());
+	let node = builder.build();
 	let expected_node_id = node.node_id();
 
 	let funding_address = node.new_funding_address().unwrap();
@@ -302,7 +311,9 @@ fn start_stop_reinit() {
 	assert_eq!(node.stop(), Err(Error::NotRunning));
 	drop(node);
 
-	let reinitialized_node = Builder::from_config(config).build();
+	let new_builder = Builder::from_config(config);
+	new_builder.set_esplora_server(esplora_url);
+	let reinitialized_node = builder.build();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
 	reinitialized_node.start().unwrap();
@@ -324,15 +335,19 @@ fn start_stop_reinit() {
 #[test]
 fn onchain_spend_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let config_a = random_config(esplora_url);
-	let node_a = Builder::from_config(config_a).build();
+	let config_a = random_config();
+	let builder_a = Builder::from_config(config_a);
+	builder_a.set_esplora_server(esplora_url.clone());
+	let node_a = builder_a.build();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
-	let config_b = random_config(esplora_url);
-	let node_b = Builder::from_config(config_b).build();
+	let config_b = random_config();
+	let builder_b = Builder::from_config(config_b);
+	builder_b.set_esplora_server(esplora_url);
+	let node_b = builder_b.build();
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
@@ -376,8 +391,11 @@ fn onchain_spend_receive() {
 #[test]
 fn sign_verify_msg() {
 	let (_, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
-	let node = Builder::from_config(random_config(esplora_url)).build();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let config = random_config();
+	let builder = Builder::from_config(config.clone());
+	builder.set_esplora_server(esplora_url.clone());
+	let node = builder.build();
 
 	node.start().unwrap();
 
