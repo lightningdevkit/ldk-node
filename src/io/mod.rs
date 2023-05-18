@@ -1,3 +1,5 @@
+//! Objects and traits for data persistence.
+
 pub(crate) mod fs_store;
 pub(crate) mod utils;
 
@@ -52,9 +54,10 @@ pub trait KVStore: KVStorePersister {
 	/// Returns a [`Read`] for the given `namespace` and `key` from which [`Readable`]s may be
 	/// read.
 	///
-	/// Returns an `Err` if the given `key` could not be found in the given `namespace`.
+	/// Returns an [`ErrorKind::NotFound`] if the given `key` could not be found in the given `namespace`.
 	///
 	/// [`Readable`]: lightning::util::ser::Readable
+	/// [`ErrorKind::NotFound`]: std::io::ErrorKind::NotFound
 	fn read(&self, namespace: &str, key: &str) -> std::io::Result<Self::Reader>;
 	/// Persists the given data under the given `key`.
 	///
