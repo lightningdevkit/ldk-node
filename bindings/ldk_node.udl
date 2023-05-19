@@ -157,6 +157,7 @@ dictionary ChannelDetails {
 	u64 channel_value_satoshis;
 	u64? unspendable_punishment_reserve;
 	UserChannelId user_channel_id;
+	u32 feerate_sat_per_1000_weight;
 	u64 balance_msat;
 	u64 outbound_capacity_msat;
 	u64 inbound_capacity_msat;
