@@ -25,8 +25,10 @@ pub enum Error {
 	PersistenceFailed,
 	/// A wallet operation failed.
 	WalletOperationFailed,
-	/// A siging operation failed.
-	WalletSigningFailed,
+	/// A signing operation for transaction failed.
+	OnchainTxSigningFailed,
+	/// A signing operation for message failed.
+	MessageSigningFailed,
 	/// A transaction sync operation failed.
 	TxSyncFailed,
 	/// A gossip updating operation failed.
@@ -71,7 +73,8 @@ impl fmt::Display for Error {
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
 			Self::PersistenceFailed => write!(f, "Failed to persist data."),
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
-			Self::WalletSigningFailed => write!(f, "Failed to sign given transaction."),
+			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
+			Self::MessageSigningFailed => write!(f, "Failed to sign given message."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
@@ -96,7 +99,7 @@ impl std::error::Error for Error {}
 impl From<bdk::Error> for Error {
 	fn from(e: bdk::Error) -> Self {
 		match e {
-			bdk::Error::Signer(_) => Self::WalletSigningFailed,
+			bdk::Error::Signer(_) => Self::OnchainTxSigningFailed,
 			_ => Self::WalletOperationFailed,
 		}
 	}

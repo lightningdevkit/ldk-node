@@ -379,7 +379,7 @@ where
 	/// We use ldk utils to sign given message with node' private key
 	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
 		message_signing::sign(msg, &self.inner.get_node_secret_key())
-			.or(Err(Error::WalletSigningFailed))
+			.or(Err(Error::OnchainTxSigningFailed))
 	}
 
 	/// We use ldk utils to verify given message' signature with node public key
