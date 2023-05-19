@@ -1557,10 +1557,17 @@ impl Node {
 			.collect()
 	}
 
+	/// Method to sign arbitrary message with ECDSA signature.
+	///
+	/// Calls inner [`WalletKeysManager::sign_message`] method to do it.
+	/// May return [`Error::MessageSigningFailed`].
 	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
 		self.keys_manager.sign_message(msg)
 	}
 
+	/// Method to verify signature for arbitrary message using node' public key.
+	///
+	/// Calls inner [`WalletKeysManager::verify_signature`] method to do it.
 	pub fn verify_signature(&self, msg: &[u8], sig: &str) -> bool {
 		self.keys_manager.verify_signature(msg, sig)
 	}

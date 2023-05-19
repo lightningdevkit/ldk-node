@@ -364,7 +364,6 @@ fn onchain_spend_receive() {
 	assert!(node_b.onchain_balance().unwrap().get_spendable() < 100000);
 }
 
-/// Tests arbitrary message signing and later verification
 #[test]
 fn sign_verify_msg() {
 	let (_, electrsd) = setup_bitcoind_and_electrsd();
@@ -373,6 +372,7 @@ fn sign_verify_msg() {
 
 	node.start().unwrap();
 
+	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
 	let sig = node.sign_message(msg).unwrap();
 	assert!(node.verify_signature(msg, sig.as_str()));
