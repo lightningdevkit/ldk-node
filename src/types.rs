@@ -296,6 +296,7 @@ impl UniffiCustomTypeConverter for Txid {
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
 /// [`Node::list_channels`]: [`crate::Node::list_channels`]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelDetails {
 	/// The channel's ID (prior to funding transaction generation, this is a random 32 bytes,
 	/// thereafter this is the transaction ID of the funding transaction XOR the funding transaction
@@ -394,6 +395,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 /// Details of a known Lightning peer as returned by [`Node::list_peers`].
 ///
 /// [`Node::list_peers`]: [`crate::Node::list_peers`]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDetails {
 	/// Our peer's node ID.
 	pub node_id: PublicKey,
