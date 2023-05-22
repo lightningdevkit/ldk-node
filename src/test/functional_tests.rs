@@ -33,6 +33,10 @@ fn channel_full_cycle() {
 	assert_eq!(node_a.onchain_balance().unwrap().get_spendable(), premine_amount_sat);
 	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), premine_amount_sat);
 
+	// Check we haven't got any events yet
+	assert_eq!(node_a.next_event(), None);
+	assert_eq!(node_b.next_event(), None);
+
 	println!("\nA -- connect_open_channel -> B");
 	let funding_amount_sat = 80_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
@@ -49,9 +53,10 @@ fn channel_full_cycle() {
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
 	expect_event!(node_a, ChannelPending);
 
-	let funding_txo = match node_b.next_event() {
+	let funding_txo = match node_b.wait_next_event() {
 		ref e @ Event::ChannelPending { funding_txo, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
+			assert_eq!(node_b.next_event().as_ref(), Some(e));
 			node_b.event_handled();
 			funding_txo
 		}
@@ -77,7 +82,7 @@ fn channel_full_cycle() {
 
 	expect_event!(node_a, ChannelReady);
 
-	let ev = node_b.next_event();
+	let ev = node_b.wait_next_event();
 	let channel_id = match ev {
 		ref e @ Event::ChannelReady { ref channel_id, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
@@ -138,7 +143,7 @@ fn channel_full_cycle() {
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
 	let payment_hash = node_a.send_payment_using_amount(&invoice, overpaid_amount_msat).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
-	let received_amount = match node_b.next_event() {
+	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled();
@@ -164,7 +169,7 @@ fn channel_full_cycle() {
 		node_a.send_payment_using_amount(&variable_amount_invoice, determined_amount_msat).unwrap();
 
 	expect_event!(node_a, PaymentSuccessful);
-	let received_amount = match node_b.next_event() {
+	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled();
@@ -201,6 +206,10 @@ fn channel_full_cycle() {
 	assert!(node_a.onchain_balance().unwrap().get_spendable() < node_a_upper_bound_sat);
 	let expected_final_amount_node_b_sat = premine_amount_sat + sum_of_all_payments_sat;
 	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), expected_final_amount_node_b_sat);
+
+	// Check we handled all events
+	assert_eq!(node_a.next_event(), None);
+	assert_eq!(node_b.next_event(), None);
 
 	node_a.stop().unwrap();
 	println!("\nA stopped");

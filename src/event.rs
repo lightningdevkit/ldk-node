@@ -141,7 +141,12 @@ where
 		Ok(())
 	}
 
-	pub(crate) fn next_event(&self) -> Event {
+	pub(crate) fn next_event(&self) -> Option<Event> {
+		let locked_queue = self.queue.lock().unwrap();
+		locked_queue.front().map(|e| e.clone())
+	}
+
+	pub(crate) fn wait_next_event(&self) -> Event {
 		let locked_queue =
 			self.notifier.wait_while(self.queue.lock().unwrap(), |queue| queue.is_empty()).unwrap();
 		locked_queue.front().unwrap().clone()
@@ -700,6 +705,7 @@ mod tests {
 		let store = Arc::new(TestStore::new());
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = EventQueue::new(Arc::clone(&store), Arc::clone(&logger));
+		assert_eq!(event_queue.next_event(), None);
 
 		let expected_event = Event::ChannelReady {
 			channel_id: ChannelId([23u8; 32]),
@@ -710,7 +716,8 @@ mod tests {
 
 		// Check we get the expected event and that it is returned until we mark it handled.
 		for _ in 0..5 {
-			assert_eq!(event_queue.next_event(), expected_event);
+			assert_eq!(event_queue.wait_next_event(), expected_event);
+			assert_eq!(event_queue.next_event(), Some(expected_event.clone()));
 			assert_eq!(false, store.get_and_clear_did_persist());
 		}
 
@@ -720,7 +727,7 @@ mod tests {
 			.unwrap();
 		let deser_event_queue =
 			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
-		assert_eq!(deser_event_queue.next_event(), expected_event);
+		assert_eq!(deser_event_queue.wait_next_event(), expected_event);
 		assert!(!store.get_and_clear_did_persist());
 
 		// Check we persisted on `event_handled()`
