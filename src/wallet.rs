@@ -376,21 +376,13 @@ where
 		)
 	}
 
-	/// Uses ldk utils to sign given message with node' private key and produce ECDSA signature.
-	///
-	/// see also [`WalletKeysManager::verify_signature`].
 	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
 		message_signing::sign(msg, &self.inner.get_node_secret_key())
-			.or(Err(Error::OnchainTxSigningFailed))
+			.or(Err(Error::MessageSigningFailed))
 	}
 
-	/// Uses ldk utils to verify given message' signature with node' public key.
-	///
-	/// `sig` suppose to be ECDSA signature for `msg`.
-	/// See also [`WalletKeysManager::sign_message`].
-	pub fn verify_signature(&self, msg: &[u8], sig: &str) -> bool {
-		let pkey = PublicKey::from_secret_key(&Secp256k1::new(), &self.inner.get_node_secret_key());
-		message_signing::verify(msg, sig, &pkey)
+	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
+		message_signing::verify(msg, sig, pkey)
 	}
 }
 

@@ -375,5 +375,6 @@ fn sign_verify_msg() {
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
 	let sig = node.sign_message(msg).unwrap();
-	assert!(node.verify_signature(msg, sig.as_str()));
+	let pkey = node.node_id();
+	assert!(node.verify_signature(msg, sig.as_str(), &pkey));
 }
