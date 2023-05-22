@@ -27,7 +27,7 @@
 //!
 //! ```no_run
 //! use ldk_node::{Builder, NetAddress};
-//! use ldk_node::lightning_invoice::Invoice;
+//! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use ldk_node::bitcoin::Network;
 //! use std::str::FromStr;
@@ -54,7 +54,7 @@
 //! 	println!("EVENT: {:?}", event);
 //! 	node.event_handled();
 //!
-//! 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
+//! 	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
 //! 	node.send_payment(&invoice).unwrap();
 //!
 //! 	node.stop().unwrap();
@@ -99,6 +99,7 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
+pub use types::ChannelConfig;
 pub use types::NetAddress;
 
 pub use io::utils::generate_entropy_mnemonic;
@@ -124,12 +125,12 @@ use wallet::Wallet;
 
 use logger::{log_debug, log_error, log_info, log_trace, FilesystemLogger, Logger};
 
-use lightning::chain::keysinterface::EntropySource;
 use lightning::chain::Confirm;
 use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::sign::EntropySource;
 
-use lightning::util::config::{ChannelConfig, ChannelHandshakeConfig, UserConfig};
+use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
 
 use lightning_background_processor::process_events_async;
@@ -137,7 +138,7 @@ use lightning_background_processor::process_events_async;
 use lightning_transaction_sync::EsploraSyncClient;
 
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router as LdkRouter};
-use lightning_invoice::{payment, Currency, Invoice};
+use lightning_invoice::{payment, Bolt11Invoice, Currency};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -889,7 +890,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// Returns a temporary channel id.
 	pub fn connect_open_channel(
 		&self, node_id: PublicKey, address: NetAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
 		announce_channel: bool,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
@@ -919,13 +920,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			})
 		})?;
 
+		let channel_config = (*(channel_config.unwrap_or_default())).clone().into();
 		let user_config = UserConfig {
 			channel_handshake_limits: Default::default(),
 			channel_handshake_config: ChannelHandshakeConfig {
 				announced_channel: announce_channel,
 				..Default::default()
 			},
-			channel_config: channel_config.unwrap_or_default(),
+			channel_config,
 			..Default::default()
 		};
 
@@ -1029,15 +1031,19 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// Update the config for a previously opened channel.
 	pub fn update_channel_config(
 		&self, channel_id: &ChannelId, counterparty_node_id: PublicKey,
-		channel_config: &ChannelConfig,
+		channel_config: Arc<ChannelConfig>,
 	) -> Result<(), Error> {
 		self.channel_manager
-			.update_channel_config(&counterparty_node_id, &[channel_id.0], channel_config)
+			.update_channel_config(
+				&counterparty_node_id,
+				&[channel_id.0],
+				&(*channel_config).clone().into(),
+			)
 			.map_err(|_| Error::ChannelConfigUpdateFailed)
 	}
 
 	/// Send a payment given an invoice.
-	pub fn send_payment(&self, invoice: &Invoice) -> Result<PaymentHash, Error> {
+	pub fn send_payment(&self, invoice: &Bolt11Invoice) -> Result<PaymentHash, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -1113,7 +1119,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
 	/// amount paid to be determined by the user.
 	pub fn send_payment_using_amount(
-		&self, invoice: &Invoice, amount_msat: u64,
+		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 	) -> Result<PaymentHash, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1147,9 +1153,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			invoice.min_final_cltv_expiry_delta() as u32,
 		)
 		.with_expiry_time(expiry_time.as_secs())
-		.with_route_hints(invoice.route_hints());
+		.with_route_hints(invoice.route_hints())
+		.map_err(|_| Error::InvalidInvoice)?;
 		if let Some(features) = invoice.features() {
-			payment_params = payment_params.with_features(features.clone());
+			payment_params = payment_params
+				.with_bolt11_features(features.clone())
+				.map_err(|_| Error::InvalidInvoice)?;
 		}
 		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
 
@@ -1294,7 +1303,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// the actual payment. Note this is only useful if there likely is sufficient time for the
 	/// probe to settle before sending out the actual payment, e.g., when waiting for user
 	/// confirmation in a wallet UI.
-	pub fn send_payment_probe(&self, invoice: &Invoice) -> Result<(), Error> {
+	pub fn send_payment_probe(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -1313,9 +1322,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			invoice.min_final_cltv_expiry_delta() as u32,
 		)
 		.with_expiry_time(expiry_time.as_secs())
-		.with_route_hints(invoice.route_hints());
+		.with_route_hints(invoice.route_hints())
+		.map_err(|_| Error::InvalidInvoice)?;
 		if let Some(features) = invoice.features() {
-			payment_params = payment_params.with_features(features.clone());
+			payment_params = payment_params
+				.with_bolt11_features(features.clone())
+				.map_err(|_| Error::InvalidInvoice)?;
 		}
 		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
 
@@ -1356,7 +1368,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				&payer,
 				&route_params,
 				Some(&first_hops.iter().collect::<Vec<_>>()),
-				&inflight_htlcs,
+				inflight_htlcs,
 			)
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to find path for payment probe: {:?}", e);
@@ -1385,7 +1397,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// given.
 	pub fn receive_payment(
 		&self, amount_msat: u64, description: &str, expiry_secs: u32,
-	) -> Result<Invoice, Error> {
+	) -> Result<Bolt11Invoice, Error> {
 		self.receive_payment_inner(Some(amount_msat), description, expiry_secs)
 	}
 
@@ -1393,13 +1405,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// amount is to be determined by the user, also known as a "zero-amount" invoice.
 	pub fn receive_variable_amount_payment(
 		&self, description: &str, expiry_secs: u32,
-	) -> Result<Invoice, Error> {
+	) -> Result<Bolt11Invoice, Error> {
 		self.receive_payment_inner(None, description, expiry_secs)
 	}
 
 	fn receive_payment_inner(
 		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
-	) -> Result<Invoice, Error> {
+	) -> Result<Bolt11Invoice, Error> {
 		let currency = Currency::from(self.config.network);
 		let keys_manager = Arc::clone(&self.keys_manager);
 		let invoice = match lightning_invoice::utils::create_invoice_from_channelmanager(

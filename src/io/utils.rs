@@ -6,9 +6,9 @@ use crate::peer_store::PeerStore;
 use crate::{Error, EventQueue, PaymentDetails};
 
 use lightning::chain::channelmonitor::ChannelMonitor;
-use lightning::chain::keysinterface::{EntropySource, SignerProvider};
 use lightning::routing::gossip::NetworkGraph;
-use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
+use lightning::sign::{EntropySource, SignerProvider};
 use lightning::util::logger::Logger;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 
@@ -161,7 +161,7 @@ pub(crate) fn read_scorer<
 where
 	L::Target: Logger,
 {
-	let params = ProbabilisticScoringParameters::default();
+	let params = ProbabilisticScoringDecayParameters::default();
 	let mut reader = kv_store.read(SCORER_PERSISTENCE_NAMESPACE, SCORER_PERSISTENCE_KEY)?;
 	let args = (params, network_graph, logger.clone());
 	ProbabilisticScorer::read(&mut reader, args).map_err(|e| {

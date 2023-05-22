@@ -62,23 +62,23 @@ interface LDKNode {
 	[Throws=NodeError]
 	void close_channel([ByRef]ChannelId channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
-	void update_channel_config([ByRef]ChannelId channel_id, PublicKey counterparty_node_id, [ByRef]ChannelConfig channel_config);
+	void update_channel_config([ByRef]ChannelId channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
 	[Throws=NodeError]
-	PaymentHash send_payment([ByRef]Invoice invoice);
+	PaymentHash send_payment([ByRef]Bolt11Invoice invoice);
 	[Throws=NodeError]
-	PaymentHash send_payment_using_amount([ByRef]Invoice invoice, u64 amount_msat);
+	PaymentHash send_payment_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
 	[Throws=NodeError]
 	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
-	void send_payment_probe([ByRef]Invoice invoice);
+	void send_payment_probe([ByRef]Bolt11Invoice invoice);
 	[Throws=NodeError]
 	void send_spontaneous_payment_probe(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
-	Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
+	Bolt11Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
 	[Throws=NodeError]
-	Invoice receive_variable_amount_payment([ByRef]string description, u32 expiry_secs);
+	Bolt11Invoice receive_variable_amount_payment([ByRef]string description, u32 expiry_secs);
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	boolean remove_payment([ByRef]PaymentHash payment_hash);
@@ -204,12 +204,20 @@ dictionary PeerDetails {
 	boolean is_connected;
 };
 
-dictionary ChannelConfig {
-	u32 forwarding_fee_proportional_millionths;
-	u32 forwarding_fee_base_msat;
-	u16 cltv_expiry_delta;
-	u64 max_dust_htlc_exposure_msat;
-	u64 force_close_avoidance_max_fee_satoshis;
+interface ChannelConfig {
+	constructor();
+	u32 forwarding_fee_proportional_millionths();
+	void set_forwarding_fee_proportional_millionths(u32 value);
+	u32 forwarding_fee_base_msat();
+	void set_forwarding_fee_base_msat(u32 fee_msat);
+	u16 cltv_expiry_delta();
+	void set_cltv_expiry_delta(u16 value);
+	u64 force_close_avoidance_max_fee_satoshis();
+	void set_force_close_avoidance_max_fee_satoshis(u64 value_sat);
+	boolean accept_underpaying_htlcs();
+	void set_accept_underpaying_htlcs(boolean value);
+	void set_max_dust_htlc_exposure_from_fixed_limit(u64 limit_msat);
+	void set_max_dust_htlc_exposure_from_fee_rate_multiplier(u64 multiplier);
 };
 
 enum LogLevel {
@@ -234,7 +242,7 @@ typedef string PublicKey;
 typedef string Address;
 
 [Custom]
-typedef string Invoice;
+typedef string Bolt11Invoice;
 
 [Custom]
 typedef string PaymentHash;

@@ -32,13 +32,13 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.0.115", features = ["max_level_trace", "std"] }
-lightning-invoice = { version = "0.23" }
-lightning-net-tokio = { version = "0.0.115" }
-lightning-persister = { version = "0.0.115" }
-lightning-background-processor = { version = "0.0.115", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.115" }
-lightning-transaction-sync = { version = "0.0.115", features = ["esplora-async-https"] }
+lightning = { version = "0.0.116", features = ["max_level_trace", "std"] }
+lightning-invoice = { version = "0.24.0" }
+lightning-net-tokio = { version = "0.0.116" }
+lightning-persister = { version = "0.0.116" }
+lightning-background-processor = { version = "0.0.116", features = ["futures"] }
+lightning-rapid-gossip-sync = { version = "0.0.116" }
+lightning-transaction-sync = { version = "0.0.116", features = ["esplora-async-https"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }

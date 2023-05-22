@@ -6,12 +6,12 @@ use lightning::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, FEERATE_FLOOR_SATS_PER_KW,
 };
 
-use lightning::chain::keysinterface::{
+use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
+use lightning::ln::script::ShutdownScript;
+use lightning::sign::{
 	EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner, Recipient, SignerProvider,
 	SpendableOutputDescriptor,
 };
-use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
-use lightning::ln::script::ShutdownScript;
 
 use lightning::util::message_signing;
 
@@ -24,7 +24,7 @@ use bitcoin::bech32::u5;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, Signing};
-use bitcoin::{Script, Transaction, TxOut, Txid};
+use bitcoin::{LockTime, PackedLockTime, Script, Transaction, TxOut, Txid};
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -116,12 +116,14 @@ where
 		let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
 
 		let confirmation_targets = vec![
+			ConfirmationTarget::MempoolMinimum,
 			ConfirmationTarget::Background,
 			ConfirmationTarget::Normal,
 			ConfirmationTarget::HighPriority,
 		];
 		for target in confirmation_targets {
 			let num_blocks = match target {
+				ConfirmationTarget::MempoolMinimum => 1008,
 				ConfirmationTarget::Background => 12,
 				ConfirmationTarget::Normal => 6,
 				ConfirmationTarget::HighPriority => 3,
@@ -154,13 +156,18 @@ where
 
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: Script, value_sats: u64, confirmation_target: ConfirmationTarget,
+		locktime: LockTime,
 	) -> Result<Transaction, Error> {
 		let fee_rate = self.estimate_fee_rate(confirmation_target);
 
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
 
-		tx_builder.add_recipient(output_script, value_sats).fee_rate(fee_rate).enable_rbf();
+		tx_builder
+			.add_recipient(output_script, value_sats)
+			.fee_rate(fee_rate)
+			.nlocktime(locktime)
+			.enable_rbf();
 
 		let mut psbt = match tx_builder.finish() {
 			Ok((psbt, _)) => {
@@ -249,7 +256,7 @@ where
 			psbt.extract_tx()
 		};
 
-		self.broadcast_transaction(&tx);
+		self.broadcast_transactions(&[&tx]);
 
 		let txid = tx.txid();
 
@@ -277,7 +284,8 @@ where
 		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
 
 		let fallback_sats_kwu = match confirmation_target {
-			ConfirmationTarget::Background => FEERATE_FLOOR_SATS_PER_KW,
+			ConfirmationTarget::MempoolMinimum => FEERATE_FLOOR_SATS_PER_KW,
+			ConfirmationTarget::Background => 500,
 			ConfirmationTarget::Normal => 2000,
 			ConfirmationTarget::HighPriority => 5000,
 		};
@@ -305,25 +313,36 @@ where
 	D: BatchDatabase,
 	L::Target: Logger,
 {
-	fn broadcast_transaction(&self, tx: &Transaction) {
+	fn broadcast_transactions(&self, txs: &[&Transaction]) {
 		let locked_runtime = self.runtime.read().unwrap();
 		if locked_runtime.as_ref().is_none() {
 			log_error!(self.logger, "Failed to broadcast transaction: No runtime.");
 			return;
 		}
 
-		let res = tokio::task::block_in_place(move || {
-			locked_runtime
-				.as_ref()
-				.unwrap()
-				.block_on(async move { self.blockchain.broadcast(tx).await })
+		let errors = tokio::task::block_in_place(move || {
+			locked_runtime.as_ref().unwrap().block_on(async move {
+				let mut handles = Vec::new();
+				let mut errors = Vec::new();
+
+				for tx in txs {
+					handles.push((tx.txid(), self.blockchain.broadcast(tx)));
+				}
+
+				for handle in handles {
+					match handle.1.await {
+						Ok(_) => {}
+						Err(e) => {
+							errors.push((e, handle.0));
+						}
+					}
+				}
+				errors
+			})
 		});
 
-		match res {
-			Ok(_) => {}
-			Err(err) => {
-				log_error!(self.logger, "Failed to broadcast transaction: {}", err);
-			}
+		for (e, txid) in errors {
+			log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
 		}
 	}
 }
@@ -361,7 +380,7 @@ where
 	pub fn spend_spendable_outputs<C: Signing>(
 		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
 		change_destination_script: Script, feerate_sat_per_1000_weight: u32,
-		secp_ctx: &Secp256k1<C>,
+		locktime: Option<PackedLockTime>, secp_ctx: &Secp256k1<C>,
 	) -> Result<Option<Transaction>, ()> {
 		let only_non_static = &descriptors
 			.iter()
@@ -377,6 +396,7 @@ where
 				outputs,
 				change_destination_script,
 				feerate_sat_per_1000_weight,
+				locktime,
 				secp_ctx,
 			)
 			.map(Some)
@@ -455,28 +475,23 @@ where
 		self.inner.read_chan_signer(reader)
 	}
 
-	fn get_destination_script(&self) -> Script {
-		let address = self.wallet.get_new_address().unwrap_or_else(|e| {
+	fn get_destination_script(&self) -> Result<Script, ()> {
+		let address = self.wallet.get_new_address().map_err(|e| {
 			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-			panic!("Failed to retrieve new address from wallet");
-		});
-		address.script_pubkey()
+		})?;
+		Ok(address.script_pubkey())
 	}
 
-	fn get_shutdown_scriptpubkey(&self) -> ShutdownScript {
-		let address = self.wallet.get_new_address().unwrap_or_else(|e| {
+	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
+		let address = self.wallet.get_new_address().map_err(|e| {
 			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-			panic!("Failed to retrieve new address from wallet");
-		});
+		})?;
 
 		match address.payload {
 			bitcoin::util::address::Payload::WitnessProgram { version, program } => {
-				return ShutdownScript::new_witness_program(version, &program).unwrap_or_else(
-					|e| {
-						log_error!(self.logger, "Invalid shutdown script: {:?}", e);
-						panic!("Invalid shutdown script.");
-					},
-				);
+				ShutdownScript::new_witness_program(version, &program).map_err(|e| {
+					log_error!(self.logger, "Invalid shutdown script: {:?}", e);
+				})
 			}
 			_ => {
 				log_error!(
