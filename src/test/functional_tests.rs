@@ -363,3 +363,18 @@ fn onchain_spend_receive() {
 	assert!(node_b.onchain_balance().unwrap().get_spendable() > 99000);
 	assert!(node_b.onchain_balance().unwrap().get_spendable() < 100000);
 }
+
+#[test]
+fn sign_verify_msg() {
+	let (_, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = electrsd.esplora_url.as_ref().unwrap();
+	let node = Builder::from_config(random_config(esplora_url)).build();
+
+	node.start().unwrap();
+
+	// Tests arbitrary message signing and later verification
+	let msg = "OK computer".as_bytes();
+	let sig = node.sign_message(msg).unwrap();
+	let pkey = node.node_id();
+	assert!(node.verify_signature(msg, sig.as_str(), &pkey));
+}
