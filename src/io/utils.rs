@@ -174,12 +174,12 @@ where
 	Ok(res)
 }
 
-pub(crate) fn read_rgs_latest_sync_timestamp<K: Deref>(kv_store: K) -> Result<u32, std::io::Error>
+pub(crate) fn read_latest_rgs_sync_timestamp<K: Deref>(kv_store: K) -> Result<u32, std::io::Error>
 where
 	K::Target: KVStore,
 {
 	let mut reader =
-		kv_store.read(RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE, RGS_LATEST_SYNC_TIMESTAMP_KEY)?;
+		kv_store.read(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY)?;
 	u32::read(&mut reader).map_err(|_| {
 		std::io::Error::new(
 			std::io::ErrorKind::InvalidData,
@@ -188,7 +188,7 @@ where
 	})
 }
 
-pub(crate) fn write_rgs_latest_sync_timestamp<K: Deref, L: Deref>(
+pub(crate) fn write_latest_rgs_sync_timestamp<K: Deref, L: Deref>(
 	updated_timestamp: u32, kv_store: K, logger: L,
 ) -> Result<(), Error>
 where
@@ -196,13 +196,13 @@ where
 	L::Target: Logger,
 {
 	let mut writer = kv_store
-		.write(RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE, RGS_LATEST_SYNC_TIMESTAMP_KEY)
+		.write(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY)
 		.map_err(|e| {
 			log_error!(
 				logger,
 				"Getting writer for key {}/{} failed due to: {}",
-				RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE,
-				RGS_LATEST_SYNC_TIMESTAMP_KEY,
+				LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
+				LATEST_RGS_SYNC_TIMESTAMP_KEY,
 				e
 			);
 			Error::PersistenceFailed
@@ -211,8 +211,8 @@ where
 		log_error!(
 			logger,
 			"Writing data to key {}/{} failed due to: {}",
-			RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE,
-			RGS_LATEST_SYNC_TIMESTAMP_KEY,
+			LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
+			LATEST_RGS_SYNC_TIMESTAMP_KEY,
 			e
 		);
 		Error::PersistenceFailed
@@ -221,8 +221,8 @@ where
 		log_error!(
 			logger,
 			"Committing data to key {}/{} failed due to: {}",
-			RGS_LATEST_SYNC_TIMESTAMP_NAMESPACE,
-			RGS_LATEST_SYNC_TIMESTAMP_KEY,
+			LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
+			LATEST_RGS_SYNC_TIMESTAMP_KEY,
 			e
 		);
 		Error::PersistenceFailed
