@@ -469,7 +469,6 @@ impl Builder {
 					if e.kind() == std::io::ErrorKind::NotFound {
 						Arc::new(NetworkGraph::new(config.network, Arc::clone(&logger)))
 					} else {
-						log_error!(logger, "Failed to read network graph: {}", e.to_string());
 						panic!("Failed to read network graph: {}", e.to_string());
 					}
 				}
@@ -490,7 +489,6 @@ impl Builder {
 						Arc::clone(&logger),
 					)))
 				} else {
-					log_error!(logger, "Failed to read scorer: {}", e.to_string());
 					panic!("Failed to read scorer: {}", e.to_string());
 				}
 			}
@@ -609,8 +607,11 @@ impl Builder {
 				p2p_source
 			}
 			GossipSourceConfig::RapidGossipSync(rgs_server) => {
-				let latest_sync_timestamp =
-					io::utils::read_latest_rgs_sync_timestamp(Arc::clone(&kv_store)).unwrap_or(0);
+				let latest_sync_timestamp = io::utils::read_latest_rgs_sync_timestamp(
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)
+				.unwrap_or(0);
 				Arc::new(GossipSource::new_rgs(
 					rgs_server.clone(),
 					latest_sync_timestamp,
@@ -648,15 +649,17 @@ impl Builder {
 		));
 
 		// Init payment info storage
-		let payment_store = match io::utils::read_payments(Arc::clone(&kv_store)) {
-			Ok(payments) => {
-				Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
-			}
-			Err(e) => {
-				log_error!(logger, "Failed to read payment information: {}", e.to_string());
-				panic!("Failed to read payment information: {}", e.to_string());
-			}
-		};
+		let payment_store =
+			match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
+				Ok(payments) => Arc::new(PaymentStore::new(
+					payments,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)),
+				Err(e) => {
+					panic!("Failed to read payment information: {}", e.to_string());
+				}
+			};
 
 		let event_queue =
 			match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger)) {
@@ -665,7 +668,6 @@ impl Builder {
 					if e.kind() == std::io::ErrorKind::NotFound {
 						Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 					} else {
-						log_error!(logger, "Failed to read event queue: {}", e.to_string());
 						panic!("Failed to read event queue: {}", e.to_string());
 					}
 				}
@@ -678,7 +680,6 @@ impl Builder {
 				if e.kind() == std::io::ErrorKind::NotFound {
 					Arc::new(PeerStore::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 				} else {
-					log_error!(logger, "Failed to read peer store: {}", e.to_string());
 					panic!("Failed to read peer store: {}", e.to_string());
 				}
 			}
@@ -746,6 +747,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			// We're already running.
 			return Err(Error::AlreadyRunning);
 		}
+
+		log_info!(self.logger, "Starting up LDK Node on network: {}", self.config.network);
 
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
@@ -969,7 +972,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							return;
 						}
 						_ = interval.tick() => {
-							let skip_broadcast = match io::utils::read_latest_node_ann_bcast_timestamp(Arc::clone(&bcast_store)) {
+							let skip_broadcast = match io::utils::read_latest_node_ann_bcast_timestamp(Arc::clone(&bcast_store), Arc::clone(&bcast_logger)) {
 								Ok(latest_bcast_time_secs) => {
 									// Skip if the time hasn't elapsed yet.
 									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
@@ -1049,6 +1052,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		});
 
 		*runtime_lock = Some(runtime);
+
+		log_info!(self.logger, "Startup complete.");
 		Ok(())
 	}
 
@@ -1057,6 +1062,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
 		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
+
+		log_info!(self.logger, "Shutting down LDK Node...");
+
 		// Stop the runtime.
 		match self.stop_sender.send(()) {
 			Ok(_) => (),
@@ -1074,6 +1082,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		self.peer_manager.disconnect_all_peers();
 
 		runtime.shutdown_timeout(Duration::from_secs(10));
+
+		log_info!(self.logger, "Shutdown complete.");
 		Ok(())
 	}
 
