@@ -8,13 +8,14 @@ use crate::UniffiCustomTypeConverter;
 use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::InMemorySigner;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
+use lightning::ln::msgs::NetAddress as LdkNetAddress;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
-use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::util::ser::{Hostname, Readable, Writeable, Writer};
 use lightning_invoice::{Invoice, SignedRawInvoice};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
@@ -24,8 +25,10 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Network, OutPoint, Txid};
 
+use core::convert::TryFrom;
 use std::convert::TryInto;
-use std::net::SocketAddr;
+use std::fmt::Display;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -91,22 +94,6 @@ pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
 	Arc<FilesystemLogger>,
 	IgnoringMessageHandler,
 >;
-
-impl UniffiCustomTypeConverter for SocketAddr {
-	type Builtin = String;
-
-	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		if let Ok(addr) = SocketAddr::from_str(&val) {
-			return Ok(addr);
-		}
-
-		Err(Error::InvalidPublicKey.into())
-	}
-
-	fn from_custom(obj: Self) -> Self::Builtin {
-		obj.to_string()
-	}
-}
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;
@@ -298,7 +285,7 @@ impl UniffiCustomTypeConverter for Network {
 impl UniffiCustomTypeConverter for Txid {
 	type Builtin = String;
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Ok(Txid::from_str(&val).unwrap())
+		Ok(Txid::from_str(&val)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
@@ -309,6 +296,7 @@ impl UniffiCustomTypeConverter for Txid {
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
 /// [`Node::list_channels`]: [`crate::Node::list_channels`]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelDetails {
 	/// The channel's ID (prior to funding transaction generation, this is a random 32 bytes,
 	/// thereafter this is the transaction ID of the funding transaction XOR the funding transaction
@@ -407,11 +395,152 @@ impl From<LdkChannelDetails> for ChannelDetails {
 /// Details of a known Lightning peer as returned by [`Node::list_peers`].
 ///
 /// [`Node::list_peers`]: [`crate::Node::list_peers`]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDetails {
 	/// Our peer's node ID.
 	pub node_id: PublicKey,
 	/// The IP address and TCP port of the peer.
-	pub address: SocketAddr,
+	pub address: NetAddress,
 	/// Indicates whether or not the user is currently has an active connection with the peer.
 	pub is_connected: bool,
+}
+
+/// The network address of a Lightning node.
+///
+/// Currently only IPv4, IPv6, and DNS hostnames are supported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetAddress(pub LdkNetAddress);
+
+impl Display for NetAddress {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.0 {
+			LdkNetAddress::IPv4 { addr, port } => {
+				let ip_addr = Ipv4Addr::from(addr);
+				write!(f, "{}:{}", ip_addr, port)
+			}
+			LdkNetAddress::IPv6 { addr, port } => {
+				let ip_addr = Ipv6Addr::from(addr);
+				write!(f, "[{}]:{}", ip_addr, port)
+			}
+			LdkNetAddress::Hostname { ref hostname, port } => {
+				write!(f, "{}:{}", hostname.as_str(), port)
+			}
+			LdkNetAddress::OnionV2(o) => {
+				write!(f, "OnionV2 (unsupported): {:?}", o)
+			}
+			LdkNetAddress::OnionV3 { ed25519_pubkey, checksum, version, port } => write!(
+				f,
+				"OnionV3 (unsupported): {:?}/{:?}/{:?}/{:?}",
+				ed25519_pubkey, checksum, version, port
+			),
+		}
+	}
+}
+
+impl UniffiCustomTypeConverter for NetAddress {
+	type Builtin = String;
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(NetAddress::from_str(&val).map_err(|_| Error::InvalidNetAddress)?)
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl FromStr for NetAddress {
+	type Err = ();
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		match std::net::SocketAddr::from_str(s) {
+			Ok(addr) => {
+				let port: u16 = addr.port();
+				match addr {
+					std::net::SocketAddr::V4(addr) => {
+						let addr = addr.ip().octets();
+						return Ok(Self(LdkNetAddress::IPv4 { addr, port }));
+					}
+					std::net::SocketAddr::V6(addr) => {
+						let addr = addr.ip().octets();
+						return Ok(Self(LdkNetAddress::IPv6 { addr, port }));
+					}
+				}
+			}
+			Err(_) => {
+				let trimmed_input = match s.rfind(":") {
+					Some(pos) => pos,
+					None => return Err(()),
+				};
+				let host = &s[..trimmed_input];
+				let port: u16 = match s[trimmed_input + 1..].parse() {
+					Ok(port) => port,
+					Err(_) => return Err(()),
+				};
+
+				Hostname::try_from(host.to_string())
+					.map(|hostname| Self(LdkNetAddress::Hostname { hostname, port }))
+					.map_err(|_| ())
+			}
+		}
+	}
+}
+
+impl From<SocketAddr> for NetAddress {
+	fn from(value: SocketAddr) -> Self {
+		match value {
+			SocketAddr::V4(v4addr) => NetAddress::from(v4addr),
+			SocketAddr::V6(v6addr) => NetAddress::from(v6addr),
+		}
+	}
+}
+
+impl From<SocketAddrV4> for NetAddress {
+	fn from(value: SocketAddrV4) -> Self {
+		Self(LdkNetAddress::IPv4 { addr: value.ip().octets(), port: value.port() })
+	}
+}
+
+impl From<SocketAddrV6> for NetAddress {
+	fn from(value: SocketAddrV6) -> Self {
+		Self(LdkNetAddress::IPv6 { addr: value.ip().octets(), port: value.port() })
+	}
+}
+
+impl ToSocketAddrs for NetAddress {
+	type Iter = std::option::IntoIter<SocketAddr>;
+
+	fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
+		match self.0 {
+			LdkNetAddress::IPv4 { addr, port } => {
+				let ip_addr = Ipv4Addr::from(addr);
+				(ip_addr, port).to_socket_addrs()
+			}
+			LdkNetAddress::IPv6 { addr, port } => {
+				let ip_addr = Ipv6Addr::from(addr);
+				(ip_addr, port).to_socket_addrs()
+			}
+			LdkNetAddress::Hostname { ref hostname, port } => {
+				Ok((hostname.as_str(), port).to_socket_addrs()?.next().into_iter())
+			}
+			LdkNetAddress::OnionV2(..) => {
+				Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+			}
+			LdkNetAddress::OnionV3 { .. } => {
+				Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+			}
+		}
+	}
+}
+
+impl Writeable for NetAddress {
+	fn write<W: lightning::util::ser::Writer>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+		self.0.write(writer)
+	}
+}
+
+impl Readable for NetAddress {
+	fn read<R: std::io::Read>(reader: &mut R) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let addr: LdkNetAddress = Readable::read(reader)?;
+		Ok(Self(addr))
+	}
 }

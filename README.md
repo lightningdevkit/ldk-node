@@ -8,7 +8,7 @@ LDK Node is a non-custodial Lightning node in library form. Its central goal is 
 The primary abstraction of the library is the `Node`, which can be retrieved by setting up and configuring a `Builder` to your liking and calling `build()`. `Node` can then be controlled via commands such as `start`, `stop`, `connect_open_channel`, `send_payment`, etc.:
 
 ```rust
-use ldk_node::Builder;
+use ldk_node::{Builder, NetAddress};
 use ldk_node::lightning_invoice::Invoice;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use std::str::FromStr;
@@ -28,7 +28,7 @@ fn main() {
 	node.sync_wallets().unwrap();
 
 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
-	let node_addr = "IP_ADDR:PORT".parse().unwrap();
+	let node_addr = NetAddress::from_str("IP_ADDR:PORT").unwrap();
 	node.connect_open_channel(node_id, node_addr, 10000, None, false).unwrap();
 
 	let invoice = Invoice::from_str("INVOICE_STR").unwrap();

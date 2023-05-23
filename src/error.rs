@@ -15,8 +15,6 @@ pub enum Error {
 	InvoiceCreationFailed,
 	/// An attempted payment has failed.
 	PaymentFailed,
-	/// A given peer info could not be parsed.
-	PeerInfoParseFailed,
 	/// A channel could not be opened.
 	ChannelCreationFailed,
 	/// A channel could not be closed.
@@ -35,6 +33,8 @@ pub enum Error {
 	GossipUpdateFailed,
 	/// The given address is invalid.
 	InvalidAddress,
+	/// The given network address is invalid.
+	InvalidNetAddress,
 	/// The given public key is invalid.
 	InvalidPublicKey,
 	/// The given payment hash is invalid.
@@ -68,7 +68,6 @@ impl fmt::Display for Error {
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
 			Self::PaymentFailed => write!(f, "Failed to send the given payment."),
-			Self::PeerInfoParseFailed => write!(f, "Failed to parse the given peer information."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
 			Self::PersistenceFailed => write!(f, "Failed to persist data."),
@@ -78,6 +77,7 @@ impl fmt::Display for Error {
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
+			Self::InvalidNetAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
 			Self::InvalidPaymentPreimage => write!(f, "The given payment preimage is invalid."),
