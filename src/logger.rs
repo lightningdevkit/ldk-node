@@ -1,7 +1,8 @@
 pub(crate) use lightning::util::logger::Logger;
-use lightning::util::logger::Record;
-use lightning::util::ser::Writer;
 pub(crate) use lightning::{log_error, log_info, log_trace};
+
+use lightning::util::logger::{Level, Record};
+use lightning::util::ser::Writer;
 
 use chrono::Utc;
 
@@ -10,18 +11,22 @@ use std::path::Path;
 
 pub(crate) struct FilesystemLogger {
 	file_path: String,
+	level: Level,
 }
 
 impl FilesystemLogger {
-	pub(crate) fn new(file_path: String) -> Self {
+	pub(crate) fn new(file_path: String, level: Level) -> Self {
 		if let Some(parent_dir) = Path::new(&file_path).parent() {
 			fs::create_dir_all(parent_dir).unwrap();
 		}
-		Self { file_path }
+		Self { file_path, level }
 	}
 }
 impl Logger for FilesystemLogger {
 	fn log(&self, record: &Record) {
+		if record.level < self.level {
+			return;
+		}
 		let raw_log = record.args.to_string();
 		let log = format!(
 			"{} {:<5} [{}:{}] {}\n",

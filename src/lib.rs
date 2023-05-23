@@ -93,7 +93,6 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
-use lightning::ln::msgs::RoutingMessageHandler;
 pub use lightning_invoice;
 
 pub use error::Error as NodeError;
@@ -126,11 +125,13 @@ use lightning::chain::{chainmonitor, BestBlock, Confirm, Watch};
 use lightning::ln::channelmanager::{
 	self, ChainParameters, ChannelManagerReadArgs, PaymentId, RecipientOnionFields, Retry,
 };
+use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
+pub use lightning::util::logger::Level as LogLevel;
 use lightning::util::ser::ReadableArgs;
 
 use lightning_background_processor::process_events_async;
@@ -173,6 +174,7 @@ const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
 const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
+const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of blocks after which BDK stops looking for scripts belonging to the wallet.
@@ -204,9 +206,10 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | Parameter                   | Value            |
 /// |-----------------------------|------------------|
 /// | `storage_dir_path`          | /tmp/ldk_node/   |
-/// | `network`                   | Network::Bitcoin |
+/// | `network`                   | `Bitcoin`        |
 /// | `listening_address`         | 0.0.0.0:9735     |
 /// | `default_cltv_expiry_delta` | 144              |
+/// | `log_level`                 | `Debug`          |
 ///
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
@@ -217,6 +220,10 @@ pub struct Config {
 	pub listening_address: Option<NetAddress>,
 	/// The default CLTV expiry delta to be used for payments.
 	pub default_cltv_expiry_delta: u32,
+	/// The level at which we log messages.
+	///
+	/// Any messages below this level will be excluded from the logs.
+	pub log_level: LogLevel,
 }
 
 impl Default for Config {
@@ -226,6 +233,7 @@ impl Default for Config {
 			network: DEFAULT_NETWORK,
 			listening_address: Some(DEFAULT_LISTENING_ADDR.parse().unwrap()),
 			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
+			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
 }
@@ -348,6 +356,12 @@ impl Builder {
 		config.listening_address = Some(listening_address);
 	}
 
+	/// Sets the level at which [`Node`] will log messages.
+	pub fn set_log_level(&self, level: LogLevel) {
+		let mut config = self.config.write().unwrap();
+		config.log_level = level;
+	}
+
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Arc<Node<FilesystemStore>> {
@@ -371,7 +385,7 @@ impl Builder {
 
 		// Initialize the Logger
 		let log_file_path = format!("{}/ldk_node.log", config.storage_dir_path);
-		let logger = Arc::new(FilesystemLogger::new(log_file_path));
+		let logger = Arc::new(FilesystemLogger::new(log_file_path, config.log_level));
 
 		// Initialize the on-chain wallet and chain access
 		let seed_bytes = match &*self.entropy_source_config.read().unwrap() {
