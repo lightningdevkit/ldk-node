@@ -30,6 +30,10 @@ pub(crate) const PAYMENT_INFO_PERSISTENCE_NAMESPACE: &str = "payments";
 pub(crate) const LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE: &str = "";
 pub(crate) const LATEST_RGS_SYNC_TIMESTAMP_KEY: &str = "latest_rgs_sync_timestamp";
 
+/// The last time we broadcast a node announcement will be persisted under this key.
+pub(crate) const LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE: &str = "";
+pub(crate) const LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY: &str = "latest_node_ann_bcast_timestamp";
+
 /// Provides an interface that allows to store and retrieve persisted values that are associated
 /// with given keys.
 ///
