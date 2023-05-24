@@ -100,10 +100,9 @@ where
 {
 	let mut reader =
 		kv_store.read(NETWORK_GRAPH_PERSISTENCE_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY)?;
-	let graph = NetworkGraph::read(&mut reader, logger).map_err(|_| {
+	NetworkGraph::read(&mut reader, logger).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NetworkGraph")
-	})?;
-	Ok(graph)
+	})
 }
 
 /// Read a previously persisted [`Scorer`] from the store.
@@ -116,10 +115,9 @@ where
 	let params = ProbabilisticScoringParameters::default();
 	let mut reader = kv_store.read(SCORER_PERSISTENCE_NAMESPACE, SCORER_PERSISTENCE_KEY)?;
 	let args = (params, network_graph, logger);
-	let scorer = ProbabilisticScorer::read(&mut reader, args).map_err(|_| {
+	ProbabilisticScorer::read(&mut reader, args).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize Scorer")
-	})?;
-	Ok(scorer)
+	})
 }
 
 /// Read previously persisted events from the store.
@@ -131,10 +129,9 @@ where
 {
 	let mut reader =
 		kv_store.read(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY)?;
-	let event_queue = EventQueue::read(&mut reader, (kv_store, logger)).map_err(|_| {
+	EventQueue::read(&mut reader, (kv_store, logger)).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize EventQueue")
-	})?;
-	Ok(event_queue)
+	})
 }
 
 /// Read previously persisted peer info from the store.
@@ -145,10 +142,9 @@ where
 	L::Target: Logger,
 {
 	let mut reader = kv_store.read(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY)?;
-	let peer_info = PeerStore::read(&mut reader, (kv_store, logger)).map_err(|_| {
+	PeerStore::read(&mut reader, (kv_store, logger)).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize PeerStore")
-	})?;
-	Ok(peer_info)
+	})
 }
 
 /// Read previously persisted payments information from the store.
@@ -200,8 +196,7 @@ where
 				e
 			);
 			Error::PersistenceFailed
-		})?;
-	Ok(())
+		})
 }
 
 pub(crate) fn read_latest_node_ann_bcast_timestamp<K: KVStore + Sync + Send>(
@@ -239,6 +234,5 @@ where
 				e
 			);
 			Error::PersistenceFailed
-		})?;
-	Ok(())
+		})
 }

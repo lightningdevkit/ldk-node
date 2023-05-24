@@ -75,10 +75,13 @@ impl KVStore for FilesystemStore {
 		dest_file_path.push(namespace);
 		dest_file_path.push(key);
 
-		let msg = format!("Could not retrieve parent directory of {}.", dest_file_path.display());
 		let parent_directory = dest_file_path
 			.parent()
-			.ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?
+			.ok_or_else(|| {
+				let msg =
+					format!("Could not retrieve parent directory of {}.", dest_file_path.display());
+				std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+			})?
 			.to_path_buf();
 		fs::create_dir_all(parent_directory.clone())?;
 
@@ -151,11 +154,11 @@ impl KVStore for FilesystemStore {
 		fs::remove_file(&dest_file_path)?;
 		#[cfg(not(target_os = "windows"))]
 		{
-			let msg =
-				format!("Could not retrieve parent directory of {}.", dest_file_path.display());
-			let parent_directory = dest_file_path
-				.parent()
-				.ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
+			let parent_directory = dest_file_path.parent().ok_or_else(|| {
+				let msg =
+					format!("Could not retrieve parent directory of {}.", dest_file_path.display());
+				std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+			})?;
 			let dir_file = fs::OpenOptions::new().read(true).open(parent_directory)?;
 			unsafe {
 				// The above call to `fs::remove_file` corresponds to POSIX `unlink`, whose changes
@@ -245,20 +248,21 @@ impl Read for FilesystemReader {
 
 impl KVStorePersister for FilesystemStore {
 	fn persist<W: Writeable>(&self, prefixed_key: &str, object: &W) -> lightning::io::Result<()> {
-		let msg = format!("Could not persist file for key {}.", prefixed_key);
 		let dest_file_path = PathBuf::from_str(prefixed_key).map_err(|_| {
-			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg.clone())
+			let msg = format!("Could not persist file for key {}.", prefixed_key);
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
 		})?;
 
-		let parent_directory = dest_file_path.parent().ok_or(lightning::io::Error::new(
-			lightning::io::ErrorKind::InvalidInput,
-			msg.clone(),
-		))?;
+		let parent_directory = dest_file_path.parent().ok_or_else(|| {
+			let msg = format!("Could not persist file for key {}.", prefixed_key);
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
+		})?;
 		let namespace = parent_directory.display().to_string();
 
-		let dest_without_namespace = dest_file_path
-			.strip_prefix(&namespace)
-			.map_err(|_| lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg))?;
+		let dest_without_namespace = dest_file_path.strip_prefix(&namespace).map_err(|_| {
+			let msg = format!("Could not persist file for key {}.", prefixed_key);
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
+		})?;
 		let key = dest_without_namespace.display().to_string();
 
 		self.write(&namespace, &key, &object.encode())?;
