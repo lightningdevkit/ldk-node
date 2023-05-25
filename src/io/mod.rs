@@ -1,7 +1,13 @@
+//! Objects and traits for data persistence.
+
 pub(crate) mod fs_store;
 pub(crate) mod utils;
 
-use std::io::{Read, Write};
+pub use fs_store::FilesystemStore;
+
+use lightning::util::persist::KVStorePersister;
+
+use std::io::Read;
 
 // The namespacs and keys LDK uses for persisting
 pub(crate) const CHANNEL_MANAGER_PERSISTENCE_NAMESPACE: &str = "";
@@ -31,8 +37,8 @@ pub(crate) const LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE: &str = "";
 pub(crate) const LATEST_RGS_SYNC_TIMESTAMP_KEY: &str = "latest_rgs_sync_timestamp";
 
 /// The last time we broadcast a node announcement will be persisted under this key.
-pub(crate) const LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE: &str = "";
-pub(crate) const LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY: &str = "latest_node_ann_bcast_timestamp";
+pub(crate) const LATEST_NODE_ANN_BCAST_TIMESTAMP_NAMESPACE: &str = "";
+pub(crate) const LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY: &str = "latest_node_ann_bcast_timestamp";
 
 /// Provides an interface that allows to store and retrieve persisted values that are associated
 /// with given keys.
@@ -43,25 +49,20 @@ pub(crate) const LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY: &str = "latest_node_ann_bca
 ///
 /// Keys and namespaces are required to be valid ASCII strings and the empty namespace (`""`) is
 /// assumed to be valid namespace.
-pub trait KVStore {
+pub trait KVStore: KVStorePersister {
 	type Reader: Read;
-	type Writer: TransactionalWrite;
 	/// Returns a [`Read`] for the given `namespace` and `key` from which [`Readable`]s may be
 	/// read.
 	///
-	/// Returns an `Err` if the given `key` could not be found in the given `namespace`.
+	/// Returns an [`ErrorKind::NotFound`] if the given `key` could not be found in the given `namespace`.
 	///
 	/// [`Readable`]: lightning::util::ser::Readable
+	/// [`ErrorKind::NotFound`]: std::io::ErrorKind::NotFound
 	fn read(&self, namespace: &str, key: &str) -> std::io::Result<Self::Reader>;
-	/// Returns a [`TransactionalWrite`] for the given `key` to which [`Writeable`]s may be written.
+	/// Persists the given data under the given `key`.
 	///
 	/// Will create the given `namespace` if not already present in the store.
-	///
-	/// Note that [`TransactionalWrite::commit`] MUST be called to commit the written data, otherwise
-	/// the changes won't be persisted.
-	///
-	/// [`Writeable`]: lightning::util::ser::Writeable
-	fn write(&self, namespace: &str, key: &str) -> std::io::Result<Self::Writer>;
+	fn write(&self, namespace: &str, key: &str, buf: &[u8]) -> std::io::Result<()>;
 	/// Removes any data that had previously been persisted under the given `key`.
 	///
 	/// Returns `true` if the `key` was present in the given `namespace`, and `false` otherwise.
@@ -70,12 +71,4 @@ pub trait KVStore {
 	///
 	/// Will return an empty list if the `namespace` is unknown.
 	fn list(&self, namespace: &str) -> std::io::Result<Vec<String>>;
-}
-
-/// A [`Write`] asserting data consistency.
-///
-/// Note that any changes need to be `commit`ed for them to take effect, and are lost otherwise.
-pub trait TransactionalWrite: Write {
-	/// Persist the previously made changes.
-	fn commit(&mut self) -> std::io::Result<()>;
 }

@@ -1,11 +1,11 @@
 #[cfg(target_os = "windows")]
 extern crate winapi;
 
-use super::{KVStore, TransactionalWrite};
+use super::KVStore;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
@@ -38,13 +38,14 @@ fn path_to_windows_str<T: AsRef<OsStr>>(path: T) -> Vec<winapi::shared::ntdef::W
 	path.as_ref().encode_wide().chain(Some(0)).collect()
 }
 
+/// A [`KVStore`] implementation that writes to and reads from the file system.
 pub struct FilesystemStore {
 	dest_dir: PathBuf,
 	locks: Mutex<HashMap<(String, String), Arc<RwLock<()>>>>,
 }
 
 impl FilesystemStore {
-	pub fn new(dest_dir: PathBuf) -> Self {
+	pub(crate) fn new(dest_dir: PathBuf) -> Self {
 		let locks = Mutex::new(HashMap::new());
 		Self { dest_dir, locks }
 	}
@@ -52,28 +53,87 @@ impl FilesystemStore {
 
 impl KVStore for FilesystemStore {
 	type Reader = FilesystemReader;
-	type Writer = FilesystemWriter;
 
 	fn read(&self, namespace: &str, key: &str) -> std::io::Result<Self::Reader> {
 		let mut outer_lock = self.locks.lock().unwrap();
 		let lock_key = (namespace.to_string(), key.to_string());
 		let inner_lock_ref = Arc::clone(&outer_lock.entry(lock_key).or_default());
 
-		let mut dest_file = self.dest_dir.clone();
-		dest_file.push(namespace);
-		dest_file.push(key);
-		FilesystemReader::new(dest_file, inner_lock_ref)
+		let mut dest_file_path = self.dest_dir.clone();
+		dest_file_path.push(namespace);
+		dest_file_path.push(key);
+		FilesystemReader::new(dest_file_path, inner_lock_ref)
 	}
 
-	fn write(&self, namespace: &str, key: &str) -> std::io::Result<Self::Writer> {
+	fn write(&self, namespace: &str, key: &str, buf: &[u8]) -> std::io::Result<()> {
 		let mut outer_lock = self.locks.lock().unwrap();
 		let lock_key = (namespace.to_string(), key.to_string());
 		let inner_lock_ref = Arc::clone(&outer_lock.entry(lock_key).or_default());
+		let _guard = inner_lock_ref.write().unwrap();
 
-		let mut dest_file = self.dest_dir.clone();
-		dest_file.push(namespace);
-		dest_file.push(key);
-		FilesystemWriter::new(dest_file, inner_lock_ref)
+		let mut dest_file_path = self.dest_dir.clone();
+		dest_file_path.push(namespace);
+		dest_file_path.push(key);
+
+		let parent_directory = dest_file_path
+			.parent()
+			.ok_or_else(|| {
+				let msg =
+					format!("Could not retrieve parent directory of {}.", dest_file_path.display());
+				std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+			})?
+			.to_path_buf();
+		fs::create_dir_all(parent_directory.clone())?;
+
+		// Do a crazy dance with lots of fsync()s to be overly cautious here...
+		// We never want to end up in a state where we've lost the old data, or end up using the
+		// old data on power loss after we've returned.
+		// The way to atomically write a file on Unix platforms is:
+		// open(tmpname), write(tmpfile), fsync(tmpfile), close(tmpfile), rename(), fsync(dir)
+		let mut tmp_file_path = dest_file_path.clone();
+		let mut rng = thread_rng();
+		let rand_str: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
+		let ext = format!("{}.tmp", rand_str);
+		tmp_file_path.set_extension(ext);
+
+		let mut tmp_file = fs::File::create(&tmp_file_path)?;
+		tmp_file.write_all(&buf)?;
+		tmp_file.sync_all()?;
+
+		#[cfg(not(target_os = "windows"))]
+		{
+			fs::rename(&tmp_file_path, &dest_file_path)?;
+			let dir_file = fs::OpenOptions::new().read(true).open(parent_directory.clone())?;
+			unsafe {
+				libc::fsync(dir_file.as_raw_fd());
+			}
+		}
+
+		#[cfg(target_os = "windows")]
+		{
+			if dest_file_path.exists() {
+				unsafe {
+					winapi::um::winbase::ReplaceFileW(
+						path_to_windows_str(dest_file_path).as_ptr(),
+						path_to_windows_str(tmp_file_path).as_ptr(),
+						std::ptr::null(),
+						winapi::um::winbase::REPLACEFILE_IGNORE_MERGE_ERRORS,
+						std::ptr::null_mut() as *mut winapi::ctypes::c_void,
+						std::ptr::null_mut() as *mut winapi::ctypes::c_void,
+					)
+				};
+			} else {
+				call!(unsafe {
+					winapi::um::winbase::MoveFileExW(
+						path_to_windows_str(tmp_file_path).as_ptr(),
+						path_to_windows_str(dest_file_path).as_ptr(),
+						winapi::um::winbase::MOVEFILE_WRITE_THROUGH
+							| winapi::um::winbase::MOVEFILE_REPLACE_EXISTING,
+					)
+				});
+			}
+		}
+		Ok(())
 	}
 
 	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<bool> {
@@ -83,21 +143,22 @@ impl KVStore for FilesystemStore {
 
 		let _guard = inner_lock_ref.write().unwrap();
 
-		let mut dest_file = self.dest_dir.clone();
-		dest_file.push(namespace);
-		dest_file.push(key);
+		let mut dest_file_path = self.dest_dir.clone();
+		dest_file_path.push(namespace);
+		dest_file_path.push(key);
 
-		if !dest_file.is_file() {
+		if !dest_file_path.is_file() {
 			return Ok(false);
 		}
 
-		fs::remove_file(&dest_file)?;
+		fs::remove_file(&dest_file_path)?;
 		#[cfg(not(target_os = "windows"))]
 		{
-			let msg = format!("Could not retrieve parent directory of {}.", dest_file.display());
-			let parent_directory = dest_file
-				.parent()
-				.ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
+			let parent_directory = dest_file_path.parent().ok_or_else(|| {
+				let msg =
+					format!("Could not retrieve parent directory of {}.", dest_file_path.display());
+				std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+			})?;
 			let dir_file = fs::OpenOptions::new().read(true).open(parent_directory)?;
 			unsafe {
 				// The above call to `fs::remove_file` corresponds to POSIX `unlink`, whose changes
@@ -110,14 +171,14 @@ impl KVStore for FilesystemStore {
 			}
 		}
 
-		if dest_file.is_file() {
+		if dest_file_path.is_file() {
 			return Err(std::io::Error::new(std::io::ErrorKind::Other, "Removing key failed"));
 		}
 
 		if Arc::strong_count(&inner_lock_ref) == 2 {
 			// It's safe to remove the lock entry if we're the only one left holding a strong
 			// reference. Checking this is necessary to ensure we continue to distribute references to the
-			// same lock as long as some Writers/Readers are around. However, we still want to
+			// same lock as long as some Readers are around. However, we still want to
 			// clean up the table when possible.
 			//
 			// Note that this by itself is still leaky as lock entries will remain when more Readers/Writers are
@@ -171,8 +232,8 @@ pub struct FilesystemReader {
 }
 
 impl FilesystemReader {
-	fn new(dest_file: PathBuf, lock_ref: Arc<RwLock<()>>) -> std::io::Result<Self> {
-		let f = fs::File::open(dest_file.clone())?;
+	fn new(dest_file_path: PathBuf, lock_ref: Arc<RwLock<()>>) -> std::io::Result<Self> {
+		let f = fs::File::open(dest_file_path.clone())?;
 		let inner = BufReader::new(f);
 		Ok(Self { inner, lock_ref })
 	}
@@ -185,115 +246,27 @@ impl Read for FilesystemReader {
 	}
 }
 
-pub struct FilesystemWriter {
-	dest_file: PathBuf,
-	parent_directory: PathBuf,
-	tmp_file: PathBuf,
-	tmp_writer: BufWriter<fs::File>,
-	lock_ref: Arc<RwLock<()>>,
-}
-
-impl FilesystemWriter {
-	fn new(dest_file: PathBuf, lock_ref: Arc<RwLock<()>>) -> std::io::Result<Self> {
-		let msg = format!("Could not retrieve parent directory of {}.", dest_file.display());
-		let parent_directory = dest_file
-			.parent()
-			.ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?
-			.to_path_buf();
-		fs::create_dir_all(parent_directory.clone())?;
-
-		// Do a crazy dance with lots of fsync()s to be overly cautious here...
-		// We never want to end up in a state where we've lost the old data, or end up using the
-		// old data on power loss after we've returned.
-		// The way to atomically write a file on Unix platforms is:
-		// open(tmpname), write(tmpfile), fsync(tmpfile), close(tmpfile), rename(), fsync(dir)
-		let mut tmp_file = dest_file.clone();
-		let mut rng = thread_rng();
-		let rand_str: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let ext = format!("{}.tmp", rand_str);
-		tmp_file.set_extension(ext);
-
-		let tmp_writer = BufWriter::new(fs::File::create(&tmp_file)?);
-
-		Ok(Self { dest_file, parent_directory, tmp_file, tmp_writer, lock_ref })
-	}
-}
-
-impl Write for FilesystemWriter {
-	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-		Ok(self.tmp_writer.write(buf)?)
-	}
-
-	fn flush(&mut self) -> std::io::Result<()> {
-		self.tmp_writer.flush()?;
-		self.tmp_writer.get_ref().sync_all()?;
-		Ok(())
-	}
-}
-
-impl TransactionalWrite for FilesystemWriter {
-	fn commit(&mut self) -> std::io::Result<()> {
-		self.flush()?;
-
-		let _guard = self.lock_ref.write().unwrap();
-		// Fsync the parent directory on Unix.
-		#[cfg(not(target_os = "windows"))]
-		{
-			fs::rename(&self.tmp_file, &self.dest_file)?;
-			let dir_file = fs::OpenOptions::new().read(true).open(self.parent_directory.clone())?;
-			unsafe {
-				libc::fsync(dir_file.as_raw_fd());
-			}
-		}
-
-		#[cfg(target_os = "windows")]
-		{
-			if dest_file.exists() {
-				unsafe {
-					winapi::um::winbase::ReplaceFileW(
-						path_to_windows_str(dest_file).as_ptr(),
-						path_to_windows_str(tmp_file).as_ptr(),
-						std::ptr::null(),
-						winapi::um::winbase::REPLACEFILE_IGNORE_MERGE_ERRORS,
-						std::ptr::null_mut() as *mut winapi::ctypes::c_void,
-						std::ptr::null_mut() as *mut winapi::ctypes::c_void,
-					)
-				};
-			} else {
-				call!(unsafe {
-					winapi::um::winbase::MoveFileExW(
-						path_to_windows_str(tmp_file).as_ptr(),
-						path_to_windows_str(dest_file).as_ptr(),
-						winapi::um::winbase::MOVEFILE_WRITE_THROUGH
-							| winapi::um::winbase::MOVEFILE_REPLACE_EXISTING,
-					)
-				});
-			}
-		}
-		Ok(())
-	}
-}
-
 impl KVStorePersister for FilesystemStore {
 	fn persist<W: Writeable>(&self, prefixed_key: &str, object: &W) -> lightning::io::Result<()> {
-		let msg = format!("Could not persist file for key {}.", prefixed_key);
-		let dest_file = PathBuf::from_str(prefixed_key).map_err(|_| {
-			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg.clone())
+		let dest_file_path = PathBuf::from_str(prefixed_key).map_err(|_| {
+			let msg = format!("Could not persist file for key {}.", prefixed_key);
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
 		})?;
 
-		let parent_directory = dest_file.parent().ok_or(lightning::io::Error::new(
-			lightning::io::ErrorKind::InvalidInput,
-			msg.clone(),
-		))?;
+		let parent_directory = dest_file_path.parent().ok_or_else(|| {
+			let msg = format!("Could not persist file for key {}.", prefixed_key);
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
+		})?;
 		let namespace = parent_directory.display().to_string();
 
-		let dest_without_namespace = dest_file
-			.strip_prefix(&namespace)
-			.map_err(|_| lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg))?;
+		let dest_without_namespace = dest_file_path.strip_prefix(&namespace).map_err(|_| {
+			let msg = format!("Could not persist file for key {}.", prefixed_key);
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
+		})?;
 		let key = dest_without_namespace.display().to_string();
-		let mut writer = self.write(&namespace, &key)?;
-		object.write(&mut writer)?;
-		Ok(writer.commit()?)
+
+		self.write(&namespace, &key, &object.encode())?;
+		Ok(())
 	}
 }
 
@@ -302,7 +275,7 @@ mod tests {
 	use super::*;
 	use crate::test::utils::random_storage_path;
 	use lightning::util::persist::KVStorePersister;
-	use lightning::util::ser::{Readable, Writeable};
+	use lightning::util::ser::Readable;
 
 	use proptest::prelude::*;
 	proptest! {
@@ -315,9 +288,7 @@ mod tests {
 			let key = "testkey";
 
 			// Test the basic KVStore operations.
-			let mut writer = fs_store.write(namespace, key).unwrap();
-			data.write(&mut writer).unwrap();
-			writer.commit().unwrap();
+			fs_store.write(namespace, key, &data).unwrap();
 
 			let listed_keys = fs_store.list(namespace).unwrap();
 			assert_eq!(listed_keys.len(), 1);

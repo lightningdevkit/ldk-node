@@ -1,4 +1,4 @@
-use crate::io::{KVStore, TransactionalWrite};
+use crate::io::KVStore;
 use crate::Config;
 use lightning::util::logger::{Level, Logger, Record};
 use lightning::util::persist::KVStorePersister;
@@ -18,7 +18,7 @@ use rand::{thread_rng, Rng};
 use std::collections::hash_map;
 use std::collections::HashMap;
 use std::env;
-use std::io::{BufWriter, Cursor, Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,7 +70,6 @@ impl TestStore {
 
 impl KVStore for TestStore {
 	type Reader = TestReader;
-	type Writer = TestWriter;
 
 	fn read(&self, namespace: &str, key: &str) -> std::io::Result<Self::Reader> {
 		if let Some(outer_ref) = self.persisted_bytes.read().unwrap().get(namespace) {
@@ -86,11 +85,15 @@ impl KVStore for TestStore {
 		}
 	}
 
-	fn write(&self, namespace: &str, key: &str) -> std::io::Result<Self::Writer> {
+	fn write(&self, namespace: &str, key: &str, buf: &[u8]) -> std::io::Result<()> {
 		let mut guard = self.persisted_bytes.write().unwrap();
 		let outer_e = guard.entry(namespace.to_string()).or_insert(HashMap::new());
 		let inner_e = outer_e.entry(key.to_string()).or_insert(Arc::new(RwLock::new(Vec::new())));
-		Ok(TestWriter::new(Arc::clone(&inner_e), Arc::clone(&self.did_persist)))
+
+		let mut guard = inner_e.write().unwrap();
+		guard.write_all(buf)?;
+		self.did_persist.store(true, Ordering::SeqCst);
+		Ok(())
 	}
 
 	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<bool> {
@@ -128,9 +131,9 @@ impl KVStorePersister for TestStore {
 			.strip_prefix(&namespace)
 			.map_err(|_| lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg))?;
 		let key = dest_without_namespace.display().to_string();
-		let mut writer = self.write(&namespace, &key)?;
-		object.write(&mut writer)?;
-		writer.commit()?;
+
+		let data = object.encode();
+		self.write(&namespace, &key, &data)?;
 		Ok(())
 	}
 }
@@ -150,40 +153,6 @@ impl Read for TestReader {
 		let bytes = self.entry_ref.read().unwrap().clone();
 		let mut reader = Cursor::new(bytes);
 		reader.read(buf)
-	}
-}
-
-pub struct TestWriter {
-	tmp_inner: BufWriter<Vec<u8>>,
-	entry_ref: Arc<RwLock<Vec<u8>>>,
-	did_persist: Arc<AtomicBool>,
-}
-
-impl TestWriter {
-	pub fn new(entry_ref: Arc<RwLock<Vec<u8>>>, did_persist: Arc<AtomicBool>) -> Self {
-		let tmp_inner = BufWriter::new(Vec::new());
-		Self { tmp_inner, entry_ref, did_persist }
-	}
-}
-
-impl Write for TestWriter {
-	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-		self.tmp_inner.write(buf)
-	}
-
-	fn flush(&mut self) -> std::io::Result<()> {
-		self.tmp_inner.flush()
-	}
-}
-
-impl TransactionalWrite for TestWriter {
-	fn commit(&mut self) -> std::io::Result<()> {
-		self.flush()?;
-		let bytes_ref = self.tmp_inner.get_ref();
-		let mut guard = self.entry_ref.write().unwrap();
-		guard.clone_from(bytes_ref);
-		self.did_persist.store(true, Ordering::SeqCst);
-		Ok(())
 	}
 }
 

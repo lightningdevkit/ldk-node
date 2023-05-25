@@ -1,6 +1,4 @@
-use crate::io::{
-	KVStore, TransactionalWrite, PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_NAMESPACE,
-};
+use crate::io::{KVStore, PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_NAMESPACE};
 use crate::logger::{log_error, Logger};
 use crate::{Error, NetAddress};
 
@@ -11,24 +9,22 @@ use bitcoin::secp256k1::PublicKey;
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-pub struct PeerStore<K: Deref, L: Deref>
+pub struct PeerStore<K: KVStore + Sync + Send, L: Deref>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	peers: RwLock<HashMap<PublicKey, PeerInfo>>,
-	kv_store: K,
+	kv_store: Arc<K>,
 	logger: L,
 }
 
-impl<K: Deref, L: Deref> PeerStore<K, L>
+impl<K: KVStore + Sync + Send, L: Deref> PeerStore<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
-	pub(crate) fn new(kv_store: K, logger: L) -> Self {
+	pub(crate) fn new(kv_store: Arc<K>, logger: L) -> Self {
 		let peers = RwLock::new(HashMap::new());
 		Self { peers, kv_store, logger }
 	}
@@ -37,14 +33,14 @@ where
 		let mut locked_peers = self.peers.write().unwrap();
 
 		locked_peers.insert(peer_info.node_id, peer_info);
-		self.write_peers_and_commit(&*locked_peers)
+		self.persist_peers(&*locked_peers)
 	}
 
 	pub(crate) fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
 		let mut locked_peers = self.peers.write().unwrap();
 
 		locked_peers.remove(node_id);
-		self.write_peers_and_commit(&*locked_peers)
+		self.persist_peers(&*locked_peers)
 	}
 
 	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
@@ -55,53 +51,31 @@ where
 		self.peers.read().unwrap().get(node_id).cloned()
 	}
 
-	fn write_peers_and_commit(
-		&self, locked_peers: &HashMap<PublicKey, PeerInfo>,
-	) -> Result<(), Error> {
-		let mut writer = self
-			.kv_store
-			.write(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY)
+	fn persist_peers(&self, locked_peers: &HashMap<PublicKey, PeerInfo>) -> Result<(), Error> {
+		let data = PeerStoreSerWrapper(&*locked_peers).encode();
+		self.kv_store
+			.write(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY, &data)
 			.map_err(|e| {
 				log_error!(
 					self.logger,
-					"Getting writer for key {}/{} failed due to: {}",
+					"Write for key {}/{} failed due to: {}",
 					PEER_INFO_PERSISTENCE_NAMESPACE,
 					PEER_INFO_PERSISTENCE_KEY,
 					e
 				);
 				Error::PersistenceFailed
 			})?;
-		PeerStoreSerWrapper(&*locked_peers).write(&mut writer).map_err(|e| {
-			log_error!(
-				self.logger,
-				"Writing peer data to key {}/{} failed due to: {}",
-				PEER_INFO_PERSISTENCE_NAMESPACE,
-				PEER_INFO_PERSISTENCE_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})?;
-		writer.commit().map_err(|e| {
-			log_error!(
-				self.logger,
-				"Committing peer data to key {}/{} failed due to: {}",
-				PEER_INFO_PERSISTENCE_NAMESPACE,
-				PEER_INFO_PERSISTENCE_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})
+		Ok(())
 	}
 }
 
-impl<K: Deref, L: Deref> ReadableArgs<(K, L)> for PeerStore<K, L>
+impl<K: KVStore + Sync + Send, L: Deref> ReadableArgs<(Arc<K>, L)> for PeerStore<K, L>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
-		reader: &mut R, args: (K, L),
+		reader: &mut R, args: (Arc<K>, L),
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let (kv_store, logger) = args;
 		let read_peers: PeerStoreDeserWrapper = Readable::read(reader)?;

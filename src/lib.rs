@@ -78,7 +78,7 @@ mod error;
 mod event;
 mod gossip;
 mod hex_utils;
-mod io;
+pub mod io;
 mod logger;
 mod payment_store;
 mod peer_store;
@@ -320,8 +320,18 @@ impl Builder {
 		self
 	}
 
+	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
+	/// previously configured.
+	pub fn build(&self) -> Arc<Node<FilesystemStore>> {
+		let ldk_data_dir = format!("{}/ldk", self.config.storage_dir_path);
+		let kv_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
+		self.build_with_store(kv_store)
+	}
+
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build(&self) -> Arc<Node> {
+	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
+		&self, kv_store: Arc<K>,
+	) -> Arc<Node<K>> {
 		let config = Arc::new(self.config.clone());
 
 		let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
@@ -392,10 +402,8 @@ impl Builder {
 			Arc::clone(&logger),
 		));
 
-		let kv_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
-
 		// Initialize the ChainMonitor
-		let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
+		let chain_monitor: Arc<ChainMonitor<K>> = Arc::new(chainmonitor::ChainMonitor::new(
 			Some(Arc::clone(&tx_sync)),
 			Arc::clone(&wallet),
 			Arc::clone(&logger),
@@ -492,7 +500,7 @@ impl Builder {
 					channel_monitor_references,
 				);
 				let (_hash, channel_manager) =
-					<(BlockHash, ChannelManager)>::read(&mut reader, read_args)
+					<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args)
 						.expect("Failed to read channel manager from store");
 				channel_manager
 			} else {
@@ -662,31 +670,35 @@ impl Builder {
 	}
 }
 
+/// This type alias is required as Uniffi doesn't support generics, i.e., we can only expose the
+/// concretized types via this aliasing hack.
+type LDKNode = Node<FilesystemStore>;
+
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
-pub struct Node {
+pub struct Node<K: KVStore + Sync + Send + 'static> {
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
 	stop_receiver: tokio::sync::watch::Receiver<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
-	event_queue: Arc<EventQueue<Arc<FilesystemStore>, Arc<FilesystemLogger>>>,
-	channel_manager: Arc<ChannelManager>,
-	chain_monitor: Arc<ChainMonitor>,
-	peer_manager: Arc<PeerManager>,
+	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
+	channel_manager: Arc<ChannelManager<K>>,
+	chain_monitor: Arc<ChainMonitor<K>>,
+	peer_manager: Arc<PeerManager<K>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
 	gossip_source: Arc<GossipSource>,
-	kv_store: Arc<FilesystemStore>,
+	kv_store: Arc<K>,
 	logger: Arc<FilesystemLogger>,
 	scorer: Arc<Mutex<Scorer>>,
-	peer_store: Arc<PeerStore<Arc<FilesystemStore>, Arc<FilesystemLogger>>>,
-	payment_store: Arc<PaymentStore<Arc<FilesystemStore>, Arc<FilesystemLogger>>>,
+	peer_store: Arc<PeerStore<K, Arc<FilesystemLogger>>>,
+	payment_store: Arc<PaymentStore<K, Arc<FilesystemLogger>>>,
 }
 
-impl Node {
+impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
@@ -1682,14 +1694,14 @@ impl Node {
 	}
 }
 
-impl Drop for Node {
+impl<K: KVStore + Sync + Send + 'static> Drop for Node<K> {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}
 }
 
-async fn connect_peer_if_necessary(
-	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager>,
+async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
+	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager<K>>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
 	for (pman_node_id, _pman_addr) in peer_manager.get_peer_node_ids() {
@@ -1701,8 +1713,8 @@ async fn connect_peer_if_necessary(
 	do_connect_peer(node_id, addr, peer_manager, logger).await
 }
 
-async fn do_connect_peer(
-	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager>,
+async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
+	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager<K>>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
 	log_info!(logger, "Connecting to peer: {}@{}", node_id, addr);

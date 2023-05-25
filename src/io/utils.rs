@@ -20,6 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::ops::Deref;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::KVStore;
 
@@ -46,11 +47,10 @@ pub(crate) fn read_or_generate_seed_file(keys_seed_path: &str) -> [u8; WALLET_KE
 }
 
 /// Read previously persisted [`ChannelMonitor`]s from the store.
-pub(crate) fn read_channel_monitors<K: Deref, ES: Deref, SP: Deref>(
-	kv_store: K, entropy_source: ES, signer_provider: SP,
+pub(crate) fn read_channel_monitors<K: KVStore + Sync + Send, ES: Deref, SP: Deref>(
+	kv_store: Arc<K>, entropy_source: ES, signer_provider: SP,
 ) -> std::io::Result<Vec<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>)>>
 where
-	K::Target: KVStore,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 {
@@ -92,74 +92,65 @@ where
 }
 
 /// Read a previously persisted [`NetworkGraph`] from the store.
-pub(crate) fn read_network_graph<K: Deref, L: Deref>(
-	kv_store: K, logger: L,
+pub(crate) fn read_network_graph<K: KVStore + Sync + Send, L: Deref>(
+	kv_store: Arc<K>, logger: L,
 ) -> Result<NetworkGraph<L>, std::io::Error>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	let mut reader =
 		kv_store.read(NETWORK_GRAPH_PERSISTENCE_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY)?;
-	let graph = NetworkGraph::read(&mut reader, logger).map_err(|_| {
+	NetworkGraph::read(&mut reader, logger).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NetworkGraph")
-	})?;
-	Ok(graph)
+	})
 }
 
 /// Read a previously persisted [`Scorer`] from the store.
-pub(crate) fn read_scorer<K: Deref, G: Deref<Target = NetworkGraph<L>>, L: Deref>(
-	kv_store: K, network_graph: G, logger: L,
+pub(crate) fn read_scorer<K: KVStore + Sync + Send, G: Deref<Target = NetworkGraph<L>>, L: Deref>(
+	kv_store: Arc<K>, network_graph: G, logger: L,
 ) -> Result<ProbabilisticScorer<G, L>, std::io::Error>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	let params = ProbabilisticScoringParameters::default();
 	let mut reader = kv_store.read(SCORER_PERSISTENCE_NAMESPACE, SCORER_PERSISTENCE_KEY)?;
 	let args = (params, network_graph, logger);
-	let scorer = ProbabilisticScorer::read(&mut reader, args).map_err(|_| {
+	ProbabilisticScorer::read(&mut reader, args).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize Scorer")
-	})?;
-	Ok(scorer)
+	})
 }
 
 /// Read previously persisted events from the store.
-pub(crate) fn read_event_queue<K: Deref, L: Deref>(
-	kv_store: K, logger: L,
+pub(crate) fn read_event_queue<K: KVStore + Sync + Send, L: Deref>(
+	kv_store: Arc<K>, logger: L,
 ) -> Result<EventQueue<K, L>, std::io::Error>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	let mut reader =
 		kv_store.read(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY)?;
-	let event_queue = EventQueue::read(&mut reader, (kv_store, logger)).map_err(|_| {
+	EventQueue::read(&mut reader, (kv_store, logger)).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize EventQueue")
-	})?;
-	Ok(event_queue)
+	})
 }
 
 /// Read previously persisted peer info from the store.
-pub(crate) fn read_peer_info<K: Deref, L: Deref>(
-	kv_store: K, logger: L,
+pub(crate) fn read_peer_info<K: KVStore + Sync + Send, L: Deref>(
+	kv_store: Arc<K>, logger: L,
 ) -> Result<PeerStore<K, L>, std::io::Error>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
 	let mut reader = kv_store.read(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY)?;
-	let peer_info = PeerStore::read(&mut reader, (kv_store, logger)).map_err(|_| {
+	PeerStore::read(&mut reader, (kv_store, logger)).map_err(|_| {
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize PeerStore")
-	})?;
-	Ok(peer_info)
+	})
 }
 
 /// Read previously persisted payments information from the store.
-pub(crate) fn read_payments<K: Deref>(kv_store: K) -> Result<Vec<PaymentDetails>, std::io::Error>
-where
-	K::Target: KVStore,
-{
+pub(crate) fn read_payments<K: KVStore + Sync + Send>(
+	kv_store: Arc<K>,
+) -> Result<Vec<PaymentDetails>, std::io::Error> {
 	let mut res = Vec::new();
 
 	for stored_key in kv_store.list(PAYMENT_INFO_PERSISTENCE_NAMESPACE)? {
@@ -174,10 +165,9 @@ where
 	Ok(res)
 }
 
-pub(crate) fn read_latest_rgs_sync_timestamp<K: Deref>(kv_store: K) -> Result<u32, std::io::Error>
-where
-	K::Target: KVStore,
-{
+pub(crate) fn read_latest_rgs_sync_timestamp<K: KVStore + Sync + Send>(
+	kv_store: Arc<K>,
+) -> Result<u32, std::io::Error> {
 	let mut reader =
 		kv_store.read(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY)?;
 	u32::read(&mut reader).map_err(|_| {
@@ -188,55 +178,32 @@ where
 	})
 }
 
-pub(crate) fn write_latest_rgs_sync_timestamp<K: Deref, L: Deref>(
-	updated_timestamp: u32, kv_store: K, logger: L,
+pub(crate) fn write_latest_rgs_sync_timestamp<K: KVStore + Sync + Send, L: Deref>(
+	updated_timestamp: u32, kv_store: Arc<K>, logger: L,
 ) -> Result<(), Error>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
-	let mut writer = kv_store
-		.write(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY)
+	let data = updated_timestamp.encode();
+	kv_store
+		.write(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY, &data)
 		.map_err(|e| {
 			log_error!(
 				logger,
-				"Getting writer for key {}/{} failed due to: {}",
+				"Writing data to key {}/{} failed due to: {}",
 				LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
 				LATEST_RGS_SYNC_TIMESTAMP_KEY,
 				e
 			);
 			Error::PersistenceFailed
-		})?;
-	updated_timestamp.write(&mut writer).map_err(|e| {
-		log_error!(
-			logger,
-			"Writing data to key {}/{} failed due to: {}",
-			LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_KEY,
-			e
-		);
-		Error::PersistenceFailed
-	})?;
-	writer.commit().map_err(|e| {
-		log_error!(
-			logger,
-			"Committing data to key {}/{} failed due to: {}",
-			LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_KEY,
-			e
-		);
-		Error::PersistenceFailed
-	})
+		})
 }
 
-pub(crate) fn read_latest_node_ann_bcast_timestamp<K: Deref>(
-	kv_store: K,
-) -> Result<u64, std::io::Error>
-where
-	K::Target: KVStore,
-{
+pub(crate) fn read_latest_node_ann_bcast_timestamp<K: KVStore + Sync + Send>(
+	kv_store: Arc<K>,
+) -> Result<u64, std::io::Error> {
 	let mut reader = kv_store
-		.read(LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE, LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY)?;
+		.read(LATEST_NODE_ANN_BCAST_TIMESTAMP_NAMESPACE, LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY)?;
 	u64::read(&mut reader).map_err(|_| {
 		std::io::Error::new(
 			std::io::ErrorKind::InvalidData,
@@ -245,43 +212,27 @@ where
 	})
 }
 
-pub(crate) fn write_latest_node_ann_bcast_timestamp<K: Deref, L: Deref>(
-	updated_timestamp: u64, kv_store: K, logger: L,
+pub(crate) fn write_latest_node_ann_bcast_timestamp<K: KVStore + Sync + Send, L: Deref>(
+	updated_timestamp: u64, kv_store: Arc<K>, logger: L,
 ) -> Result<(), Error>
 where
-	K::Target: KVStore,
 	L::Target: Logger,
 {
-	let mut writer = kv_store
-		.write(LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE, LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY)
+	let data = updated_timestamp.encode();
+	kv_store
+		.write(
+			LATEST_NODE_ANN_BCAST_TIMESTAMP_NAMESPACE,
+			LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
+			&data,
+		)
 		.map_err(|e| {
 			log_error!(
 				logger,
-				"Getting writer for key {}/{} failed due to: {}",
-				LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE,
-				LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY,
+				"Writing data to key {}/{} failed due to: {}",
+				LATEST_NODE_ANN_BCAST_TIMESTAMP_NAMESPACE,
+				LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
 				e
 			);
 			Error::PersistenceFailed
-		})?;
-	updated_timestamp.write(&mut writer).map_err(|e| {
-		log_error!(
-			logger,
-			"Writing data to key {}/{} failed due to: {}",
-			LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE,
-			LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY,
-			e
-		);
-		Error::PersistenceFailed
-	})?;
-	writer.commit().map_err(|e| {
-		log_error!(
-			logger,
-			"Committing data to key {}/{} failed due to: {}",
-			LATEST_NODE_ANN_BCAST_TIMSTAMP_NAMESPACE,
-			LATEST_NODE_ANN_BCAST_TIMSTAMP_KEY,
-			e
-		);
-		Error::PersistenceFailed
-	})
+		})
 }
