@@ -107,6 +107,7 @@ use {bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use io::fs_store::FilesystemStore;
+use io::sqlite_store::SqliteStore;
 use io::{KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_NAMESPACE};
 use payment_store::PaymentStore;
 pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
@@ -362,12 +363,21 @@ impl Builder {
 		config.log_level = level;
 	}
 
+	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
+	/// previously configured.
+	pub fn build(&self) -> Arc<Node<SqliteStore>> {
+		let storage_dir_path = self.config.read().unwrap().storage_dir_path.clone();
+		fs::create_dir_all(storage_dir_path.clone()).expect("Failed to create LDK data directory");
+		let kv_store = Arc::new(SqliteStore::new(storage_dir_path.into()));
+		self.build_with_store(kv_store)
+	}
+
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Arc<Node<FilesystemStore>> {
-		let config = self.config.read().unwrap();
-		let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
-		let kv_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
+	pub fn build_with_fs_store(&self) -> Arc<Node<FilesystemStore>> {
+		let storage_dir_path = self.config.read().unwrap().storage_dir_path.clone();
+		fs::create_dir_all(storage_dir_path.clone()).expect("Failed to create LDK data directory");
+		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path.into()));
 		self.build_with_store(kv_store)
 	}
 
@@ -376,12 +386,6 @@ impl Builder {
 		&self, kv_store: Arc<K>,
 	) -> Arc<Node<K>> {
 		let config = Arc::new(self.config.read().unwrap().clone());
-
-		let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
-		fs::create_dir_all(ldk_data_dir.clone()).expect("Failed to create LDK data directory");
-
-		let bdk_data_dir = format!("{}/bdk", config.storage_dir_path);
-		fs::create_dir_all(bdk_data_dir.clone()).expect("Failed to create BDK data directory");
 
 		// Initialize the Logger
 		let log_file_path = format!("{}/ldk_node.log", config.storage_dir_path);
@@ -415,7 +419,8 @@ impl Builder {
 		)
 		.expect("Failed to derive on-chain wallet name");
 
-		let database_path = format!("{}/{}.sqlite", bdk_data_dir, wallet_name);
+		let database_path =
+			format!("{}/bdk_wallet_{}.sqlite", config.storage_dir_path, wallet_name);
 		let database = SqliteDatabase::new(database_path);
 
 		let bdk_wallet = bdk::Wallet::new(

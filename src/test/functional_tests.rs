@@ -342,6 +342,59 @@ fn start_stop_reinit() {
 }
 
 #[test]
+fn start_stop_reinit_fs_store() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let config = random_config();
+	let builder = Builder::from_config(config.clone());
+	builder.set_esplora_server(esplora_url.clone());
+	let node = builder.build_with_fs_store();
+	let expected_node_id = node.node_id();
+
+	let funding_address = node.new_funding_address().unwrap();
+	let expected_amount = Amount::from_sat(100000);
+
+	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
+	assert_eq!(node.onchain_balance().unwrap().get_total(), 0);
+
+	node.start().unwrap();
+	assert_eq!(node.start(), Err(Error::AlreadyRunning));
+
+	node.sync_wallets().unwrap();
+	assert_eq!(node.onchain_balance().unwrap().get_spendable(), expected_amount.to_sat());
+
+	node.stop().unwrap();
+	assert_eq!(node.stop(), Err(Error::NotRunning));
+
+	node.start().unwrap();
+	assert_eq!(node.start(), Err(Error::AlreadyRunning));
+
+	node.stop().unwrap();
+	assert_eq!(node.stop(), Err(Error::NotRunning));
+	drop(node);
+
+	let new_builder = Builder::from_config(config);
+	new_builder.set_esplora_server(esplora_url);
+	let reinitialized_node = builder.build_with_fs_store();
+	assert_eq!(reinitialized_node.node_id(), expected_node_id);
+
+	reinitialized_node.start().unwrap();
+
+	assert_eq!(
+		reinitialized_node.onchain_balance().unwrap().get_spendable(),
+		expected_amount.to_sat()
+	);
+
+	reinitialized_node.sync_wallets().unwrap();
+	assert_eq!(
+		reinitialized_node.onchain_balance().unwrap().get_spendable(),
+		expected_amount.to_sat()
+	);
+
+	reinitialized_node.stop().unwrap();
+}
+
+#[test]
 fn onchain_spend_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
