@@ -93,7 +93,6 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
-use lightning::ln::msgs::RoutingMessageHandler;
 pub use lightning_invoice;
 
 pub use error::Error as NodeError;
@@ -101,6 +100,8 @@ use error::Error;
 
 pub use event::Event;
 pub use types::NetAddress;
+
+pub use io::utils::generate_entropy_mnemonic;
 
 #[cfg(feature = "uniffi")]
 use {bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
@@ -126,6 +127,7 @@ use lightning::chain::{chainmonitor, BestBlock, Confirm, Watch};
 use lightning::ln::channelmanager::{
 	self, ChainParameters, ChannelManagerReadArgs, PaymentId, RecipientOnionFields, Retry,
 };
+use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};

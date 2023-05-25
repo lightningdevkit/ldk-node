@@ -12,6 +12,7 @@ use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParam
 use lightning::util::logger::Logger;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 
+use bip39::Mnemonic;
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hex::FromHex;
 use rand::{thread_rng, RngCore};
@@ -23,6 +24,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::KVStore;
+
+/// Generates a random [BIP 39] mnemonic.
+///
+/// The result may be used to initialize the [`Node`] entropy, i.e., can be given to
+/// [`Builder::set_entropy_bip39_mnemonic`].
+///
+/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+/// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
+pub fn generate_entropy_mnemonic() -> Mnemonic {
+	// bip39::Mnemonic supports 256 bit entropy max
+	let mut entropy = [0; 32];
+	thread_rng().fill_bytes(&mut entropy);
+	Mnemonic::from_entropy(&entropy).unwrap()
+}
 
 pub(crate) fn read_or_generate_seed_file(keys_seed_path: &str) -> [u8; WALLET_KEYS_SEED_LEN] {
 	if Path::new(&keys_seed_path).exists() {
@@ -235,4 +250,17 @@ where
 			);
 			Error::PersistenceFailed
 		})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn mnemonic_to_entropy_to_mnemonic() {
+		let mnemonic = generate_entropy_mnemonic();
+
+		let entropy = mnemonic.to_entropy();
+		assert_eq!(mnemonic, Mnemonic::from_entropy(&entropy).unwrap());
+	}
 }
