@@ -523,8 +523,12 @@ impl Builder {
 		) {
 			Ok(monitors) => monitors,
 			Err(e) => {
-				log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
-				panic!("Failed to read channel monitors: {}", e.to_string());
+				if e.kind() == std::io::ErrorKind::NotFound {
+					Vec::new()
+				} else {
+					log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
+					panic!("Failed to read channel monitors: {}", e.to_string());
+				}
 			}
 		};
 
