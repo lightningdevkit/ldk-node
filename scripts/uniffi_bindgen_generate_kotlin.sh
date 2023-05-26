@@ -12,7 +12,7 @@ fi
 
 #rustup target add aarch64-apple-darwin
 #cargo build --target aarch64-apple-darwin || exit 1
-cargo build --release || exit 1
+cargo build --release --features uniffi || exit 1
 $UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language kotlin -o "$TARGET_DIR" || exit 1
 
 mkdir -p "$BINDINGS_DIR"/"$PROJECT_DIR"/lib/src/main/kotlin/"$PACKAGE_DIR" || exit 1

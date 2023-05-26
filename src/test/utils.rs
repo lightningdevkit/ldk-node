@@ -4,7 +4,7 @@ use lightning::util::logger::{Level, Logger, Record};
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::Writeable;
 
-use bitcoin::{Address, Amount, OutPoint, Txid};
+use bitcoin::{Address, Amount, Network, OutPoint, Txid};
 
 use bitcoind::bitcoincore_rpc::RpcApi;
 use electrsd::bitcoind::bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
@@ -251,11 +251,11 @@ pub fn random_port() -> u16 {
 	rng.gen_range(5000..65535)
 }
 
-pub fn random_config(esplora_url: &str) -> Config {
+pub fn random_config() -> Config {
 	let mut config = Config::default();
 
-	println!("Setting esplora server URL: {}", esplora_url);
-	config.esplora_server_url = format!("http://{}", esplora_url);
+	config.network = Network::Regtest;
+	println!("Setting network: {}", config.network);
 
 	let rand_dir = random_storage_path();
 	println!("Setting random LDK storage dir: {}", rand_dir);

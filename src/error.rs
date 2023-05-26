@@ -37,6 +37,8 @@ pub enum Error {
 	InvalidNetAddress,
 	/// The given public key is invalid.
 	InvalidPublicKey,
+	/// The given secret key is invalid.
+	InvalidSecretKey,
 	/// The given payment hash is invalid.
 	InvalidPaymentHash,
 	/// The given payment preimage is invalid.
@@ -79,6 +81,7 @@ impl fmt::Display for Error {
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
 			Self::InvalidNetAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
+			Self::InvalidSecretKey => write!(f, "The given secret key is invalid."),
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
 			Self::InvalidPaymentPreimage => write!(f, "The given payment preimage is invalid."),
 			Self::InvalidPaymentSecret => write!(f, "The given payment secret is invalid."),

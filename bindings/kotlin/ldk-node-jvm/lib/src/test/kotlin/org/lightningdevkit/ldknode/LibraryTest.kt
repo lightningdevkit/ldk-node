@@ -61,8 +61,7 @@ class LibraryTest {
     @Test fun fullCycle() {
         setup()
 
-        val network: Network = "regtest"
-        assertEquals(network, "regtest")
+        val network = Network.REGTEST
 
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")

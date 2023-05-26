@@ -15,12 +15,12 @@ rustup target add aarch64-apple-ios-sim --toolchain nightly
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
 # Build rust target libs
-cargo build --profile release-smaller || exit 1
-cargo build --profile release-smaller --target x86_64-apple-darwin || exit 1
-cargo build --profile release-smaller --target aarch64-apple-darwin || exit 1
-cargo build --profile release-smaller --target x86_64-apple-ios || exit 1
-cargo build --profile release-smaller --target aarch64-apple-ios || exit 1
-cargo +nightly build --release --target aarch64-apple-ios-sim || exit 1
+cargo build --profile release-smaller --features uniffi || exit 1
+cargo build --profile release-smaller --features uniffi --target x86_64-apple-darwin || exit 1
+cargo build --profile release-smaller --features uniffi --target aarch64-apple-darwin || exit 1
+cargo build --profile release-smaller --features uniffi --target x86_64-apple-ios || exit 1
+cargo build --profile release-smaller --features uniffi --target aarch64-apple-ios || exit 1
+cargo +nightly build --release --features uniffi --target aarch64-apple-ios-sim || exit 1
 
 # Combine ios-sim and apple-darwin (macos) libs for x86_64 and aarch64 (m1)
 mkdir -p target/lipo-ios-sim/release-smaller || exit 1

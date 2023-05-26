@@ -3,7 +3,6 @@ namespace ldk_node {
 
 dictionary Config {
 	string storage_dir_path;
-	string esplora_server_url;
 	Network network;
 	NetAddress? listening_address;
 	u32 default_cltv_expiry_delta;
@@ -13,6 +12,15 @@ interface Builder {
 	constructor();
 	[Name=from_config]
 	constructor(Config config);
+	void set_entropy_seed_path(string seed_path);
+	void set_entropy_seed_bytes(sequence<u8> seed_bytes);
+	void set_entropy_bip39_mnemonic(Mnemonic mnemonic, string? passphrase);
+	void set_esplora_server(string esplora_server_url);
+	void set_gossip_source_p2p();
+	void set_gossip_source_rgs(string rgs_server_url);
+	void set_storage_dir_path(string storage_dir_path);
+	void set_network(Network network);
+	void set_listening_address(NetAddress listening_address);
 	LDKNode build();
 };
 
@@ -85,6 +93,7 @@ enum NodeError {
 	"InvalidAddress",
 	"InvalidNetAddress",
 	"InvalidPublicKey",
+	"InvalidSecretKey",
 	"InvalidPaymentHash",
 	"InvalidPaymentPreimage",
 	"InvalidPaymentSecret",
@@ -115,6 +124,13 @@ enum PaymentStatus {
 	"Pending",
 	"Succeeded",
 	"Failed",
+};
+
+enum Network {
+	"Bitcoin",
+	"Testnet",
+	"Signet",
+	"Regtest",
 };
 
 dictionary PaymentDetails {
@@ -187,4 +203,4 @@ typedef string ChannelId;
 typedef string UserChannelId;
 
 [Custom]
-typedef string Network;
+typedef string Mnemonic;

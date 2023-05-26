@@ -29,14 +29,15 @@
 //! use ldk_node::{Builder, NetAddress};
 //! use ldk_node::lightning_invoice::Invoice;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
+//! use ldk_node::bitcoin::Network;
 //! use std::str::FromStr;
 //!
 //! fn main() {
-//! 	let node = Builder::new()
-//! 		.set_network("testnet")
-//! 		.set_esplora_server_url("https://blockstream.info/testnet/api".to_string())
-//! 		.build();
+//! 	let mut builder = Builder::new();
+//! 	builder.set_network(Network::Testnet);
+//! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 //!
+//! 	let node = builder.build();
 //! 	node.start().unwrap();
 //!
 //! 	let _funding_address = node.new_funding_address();
@@ -85,6 +86,8 @@ mod peer_store;
 #[cfg(test)]
 mod test;
 mod types;
+#[cfg(feature = "uniffi")]
+mod uniffi_types;
 mod wallet;
 
 pub use bip39;
@@ -98,6 +101,9 @@ use error::Error;
 
 pub use event::Event;
 pub use types::NetAddress;
+
+#[cfg(feature = "uniffi")]
+use {bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
 
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
@@ -121,7 +127,7 @@ use lightning::ln::channelmanager::{
 	self, ChainParameters, ChannelManagerReadArgs, PaymentId, RecipientOnionFields, Retry,
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
-use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
@@ -144,7 +150,9 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 
-use bitcoin::{Address, BlockHash, OutPoint, Txid};
+use bip39::Mnemonic;
+
+use bitcoin::{Address, BlockHash, Txid};
 
 use rand::Rng;
 
@@ -152,12 +160,19 @@ use std::convert::TryInto;
 use std::default::Default;
 use std::fs;
 use std::net::ToSocketAddrs;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
+
+// Config defaults
+const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
+const DEFAULT_NETWORK: Network = Network::Bitcoin;
+const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
+const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
+const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of blocks after which BDK stops looking for scripts belonging to the wallet.
@@ -183,11 +198,19 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
+///
+/// ### Defaults
+///
+/// | Parameter                   | Value            |
+/// |-----------------------------|------------------|
+/// | `storage_dir_path`          | /tmp/ldk_node/   |
+/// | `network`                   | Network::Bitcoin |
+/// | `listening_address`         | 0.0.0.0:9735     |
+/// | `default_cltv_expiry_delta` | 144              |
+///
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
-	/// The URL of the utilized Esplora server.
-	pub esplora_server_url: String,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The IP address and TCP port the node will listen on.
@@ -199,20 +222,24 @@ pub struct Config {
 impl Default for Config {
 	fn default() -> Self {
 		Self {
-			storage_dir_path: "/tmp/ldk_node/".to_string(),
-			esplora_server_url: "http://localhost:3002".to_string(),
-			network: Network::Regtest,
-			listening_address: Some("0.0.0.0:9735".parse().unwrap()),
-			default_cltv_expiry_delta: 144,
+			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
+			network: DEFAULT_NETWORK,
+			listening_address: Some(DEFAULT_LISTENING_ADDR.parse().unwrap()),
+			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
 		}
 	}
+}
+
+#[derive(Debug, Clone)]
+enum ChainDataSourceConfig {
+	Esplora(String),
 }
 
 #[derive(Debug, Clone)]
 enum EntropySourceConfig {
 	SeedFile(String),
 	SeedBytes([u8; WALLET_KEYS_SEED_LEN]),
-	Bip39Mnemonic { mnemonic: bip39::Mnemonic, passphrase: Option<String> },
+	Bip39Mnemonic { mnemonic: Mnemonic, passphrase: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -223,107 +250,109 @@ enum GossipSourceConfig {
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
 /// the getgo.
-#[derive(Debug, Clone)]
+///
+/// ### Defaults
+/// - Wallet entropy is sourced from a `keys_seed` file located under [`Config::storage_dir_path`]
+/// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
+/// - Gossip data is sourced via the peer-to-peer network
+#[derive(Debug)]
 pub struct Builder {
-	config: Config,
-	entropy_source_config: Option<EntropySourceConfig>,
-	gossip_source_config: Option<GossipSourceConfig>,
+	config: RwLock<Config>,
+	entropy_source_config: RwLock<Option<EntropySourceConfig>>,
+	chain_data_source_config: RwLock<Option<ChainDataSourceConfig>>,
+	gossip_source_config: RwLock<Option<GossipSourceConfig>>,
 }
 
 impl Builder {
 	/// Creates a new builder instance with the default configuration.
 	pub fn new() -> Self {
-		let config = Config::default();
-		let entropy_source_config = None;
-		let gossip_source_config = None;
-		Self { config, entropy_source_config, gossip_source_config }
+		let config = RwLock::new(Config::default());
+		let entropy_source_config = RwLock::new(None);
+		let chain_data_source_config = RwLock::new(None);
+		let gossip_source_config = RwLock::new(None);
+		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
-		let entropy_source_config = None;
-		let gossip_source_config = None;
-		Self { config, entropy_source_config, gossip_source_config }
+		let config = RwLock::new(config);
+		let entropy_source_config = RwLock::new(None);
+		let chain_data_source_config = RwLock::new(None);
+		let gossip_source_config = RwLock::new(None);
+		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
 	///
 	/// If the given file does not exist a new random seed file will be generated and
 	/// stored at the given location.
-	pub fn set_entropy_seed_path(&mut self, seed_path: String) -> &mut Self {
-		self.entropy_source_config = Some(EntropySourceConfig::SeedFile(seed_path));
-		self
+	pub fn set_entropy_seed_path(&self, seed_path: String) {
+		*self.entropy_source_config.write().unwrap() =
+			Some(EntropySourceConfig::SeedFile(seed_path));
 	}
 
-	/// Configures the [`Node`] instance to source its wallet entropy from the given seed bytes.
-	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: [u8; WALLET_KEYS_SEED_LEN]) -> &mut Self {
-		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(seed_bytes));
-		self
-	}
-
-	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
-	/// network.
-	pub fn set_gossip_source_p2p(&mut self) -> &mut Self {
-		self.gossip_source_config = Some(GossipSourceConfig::P2PNetwork);
-		self
-	}
-
-	/// Configures the [`Node`] instance to source its gossip data from the given RapidGossipSync
-	/// server.
-	pub fn set_gossip_source_rgs(&mut self, rgs_server_url: String) -> &mut Self {
-		self.gossip_source_config = Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
-		self
+	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
+	///
+	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
+	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) {
+		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
+			panic!("Failed to set seed due to invalid length.");
+		}
+		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
+		bytes.copy_from_slice(&seed_bytes);
+		*self.entropy_source_config.write().unwrap() = Some(EntropySourceConfig::SeedBytes(bytes));
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
 	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn set_entropy_bip39_mnemonic(
-		&mut self, mnemonic: bip39::Mnemonic, passphrase: Option<String>,
-	) -> &mut Self {
-		self.entropy_source_config =
+	pub fn set_entropy_bip39_mnemonic(&self, mnemonic: Mnemonic, passphrase: Option<String>) {
+		*self.entropy_source_config.write().unwrap() =
 			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
-		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
+	pub fn set_esplora_server(&self, esplora_server_url: String) {
+		*self.chain_data_source_config.write().unwrap() =
+			Some(ChainDataSourceConfig::Esplora(esplora_server_url));
+	}
+
+	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
+	/// network.
+	pub fn set_gossip_source_p2p(&self) {
+		*self.gossip_source_config.write().unwrap() = Some(GossipSourceConfig::P2PNetwork);
+	}
+
+	/// Configures the [`Node`] instance to source its gossip data from the given RapidGossipSync
+	/// server.
+	pub fn set_gossip_source_rgs(&self, rgs_server_url: String) {
+		*self.gossip_source_config.write().unwrap() =
+			Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
 	}
 
 	/// Sets the used storage directory path.
-	///
-	/// Default: `/tmp/ldk_node/`
-	pub fn set_storage_dir_path(&mut self, storage_dir_path: String) -> &mut Self {
-		self.config.storage_dir_path = storage_dir_path;
-		self
-	}
-
-	/// Sets the Esplora server URL.
-	///
-	/// Default: `https://blockstream.info/api`
-	pub fn set_esplora_server_url(&mut self, esplora_server_url: String) -> &mut Self {
-		self.config.esplora_server_url = esplora_server_url;
-		self
+	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
+		let mut config = self.config.write().unwrap();
+		config.storage_dir_path = storage_dir_path;
 	}
 
 	/// Sets the Bitcoin network used.
-	///
-	/// Options: `mainnet`/`bitcoin`, `testnet`, `regtest`, `signet`
-	///
-	/// Default: `regtest`
-	pub fn set_network(&mut self, network: &str) -> &mut Self {
-		self.config.network = Network::from_str(network).unwrap_or(Network::Regtest);
-		self
+	pub fn set_network(&self, network: Network) {
+		let mut config = self.config.write().unwrap();
+		config.network = network;
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
-	///
-	/// Default: `0.0.0.0:9735`
-	pub fn set_listening_address(&mut self, listening_address: NetAddress) -> &mut Self {
-		self.config.listening_address = Some(listening_address);
-		self
+	pub fn set_listening_address(&self, listening_address: NetAddress) {
+		let mut config = self.config.write().unwrap();
+		config.listening_address = Some(listening_address);
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Arc<Node<FilesystemStore>> {
-		let ldk_data_dir = format!("{}/ldk", self.config.storage_dir_path);
+		let config = self.config.read().unwrap();
+		let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
 		let kv_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
 		self.build_with_store(kv_store)
 	}
@@ -332,7 +361,7 @@ impl Builder {
 	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
 		&self, kv_store: Arc<K>,
 	) -> Arc<Node<K>> {
-		let config = Arc::new(self.config.clone());
+		let config = Arc::new(self.config.read().unwrap().clone());
 
 		let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
 		fs::create_dir_all(ldk_data_dir.clone()).expect("Failed to create LDK data directory");
@@ -345,22 +374,20 @@ impl Builder {
 		let logger = Arc::new(FilesystemLogger::new(log_file_path));
 
 		// Initialize the on-chain wallet and chain access
-		let seed_bytes = if let Some(entropy_source_config) = &self.entropy_source_config {
-			// Use the configured entropy source, if the user set one.
-			match entropy_source_config {
-				EntropySourceConfig::SeedBytes(bytes) => bytes.clone(),
-				EntropySourceConfig::SeedFile(seed_path) => {
-					io::utils::read_or_generate_seed_file(seed_path)
-				}
-				EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase } => match passphrase {
-					Some(passphrase) => mnemonic.to_seed(passphrase),
-					None => mnemonic.to_seed(""),
-				},
+		let seed_bytes = match &*self.entropy_source_config.read().unwrap() {
+			Some(EntropySourceConfig::SeedBytes(bytes)) => bytes.clone(),
+			Some(EntropySourceConfig::SeedFile(seed_path)) => {
+				io::utils::read_or_generate_seed_file(seed_path)
 			}
-		} else {
-			// Default to read or generate from the default location generate a seed file.
-			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			io::utils::read_or_generate_seed_file(&seed_path)
+			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
+				Some(passphrase) => mnemonic.to_seed(passphrase),
+				None => mnemonic.to_seed(""),
+			},
+			None => {
+				// Default to read or generate from the default location generate a seed file.
+				let seed_path = format!("{}/keys_seed", config.storage_dir_path);
+				io::utils::read_or_generate_seed_file(&seed_path)
+			}
 		};
 
 		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
@@ -385,14 +412,25 @@ impl Builder {
 		)
 		.expect("Failed to set up on-chain wallet");
 
-		let tx_sync = Arc::new(EsploraSyncClient::new(
-			config.esplora_server_url.clone(),
-			Arc::clone(&logger),
-		));
-
-		let blockchain =
-			EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
-				.with_concurrency(BDK_CLIENT_CONCURRENCY);
+		let (blockchain, tx_sync) = match &*self.chain_data_source_config.read().unwrap() {
+			Some(ChainDataSourceConfig::Esplora(server_url)) => {
+				let tx_sync =
+					Arc::new(EsploraSyncClient::new(server_url.clone(), Arc::clone(&logger)));
+				let blockchain =
+					EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
+						.with_concurrency(BDK_CLIENT_CONCURRENCY);
+				(blockchain, tx_sync)
+			}
+			None => {
+				// Default to Esplora client.
+				let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+				let tx_sync = Arc::new(EsploraSyncClient::new(server_url, Arc::clone(&logger)));
+				let blockchain =
+					EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
+						.with_concurrency(BDK_CLIENT_CONCURRENCY);
+				(blockchain, tx_sync)
+			}
+		};
 
 		let runtime = Arc::new(RwLock::new(None));
 		let wallet = Arc::new(Wallet::new(
@@ -550,8 +588,9 @@ impl Builder {
 
 		// Initialize the GossipSource
 		// Use the configured gossip source, if the user set one, otherwise default to P2PNetwork.
+		let gossip_source_config_lock = self.gossip_source_config.read().unwrap();
 		let gossip_source_config =
-			self.gossip_source_config.as_ref().unwrap_or(&GossipSourceConfig::P2PNetwork);
+			gossip_source_config_lock.as_ref().unwrap_or(&GossipSourceConfig::P2PNetwork);
 
 		let gossip_source = match gossip_source_config {
 			GossipSourceConfig::P2PNetwork => {
@@ -669,10 +708,6 @@ impl Builder {
 		})
 	}
 }
-
-/// This type alias is required as Uniffi doesn't support generics, i.e., we can only expose the
-/// concretized types via this aliasing hack.
-type LDKNode = Node<FilesystemStore>;
 
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///

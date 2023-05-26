@@ -1,5 +1,6 @@
 use std::fmt::Write;
 
+#[cfg(feature = "uniffi")]
 pub fn to_vec(hex: &str) -> Option<Vec<u8>> {
 	let mut out = Vec::with_capacity(hex.len() / 2);
 
