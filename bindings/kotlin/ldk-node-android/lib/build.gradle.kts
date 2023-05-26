@@ -68,7 +68,7 @@ afterEvaluate {
                 pom {
                     name.set("ldk-node-android")
                     description.set(
-                        "LDK Node, a ready-to-go node implementation built using LDK."
+                        "LDK Node, a ready-to-go Lightning node library built using LDK and BDK."
                     )
                     url.set("https://lightningdevkit.org")
                     licenses {
@@ -85,12 +85,7 @@ afterEvaluate {
                         developer {
                             id.set("tnull")
                             name.set("Elias Rohrer")
-                            email.set("tnull@noreply.github.org")
-                        }
-                        developer {
-                            id.set("jurvis")
-                            name.set("Jurvis Tan")
-                            email.set("jurvis@noreply.github.org")
+                            email.set("dev@tnull.de")
                         }
                     }
                     scm {
