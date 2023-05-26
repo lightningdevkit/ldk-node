@@ -1,0 +1,43 @@
+name: Publish ldk-node-android to Maven Central
+on: [workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: "Check out PR branch"
+        uses: actions/checkout@v2
+
+      - name: "Cache"
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ./target
+          key: ${{ runner.os }}-${{ hashFiles('**/Cargo.toml','**/Cargo.lock') }}
+
+      - name: "Set up JDK"
+        uses: actions/setup-java@v2
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: "Install Rust Android targets"
+        run: rustup target add x86_64-linux-android aarch64-linux-android armv7-linux-androideabi
+
+      - name: "Build ldk-node-android library"
+        run: |
+          export PATH=$PATH:$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          ./scripts/uniffi_bindgen_generate_kotlin_android.sh
+
+      - name: "Publish to Maven Local and Maven Central"
+        env:
+          ORG_GRADLE_PROJECT_signingKeyId: ${{ secrets.PGP_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.PGP_SECRET_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.PGP_PASSPHRASE }}
+          ORG_GRADLE_PROJECT_ossrhUsername: ${{ secrets.NEXUS_USERNAME }}
+          ORG_GRADLE_PROJECT_ossrhPassword: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          cd bindings/kotlin/ldk-node-android
+          ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository

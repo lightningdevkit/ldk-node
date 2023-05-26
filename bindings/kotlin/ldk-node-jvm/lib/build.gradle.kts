@@ -1,12 +1,17 @@
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat.*
 import org.gradle.api.tasks.testing.logging.TestLogEvent.*
 
+// library version is defined in gradle.properties
+val libraryVersion: String by project
+
 plugins {
     // Apply the org.jetbrains.kotlin.jvm Plugin to add support for Kotlin.
     id("org.jetbrains.kotlin.jvm") version "1.7.10"
 
     // Apply the java-library plugin for API and implementation separation.
-    `java-library`
+    id("java-library")
+    id("maven-publish")
+    id("signing")
 }
 
 repositories {
@@ -47,4 +52,60 @@ tasks.named<Test>("test") {
         showStackTraces = true
 		showStandardStreams = true
     }
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("maven") {
+                groupId = "org.lightningdevkit"
+                artifactId = "ldk-node-jvm"
+                version = libraryVersion
+
+                from(components["java"])
+                pom {
+                    name.set("ldk-node-jvm")
+                    description.set(
+                        "LDK Node, a ready-to-go node implementation built using LDK."
+                    )
+                    url.set("https://lightningdevkit.org")
+                    licenses {
+                        license {
+                            name.set("APACHE 2.0")
+                            url.set("https://github.com/lightningdevkit/ldk-node/blob/main/LICENSE-APACHE")
+                        }
+                        license {
+                            name.set("MIT")
+                            url.set("https://github.com/lightningdevkit/ldk-node/blob/main/LICENSE-MIT")
+                        }
+                    }
+                    developers {
+                        developer {
+                            id.set("tnull")
+                            name.set("Elias Rohrer")
+                            email.set("tnull@noreply.github.org")
+                        }
+                        developer {
+                            id.set("jurvis")
+                            name.set("Jurvis Tan")
+                            email.set("jurvis@noreply.github.org")
+                        }
+                    }
+                    scm {
+                        connection.set("scm:git:github.com/lightningdevkit/ldk-node.git")
+                        developerConnection.set("scm:git:ssh://github.com/lightningdevkit/ldk-node.git")
+                        url.set("https://github.com/lightningdevkit/ldk-node/tree/main")
+                    }
+                }
+            }
+        }
+    }
+}
+
+signing {
+    val signingKeyId: String? by project
+    val signingKey: String? by project
+    val signingPassword: String? by project
+    useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+    sign(publishing.publications)
 }
