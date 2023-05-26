@@ -163,7 +163,7 @@ uniffi::include_scaffolding!("ldk_node");
 
 // Config defaults
 const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
-const DEFAULT_NETWORK: Network = Network::Regtest;
+const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
 const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
@@ -198,7 +198,7 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | Parameter                   | Value            |
 /// |-----------------------------|------------------|
 /// | `storage_dir_path`          | /tmp/ldk_node/   |
-/// | `network`                   | Network::Regtest |
+/// | `network`                   | Network::Bitcoin |
 /// | `listening_address`         | 0.0.0.0:9735     |
 /// | `default_cltv_expiry_delta` | 144              |
 ///
