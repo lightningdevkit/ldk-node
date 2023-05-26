@@ -86,6 +86,8 @@ mod peer_store;
 #[cfg(test)]
 mod test;
 mod types;
+#[cfg(feature = "uniffi")]
+mod uniffi_types;
 mod wallet;
 
 pub use bip39;
@@ -99,6 +101,9 @@ use error::Error;
 
 pub use event::Event;
 pub use types::NetAddress;
+
+#[cfg(feature = "uniffi")]
+use {bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
 
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
@@ -122,7 +127,7 @@ use lightning::ln::channelmanager::{
 	self, ChainParameters, ChannelManagerReadArgs, PaymentId, RecipientOnionFields, Retry,
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
-use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
@@ -147,7 +152,7 @@ use bitcoin::Network;
 
 use bip39::Mnemonic;
 
-use bitcoin::{Address, BlockHash, OutPoint, Txid};
+use bitcoin::{Address, BlockHash, Txid};
 
 use rand::Rng;
 
@@ -159,6 +164,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
 
 // Config defaults
@@ -702,10 +708,6 @@ impl Builder {
 		})
 	}
 }
-
-/// This type alias is required as Uniffi doesn't support generics, i.e., we can only expose the
-/// concretized types via this aliasing hack.
-type LDKNode = Node<FilesystemStore>;
 
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
