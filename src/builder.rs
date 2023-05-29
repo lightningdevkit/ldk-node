@@ -196,358 +196,368 @@ impl Builder {
 	) -> Arc<Node<K>> {
 		let config = Arc::new(self.config.read().unwrap().clone());
 
-		// Initialize the Logger
-		let log_file_path = format!(
-			"{}/logs/ldk_node_{}.log",
-			config.storage_dir_path,
-			chrono::offset::Local::now().format("%Y_%m_%d")
-		);
-		let logger = Arc::new(FilesystemLogger::new(log_file_path.clone(), config.log_level));
-
-		// Initialize the on-chain wallet and chain access
-		let seed_bytes = match &*self.entropy_source_config.read().unwrap() {
-			Some(EntropySourceConfig::SeedBytes(bytes)) => bytes.clone(),
-			Some(EntropySourceConfig::SeedFile(seed_path)) => {
-				io::utils::read_or_generate_seed_file(seed_path)
-			}
-			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
-				Some(passphrase) => mnemonic.to_seed(passphrase),
-				None => mnemonic.to_seed(""),
-			},
-			None => {
-				// Default to read or generate from the default location generate a seed file.
-				let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-				io::utils::read_or_generate_seed_file(&seed_path)
-			}
-		};
-
-		let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
-			.expect("Failed to read wallet master key");
-
-		let wallet_name = bdk::wallet::wallet_name_from_descriptor(
-			Bip84(xprv, bdk::KeychainKind::External),
-			Some(Bip84(xprv, bdk::KeychainKind::Internal)),
-			config.network,
-			&Secp256k1::new(),
-		)
-		.expect("Failed to derive on-chain wallet name");
-
-		let database_path =
-			format!("{}/bdk_wallet_{}.sqlite", config.storage_dir_path, wallet_name);
-		let database = SqliteDatabase::new(database_path);
-
-		let bdk_wallet = bdk::Wallet::new(
-			Bip84(xprv, bdk::KeychainKind::External),
-			Some(Bip84(xprv, bdk::KeychainKind::Internal)),
-			config.network,
-			database,
-		)
-		.expect("Failed to set up on-chain wallet");
-
-		let (blockchain, tx_sync) = match &*self.chain_data_source_config.read().unwrap() {
-			Some(ChainDataSourceConfig::Esplora(server_url)) => {
-				let tx_sync =
-					Arc::new(EsploraSyncClient::new(server_url.clone(), Arc::clone(&logger)));
-				let blockchain =
-					EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
-						.with_concurrency(BDK_CLIENT_CONCURRENCY);
-				(blockchain, tx_sync)
-			}
-			None => {
-				// Default to Esplora client.
-				let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
-				let tx_sync = Arc::new(EsploraSyncClient::new(server_url, Arc::clone(&logger)));
-				let blockchain =
-					EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
-						.with_concurrency(BDK_CLIENT_CONCURRENCY);
-				(blockchain, tx_sync)
-			}
-		};
-
-		let runtime = Arc::new(RwLock::new(None));
-		let wallet = Arc::new(Wallet::new(
-			blockchain,
-			bdk_wallet,
-			Arc::clone(&runtime),
-			Arc::clone(&logger),
-		));
-
-		// Initialize the ChainMonitor
-		let chain_monitor: Arc<ChainMonitor<K>> = Arc::new(chainmonitor::ChainMonitor::new(
-			Some(Arc::clone(&tx_sync)),
-			Arc::clone(&wallet),
-			Arc::clone(&logger),
-			Arc::clone(&wallet),
-			Arc::clone(&kv_store),
-		));
-
-		// Initialize the KeysManager
-		let cur_time = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
-			.expect("System time error: Clock may have gone backwards");
-		let ldk_seed_bytes: [u8; 32] = xprv.private_key.secret_bytes();
-		let keys_manager = Arc::new(KeysManager::new(
-			&ldk_seed_bytes,
-			cur_time.as_secs(),
-			cur_time.subsec_nanos(),
-			Arc::clone(&wallet),
-		));
-
-		// Initialize the network graph, scorer, and router
-		let network_graph =
-			match io::utils::read_network_graph(Arc::clone(&kv_store), Arc::clone(&logger)) {
-				Ok(graph) => Arc::new(graph),
-				Err(e) => {
-					if e.kind() == std::io::ErrorKind::NotFound {
-						Arc::new(NetworkGraph::new(config.network, Arc::clone(&logger)))
-					} else {
-						panic!("Failed to read network graph: {}", e.to_string());
-					}
-				}
-			};
-
-		let scorer = match io::utils::read_scorer(
-			Arc::clone(&kv_store),
-			Arc::clone(&network_graph),
-			Arc::clone(&logger),
-		) {
-			Ok(scorer) => Arc::new(Mutex::new(scorer)),
-			Err(e) => {
-				if e.kind() == std::io::ErrorKind::NotFound {
-					let params = ProbabilisticScoringParameters::default();
-					Arc::new(Mutex::new(ProbabilisticScorer::new(
-						params,
-						Arc::clone(&network_graph),
-						Arc::clone(&logger),
-					)))
-				} else {
-					panic!("Failed to read scorer: {}", e.to_string());
-				}
-			}
-		};
-
-		let router = Arc::new(DefaultRouter::new(
-			Arc::clone(&network_graph),
-			Arc::clone(&logger),
-			keys_manager.get_secure_random_bytes(),
-			Arc::clone(&scorer),
-		));
-
-		// Read ChannelMonitor state from store
-		let mut channel_monitors = match io::utils::read_channel_monitors(
-			Arc::clone(&kv_store),
-			Arc::clone(&keys_manager),
-			Arc::clone(&keys_manager),
-		) {
-			Ok(monitors) => monitors,
-			Err(e) => {
-				if e.kind() == std::io::ErrorKind::NotFound {
-					Vec::new()
-				} else {
-					log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
-					panic!("Failed to read channel monitors: {}", e.to_string());
-				}
-			}
-		};
-
-		// Initialize the ChannelManager
-		let mut user_config = UserConfig::default();
-		user_config.channel_handshake_limits.force_announced_channel_preference = false;
-
-		if !config.trusted_peers_0conf.is_empty() {
-			// Manually accept inbound channels if we expect 0conf channel requests, avoid
-			// generating the events otherwise.
-			user_config.manually_accept_inbound_channels = true;
-		}
-		let channel_manager = {
-			if let Ok(mut reader) = kv_store
-				.read(CHANNEL_MANAGER_PERSISTENCE_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_KEY)
-			{
-				let channel_monitor_references =
-					channel_monitors.iter_mut().map(|(_, chanmon)| chanmon).collect();
-				let read_args = ChannelManagerReadArgs::new(
-					Arc::clone(&keys_manager),
-					Arc::clone(&keys_manager),
-					Arc::clone(&keys_manager),
-					Arc::clone(&wallet),
-					Arc::clone(&chain_monitor),
-					Arc::clone(&wallet),
-					Arc::clone(&router),
-					Arc::clone(&logger),
-					user_config,
-					channel_monitor_references,
-				);
-				let (_hash, channel_manager) =
-					<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args)
-						.expect("Failed to read channel manager from store");
-				channel_manager
-			} else {
-				// We're starting a fresh node.
-				let genesis_block_hash =
-					bitcoin::blockdata::constants::genesis_block(config.network).block_hash();
-
-				let chain_params = ChainParameters {
-					network: config.network,
-					best_block: BestBlock::new(genesis_block_hash, 0),
-				};
-				channelmanager::ChannelManager::new(
-					Arc::clone(&wallet),
-					Arc::clone(&chain_monitor),
-					Arc::clone(&wallet),
-					Arc::clone(&router),
-					Arc::clone(&logger),
-					Arc::clone(&keys_manager),
-					Arc::clone(&keys_manager),
-					Arc::clone(&keys_manager),
-					user_config,
-					chain_params,
-				)
-			}
-		};
-
-		let channel_manager = Arc::new(channel_manager);
-
-		// Give ChannelMonitors to ChainMonitor
-		for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
-			let funding_outpoint = channel_monitor.get_funding_txo().0;
-			chain_monitor.watch_channel(funding_outpoint, channel_monitor);
-		}
-
-		// Initialize the PeerManager
-		let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
-			Arc::clone(&keys_manager),
-			Arc::clone(&keys_manager),
-			Arc::clone(&logger),
-			IgnoringMessageHandler {},
-		));
-		let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
-
-		let cur_time = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
-			.expect("System time error: Clock may have gone backwards");
-
-		// Initialize the GossipSource
-		// Use the configured gossip source, if the user set one, otherwise default to P2PNetwork.
-		let gossip_source_config_lock = self.gossip_source_config.read().unwrap();
-		let gossip_source_config =
-			gossip_source_config_lock.as_ref().unwrap_or(&GossipSourceConfig::P2PNetwork);
-
-		let gossip_source = match gossip_source_config {
-			GossipSourceConfig::P2PNetwork => {
-				let p2p_source = Arc::new(GossipSource::new_p2p(
-					Arc::clone(&network_graph),
-					Arc::clone(&logger),
-				));
-
-				// Reset the RGS sync timestamp in case we somehow switch gossip sources
-				io::utils::write_latest_rgs_sync_timestamp(
-					0,
-					Arc::clone(&kv_store),
-					Arc::clone(&logger),
-				)
-				.expect("Persistence failed");
-				p2p_source
-			}
-			GossipSourceConfig::RapidGossipSync(rgs_server) => {
-				let latest_sync_timestamp = io::utils::read_latest_rgs_sync_timestamp(
-					Arc::clone(&kv_store),
-					Arc::clone(&logger),
-				)
-				.unwrap_or(0);
-				Arc::new(GossipSource::new_rgs(
-					rgs_server.clone(),
-					latest_sync_timestamp,
-					Arc::clone(&network_graph),
-					Arc::clone(&logger),
-				))
-			}
-		};
-
-		let msg_handler = match gossip_source.as_gossip_sync() {
-			GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
-				chan_handler: Arc::clone(&channel_manager),
-				route_handler: Arc::clone(&p2p_gossip_sync)
-					as Arc<dyn RoutingMessageHandler + Sync + Send>,
-				onion_message_handler: onion_messenger,
-			},
-			GossipSync::Rapid(_) => MessageHandler {
-				chan_handler: Arc::clone(&channel_manager),
-				route_handler: Arc::new(IgnoringMessageHandler {})
-					as Arc<dyn RoutingMessageHandler + Sync + Send>,
-				onion_message_handler: onion_messenger,
-			},
-			GossipSync::None => {
-				unreachable!("We must always have a gossip sync!");
-			}
-		};
-
-		let peer_manager = Arc::new(PeerManager::new(
-			msg_handler,
-			cur_time.as_secs().try_into().expect("System time error"),
-			&ephemeral_bytes,
-			Arc::clone(&logger),
-			IgnoringMessageHandler {},
-			Arc::clone(&keys_manager),
-		));
-
-		// Init payment info storage
-		let payment_store =
-			match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
-				Ok(payments) => Arc::new(PaymentStore::new(
-					payments,
-					Arc::clone(&kv_store),
-					Arc::clone(&logger),
-				)),
-				Err(e) => {
-					panic!("Failed to read payment information: {}", e.to_string());
-				}
-			};
-
-		let event_queue =
-			match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger)) {
-				Ok(event_queue) => Arc::new(event_queue),
-				Err(e) => {
-					if e.kind() == std::io::ErrorKind::NotFound {
-						Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
-					} else {
-						panic!("Failed to read event queue: {}", e.to_string());
-					}
-				}
-			};
-
-		let peer_store = match io::utils::read_peer_info(Arc::clone(&kv_store), Arc::clone(&logger))
-		{
-			Ok(peer_store) => Arc::new(peer_store),
-			Err(e) => {
-				if e.kind() == std::io::ErrorKind::NotFound {
-					Arc::new(PeerStore::new(Arc::clone(&kv_store), Arc::clone(&logger)))
-				} else {
-					panic!("Failed to read peer store: {}", e.to_string());
-				}
-			}
-		};
-
-		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
-
-		Arc::new(Node {
-			runtime,
-			stop_sender,
-			stop_receiver,
+		let entropy_source_config = self.entropy_source_config.read().unwrap();
+		let chain_data_source_config = self.chain_data_source_config.read().unwrap();
+		let gossip_source_config = self.gossip_source_config.read().unwrap();
+		Arc::new(build_with_store_internal(
 			config,
-			wallet,
-			tx_sync,
-			event_queue,
-			channel_manager,
-			chain_monitor,
-			peer_manager,
-			keys_manager,
-			network_graph,
-			gossip_source,
+			entropy_source_config.as_ref(),
+			chain_data_source_config.as_ref(),
+			gossip_source_config.as_ref(),
 			kv_store,
-			logger,
-			scorer,
-			peer_store,
-			payment_store,
-		})
+		))
+	}
+}
+
+/// Builds a [`Node`] instance according to the options previously configured.
+fn build_with_store_internal<'a, K: KVStore + Sync + Send + 'static>(
+	config: Arc<Config>, entropy_source_config: Option<&'a EntropySourceConfig>,
+	chain_data_source_config: Option<&'a ChainDataSourceConfig>,
+	gossip_source_config: Option<&'a GossipSourceConfig>, kv_store: Arc<K>,
+) -> Node<K> {
+	let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
+	fs::create_dir_all(ldk_data_dir.clone()).expect("Failed to create LDK data directory");
+
+	let bdk_data_dir = format!("{}/bdk", config.storage_dir_path);
+	fs::create_dir_all(bdk_data_dir.clone()).expect("Failed to create BDK data directory");
+
+	// Initialize the Logger
+	let log_file_path = format!(
+		"{}/logs/ldk_node_{}.log",
+		config.storage_dir_path,
+		chrono::offset::Local::now().format("%Y_%m_%d")
+	);
+	let logger = Arc::new(FilesystemLogger::new(log_file_path.clone(), config.log_level));
+
+	// Initialize the on-chain wallet and chain access
+	let seed_bytes = match entropy_source_config {
+		Some(EntropySourceConfig::SeedBytes(bytes)) => bytes.clone(),
+		Some(EntropySourceConfig::SeedFile(seed_path)) => {
+			io::utils::read_or_generate_seed_file(seed_path)
+		}
+		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
+			Some(passphrase) => mnemonic.to_seed(passphrase),
+			None => mnemonic.to_seed(""),
+		},
+		None => {
+			// Default to read or generate from the default location generate a seed file.
+			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
+			io::utils::read_or_generate_seed_file(&seed_path)
+		}
+	};
+
+	let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
+		.expect("Failed to read wallet master key");
+
+	let wallet_name = bdk::wallet::wallet_name_from_descriptor(
+		Bip84(xprv, bdk::KeychainKind::External),
+		Some(Bip84(xprv, bdk::KeychainKind::Internal)),
+		config.network,
+		&Secp256k1::new(),
+	)
+	.expect("Failed to derive on-chain wallet name");
+
+	let database_path = format!("{}/bdk_wallet_{}.sqlite", config.storage_dir_path, wallet_name);
+	let database = SqliteDatabase::new(database_path);
+
+	let bdk_wallet = bdk::Wallet::new(
+		Bip84(xprv, bdk::KeychainKind::External),
+		Some(Bip84(xprv, bdk::KeychainKind::Internal)),
+		config.network,
+		database,
+	)
+	.expect("Failed to set up on-chain wallet");
+
+	let (blockchain, tx_sync) = match chain_data_source_config {
+		Some(ChainDataSourceConfig::Esplora(server_url)) => {
+			let tx_sync = Arc::new(EsploraSyncClient::new(server_url.clone(), Arc::clone(&logger)));
+			let blockchain =
+				EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
+					.with_concurrency(BDK_CLIENT_CONCURRENCY);
+			(blockchain, tx_sync)
+		}
+		None => {
+			// Default to Esplora client.
+			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+			let tx_sync = Arc::new(EsploraSyncClient::new(server_url, Arc::clone(&logger)));
+			let blockchain =
+				EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
+					.with_concurrency(BDK_CLIENT_CONCURRENCY);
+			(blockchain, tx_sync)
+		}
+	};
+
+	let runtime = Arc::new(RwLock::new(None));
+	let wallet =
+		Arc::new(Wallet::new(blockchain, bdk_wallet, Arc::clone(&runtime), Arc::clone(&logger)));
+
+	// Initialize the ChainMonitor
+	let chain_monitor: Arc<ChainMonitor<K>> = Arc::new(chainmonitor::ChainMonitor::new(
+		Some(Arc::clone(&tx_sync)),
+		Arc::clone(&wallet),
+		Arc::clone(&logger),
+		Arc::clone(&wallet),
+		Arc::clone(&kv_store),
+	));
+
+	// Initialize the KeysManager
+	let cur_time = SystemTime::now()
+		.duration_since(SystemTime::UNIX_EPOCH)
+		.expect("System time error: Clock may have gone backwards");
+	let ldk_seed_bytes: [u8; 32] = xprv.private_key.secret_bytes();
+	let keys_manager = Arc::new(KeysManager::new(
+		&ldk_seed_bytes,
+		cur_time.as_secs(),
+		cur_time.subsec_nanos(),
+		Arc::clone(&wallet),
+	));
+
+	// Initialize the network graph, scorer, and router
+	let network_graph =
+		match io::utils::read_network_graph(Arc::clone(&kv_store), Arc::clone(&logger)) {
+			Ok(graph) => Arc::new(graph),
+			Err(e) => {
+				if e.kind() == std::io::ErrorKind::NotFound {
+					Arc::new(NetworkGraph::new(config.network, Arc::clone(&logger)))
+				} else {
+					panic!("Failed to read network graph: {}", e.to_string());
+				}
+			}
+		};
+
+	let scorer = match io::utils::read_scorer(
+		Arc::clone(&kv_store),
+		Arc::clone(&network_graph),
+		Arc::clone(&logger),
+	) {
+		Ok(scorer) => Arc::new(Mutex::new(scorer)),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				let params = ProbabilisticScoringParameters::default();
+				Arc::new(Mutex::new(ProbabilisticScorer::new(
+					params,
+					Arc::clone(&network_graph),
+					Arc::clone(&logger),
+				)))
+			} else {
+				panic!("Failed to read scorer: {}", e.to_string());
+			}
+		}
+	};
+
+	let router = Arc::new(DefaultRouter::new(
+		Arc::clone(&network_graph),
+		Arc::clone(&logger),
+		keys_manager.get_secure_random_bytes(),
+		Arc::clone(&scorer),
+	));
+
+	// Read ChannelMonitor state from store
+	let mut channel_monitors = match io::utils::read_channel_monitors(
+		Arc::clone(&kv_store),
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+	) {
+		Ok(monitors) => monitors,
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Vec::new()
+			} else {
+				log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
+				panic!("Failed to read channel monitors: {}", e.to_string());
+			}
+		}
+	};
+
+	// Initialize the ChannelManager
+	let mut user_config = UserConfig::default();
+	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+
+	if !config.trusted_peers_0conf.is_empty() {
+		// Manually accept inbound channels if we expect 0conf channel requests, avoid
+		// generating the events otherwise.
+		user_config.manually_accept_inbound_channels = true;
+	}
+	let channel_manager = {
+		if let Ok(mut reader) =
+			kv_store.read(CHANNEL_MANAGER_PERSISTENCE_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_KEY)
+		{
+			let channel_monitor_references =
+				channel_monitors.iter_mut().map(|(_, chanmon)| chanmon).collect();
+			let read_args = ChannelManagerReadArgs::new(
+				Arc::clone(&keys_manager),
+				Arc::clone(&keys_manager),
+				Arc::clone(&keys_manager),
+				Arc::clone(&wallet),
+				Arc::clone(&chain_monitor),
+				Arc::clone(&wallet),
+				Arc::clone(&router),
+				Arc::clone(&logger),
+				user_config,
+				channel_monitor_references,
+			);
+			let (_hash, channel_manager) =
+				<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args)
+					.expect("Failed to read channel manager from store");
+			channel_manager
+		} else {
+			// We're starting a fresh node.
+			let genesis_block_hash =
+				bitcoin::blockdata::constants::genesis_block(config.network).block_hash();
+
+			let chain_params = ChainParameters {
+				network: config.network,
+				best_block: BestBlock::new(genesis_block_hash, 0),
+			};
+			channelmanager::ChannelManager::new(
+				Arc::clone(&wallet),
+				Arc::clone(&chain_monitor),
+				Arc::clone(&wallet),
+				Arc::clone(&router),
+				Arc::clone(&logger),
+				Arc::clone(&keys_manager),
+				Arc::clone(&keys_manager),
+				Arc::clone(&keys_manager),
+				user_config,
+				chain_params,
+			)
+		}
+	};
+
+	let channel_manager = Arc::new(channel_manager);
+
+	// Give ChannelMonitors to ChainMonitor
+	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
+		let funding_outpoint = channel_monitor.get_funding_txo().0;
+		chain_monitor.watch_channel(funding_outpoint, channel_monitor);
+	}
+
+	// Initialize the PeerManager
+	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+		IgnoringMessageHandler {},
+	));
+	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
+
+	let cur_time = SystemTime::now()
+		.duration_since(SystemTime::UNIX_EPOCH)
+		.expect("System time error: Clock may have gone backwards");
+
+	// Initialize the GossipSource
+	// Use the configured gossip source, if the user set one, otherwise default to P2PNetwork.
+	let gossip_source_config = gossip_source_config.unwrap_or(&GossipSourceConfig::P2PNetwork);
+
+	let gossip_source = match gossip_source_config {
+		GossipSourceConfig::P2PNetwork => {
+			let p2p_source =
+				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)));
+
+			// Reset the RGS sync timestamp in case we somehow switch gossip sources
+			io::utils::write_latest_rgs_sync_timestamp(
+				0,
+				Arc::clone(&kv_store),
+				Arc::clone(&logger),
+			)
+			.expect("Persistence failed");
+			p2p_source
+		}
+		GossipSourceConfig::RapidGossipSync(rgs_server) => {
+			let latest_sync_timestamp = io::utils::read_latest_rgs_sync_timestamp(
+				Arc::clone(&kv_store),
+				Arc::clone(&logger),
+			)
+			.unwrap_or(0);
+			Arc::new(GossipSource::new_rgs(
+				rgs_server.clone(),
+				latest_sync_timestamp,
+				Arc::clone(&network_graph),
+				Arc::clone(&logger),
+			))
+		}
+	};
+
+	let msg_handler = match gossip_source.as_gossip_sync() {
+		GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
+			chan_handler: Arc::clone(&channel_manager),
+			route_handler: Arc::clone(&p2p_gossip_sync)
+				as Arc<dyn RoutingMessageHandler + Sync + Send>,
+			onion_message_handler: onion_messenger,
+		},
+		GossipSync::Rapid(_) => MessageHandler {
+			chan_handler: Arc::clone(&channel_manager),
+			route_handler: Arc::new(IgnoringMessageHandler {})
+				as Arc<dyn RoutingMessageHandler + Sync + Send>,
+			onion_message_handler: onion_messenger,
+		},
+		GossipSync::None => {
+			unreachable!("We must always have a gossip sync!");
+		}
+	};
+
+	let peer_manager = Arc::new(PeerManager::new(
+		msg_handler,
+		cur_time.as_secs().try_into().expect("System time error"),
+		&ephemeral_bytes,
+		Arc::clone(&logger),
+		IgnoringMessageHandler {},
+		Arc::clone(&keys_manager),
+	));
+
+	// Init payment info storage
+	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(payments) => {
+			Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
+		}
+		Err(e) => {
+			panic!("Failed to read payment information: {}", e.to_string());
+		}
+	};
+
+	let event_queue = match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger))
+	{
+		Ok(event_queue) => Arc::new(event_queue),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
+			} else {
+				panic!("Failed to read event queue: {}", e.to_string());
+			}
+		}
+	};
+
+	let peer_store = match io::utils::read_peer_info(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(peer_store) => Arc::new(peer_store),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(PeerStore::new(Arc::clone(&kv_store), Arc::clone(&logger)))
+			} else {
+				panic!("Failed to read peer store: {}", e.to_string());
+			}
+		}
+	};
+
+	let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
+
+	Node {
+		runtime,
+		stop_sender,
+		stop_receiver,
+		config,
+		wallet,
+		tx_sync,
+		event_queue,
+		channel_manager,
+		chain_monitor,
+		peer_manager,
+		keys_manager,
+		network_graph,
+		gossip_source,
+		kv_store,
+		logger,
+		scorer,
+		peer_store,
+		payment_store,
 	}
 }
