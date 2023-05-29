@@ -199,12 +199,14 @@ impl Builder {
 		let entropy_source_config = self.entropy_source_config.read().unwrap();
 		let chain_data_source_config = self.chain_data_source_config.read().unwrap();
 		let gossip_source_config = self.gossip_source_config.read().unwrap();
+		let runtime = Arc::new(RwLock::new(None));
 		Arc::new(build_with_store_internal(
 			config,
 			entropy_source_config.as_ref(),
 			chain_data_source_config.as_ref(),
 			gossip_source_config.as_ref(),
 			kv_store,
+			runtime,
 		))
 	}
 }
@@ -214,6 +216,7 @@ fn build_with_store_internal<'a, K: KVStore + Sync + Send + 'static>(
 	config: Arc<Config>, entropy_source_config: Option<&'a EntropySourceConfig>,
 	chain_data_source_config: Option<&'a ChainDataSourceConfig>,
 	gossip_source_config: Option<&'a GossipSourceConfig>, kv_store: Arc<K>,
+	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 ) -> Node<K> {
 	let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
 	fs::create_dir_all(ldk_data_dir.clone()).expect("Failed to create LDK data directory");
@@ -287,7 +290,6 @@ fn build_with_store_internal<'a, K: KVStore + Sync + Send + 'static>(
 		}
 	};
 
-	let runtime = Arc::new(RwLock::new(None));
 	let wallet =
 		Arc::new(Wallet::new(blockchain, bdk_wallet, Arc::clone(&runtime), Arc::clone(&logger)));
 
