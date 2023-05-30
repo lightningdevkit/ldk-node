@@ -736,9 +736,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		Ok(funding_address)
 	}
 
-	/// Retrieve the current on-chain balance.
-	pub fn onchain_balance(&self) -> Result<bdk::Balance, Error> {
-		self.wallet.get_balance()
+	/// Retrieve the currently spendable on-chain balance in satoshis.
+	pub fn spendable_onchain_balance_sats(&self) -> Result<u64, Error> {
+		Ok(self.wallet.get_balance().map(|bal| bal.get_spendable())?)
+	}
+
+	/// Retrieve the current total on-chain balance in satoshis.
+	pub fn total_onchain_balance_sats(&self) -> Result<u64, Error> {
+		Ok(self.wallet.get_balance().map(|bal| bal.get_total())?)
 	}
 
 	/// Send an on-chain payment to the given address.
@@ -766,16 +771,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		self.wallet.send_to_address(address, None)
-	}
-
-	/// Retrieve the currently spendable on-chain balance in satoshis.
-	pub fn spendable_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_spendable())?)
-	}
-
-	/// Retrieve the current total on-chain balance in satoshis.
-	pub fn total_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_total())?)
 	}
 
 	/// Retrieve a list of known channels.
