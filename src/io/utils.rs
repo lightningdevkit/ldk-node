@@ -31,6 +31,7 @@ use super::KVStore;
 /// [`Builder::set_entropy_bip39_mnemonic`].
 ///
 /// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+/// [`Node`]: crate::Node
 /// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
 pub fn generate_entropy_mnemonic() -> Mnemonic {
 	// bip39::Mnemonic supports 256 bit entropy max
@@ -121,7 +122,7 @@ where
 	})
 }
 
-/// Read a previously persisted [`Scorer`] from the store.
+/// Read a previously persisted [`ProbabilisticScorer`] from the store.
 pub(crate) fn read_scorer<
 	K: KVStore + Send + Sync,
 	G: Deref<Target = NetworkGraph<L>>,

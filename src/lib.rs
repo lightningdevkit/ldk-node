@@ -67,12 +67,7 @@
 //! [`connect_open_channel`]: Node::connect_open_channel
 //! [`send_payment`]: Node::send_payment
 //!
-
-// We currently disable the missing_docs lint due to incompatibility with the generated Uniffi
-// scaffolding.
-// TODO: Re-enable after https://github.com/mozilla/uniffi-rs/issues/1502 has been
-// addressed.
-//#![deny(missing_docs)]
+#![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(rustdoc::private_intra_doc_links)]
 #![allow(bare_trait_objects)]
