@@ -23,10 +23,19 @@ fun runCommandAndWait(cmd: String): String {
     return stdout + stderr
 }
 
-fun mine(blocks: UInt) {
+fun mine(blocks: UInt): String {
     val address = runCommandAndWait("bitcoin-cli -regtest getnewaddress")
     val output = runCommandAndWait("bitcoin-cli -regtest generatetoaddress $blocks $address")
     println("Mining output: $output")
+    val re = Regex("\n.+\n\\]$")
+    val lastBlock = re.find(output)!!.value.replace("]","").replace("\"", "").replace("\n","").trim()
+    println("Last block: $lastBlock")
+    return lastBlock
+}
+
+fun mineAndWait(esploraEndpoint: String, blocks: UInt) {
+    val lastBlockHash = mine(blocks)
+    waitForBlock(esploraEndpoint, lastBlockHash)
 }
 
 fun sendToAddress(address: String, amountSats: UInt): String {
@@ -39,6 +48,7 @@ fun setup() {
     runCommandAndWait("bitcoin-cli -regtest createwallet ldk_node_test")
     runCommandAndWait("bitcoin-cli -regtest loadwallet ldk_node_test true")
     mine(101u)
+    Thread.sleep(5_000)
 }
 
 fun waitForTx(esploraEndpoint: String, txid: String) {
@@ -53,15 +63,31 @@ fun waitForTx(esploraEndpoint: String, txid: String) {
         val response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
         esploraPickedUpTx = re.containsMatchIn(response.body());
-        Thread.sleep(1_000)
+        Thread.sleep(500)
+    }
+}
+
+fun waitForBlock(esploraEndpoint: String, blockHash: String) {
+    var esploraPickedUpBlock = false
+    val re = Regex("\"in_best_chain\":true");
+    while (!esploraPickedUpBlock) {
+        val client = HttpClient.newBuilder().build()
+        val request = HttpRequest.newBuilder()
+            .uri(URI.create(esploraEndpoint + "/block/" + blockHash + "/status"))
+            .build();
+
+        val response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        val body = response.body()
+
+        esploraPickedUpBlock = re.containsMatchIn(response.body());
+        Thread.sleep(500)
     }
 }
 
 class LibraryTest {
     @Test fun fullCycle() {
+        val esploraEndpoint = "http://127.0.0.1:3002"
         setup()
-
-        val network = Network.REGTEST
 
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
@@ -71,13 +97,27 @@ class LibraryTest {
         val listenAddress1 = "127.0.0.1:2323"
         val listenAddress2 = "127.0.0.1:2324"
 
-        val esploraEndpoint = "http://127.0.0.1:3002"
+        val logLevel = LogLevel.TRACE;
 
-        val config1 = Config(tmpDir1, esploraEndpoint, network, listenAddress1, 2048u)
-        val config2 = Config(tmpDir2, esploraEndpoint, network, listenAddress2, 2048u)
+        val config1 = Config()
+        config1.storageDirPath = tmpDir1
+        config1.listeningAddress = listenAddress1
+        config1.network = Network.REGTEST
+        config1.logLevel = LogLevel.TRACE
+
+        println("Config 1: $config1")
+
+        val config2 = Config()
+        config2.storageDirPath = tmpDir2
+        config2.listeningAddress = listenAddress2
+        config2.network = Network.REGTEST
+        config2.logLevel = LogLevel.TRACE
+        println("Config 2: $config2")
 
         val builder1 = Builder.fromConfig(config1)
+        builder1.setEsploraServer(esploraEndpoint)
         val builder2 = Builder.fromConfig(config2)
+        builder2.setEsploraServer(esploraEndpoint)
 
         val node1 = builder1.build()
         val node2 = builder2.build()
@@ -99,7 +139,7 @@ class LibraryTest {
 
         val txid1 = sendToAddress(address1, 100000u)
         val txid2 = sendToAddress(address2, 100000u)
-        mine(6u)
+        mineAndWait(esploraEndpoint, 6u)
 
         waitForTx(esploraEndpoint, txid1)
         waitForTx(esploraEndpoint, txid2)
@@ -139,7 +179,7 @@ class LibraryTest {
 
         waitForTx(esploraEndpoint, fundingTxid)
 
-        mine(6u)
+        mineAndWait(esploraEndpoint, 6u)
 
         node1.syncWallets()
         node2.syncWallets()
@@ -196,10 +236,7 @@ class LibraryTest {
         assert(channelClosedEvent2 is Event.ChannelClosed)
         node2.eventHandled()
 
-        mine(1u)
-
-        // Sleep a bit to allow for the block to propagate to esplora
-        Thread.sleep(5_000)
+        mineAndWait(esploraEndpoint, 1u)
 
         node1.syncWallets()
         node2.syncWallets()
