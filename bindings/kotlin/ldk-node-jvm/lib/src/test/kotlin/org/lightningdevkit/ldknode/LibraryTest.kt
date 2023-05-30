@@ -91,10 +91,10 @@ class LibraryTest {
         val nodeId2 = node2.nodeId()
         println("Node Id 2: $nodeId2")
 
-        val address1 = node1.newFundingAddress()
+        val address1 = node1.newOnchainAddress()
         println("Funding address 1: $address1")
 
-        val address2 = node2.newFundingAddress()
+        val address2 = node2.newOnchainAddress()
         println("Funding address 2: $address2")
 
         val txid1 = sendToAddress(address1, 100000u)

@@ -16,8 +16,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 @RunWith(AndroidJUnit4::class)
 class AndroidLibTest {
     @Test fun node_start_stop() {
-        val network: Network = "regtest"
-        assertEquals(network, "regtest")
+        val network = Network.REGTEST
 
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
@@ -27,8 +26,8 @@ class AndroidLibTest {
         val listenAddress1 = "127.0.0.1:2323"
         val listenAddress2 = "127.0.0.1:2324"
 
-        val config1 = Config(tmpDir1, "http://127.0.0.1:3002", network, listenAddress1, 2048u)
-        val config2 = Config(tmpDir2, "http://127.0.0.1:3002", network, listenAddress2, 2048u)
+        val config1 = Config(tmpDir1, network, listenAddress1, 2048u)
+        val config2 = Config(tmpDir2, network, listenAddress2, 2048u)
 
         val builder1 = Builder.fromConfig(config1)
         val builder2 = Builder.fromConfig(config2)
@@ -45,10 +44,10 @@ class AndroidLibTest {
         val nodeId2 = node2.nodeId()
         println("Node Id 2: $nodeId2")
 
-        val address1 = node1.newFundingAddress()
+        val address1 = node1.newOnchainAddress()
         println("Funding address 1: $address1")
 
-        val address2 = node2.newFundingAddress()
+        val address2 = node2.newOnchainAddress()
         println("Funding address 2: $address2")
 
         node1.stop()

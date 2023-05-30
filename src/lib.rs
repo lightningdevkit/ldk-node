@@ -42,7 +42,7 @@
 //!
 //! 	node.start().unwrap();
 //!
-//! 	let funding_address = node.new_funding_address();
+//! 	let funding_address = node.new_onchain_address();
 //!
 //! 	// .. fund address ..
 //!
@@ -730,7 +730,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	}
 
 	/// Retrieve a new on-chain/funding address.
-	pub fn new_funding_address(&self) -> Result<Address, Error> {
+	pub fn new_onchain_address(&self) -> Result<Address, Error> {
 		let funding_address = self.wallet.get_new_address()?;
 		log_info!(self.logger, "Generated new funding address: {}", funding_address);
 		Ok(funding_address)

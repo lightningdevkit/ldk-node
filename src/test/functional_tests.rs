@@ -56,8 +56,8 @@ fn channel_full_cycle_0conf() {
 fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	node_a: Node<K>, node_b: Node<K>, bitcoind: &BitcoinD, electrsd: &ElectrsD, allow_0conf: bool,
 ) {
-	let addr_a = node_a.new_funding_address().unwrap();
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_a = node_a.new_onchain_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 
 	let premine_amount_sat = 100_000;
 
@@ -278,7 +278,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build();
 	node_a.start().unwrap();
-	let addr_a = node_a.new_funding_address().unwrap();
+	let addr_a = node_a.new_onchain_address().unwrap();
 
 	println!("\n== Node B ==");
 	let config_b = random_config();
@@ -286,7 +286,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build();
 	node_b.start().unwrap();
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 
 	let premine_amount_sat = 100_000;
 
@@ -337,7 +337,7 @@ fn start_stop_reinit() {
 	let node = builder.build();
 	let expected_node_id = node.node_id();
 
-	let funding_address = node.new_funding_address().unwrap();
+	let funding_address = node.new_onchain_address().unwrap();
 	let expected_amount = Amount::from_sat(100000);
 
 	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
@@ -393,7 +393,7 @@ fn start_stop_reinit_fs_store() {
 	let node = builder.build_with_fs_store();
 	let expected_node_id = node.node_id();
 
-	let funding_address = node.new_funding_address().unwrap();
+	let funding_address = node.new_onchain_address().unwrap();
 	let expected_amount = Amount::from_sat(100000);
 
 	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
@@ -446,14 +446,14 @@ fn onchain_spend_receive() {
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build();
 	node_a.start().unwrap();
-	let addr_a = node_a.new_funding_address().unwrap();
+	let addr_a = node_a.new_onchain_address().unwrap();
 
 	let config_b = random_config();
 	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build();
 	node_b.start().unwrap();
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 
 	premine_and_distribute_funds(
 		&bitcoind,
@@ -479,7 +479,7 @@ fn onchain_spend_receive() {
 	assert!(node_b.spendable_onchain_balance_sats().unwrap() > 98000);
 	assert!(node_b.spendable_onchain_balance_sats().unwrap() < 100000);
 
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 	let txid = node_a.send_all_to_onchain_address(&addr_b).unwrap();
 	generate_blocks_and_wait(&bitcoind, &electrsd, 6);
 	wait_for_tx(&electrsd, txid);
