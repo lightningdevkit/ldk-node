@@ -57,16 +57,19 @@ impl_writeable_tlv_based_enum!(PaymentDirection,
 pub enum PaymentStatus {
 	/// The payment is still pending.
 	Pending,
+	/// The sending of the payment failed and is safe to be retried.
+	SendingFailed,
 	/// The payment suceeded.
 	Succeeded,
-	/// The payment failed.
+	/// The payment failed and is not retryable.
 	Failed,
 }
 
 impl_writeable_tlv_based_enum!(PaymentStatus,
 	(0, Pending) => {},
-	(1, Succeeded) => {},
-	(2, Failed) => {};
+	(2, SendingFailed) => {},
+	(4, Succeeded) => {},
+	(6, Failed) => {};
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,10 +142,6 @@ where
 		self.payments.lock().unwrap().get(hash).cloned()
 	}
 
-	pub(crate) fn contains(&self, hash: &PaymentHash) -> bool {
-		self.payments.lock().unwrap().contains_key(hash)
-	}
-
 	pub(crate) fn update(&self, update: &PaymentDetailsUpdate) -> Result<bool, Error> {
 		let mut updated = false;
 		let mut locked_payments = self.payments.lock().unwrap();
@@ -210,13 +209,13 @@ mod tests {
 	use std::sync::Arc;
 
 	#[test]
-	fn persistence_guard_persists_on_drop() {
+	fn payment_info_is_persisted() {
 		let store = Arc::new(TestStore::new());
 		let logger = Arc::new(TestLogger::new());
 		let payment_store = PaymentStore::new(Vec::new(), Arc::clone(&store), logger);
 
 		let hash = PaymentHash([42u8; 32]);
-		assert!(!payment_store.contains(&hash));
+		assert!(!payment_store.get(&hash).is_some());
 
 		let payment = PaymentDetails {
 			hash,

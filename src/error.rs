@@ -13,8 +13,8 @@ pub enum Error {
 	ConnectionFailed,
 	/// Invoice creation failed.
 	InvoiceCreationFailed,
-	/// An attempted payment has failed.
-	PaymentFailed,
+	/// Sending a payment has failed.
+	PaymentSendingFailed,
 	/// A channel could not be opened.
 	ChannelCreationFailed,
 	/// A channel could not be closed.
@@ -53,8 +53,8 @@ pub enum Error {
 	InvalidChannelId,
 	/// The given network is invalid.
 	InvalidNetwork,
-	/// Payment of the given invoice has already been intiated.
-	NonUniquePaymentHash,
+	/// A payment with the given hash has already been intiated.
+	DuplicatePayment,
 	/// There are insufficient funds to complete the given operation.
 	InsufficientFunds,
 }
@@ -69,7 +69,7 @@ impl fmt::Display for Error {
 			}
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
-			Self::PaymentFailed => write!(f, "Failed to send the given payment."),
+			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
 			Self::PersistenceFailed => write!(f, "Failed to persist data."),
@@ -89,7 +89,9 @@ impl fmt::Display for Error {
 			Self::InvalidInvoice => write!(f, "The given invoice is invalid."),
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
-			Self::NonUniquePaymentHash => write!(f, "An invoice must not get payed twice."),
+			Self::DuplicatePayment => {
+				write!(f, "A payment with the given hash has already been initiated.")
+			}
 			Self::InsufficientFunds => {
 				write!(f, "There are insufficient funds to complete the given operation.")
 			}

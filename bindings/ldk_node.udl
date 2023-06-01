@@ -67,6 +67,7 @@ interface LDKNode {
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	boolean remove_payment([ByRef]PaymentHash payment_hash);
+	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
 	[Throws=NodeError]
@@ -81,7 +82,7 @@ enum NodeError {
 	"OnchainTxCreationFailed",
 	"ConnectionFailed",
 	"InvoiceCreationFailed",
-	"PaymentFailed",
+	"PaymentSendingFailed",
 	"ChannelCreationFailed",
 	"ChannelClosingFailed",
 	"PersistenceFailed",
@@ -101,7 +102,7 @@ enum NodeError {
 	"InvalidInvoice",
 	"InvalidChannelId",
 	"InvalidNetwork",
-	"NonUniquePaymentHash",
+	"DuplicatePayment",
 	"InsufficientFunds",
 };
 
@@ -122,6 +123,7 @@ enum PaymentDirection {
 
 enum PaymentStatus {
 	"Pending",
+	"SendingFailed",
 	"Succeeded",
 	"Failed",
 };

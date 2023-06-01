@@ -1402,9 +1402,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
 
-		if self.payment_store.contains(&payment_hash) {
-			log_error!(self.logger, "Payment error: an invoice must not get paid twice.");
-			return Err(Error::NonUniquePaymentHash);
+		if let Some(payment) = self.payment_store.get(&payment_hash) {
+			if payment.status != PaymentStatus::SendingFailed {
+				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+				return Err(Error::DuplicatePayment);
+			}
 		}
 
 		let payment_secret = Some(*invoice.payment_secret());
@@ -1437,18 +1439,24 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
+				match e {
+					channelmanager::RetryableSendFailure::DuplicatePayment => {
+						Err(Error::DuplicatePayment)
+					}
+					_ => {
+						let payment = PaymentDetails {
+							preimage: None,
+							hash: payment_hash,
+							secret: payment_secret,
+							amount_msat: invoice.amount_milli_satoshis(),
+							direction: PaymentDirection::Outbound,
+							status: PaymentStatus::SendingFailed,
+						};
 
-				let payment = PaymentDetails {
-					preimage: None,
-					hash: payment_hash,
-					secret: payment_secret,
-					amount_msat: invoice.amount_milli_satoshis(),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Failed,
-				};
-				self.payment_store.insert(payment)?;
-
-				Err(Error::PaymentFailed)
+						self.payment_store.insert(payment)?;
+						Err(Error::PaymentSendingFailed)
+					}
+				}
 			}
 		}
 	}
@@ -1477,9 +1485,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
-		if self.payment_store.contains(&payment_hash) {
-			log_error!(self.logger, "Payment error: an invoice must not get paid twice.");
-			return Err(Error::NonUniquePaymentHash);
+		if let Some(payment) = self.payment_store.get(&payment_hash) {
+			if payment.status != PaymentStatus::SendingFailed {
+				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+				return Err(Error::DuplicatePayment);
+			}
 		}
 
 		let payment_id = PaymentId(invoice.payment_hash().into_inner());
@@ -1532,17 +1542,24 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			Err(payment::PaymentError::Sending(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
-				let payment = PaymentDetails {
-					hash: payment_hash,
-					preimage: None,
-					secret: payment_secret,
-					amount_msat: Some(amount_msat),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Failed,
-				};
-				self.payment_store.insert(payment)?;
+				match e {
+					channelmanager::RetryableSendFailure::DuplicatePayment => {
+						Err(Error::DuplicatePayment)
+					}
+					_ => {
+						let payment = PaymentDetails {
+							hash: payment_hash,
+							preimage: None,
+							secret: payment_secret,
+							amount_msat: Some(amount_msat),
+							direction: PaymentDirection::Outbound,
+							status: PaymentStatus::SendingFailed,
+						};
+						self.payment_store.insert(payment)?;
 
-				Err(Error::PaymentFailed)
+						Err(Error::PaymentSendingFailed)
+					}
+				}
 			}
 		}
 	}
@@ -1558,6 +1575,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
 		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
+
+		if let Some(payment) = self.payment_store.get(&payment_hash) {
+			if payment.status != PaymentStatus::SendingFailed {
+				log_error!(self.logger, "Payment error: must not send duplicate payments.");
+				return Err(Error::DuplicatePayment);
+			}
+		}
 
 		let route_params = RouteParameters {
 			payment_params: PaymentParameters::from_node_id(
@@ -1593,17 +1617,24 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
-				let payment = PaymentDetails {
-					hash: payment_hash,
-					preimage: Some(payment_preimage),
-					secret: None,
-					status: PaymentStatus::Failed,
-					direction: PaymentDirection::Outbound,
-					amount_msat: Some(amount_msat),
-				};
-				self.payment_store.insert(payment)?;
+				match e {
+					channelmanager::RetryableSendFailure::DuplicatePayment => {
+						Err(Error::DuplicatePayment)
+					}
+					_ => {
+						let payment = PaymentDetails {
+							hash: payment_hash,
+							preimage: Some(payment_preimage),
+							secret: None,
+							status: PaymentStatus::SendingFailed,
+							direction: PaymentDirection::Outbound,
+							amount_msat: Some(amount_msat),
+						};
 
-				Err(Error::PaymentFailed)
+						self.payment_store.insert(payment)?;
+						Err(Error::PaymentSendingFailed)
+					}
+				}
 			}
 		}
 	}
@@ -1695,6 +1726,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		&self, f: F,
 	) -> Vec<PaymentDetails> {
 		self.payment_store.list_filter(f)
+	}
+
+	/// Retrieves all payments.
+	pub fn list_payments(&self) -> Vec<PaymentDetails> {
+		self.payment_store.list_filter(|_| true)
 	}
 
 	/// Retrieves a list of known peers.
