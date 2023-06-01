@@ -1342,15 +1342,17 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 	}
 
-	/// Sync the LDK and BDK wallets with the current chain state.
+	/// Manually sync the LDK and BDK wallets with the current chain state.
 	///
-	/// Note that the wallets will be also synced regularly in the background.
+	/// **Note:** The wallets are regularly synced in the background, which is configurable via
+	/// [`Config::onchain_wallet_sync_interval_secs`] and [`Config::wallet_sync_interval_secs`].
+	/// Therefore, using this blocking sync method is almost always redudant and should be avoided
+	/// where possible.
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
-		let runtime = rt_lock.as_ref().unwrap();
 
 		let wallet = Arc::clone(&self.wallet);
 		let tx_sync = Arc::clone(&self.tx_sync);
@@ -1373,39 +1375,31 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								"Sync of on-chain wallet finished in {}ms.",
 								now.elapsed().as_millis()
 							);
-							Ok(())
 						}
 						Err(e) => {
 							log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
-							Err(e)
+							return Err(e);
+						}
+					};
+
+					let now = Instant::now();
+					match tx_sync.sync(confirmables).await {
+						Ok(()) => {
+							log_info!(
+								sync_logger,
+								"Sync of Lightning wallet finished in {}ms.",
+								now.elapsed().as_millis()
+							);
+							Ok(())
+						}
+						Err(e) => {
+							log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
+							Err(e.into())
 						}
 					}
 				},
 			)
-		})?;
-
-		let sync_logger = Arc::clone(&self.logger);
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				let now = Instant::now();
-				match tx_sync.sync(confirmables).await {
-					Ok(()) => {
-						log_info!(
-							sync_logger,
-							"Sync of Lightning wallet finished in {}ms.",
-							now.elapsed().as_millis()
-						);
-						Ok(())
-					}
-					Err(e) => {
-						log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
-						Err(e)
-					}
-				}
-			})
-		})?;
-
-		Ok(())
+		})
 	}
 
 	/// Close a previously opened channel.
