@@ -174,6 +174,7 @@ const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 60;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 20;
+const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
@@ -217,6 +218,7 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `default_cltv_expiry_delta`            | 144              |
 /// | `onchain_wallet_sync_interval_secs`    | 60               |
 /// | `wallet_sync_interval_secs`            | 20               |
+/// | `fee_rate_cache_update_interval_secs`  | 600              |
 /// | `log_level`                            | `Debug`          |
 ///
 pub struct Config {
@@ -236,6 +238,10 @@ pub struct Config {
 	///
 	/// **Note:** A minimum of 10 seconds is always enforced.
 	pub wallet_sync_interval_secs: u64,
+	/// The time in-between background update attempts to our fee rate cache, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub fee_rate_cache_update_interval_secs: u64,
 	/// The level at which we log messages.
 	///
 	/// Any messages below this level will be excluded from the logs.
@@ -251,6 +257,7 @@ impl Default for Config {
 			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
 			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
 			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
+			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
 			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
@@ -784,12 +791,35 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
+		// Block to ensure we update our fee rate cache once on startup
+		let wallet = Arc::clone(&self.wallet);
+		let sync_logger = Arc::clone(&self.logger);
+		runtime.block_on(async move {
+			let now = Instant::now();
+			match wallet.update_fee_estimates().await {
+				Ok(()) => {
+					log_info!(
+						sync_logger,
+						"Initial fee rate cache update finished in {}ms.",
+						now.elapsed().as_millis()
+					);
+					Ok(())
+				}
+				Err(e) => {
+					log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
+					Err(e)
+				}
+			}
+		})?;
+
 		// Setup wallet sync
 		let wallet = Arc::clone(&self.wallet);
 		let sync_logger = Arc::clone(&self.logger);
 		let mut stop_sync = self.stop_receiver.clone();
 		let onchain_wallet_sync_interval_secs =
 			self.config.onchain_wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+		let fee_rate_cache_update_interval_secs =
+			self.config.fee_rate_cache_update_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 		std::thread::spawn(move || {
 			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
 				async move {
@@ -798,6 +828,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					);
 					onchain_wallet_sync_interval
 						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+					let mut fee_rate_update_interval = tokio::time::interval(Duration::from_secs(
+						fee_rate_cache_update_interval_secs,
+					));
+					// We just blocked on updating, so skip the first tick.
+					fee_rate_update_interval.reset();
 					loop {
 						tokio::select! {
 							_ = stop_sync.changed() => {
@@ -815,6 +850,23 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 										log_error!(
 											sync_logger,
 											"Background sync of on-chain wallet failed: {}",
+											err
+											)
+									}
+								}
+							}
+							_ = fee_rate_update_interval.tick() => {
+								let now = Instant::now();
+								match wallet.update_fee_estimates().await {
+									Ok(()) => log_trace!(
+										sync_logger,
+										"Background update of fee rate cache finished in {}ms.",
+										now.elapsed().as_millis()
+										),
+									Err(err) => {
+										log_error!(
+											sync_logger,
+											"Background update of fee rate cache failed: {}",
 											err
 											)
 									}
