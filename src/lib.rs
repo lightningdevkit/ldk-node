@@ -93,7 +93,6 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
-use lightning::ln::msgs::RoutingMessageHandler;
 pub use lightning_invoice;
 
 pub use error::Error as NodeError;
@@ -126,11 +125,13 @@ use lightning::chain::{chainmonitor, BestBlock, Confirm, Watch};
 use lightning::ln::channelmanager::{
 	self, ChainParameters, ChannelManagerReadArgs, PaymentId, RecipientOnionFields, Retry,
 };
+use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
+pub use lightning::util::logger::Level as LogLevel;
 use lightning::util::ser::ReadableArgs;
 
 use lightning_background_processor::process_events_async;
@@ -173,6 +174,7 @@ const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
 const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
+const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of blocks after which BDK stops looking for scripts belonging to the wallet.
@@ -204,9 +206,10 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | Parameter                   | Value            |
 /// |-----------------------------|------------------|
 /// | `storage_dir_path`          | /tmp/ldk_node/   |
-/// | `network`                   | Network::Bitcoin |
+/// | `network`                   | `Bitcoin`        |
 /// | `listening_address`         | 0.0.0.0:9735     |
 /// | `default_cltv_expiry_delta` | 144              |
+/// | `log_level`                 | `Debug`          |
 ///
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
@@ -217,6 +220,10 @@ pub struct Config {
 	pub listening_address: Option<NetAddress>,
 	/// The default CLTV expiry delta to be used for payments.
 	pub default_cltv_expiry_delta: u32,
+	/// The level at which we log messages.
+	///
+	/// Any messages below this level will be excluded from the logs.
+	pub log_level: LogLevel,
 }
 
 impl Default for Config {
@@ -226,6 +233,7 @@ impl Default for Config {
 			network: DEFAULT_NETWORK,
 			listening_address: Some(DEFAULT_LISTENING_ADDR.parse().unwrap()),
 			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
+			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
 }
@@ -348,6 +356,12 @@ impl Builder {
 		config.listening_address = Some(listening_address);
 	}
 
+	/// Sets the level at which [`Node`] will log messages.
+	pub fn set_log_level(&self, level: LogLevel) {
+		let mut config = self.config.write().unwrap();
+		config.log_level = level;
+	}
+
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Arc<Node<FilesystemStore>> {
@@ -371,7 +385,7 @@ impl Builder {
 
 		// Initialize the Logger
 		let log_file_path = format!("{}/ldk_node.log", config.storage_dir_path);
-		let logger = Arc::new(FilesystemLogger::new(log_file_path));
+		let logger = Arc::new(FilesystemLogger::new(log_file_path, config.log_level));
 
 		// Initialize the on-chain wallet and chain access
 		let seed_bytes = match &*self.entropy_source_config.read().unwrap() {
@@ -469,7 +483,6 @@ impl Builder {
 					if e.kind() == std::io::ErrorKind::NotFound {
 						Arc::new(NetworkGraph::new(config.network, Arc::clone(&logger)))
 					} else {
-						log_error!(logger, "Failed to read network graph: {}", e.to_string());
 						panic!("Failed to read network graph: {}", e.to_string());
 					}
 				}
@@ -490,7 +503,6 @@ impl Builder {
 						Arc::clone(&logger),
 					)))
 				} else {
-					log_error!(logger, "Failed to read scorer: {}", e.to_string());
 					panic!("Failed to read scorer: {}", e.to_string());
 				}
 			}
@@ -609,8 +621,11 @@ impl Builder {
 				p2p_source
 			}
 			GossipSourceConfig::RapidGossipSync(rgs_server) => {
-				let latest_sync_timestamp =
-					io::utils::read_latest_rgs_sync_timestamp(Arc::clone(&kv_store)).unwrap_or(0);
+				let latest_sync_timestamp = io::utils::read_latest_rgs_sync_timestamp(
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)
+				.unwrap_or(0);
 				Arc::new(GossipSource::new_rgs(
 					rgs_server.clone(),
 					latest_sync_timestamp,
@@ -648,15 +663,17 @@ impl Builder {
 		));
 
 		// Init payment info storage
-		let payment_store = match io::utils::read_payments(Arc::clone(&kv_store)) {
-			Ok(payments) => {
-				Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
-			}
-			Err(e) => {
-				log_error!(logger, "Failed to read payment information: {}", e.to_string());
-				panic!("Failed to read payment information: {}", e.to_string());
-			}
-		};
+		let payment_store =
+			match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
+				Ok(payments) => Arc::new(PaymentStore::new(
+					payments,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)),
+				Err(e) => {
+					panic!("Failed to read payment information: {}", e.to_string());
+				}
+			};
 
 		let event_queue =
 			match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger)) {
@@ -665,7 +682,6 @@ impl Builder {
 					if e.kind() == std::io::ErrorKind::NotFound {
 						Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 					} else {
-						log_error!(logger, "Failed to read event queue: {}", e.to_string());
 						panic!("Failed to read event queue: {}", e.to_string());
 					}
 				}
@@ -678,7 +694,6 @@ impl Builder {
 				if e.kind() == std::io::ErrorKind::NotFound {
 					Arc::new(PeerStore::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 				} else {
-					log_error!(logger, "Failed to read peer store: {}", e.to_string());
 					panic!("Failed to read peer store: {}", e.to_string());
 				}
 			}
@@ -746,6 +761,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			// We're already running.
 			return Err(Error::AlreadyRunning);
 		}
+
+		log_info!(self.logger, "Starting up LDK Node on network: {}", self.config.network);
 
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
@@ -969,7 +986,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							return;
 						}
 						_ = interval.tick() => {
-							let skip_broadcast = match io::utils::read_latest_node_ann_bcast_timestamp(Arc::clone(&bcast_store)) {
+							let skip_broadcast = match io::utils::read_latest_node_ann_bcast_timestamp(Arc::clone(&bcast_store), Arc::clone(&bcast_logger)) {
 								Ok(latest_bcast_time_secs) => {
 									// Skip if the time hasn't elapsed yet.
 									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
@@ -1049,6 +1066,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		});
 
 		*runtime_lock = Some(runtime);
+
+		log_info!(self.logger, "Startup complete.");
 		Ok(())
 	}
 
@@ -1057,6 +1076,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
 		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
+
+		log_info!(self.logger, "Shutting down LDK Node...");
+
 		// Stop the runtime.
 		match self.stop_sender.send(()) {
 			Ok(_) => (),
@@ -1074,6 +1096,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		self.peer_manager.disconnect_all_peers();
 
 		runtime.shutdown_timeout(Duration::from_secs(10));
+
+		log_info!(self.logger, "Shutdown complete.");
 		Ok(())
 	}
 
@@ -1099,7 +1123,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
 	pub fn event_handled(&self) {
-		self.event_queue.event_handled().unwrap();
+		self.event_queue
+			.event_handled()
+			.expect("Couldn't mark event handled due to persistence failure");
 	}
 
 	/// Returns our own node id

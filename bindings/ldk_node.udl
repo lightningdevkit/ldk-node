@@ -6,6 +6,7 @@ dictionary Config {
 	Network network;
 	NetAddress? listening_address;
 	u32 default_cltv_expiry_delta;
+	LogLevel log_level;
 };
 
 interface Builder {
@@ -172,6 +173,15 @@ dictionary PeerDetails {
 	PublicKey node_id;
 	NetAddress address;
 	boolean is_connected;
+};
+
+enum LogLevel {
+	"Gossip",
+	"Trace",
+	"Debug",
+	"Info",
+	"Warn",
+	"Error",
 };
 
 [Custom]

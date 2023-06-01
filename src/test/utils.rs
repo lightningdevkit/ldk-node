@@ -266,6 +266,8 @@ pub fn random_config() -> Config {
 	let listening_address_str = format!("127.0.0.1:{}", rand_port);
 	config.listening_address = Some(listening_address_str.parse().unwrap());
 
+	config.log_level = Level::Trace;
+
 	config
 }
 
