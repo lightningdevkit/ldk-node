@@ -209,7 +209,7 @@ mod tests {
 	use std::sync::Arc;
 
 	#[test]
-	fn persistence_guard_persists_on_drop() {
+	fn payment_info_is_persisted() {
 		let store = Arc::new(TestStore::new());
 		let logger = Arc::new(TestLogger::new());
 		let payment_store = PaymentStore::new(Vec::new(), Arc::clone(&store), logger);
