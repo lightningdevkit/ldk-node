@@ -118,7 +118,7 @@ use types::{
 pub use types::{ChannelDetails, ChannelId, PeerDetails, UserChannelId};
 use wallet::Wallet;
 
-use logger::{log_error, log_info, FilesystemLogger, Logger};
+use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::keysinterface::EntropySource;
 use lightning::chain::{chainmonitor, BestBlock, Confirm, Watch};
@@ -172,6 +172,8 @@ const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
+const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 60;
+const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 20;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
@@ -196,6 +198,9 @@ const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // The time in-between node announcement broadcast attempts.
 const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+// The lower limit which we apply to any configured wallet sync intervals.
+const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
+
 // The length in bytes of our wallets' keys seed.
 const WALLET_KEYS_SEED_LEN: usize = 64;
 
@@ -204,13 +209,15 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 ///
 /// ### Defaults
 ///
-/// | Parameter                   | Value            |
-/// |-----------------------------|------------------|
-/// | `storage_dir_path`          | /tmp/ldk_node/   |
-/// | `network`                   | `Bitcoin`        |
-/// | `listening_address`         | 0.0.0.0:9735     |
-/// | `default_cltv_expiry_delta` | 144              |
-/// | `log_level`                 | `Debug`          |
+/// | Parameter                              | Value            |
+/// |----------------------------------------|------------------|
+/// | `storage_dir_path`                     | /tmp/ldk_node/   |
+/// | `network`                              | `Bitcoin         |
+/// | `listening_address`                    | 0.0.0.0:9735     |
+/// | `default_cltv_expiry_delta`            | 144              |
+/// | `onchain_wallet_sync_interval_secs`    | 60               |
+/// | `wallet_sync_interval_secs`            | 20               |
+/// | `log_level`                            | `Debug`          |
 ///
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
@@ -221,6 +228,14 @@ pub struct Config {
 	pub listening_address: Option<NetAddress>,
 	/// The default CLTV expiry delta to be used for payments.
 	pub default_cltv_expiry_delta: u32,
+	/// The time in-between background sync attempts of the onchain wallet, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub onchain_wallet_sync_interval_secs: u64,
+	/// The time in-between background sync attempts of the LDK wallet, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub wallet_sync_interval_secs: u64,
 	/// The level at which we log messages.
 	///
 	/// Any messages below this level will be excluded from the logs.
@@ -234,6 +249,8 @@ impl Default for Config {
 			network: DEFAULT_NETWORK,
 			listening_address: Some(DEFAULT_LISTENING_ADDR.parse().unwrap()),
 			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
+			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
+			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
 			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
@@ -769,26 +786,27 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		// Setup wallet sync
 		let wallet = Arc::clone(&self.wallet);
-		let tx_sync = Arc::clone(&self.tx_sync);
-		let sync_cman = Arc::clone(&self.channel_manager);
-		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_logger = Arc::clone(&self.logger);
 		let mut stop_sync = self.stop_receiver.clone();
-
+		let onchain_wallet_sync_interval_secs =
+			self.config.onchain_wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 		std::thread::spawn(move || {
 			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
 				async move {
-					let mut interval = tokio::time::interval(Duration::from_secs(30));
-					interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+					let mut onchain_wallet_sync_interval = tokio::time::interval(
+						Duration::from_secs(onchain_wallet_sync_interval_secs),
+					);
+					onchain_wallet_sync_interval
+						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 					loop {
-						let now = Instant::now();
 						tokio::select! {
 							_ = stop_sync.changed() => {
 								return;
 							}
-							_ = interval.tick() => {
+							_ = onchain_wallet_sync_interval.tick() => {
+								let now = Instant::now();
 								match wallet.sync().await {
-									Ok(()) => log_info!(
+									Ok(()) => log_trace!(
 										sync_logger,
 										"Background sync of on-chain wallet finished in {}ms.",
 										now.elapsed().as_millis()
@@ -808,6 +826,43 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			);
 		});
 
+		let tx_sync = Arc::clone(&self.tx_sync);
+		let sync_cman = Arc::clone(&self.channel_manager);
+		let sync_cmon = Arc::clone(&self.chain_monitor);
+		let sync_logger = Arc::clone(&self.logger);
+		let mut stop_sync = self.stop_receiver.clone();
+		let wallet_sync_interval_secs =
+			self.config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+		runtime.spawn(async move {
+			let mut wallet_sync_interval =
+				tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
+			wallet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					_ = stop_sync.changed() => {
+						return;
+					}
+					_ = wallet_sync_interval.tick() => {
+						let confirmables = vec![
+							&*sync_cman as &(dyn Confirm + Sync + Send),
+							&*sync_cmon as &(dyn Confirm + Sync + Send),
+						];
+						let now = Instant::now();
+						match tx_sync.sync(confirmables).await {
+							Ok(()) => log_trace!(
+								sync_logger,
+								"Background sync of Lightning wallet finished in {}ms.",
+								now.elapsed().as_millis()
+								),
+							Err(e) => {
+								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+							}
+						}
+					}
+				}
+			}
+		});
+
 		if self.gossip_source.is_rgs() {
 			let gossip_source = Arc::clone(&self.gossip_source);
 			let gossip_sync_store = Arc::clone(&self.kv_store);
@@ -825,7 +880,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							let now = Instant::now();
 							match gossip_source.update_rgs_snapshot().await {
 								Ok(updated_timestamp) => {
-									log_info!(
+									log_trace!(
 										gossip_sync_logger,
 										"Background sync of RGS gossip data finished in {}ms.",
 										now.elapsed().as_millis()
@@ -848,37 +903,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				}
 			});
 		}
-
-		let sync_logger = Arc::clone(&self.logger);
-		let mut stop_sync = self.stop_receiver.clone();
-		runtime.spawn(async move {
-			let mut interval = tokio::time::interval(Duration::from_secs(10));
-			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				let now = Instant::now();
-				tokio::select! {
-					_ = stop_sync.changed() => {
-						return;
-					}
-					_ = interval.tick() => {
-						let confirmables = vec![
-							&*sync_cman as &(dyn Confirm + Sync + Send),
-							&*sync_cmon as &(dyn Confirm + Sync + Send),
-						];
-						match tx_sync.sync(confirmables).await {
-							Ok(()) => log_info!(
-								sync_logger,
-								"Background sync of Lightning wallet finished in {}ms.",
-								now.elapsed().as_millis()
-								),
-							Err(e) => {
-								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
-							}
-						}
-					}
-				}
-			}
-		});
 
 		if let Some(listening_address) = &self.config.listening_address {
 			// Setup networking
