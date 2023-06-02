@@ -765,18 +765,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
-		let event_handler = Arc::new(EventHandler::new(
-			Arc::clone(&self.wallet),
-			Arc::clone(&self.event_queue),
-			Arc::clone(&self.channel_manager),
-			Arc::clone(&self.network_graph),
-			Arc::clone(&self.keys_manager),
-			Arc::clone(&self.payment_store),
-			Arc::clone(&self.runtime),
-			Arc::clone(&self.logger),
-			Arc::clone(&self.config),
-		));
-
 		// Setup wallet sync
 		let wallet = Arc::clone(&self.wallet);
 		let tx_sync = Arc::clone(&self.tx_sync);
@@ -1022,6 +1010,18 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				}
 			}
 		});
+
+		let event_handler = Arc::new(EventHandler::new(
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.event_queue),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.network_graph),
+			Arc::clone(&self.keys_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.logger),
+			Arc::clone(&self.config),
+		));
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
