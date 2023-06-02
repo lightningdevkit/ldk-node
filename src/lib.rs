@@ -417,8 +417,12 @@ impl Builder {
 		let config = Arc::new(self.config.read().unwrap().clone());
 
 		// Initialize the Logger
-		let log_file_path = format!("{}/ldk_node.log", config.storage_dir_path);
-		let logger = Arc::new(FilesystemLogger::new(log_file_path, config.log_level));
+		let log_file_path = format!(
+			"{}/logs/ldk_node_{}.log",
+			config.storage_dir_path,
+			chrono::offset::Local::now().format("%Y_%m_%d")
+		);
+		let logger = Arc::new(FilesystemLogger::new(log_file_path.clone(), config.log_level));
 
 		// Initialize the on-chain wallet and chain access
 		let seed_bytes = match &*self.entropy_source_config.read().unwrap() {

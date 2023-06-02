@@ -310,6 +310,9 @@ fn start_stop_reinit() {
 	node.sync_wallets().unwrap();
 	assert_eq!(node.onchain_balance().unwrap().get_spendable(), expected_amount.to_sat());
 
+	let log_file_symlink = format!("{}/logs/ldk_node_latest.log", config.storage_dir_path);
+	assert!(std::path::Path::new(&log_file_symlink).is_symlink());
+
 	node.stop().unwrap();
 	assert_eq!(node.stop(), Err(Error::NotRunning));
 
