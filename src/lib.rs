@@ -172,7 +172,6 @@ const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
-const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
@@ -181,6 +180,9 @@ const BDK_CLIENT_STOP_GAP: usize = 20;
 
 // The number of concurrent requests made against the API provider.
 const BDK_CLIENT_CONCURRENCY: u8 = 8;
+
+// The default Esplora server we're using.
+const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
 // The timeout after which we abandon retrying failed payments.
 const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
