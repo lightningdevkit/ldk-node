@@ -161,7 +161,6 @@ use std::convert::TryInto;
 use std::default::Default;
 use std::fs;
 use std::net::ToSocketAddrs;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1208,22 +1207,16 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_success = Arc::new(AtomicBool::new(false));
-		let con_success_cloned = Arc::clone(&con_success);
 		let con_logger = Arc::clone(&self.logger);
 		let con_pm = Arc::clone(&self.peer_manager);
 
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				let res =
-					connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await;
-				con_success_cloned.store(res.is_ok(), Ordering::Release);
+				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
 			})
-		});
-
-		if !con_success.load(Ordering::Acquire) {
-			return Err(Error::ConnectionFailed);
-		}
+		})?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
@@ -1286,22 +1279,16 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_success = Arc::new(AtomicBool::new(false));
-		let con_success_cloned = Arc::clone(&con_success);
 		let con_logger = Arc::clone(&self.logger);
 		let con_pm = Arc::clone(&self.peer_manager);
 
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				let res =
-					connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await;
-				con_success_cloned.store(res.is_ok(), Ordering::Release);
+				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
 			})
-		});
-
-		if !con_success.load(Ordering::Acquire) {
-			return Err(Error::ConnectionFailed);
-		}
+		})?;
 
 		let user_config = UserConfig {
 			channel_handshake_limits: ChannelHandshakeLimits {
