@@ -6,6 +6,9 @@ dictionary Config {
 	Network network;
 	NetAddress? listening_address;
 	u32 default_cltv_expiry_delta;
+	u64 onchain_wallet_sync_interval_secs;
+	u64 wallet_sync_interval_secs;
+	u64 fee_rate_cache_update_interval_secs;
 	LogLevel log_level;
 };
 
@@ -157,6 +160,7 @@ dictionary ChannelDetails {
 	u64 channel_value_satoshis;
 	u64? unspendable_punishment_reserve;
 	UserChannelId user_channel_id;
+	u32 feerate_sat_per_1000_weight;
 	u64 balance_msat;
 	u64 outbound_capacity_msat;
 	u64 inbound_capacity_msat;

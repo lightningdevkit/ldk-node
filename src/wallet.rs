@@ -73,14 +73,6 @@ where
 			}
 		};
 
-		match self.update_fee_estimates().await {
-			Ok(()) => (),
-			Err(e) => {
-				log_error!(self.logger, "Fee estimation error: {}", e);
-				return Err(e);
-			}
-		}
-
 		let sync_options = SyncOptions { progress: None };
 		let wallet_lock = self.inner.lock().unwrap();
 		let res = match wallet_lock.sync(&self.blockchain, sync_options).await {

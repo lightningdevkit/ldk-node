@@ -452,7 +452,7 @@ fn onchain_spend_receive() {
 
 #[test]
 fn sign_verify_msg() {
-	let (_, electrsd) = setup_bitcoind_and_electrsd();
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config = random_config();
 	let builder = Builder::from_config(config.clone());

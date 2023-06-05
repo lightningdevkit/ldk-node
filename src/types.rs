@@ -159,6 +159,9 @@ pub struct ChannelDetails {
 	pub unspendable_punishment_reserve: Option<u64>,
 	/// The local `user_channel_id` of this channel.
 	pub user_channel_id: UserChannelId,
+	/// The currently negotiated fee rate denominated in satoshi per 1000 weight units,
+	/// which is applied to commitment and HTLC transactions.
+	pub feerate_sat_per_1000_weight: u32,
 	/// Total balance of the channel. This is the amount that will be returned to the user if the
 	/// channel is closed.
 	///
@@ -214,6 +217,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
 			user_channel_id: UserChannelId(value.user_channel_id),
 			balance_msat: value.balance_msat,
+			feerate_sat_per_1000_weight: value.feerate_sat_per_1000_weight.unwrap(),
 			outbound_capacity_msat: value.outbound_capacity_msat,
 			inbound_capacity_msat: value.inbound_capacity_msat,
 			confirmations_required: value.confirmations_required,
