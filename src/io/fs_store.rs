@@ -1,13 +1,12 @@
 #[cfg(target_os = "windows")]
 extern crate winapi;
 
-use super::KVStore;
+use super::*;
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(not(target_os = "windows"))]
@@ -45,7 +44,8 @@ pub struct FilesystemStore {
 }
 
 impl FilesystemStore {
-	pub(crate) fn new(dest_dir: PathBuf) -> Self {
+	pub(crate) fn new(mut dest_dir: PathBuf) -> Self {
+		dest_dir.push("fs_store");
 		let locks = Mutex::new(HashMap::new());
 		Self { dest_dir, locks }
 	}
@@ -248,25 +248,8 @@ impl Read for FilesystemReader {
 
 impl KVStorePersister for FilesystemStore {
 	fn persist<W: Writeable>(&self, prefixed_key: &str, object: &W) -> lightning::io::Result<()> {
-		let dest_file_path = PathBuf::from_str(prefixed_key).map_err(|_| {
-			let msg = format!("Could not persist file for key {}.", prefixed_key);
-			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
-		})?;
-
-		let parent_directory = dest_file_path.parent().ok_or_else(|| {
-			let msg = format!("Could not persist file for key {}.", prefixed_key);
-			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
-		})?;
-		let namespace = parent_directory.display().to_string();
-
-		let dest_without_namespace = dest_file_path.strip_prefix(&namespace).map_err(|_| {
-			let msg = format!("Could not persist file for key {}.", prefixed_key);
-			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg)
-		})?;
-		let key = dest_without_namespace.display().to_string();
-
-		self.write(&namespace, &key, &object.encode())?;
-		Ok(())
+		let (namespace, key) = get_namespace_and_key_from_prefixed(prefixed_key)?;
+		self.write(&namespace, &key, &object.encode())
 	}
 }
 
@@ -274,8 +257,6 @@ impl KVStorePersister for FilesystemStore {
 mod tests {
 	use super::*;
 	use crate::test::utils::random_storage_path;
-	use lightning::util::persist::KVStorePersister;
-	use lightning::util::ser::Readable;
 
 	use proptest::prelude::*;
 	proptest! {
@@ -284,31 +265,8 @@ mod tests {
 			let rand_dir = random_storage_path();
 
 			let fs_store = FilesystemStore::new(rand_dir.into());
-			let namespace = "testspace";
-			let key = "testkey";
 
-			// Test the basic KVStore operations.
-			fs_store.write(namespace, key, &data).unwrap();
-
-			let listed_keys = fs_store.list(namespace).unwrap();
-			assert_eq!(listed_keys.len(), 1);
-			assert_eq!(listed_keys[0], "testkey");
-
-			let mut reader = fs_store.read(namespace, key).unwrap();
-			let read_data: [u8; 32] = Readable::read(&mut reader).unwrap();
-			assert_eq!(data, read_data);
-
-			fs_store.remove(namespace, key).unwrap();
-
-			let listed_keys = fs_store.list(namespace).unwrap();
-			assert_eq!(listed_keys.len(), 0);
-
-			// Test KVStorePersister
-			let prefixed_key = format!("{}/{}", namespace, key);
-			fs_store.persist(&prefixed_key, &data).unwrap();
-			let mut reader = fs_store.read(namespace, key).unwrap();
-			let read_data: [u8; 32] = Readable::read(&mut reader).unwrap();
-			assert_eq!(data, read_data);
+			do_read_write_remove_list_persist(&data, &fs_store);
 		}
 	}
 }
