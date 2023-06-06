@@ -309,22 +309,25 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		// Block to ensure we update our fee rate cache once on startup
 		let wallet = Arc::clone(&self.wallet);
 		let sync_logger = Arc::clone(&self.logger);
-		runtime.block_on(async move {
-			let now = Instant::now();
-			match wallet.update_fee_estimates().await {
-				Ok(()) => {
-					log_info!(
-						sync_logger,
-						"Initial fee rate cache update finished in {}ms.",
-						now.elapsed().as_millis()
-					);
-					Ok(())
+		let runtime_ref = &runtime;
+		tokio::task::block_in_place(move || {
+			runtime_ref.block_on(async move {
+				let now = Instant::now();
+				match wallet.update_fee_estimates().await {
+					Ok(()) => {
+						log_info!(
+							sync_logger,
+							"Initial fee rate cache update finished in {}ms.",
+							now.elapsed().as_millis()
+						);
+						Ok(())
+					}
+					Err(e) => {
+						log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
+						Err(e)
+					}
 				}
-				Err(e) => {
-					log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
-					Err(e)
-				}
-			}
+			})
 		})?;
 
 		// Setup wallet sync
