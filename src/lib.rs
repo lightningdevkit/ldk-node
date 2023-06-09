@@ -48,7 +48,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = NetAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.connect_open_channel(node_id, node_addr, 10000, None, false).unwrap();
+//! 	node.connect_open_channel(node_id, node_addr, 10000, None, None, false).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -1369,7 +1369,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// Returns a temporary channel id.
 	pub fn connect_open_channel(
 		&self, node_id: PublicKey, address: NetAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, announce_channel: bool,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		announce_channel: bool,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1404,6 +1405,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				announced_channel: announce_channel,
 				..Default::default()
 			},
+			channel_config: channel_config.unwrap_or_default(),
 			..Default::default()
 		};
 
