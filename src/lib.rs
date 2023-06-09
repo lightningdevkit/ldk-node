@@ -135,7 +135,7 @@ use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 
-use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
+use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
 use lightning::util::ser::ReadableArgs;
 
@@ -1399,11 +1399,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		})?;
 
 		let user_config = UserConfig {
-			channel_handshake_limits: ChannelHandshakeLimits {
-				// lnd's max to_self_delay is 2016, so we want to be compatible.
-				their_to_self_delay: 2016,
-				..Default::default()
-			},
+			channel_handshake_limits: Default::default(),
 			channel_handshake_config: ChannelHandshakeConfig {
 				announced_channel: announce_channel,
 				..Default::default()
