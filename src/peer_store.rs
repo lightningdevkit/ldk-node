@@ -32,6 +32,10 @@ where
 	pub(crate) fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let mut locked_peers = self.peers.write().unwrap();
 
+		if locked_peers.contains_key(&peer_info.node_id) {
+			return Ok(());
+		}
+
 		locked_peers.insert(peer_info.node_id, peer_info);
 		self.persist_peers(&*locked_peers)
 	}
