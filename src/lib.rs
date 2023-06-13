@@ -38,7 +38,7 @@
 //! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 //! 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
 //!
-//! 	let node = builder.build();
+//! 	let node = builder.build().unwrap();
 //!
 //! 	node.start().unwrap();
 //!
@@ -113,6 +113,7 @@ use {bip39::Mnemonic, bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_ty
 
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
+pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 
@@ -1330,7 +1331,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// # config.network = Network::Regtest;
 	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();
 	/// # let builder = Builder::from_config(config);
-	/// # let node = builder.build();
+	/// # let node = builder.build().unwrap();
 	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
 	/// ```
 	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(

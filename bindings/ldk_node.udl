@@ -19,6 +19,7 @@ interface Builder {
 	[Name=from_config]
 	constructor(Config config);
 	void set_entropy_seed_path(string seed_path);
+	[Throws=BuildError]
 	void set_entropy_seed_bytes(sequence<u8> seed_bytes);
 	void set_entropy_bip39_mnemonic(Mnemonic mnemonic, string? passphrase);
 	void set_esplora_server(string esplora_server_url);
@@ -27,6 +28,7 @@ interface Builder {
 	void set_storage_dir_path(string storage_dir_path);
 	void set_network(Network network);
 	void set_listening_address(NetAddress listening_address);
+	[Throws=BuildError]
 	LDKNode build();
 };
 
@@ -113,6 +115,16 @@ enum NodeError {
 	"InvalidNetwork",
 	"DuplicatePayment",
 	"InsufficientFunds",
+};
+
+[Error]
+enum BuildError {
+	"InvalidSeedBytes",
+	"InvalidSystemTime",
+	"ReadFailed",
+	"WriteFailed",
+	"StoragePathAccessFailed",
+	"WalletSetupFailed",
 };
 
 [Enum]
