@@ -231,7 +231,7 @@ where
 	payment_store: Arc<PaymentStore<K, L>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
-	_config: Arc<Config>,
+	config: Arc<Config>,
 }
 
 impl<K: KVStore + Sync + Send + 'static, L: Deref> EventHandler<K, L>
@@ -242,7 +242,7 @@ where
 		wallet: Arc<Wallet<bdk::database::SqliteDatabase>>, event_queue: Arc<EventQueue<K, L>>,
 		channel_manager: Arc<ChannelManager<K>>, network_graph: Arc<NetworkGraph>,
 		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, _config: Arc<Config>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -253,7 +253,7 @@ where
 			payment_store,
 			logger,
 			runtime,
-			_config,
+			config,
 		}
 	}
 
@@ -545,7 +545,52 @@ where
 					}
 				}
 			}
-			LdkEvent::OpenChannelRequest { .. } => {}
+			LdkEvent::OpenChannelRequest {
+				temporary_channel_id,
+				counterparty_node_id,
+				funding_satoshis,
+				channel_type: _,
+				push_msat: _,
+			} => {
+				let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
+				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
+				let res = if allow_0conf {
+					self.channel_manager.accept_inbound_channel_from_trusted_peer_0conf(
+						&temporary_channel_id,
+						&counterparty_node_id,
+						user_channel_id,
+					)
+				} else {
+					self.channel_manager.accept_inbound_channel(
+						&temporary_channel_id,
+						&counterparty_node_id,
+						user_channel_id,
+					)
+				};
+
+				match res {
+					Ok(()) => {
+						log_info!(
+							self.logger,
+							"Accepting inbound{} channel of {}sats from{} peer {}",
+							if allow_0conf { " 0conf" } else { "" },
+							funding_satoshis,
+							if allow_0conf { " trusted" } else { "" },
+							counterparty_node_id,
+						);
+					}
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Error while accepting inbound{} channel from{} peer {}: {:?}",
+							if allow_0conf { " 0conf" } else { "" },
+							counterparty_node_id,
+							if allow_0conf { " trusted" } else { "" },
+							e,
+						);
+					}
+				}
+			}
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,

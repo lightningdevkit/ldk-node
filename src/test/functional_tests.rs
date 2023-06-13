@@ -1,8 +1,13 @@
+use crate::io::KVStore;
 use crate::test::utils::*;
 use crate::test::utils::{expect_event, random_config};
-use crate::{Builder, Error, Event, PaymentDirection, PaymentStatus};
+use crate::{Builder, Error, Event, Node, PaymentDirection, PaymentStatus};
 
 use bitcoin::Amount;
+use electrsd::bitcoind::BitcoinD;
+use electrsd::ElectrsD;
+
+use std::sync::Arc;
 
 #[test]
 fn channel_full_cycle() {
@@ -14,7 +19,6 @@ fn channel_full_cycle() {
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build();
 	node_a.start().unwrap();
-	let addr_a = node_a.new_funding_address().unwrap();
 
 	println!("\n== Node B ==");
 	let config_b = random_config();
@@ -22,6 +26,39 @@ fn channel_full_cycle() {
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build();
 	node_b.start().unwrap();
+
+	do_channel_full_cycle(node_a, node_b, &bitcoind, &electrsd, false);
+}
+
+#[test]
+fn channel_full_cycle_0conf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	println!("== Node A ==");
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let config_a = random_config();
+	let builder_a = Builder::from_config(config_a);
+	builder_a.set_esplora_server(esplora_url.clone());
+	let node_a = builder_a.build();
+	node_a.start().unwrap();
+
+	println!("\n== Node B ==");
+	let mut config_b = random_config();
+	config_b.trusted_peers_0conf.push(node_a.node_id());
+
+	let builder_b = Builder::from_config(config_b);
+	builder_b.set_esplora_server(esplora_url.clone());
+	let node_b = builder_b.build();
+
+	node_b.start().unwrap();
+
+	do_channel_full_cycle(node_a, node_b, &bitcoind, &electrsd, true)
+}
+
+fn do_channel_full_cycle<K: KVStore + Sync + Send>(
+	node_a: Arc<Node<K>>, node_b: Arc<Node<K>>, bitcoind: &BitcoinD, electrsd: &ElectrsD,
+	allow_0conf: bool,
+) {
+	let addr_a = node_a.new_funding_address().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
 	let premine_amount_sat = 100_000;
@@ -71,8 +108,11 @@ fn channel_full_cycle() {
 
 	wait_for_tx(&electrsd, funding_txo.txid);
 
-	println!("\n .. generating blocks, syncing wallets .. ");
-	generate_blocks_and_wait(&bitcoind, &electrsd, 6);
+	if !allow_0conf {
+		println!("\n .. generating blocks ..");
+		generate_blocks_and_wait(&bitcoind, &electrsd, 6);
+	}
+
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -271,7 +311,7 @@ fn channel_open_fails_when_funds_insufficient() {
 			node_b.listening_address().unwrap().into(),
 			120000,
 			None,
-			true
+			true,
 		)
 	);
 }
