@@ -33,7 +33,7 @@
 //! use std::str::FromStr;
 //!
 //! fn main() {
-//! 	let builder = Builder::new();
+//! 	let mut builder = Builder::new();
 //! 	builder.set_network(Network::Testnet);
 //! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 //! 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
@@ -109,7 +109,11 @@ pub use types::NetAddress;
 #[cfg(feature = "uniffi")]
 use {bip39::Mnemonic, bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
 
-pub use builder::Builder;
+#[cfg(feature = "uniffi")]
+pub use builder::ArcedNodeBuilder as Builder;
+#[cfg(not(feature = "uniffi"))]
+pub use builder::NodeBuilder as Builder;
+
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use io::KVStore;

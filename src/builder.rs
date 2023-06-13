@@ -74,29 +74,29 @@ enum GossipSourceConfig {
 /// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
 /// - Gossip data is sourced via the peer-to-peer network
 #[derive(Debug)]
-pub struct Builder {
-	config: RwLock<Config>,
-	entropy_source_config: RwLock<Option<EntropySourceConfig>>,
-	chain_data_source_config: RwLock<Option<ChainDataSourceConfig>>,
-	gossip_source_config: RwLock<Option<GossipSourceConfig>>,
+pub struct NodeBuilder {
+	config: Config,
+	entropy_source_config: Option<EntropySourceConfig>,
+	chain_data_source_config: Option<ChainDataSourceConfig>,
+	gossip_source_config: Option<GossipSourceConfig>,
 }
 
-impl Builder {
+impl NodeBuilder {
 	/// Creates a new builder instance with the default configuration.
 	pub fn new() -> Self {
-		let config = RwLock::new(Config::default());
-		let entropy_source_config = RwLock::new(None);
-		let chain_data_source_config = RwLock::new(None);
-		let gossip_source_config = RwLock::new(None);
+		let config = Config::default();
+		let entropy_source_config = None;
+		let chain_data_source_config = None;
+		let gossip_source_config = None;
 		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
-		let config = RwLock::new(config);
-		let entropy_source_config = RwLock::new(None);
-		let chain_data_source_config = RwLock::new(None);
-		let gossip_source_config = RwLock::new(None);
+		let config = config;
+		let entropy_source_config = None;
+		let chain_data_source_config = None;
+		let gossip_source_config = None;
 		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
@@ -104,78 +104,83 @@ impl Builder {
 	///
 	/// If the given file does not exist a new random seed file will be generated and
 	/// stored at the given location.
-	pub fn set_entropy_seed_path(&self, seed_path: String) {
-		*self.entropy_source_config.write().unwrap() =
-			Some(EntropySourceConfig::SeedFile(seed_path));
+	pub fn set_entropy_seed_path(&mut self, seed_path: String) -> &mut Self {
+		self.entropy_source_config = Some(EntropySourceConfig::SeedFile(seed_path));
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
 	///
 	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
-	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) {
+	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: Vec<u8>) -> &mut Self {
 		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
 			panic!("Failed to set seed due to invalid length.");
 		}
 		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
 		bytes.copy_from_slice(&seed_bytes);
-		*self.entropy_source_config.write().unwrap() = Some(EntropySourceConfig::SeedBytes(bytes));
+		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(bytes));
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
 	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn set_entropy_bip39_mnemonic(&self, mnemonic: Mnemonic, passphrase: Option<String>) {
-		*self.entropy_source_config.write().unwrap() =
+	pub fn set_entropy_bip39_mnemonic(
+		&mut self, mnemonic: Mnemonic, passphrase: Option<String>,
+	) -> &mut Self {
+		self.entropy_source_config =
 			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
-	pub fn set_esplora_server(&self, esplora_server_url: String) {
-		*self.chain_data_source_config.write().unwrap() =
-			Some(ChainDataSourceConfig::Esplora(esplora_server_url));
+	pub fn set_esplora_server(&mut self, esplora_server_url: String) -> &mut Self {
+		self.chain_data_source_config = Some(ChainDataSourceConfig::Esplora(esplora_server_url));
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
 	/// network.
-	pub fn set_gossip_source_p2p(&self) {
-		*self.gossip_source_config.write().unwrap() = Some(GossipSourceConfig::P2PNetwork);
+	pub fn set_gossip_source_p2p(&mut self) -> &mut Self {
+		self.gossip_source_config = Some(GossipSourceConfig::P2PNetwork);
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its gossip data from the given RapidGossipSync
 	/// server.
-	pub fn set_gossip_source_rgs(&self, rgs_server_url: String) {
-		*self.gossip_source_config.write().unwrap() =
-			Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
+	pub fn set_gossip_source_rgs(&mut self, rgs_server_url: String) -> &mut Self {
+		self.gossip_source_config = Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
+		self
 	}
 
 	/// Sets the used storage directory path.
-	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
-		let mut config = self.config.write().unwrap();
-		config.storage_dir_path = storage_dir_path;
+	pub fn set_storage_dir_path(&mut self, storage_dir_path: String) -> &mut Self {
+		self.config.storage_dir_path = storage_dir_path;
+		self
 	}
 
 	/// Sets the Bitcoin network used.
-	pub fn set_network(&self, network: Network) {
-		let mut config = self.config.write().unwrap();
-		config.network = network;
+	pub fn set_network(&mut self, network: Network) -> &mut Self {
+		self.config.network = network;
+		self
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
-	pub fn set_listening_address(&self, listening_address: NetAddress) {
-		let mut config = self.config.write().unwrap();
-		config.listening_address = Some(listening_address);
+	pub fn set_listening_address(&mut self, listening_address: NetAddress) -> &mut Self {
+		self.config.listening_address = Some(listening_address);
+		self
 	}
 
 	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&self, level: LogLevel) {
-		let mut config = self.config.write().unwrap();
-		config.log_level = level;
+	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
+		self.config.log_level = level;
+		self
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Arc<Node<SqliteStore>> {
-		let storage_dir_path = self.config.read().unwrap().storage_dir_path.clone();
+	pub fn build(&self) -> Node<SqliteStore> {
+		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone()).expect("Failed to create LDK data directory");
 		let kv_store = Arc::new(SqliteStore::new(storage_dir_path.into()));
 		self.build_with_store(kv_store)
@@ -183,8 +188,8 @@ impl Builder {
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Arc<Node<FilesystemStore>> {
-		let storage_dir_path = self.config.read().unwrap().storage_dir_path.clone();
+	pub fn build_with_fs_store(&self) -> Node<FilesystemStore> {
+		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone()).expect("Failed to create LDK data directory");
 		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path.into()));
 		self.build_with_store(kv_store)
@@ -193,29 +198,132 @@ impl Builder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
 		&self, kv_store: Arc<K>,
-	) -> Arc<Node<K>> {
-		let config = Arc::new(self.config.read().unwrap().clone());
+	) -> Node<K> {
+		let config = Arc::new(self.config.clone());
 
-		let entropy_source_config = self.entropy_source_config.read().unwrap();
-		let chain_data_source_config = self.chain_data_source_config.read().unwrap();
-		let gossip_source_config = self.gossip_source_config.read().unwrap();
 		let runtime = Arc::new(RwLock::new(None));
-		Arc::new(build_with_store_internal(
+		build_with_store_internal(
 			config,
-			entropy_source_config.as_ref(),
-			chain_data_source_config.as_ref(),
-			gossip_source_config.as_ref(),
+			self.entropy_source_config.as_ref(),
+			self.chain_data_source_config.as_ref(),
+			self.gossip_source_config.as_ref(),
 			kv_store,
 			runtime,
-		))
+		)
+	}
+}
+
+/// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
+/// the getgo.
+///
+/// ### Defaults
+/// - Wallet entropy is sourced from a `keys_seed` file located under [`Config::storage_dir_path`]
+/// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
+/// - Gossip data is sourced via the peer-to-peer network
+#[derive(Debug)]
+#[cfg(feature = "uniffi")]
+pub struct ArcedNodeBuilder {
+	inner: RwLock<NodeBuilder>,
+}
+
+#[cfg(feature = "uniffi")]
+impl ArcedNodeBuilder {
+	/// Creates a new builder instance with the default configuration.
+	pub fn new() -> Self {
+		let inner = RwLock::new(NodeBuilder::new());
+		Self { inner }
+	}
+
+	/// Creates a new builder instance from an [`Config`].
+	pub fn from_config(config: Config) -> Self {
+		let inner = RwLock::new(NodeBuilder::from_config(config));
+		Self { inner }
+	}
+
+	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
+	///
+	/// If the given file does not exist a new random seed file will be generated and
+	/// stored at the given location.
+	pub fn set_entropy_seed_path(&self, seed_path: String) {
+		self.inner.write().unwrap().set_entropy_seed_path(seed_path);
+	}
+
+	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
+	///
+	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
+	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) {
+		self.inner.write().unwrap().set_entropy_seed_bytes(seed_bytes);
+	}
+
+	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
+	///
+	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+	pub fn set_entropy_bip39_mnemonic(&self, mnemonic: Mnemonic, passphrase: Option<String>) {
+		self.inner.write().unwrap().set_entropy_bip39_mnemonic(mnemonic, passphrase);
+	}
+
+	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
+	pub fn set_esplora_server(&self, esplora_server_url: String) {
+		self.inner.write().unwrap().set_esplora_server(esplora_server_url);
+	}
+
+	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
+	/// network.
+	pub fn set_gossip_source_p2p(&self) {
+		self.inner.write().unwrap().set_gossip_source_p2p();
+	}
+
+	/// Configures the [`Node`] instance to source its gossip data from the given RapidGossipSync
+	/// server.
+	pub fn set_gossip_source_rgs(&self, rgs_server_url: String) {
+		self.inner.write().unwrap().set_gossip_source_rgs(rgs_server_url);
+	}
+
+	/// Sets the used storage directory path.
+	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
+		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
+	}
+
+	/// Sets the Bitcoin network used.
+	pub fn set_network(&self, network: Network) {
+		self.inner.write().unwrap().set_network(network);
+	}
+
+	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
+	pub fn set_listening_address(&self, listening_address: NetAddress) {
+		self.inner.write().unwrap().set_listening_address(listening_address);
+	}
+
+	/// Sets the level at which [`Node`] will log messages.
+	pub fn set_log_level(&self, level: LogLevel) {
+		self.inner.write().unwrap().set_log_level(level);
+	}
+
+	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
+	/// previously configured.
+	pub fn build(&self) -> Arc<Node<SqliteStore>> {
+		Arc::new(self.inner.read().unwrap().build())
+	}
+
+	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
+	/// previously configured.
+	pub fn build_with_fs_store(&self) -> Arc<Node<FilesystemStore>> {
+		Arc::new(self.inner.read().unwrap().build_with_fs_store())
+	}
+
+	/// Builds a [`Node`] instance according to the options previously configured.
+	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
+		&self, kv_store: Arc<K>,
+	) -> Arc<Node<K>> {
+		Arc::new(self.inner.read().unwrap().build_with_store(kv_store))
 	}
 }
 
 /// Builds a [`Node`] instance according to the options previously configured.
-fn build_with_store_internal<'a, K: KVStore + Sync + Send + 'static>(
-	config: Arc<Config>, entropy_source_config: Option<&'a EntropySourceConfig>,
-	chain_data_source_config: Option<&'a ChainDataSourceConfig>,
-	gossip_source_config: Option<&'a GossipSourceConfig>, kv_store: Arc<K>,
+fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
+	config: Arc<Config>, entropy_source_config: Option<&EntropySourceConfig>,
+	chain_data_source_config: Option<&ChainDataSourceConfig>,
+	gossip_source_config: Option<&GossipSourceConfig>, kv_store: Arc<K>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 ) -> Node<K> {
 	let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
