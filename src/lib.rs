@@ -461,7 +461,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 										Arc::clone(&gossip_sync_store),
 										Arc::clone(&gossip_sync_logger),
 										)
-										.expect("Persistence failed");
+										.unwrap_or_else(|e| {
+											log_error!(gossip_sync_logger, "Persistence failed: {}", e);
+											panic!("Persistence failed");
+										});
 								}
 								Err(e) => log_error!(
 									gossip_sync_logger,
@@ -480,6 +483,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
 			let mut stop_listen = self.stop_receiver.clone();
 			let listening_address = listening_address.clone();
+			let listening_logger = Arc::clone(&self.logger);
 
 			let bind_addr = listening_address
 				.to_socket_addrs()
@@ -503,9 +507,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 			runtime.spawn(async move {
 				let listener =
-					tokio::net::TcpListener::bind(bind_addr).await.expect(
-						"Failed to bind to listen address/port - is something else already listening on it?",
-						);
+					tokio::net::TcpListener::bind(bind_addr).await
+										.unwrap_or_else(|e| {
+											log_error!(listening_logger, "Failed to bind to listen address/port - is something else already listening on it?: {}", e);
+											panic!(
+												"Failed to bind to listen address/port - is something else already listening on it?",
+												);
+										});
+
 				loop {
 					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
 					tokio::select! {
@@ -616,7 +625,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 							let unix_time_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
 							io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
-								.expect("Persistence failed");
+								.unwrap_or_else(|e| {
+									log_error!(bcast_logger, "Persistence failed: {}", e);
+									panic!("Persistence failed");
+								});
 						}
 				}
 			}
@@ -642,6 +654,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
 		let background_logger = Arc::clone(&self.logger);
+		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
 		let stop_bp = self.stop_receiver.clone();
 		let sleeper = move |d| {
@@ -672,7 +685,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				true,
 			)
 			.await
-			.expect("Failed to process events");
+			.unwrap_or_else(|e| {
+				log_error!(background_error_logger, "Failed to process events: {}", e);
+				panic!("Failed to process events");
+			});
 		});
 
 		*runtime_lock = Some(runtime);
@@ -733,9 +749,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
 	pub fn event_handled(&self) {
-		self.event_queue
-			.event_handled()
-			.expect("Couldn't mark event handled due to persistence failure");
+		self.event_queue.event_handled().unwrap_or_else(|e| {
+			log_error!(
+				self.logger,
+				"Couldn't mark event handled due to persistence failure: {}",
+				e
+			);
+			panic!("Couldn't mark event handled due to persistence failure");
+		});
 	}
 
 	/// Returns our own node id
