@@ -120,6 +120,7 @@ enum NodeError {
 [Error]
 enum BuildError {
 	"InvalidSeedBytes",
+	"InvalidSeedFile",
 	"InvalidSystemTime",
 	"ReadFailed",
 	"WriteFailed",

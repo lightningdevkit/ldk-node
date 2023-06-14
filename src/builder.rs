@@ -72,8 +72,10 @@ enum GossipSourceConfig {
 /// [`Node`]: crate::Node
 #[derive(Debug, Clone)]
 pub enum BuildError {
-	/// The given seed bytes are invalid, e.g, are of invalid length.
+	/// The given seed bytes are invalid, e.g., have invalid length.
 	InvalidSeedBytes,
+	/// The given seed file is invalid, e.g., has invalid length, or could not be read.
+	InvalidSeedFile,
 	/// The current system time is invalid, clocks might have gone backwards.
 	InvalidSystemTime,
 	/// We failed to read data from the [`KVStore`].
@@ -92,6 +94,7 @@ impl fmt::Display for BuildError {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match *self {
 			Self::InvalidSeedBytes => write!(f, "Given seed bytes are invalid."),
+			Self::InvalidSeedFile => write!(f, "Given seed file is invalid or could not be read."),
 			Self::InvalidSystemTime => {
 				write!(f, "System time is invalid. Clocks might have gone back in time.")
 			}
@@ -389,7 +392,8 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let seed_bytes = match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => bytes.clone(),
 		Some(EntropySourceConfig::SeedFile(seed_path)) => {
-			io::utils::read_or_generate_seed_file(seed_path)
+			io::utils::read_or_generate_seed_file(seed_path, Arc::clone(&logger))
+				.map_err(|_| BuildError::InvalidSeedFile)?
 		}
 		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
 			Some(passphrase) => mnemonic.to_seed(passphrase),
@@ -398,7 +402,8 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		None => {
 			// Default to read or generate from the default location generate a seed file.
 			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			io::utils::read_or_generate_seed_file(&seed_path)
+			io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
+				.map_err(|_| BuildError::InvalidSeedFile)?
 		}
 	};
 

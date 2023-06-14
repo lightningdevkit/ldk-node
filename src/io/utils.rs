@@ -39,25 +39,53 @@ pub fn generate_entropy_mnemonic() -> Mnemonic {
 	Mnemonic::from_entropy(&entropy).unwrap()
 }
 
-pub(crate) fn read_or_generate_seed_file(keys_seed_path: &str) -> [u8; WALLET_KEYS_SEED_LEN] {
+pub(crate) fn read_or_generate_seed_file<L: Deref>(
+	keys_seed_path: &str, logger: L,
+) -> std::io::Result<[u8; WALLET_KEYS_SEED_LEN]>
+where
+	L::Target: Logger,
+{
 	if Path::new(&keys_seed_path).exists() {
-		let seed = fs::read(keys_seed_path).expect("Failed to read keys seed file");
-		assert_eq!(
-			seed.len(),
-			WALLET_KEYS_SEED_LEN,
-			"Failed to read keys seed file: unexpected length"
-		);
+		let seed = fs::read(keys_seed_path).map_err(|e| {
+			log_error!(logger, "Failed to read keys seed file: {}", keys_seed_path);
+			e
+		})?;
+
+		if seed.len() != WALLET_KEYS_SEED_LEN {
+			log_error!(
+				logger,
+				"Failed to read keys seed file due to invalid length: {}",
+				keys_seed_path
+			);
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"Failed to read keys seed file due to invalid length",
+			));
+		}
+
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
 		key.copy_from_slice(&seed);
-		key
+		Ok(key)
 	} else {
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
 		thread_rng().fill_bytes(&mut key);
 
-		let mut f = fs::File::create(keys_seed_path).expect("Failed to create keys seed file");
-		f.write_all(&key).expect("Failed to write node keys seed to disk");
-		f.sync_all().expect("Failed to sync node keys seed to disk");
-		key
+		let mut f = fs::File::create(keys_seed_path).map_err(|e| {
+			log_error!(logger, "Failed to create keys seed file: {}", keys_seed_path);
+			e
+		})?;
+
+		f.write_all(&key).map_err(|e| {
+			log_error!(logger, "Failed to write node keys seed to disk: {}", keys_seed_path);
+			e
+		})?;
+
+		f.sync_all().map_err(|e| {
+			log_error!(logger, "Failed to sync node keys seed to disk: {}", keys_seed_path);
+			e
+		})?;
+
+		Ok(key)
 	}
 }
 
