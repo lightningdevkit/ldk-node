@@ -311,9 +311,12 @@ where
 								&temporary_channel_id,
 								&counterparty_node_id,
 							)
-							.expect(
-								"Failed to force close channel after funding generation failed",
-							);
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to force close channel after funding generation failed: {:?}", e);
+								panic!(
+									"Failed to force close channel after funding generation failed"
+								);
+							});
 					}
 				}
 			}
@@ -341,7 +344,10 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_hash)
 						};
-						self.payment_store.update(&update).expect("Failed to access payment store");
+						self.payment_store.update(&update).unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to access payment store: {}", e);
+							panic!("Failed to access payment store");
+						});
 						return;
 					}
 				}
@@ -379,7 +385,10 @@ where
 						status: Some(PaymentStatus::Failed),
 						..PaymentDetailsUpdate::new(payment_hash)
 					};
-					self.payment_store.update(&update).expect("Failed to access payment store");
+					self.payment_store.update(&update).unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						panic!("Failed to access payment store");
+					});
 				}
 			}
 			LdkEvent::PaymentClaimed {
@@ -459,15 +468,19 @@ where
 
 				self.event_queue
 					.add_event(Event::PaymentReceived { payment_hash, amount_msat })
-					.expect("Failed to push to event queue");
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					});
 			}
 			LdkEvent::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 				if let Some(mut payment) = self.payment_store.get(&payment_hash) {
 					payment.preimage = Some(payment_preimage);
 					payment.status = PaymentStatus::Succeeded;
-					self.payment_store
-						.insert(payment.clone())
-						.expect("Failed to access payment store");
+					self.payment_store.insert(payment.clone()).unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						panic!("Failed to access payment store");
+					});
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
@@ -484,7 +497,10 @@ where
 				}
 				self.event_queue
 					.add_event(Event::PaymentSuccessful { payment_hash })
-					.expect("Failed to push to event queue");
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					});
 			}
 			LdkEvent::PaymentFailed { payment_hash, .. } => {
 				log_info!(
@@ -497,10 +513,16 @@ where
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_hash)
 				};
-				self.payment_store.update(&update).expect("Failed to access payment store");
-				self.event_queue
-					.add_event(Event::PaymentFailed { payment_hash })
-					.expect("Failed to push to event queue");
+				self.payment_store.update(&update).unwrap_or_else(|e| {
+					log_error!(self.logger, "Failed to access payment store: {}", e);
+					panic!("Failed to access payment store");
+				});
+				self.event_queue.add_event(Event::PaymentFailed { payment_hash }).unwrap_or_else(
+					|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					},
+				);
 			}
 
 			LdkEvent::PaymentPathSuccessful { .. } => {}
@@ -526,8 +548,11 @@ where
 			}
 			LdkEvent::SpendableOutputs { outputs } => {
 				// TODO: We should eventually remember the outputs and supply them to the wallet's coin selection, once BDK allows us to do so.
-				let destination_address =
-					self.wallet.get_new_address().expect("Failed to get destination address");
+				let destination_address = self.wallet.get_new_address().unwrap_or_else(|e| {
+					log_error!(self.logger, "Failed to get destination address: {}", e);
+					panic!("Failed to get destination address");
+				});
+
 				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
 				let tx_feerate =
 					self.wallet.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
@@ -676,7 +701,10 @@ where
 						counterparty_node_id,
 						funding_txo,
 					})
-					.expect("Failed to push to event queue");
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					});
 			}
 			LdkEvent::ChannelReady {
 				channel_id, user_channel_id, counterparty_node_id, ..
@@ -692,7 +720,10 @@ where
 						channel_id: ChannelId(channel_id),
 						user_channel_id: UserChannelId(user_channel_id),
 					})
-					.expect("Failed to push to event queue");
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					});
 			}
 			LdkEvent::ChannelClosed { channel_id, reason, user_channel_id } => {
 				log_info!(
@@ -706,7 +737,10 @@ where
 						channel_id: ChannelId(channel_id),
 						user_channel_id: UserChannelId(user_channel_id),
 					})
-					.expect("Failed to push to event queue");
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					});
 			}
 			LdkEvent::DiscardFunding { .. } => {}
 			LdkEvent::HTLCIntercepted { .. } => {}
