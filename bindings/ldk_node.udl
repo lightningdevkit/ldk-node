@@ -125,6 +125,7 @@ enum BuildError {
 	"WriteFailed",
 	"StoragePathAccessFailed",
 	"WalletSetupFailed",
+	"LoggerSetupFailed",
 };
 
 [Enum]

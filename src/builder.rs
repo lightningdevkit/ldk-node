@@ -84,6 +84,8 @@ pub enum BuildError {
 	StoragePathAccessFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
+	/// We failed to setup the logger.
+	LoggerSetupFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -97,6 +99,7 @@ impl fmt::Display for BuildError {
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
+			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
 		}
 	}
 }
@@ -377,7 +380,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		config.storage_dir_path,
 		chrono::offset::Local::now().format("%Y_%m_%d")
 	);
-	let logger = Arc::new(FilesystemLogger::new(log_file_path.clone(), config.log_level));
+	let logger = Arc::new(
+		FilesystemLogger::new(log_file_path.clone(), config.log_level)
+			.map_err(|_| BuildError::LoggerSetupFailed)?,
+	);
 
 	// Initialize the on-chain wallet and chain access
 	let seed_bytes = match entropy_source_config {
