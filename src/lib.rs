@@ -171,11 +171,11 @@ const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
-// number of blocks after which BDK stops looking for scripts belonging to the wallet.
+// number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
 const BDK_CLIENT_STOP_GAP: usize = 20;
 
 // The number of concurrent requests made against the API provider.
-const BDK_CLIENT_CONCURRENCY: u8 = 8;
+const BDK_CLIENT_CONCURRENCY: u8 = 4;
 
 // The default Esplora server we're using.
 const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
