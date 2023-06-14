@@ -470,6 +470,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		cur_time.as_secs(),
 		cur_time.subsec_nanos(),
 		Arc::clone(&wallet),
+		Arc::clone(&logger),
 	));
 
 	// Initialize the network graph, scorer, and router

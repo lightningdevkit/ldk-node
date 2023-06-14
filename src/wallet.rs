@@ -337,6 +337,7 @@ where
 {
 	inner: KeysManager,
 	wallet: Arc<Wallet<D, L>>,
+	logger: L,
 }
 
 impl<D, L: Deref> WalletKeysManager<D, L>
@@ -350,10 +351,10 @@ where
 	/// `starting_time_nanos`.
 	pub fn new(
 		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
-		wallet: Arc<Wallet<D, L>>,
+		wallet: Arc<Wallet<D, L>>, logger: L,
 	) -> Self {
 		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
-		Self { inner, wallet }
+		Self { inner, wallet, logger }
 	}
 
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
@@ -450,20 +451,35 @@ where
 	}
 
 	fn get_destination_script(&self) -> Script {
-		let address =
-			self.wallet.get_new_address().expect("Failed to retrieve new address from wallet.");
+		let address = self.wallet.get_new_address().unwrap_or_else(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			panic!("Failed to retrieve new address from wallet");
+		});
 		address.script_pubkey()
 	}
 
 	fn get_shutdown_scriptpubkey(&self) -> ShutdownScript {
-		let address =
-			self.wallet.get_new_address().expect("Failed to retrieve new address from wallet.");
+		let address = self.wallet.get_new_address().unwrap_or_else(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			panic!("Failed to retrieve new address from wallet");
+		});
+
 		match address.payload {
 			bitcoin::util::address::Payload::WitnessProgram { version, program } => {
-				return ShutdownScript::new_witness_program(version, &program)
-					.expect("Invalid shutdown script.");
+				return ShutdownScript::new_witness_program(version, &program).unwrap_or_else(
+					|e| {
+						log_error!(self.logger, "Invalid shutdown script: {:?}", e);
+						panic!("Invalid shutdown script.");
+					},
+				);
 			}
-			_ => panic!("Tried to use a non-witness address. This must not ever happen."),
+			_ => {
+				log_error!(
+					self.logger,
+					"Tried to use a non-witness address. This must never happen."
+				);
+				panic!("Tried to use a non-witness address. This must never happen.");
+			}
 		}
 	}
 }
