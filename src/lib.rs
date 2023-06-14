@@ -163,7 +163,6 @@ uniffi::include_scaffolding!("ldk_node");
 // Config defaults
 const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
-const DEFAULT_LISTENING_ADDR: &str = "0.0.0.0:9735";
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
@@ -206,14 +205,14 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | Parameter                              | Value            |
 /// |----------------------------------------|------------------|
 /// | `storage_dir_path`                     | /tmp/ldk_node/   |
-/// | `network`                              | `Bitcoin         |
-/// | `listening_address`                    | 0.0.0.0:9735     |
+/// | `network`                              | Bitcoin          |
+/// | `listening_address`                    | None             |
 /// | `default_cltv_expiry_delta`            | 144              |
-/// | `onchain_wallet_sync_interval_secs`    | 60               |
-/// | `wallet_sync_interval_secs`            | 20               |
+/// | `onchain_wallet_sync_interval_secs`    | 80               |
+/// | `wallet_sync_interval_secs`            | 30               |
 /// | `fee_rate_cache_update_interval_secs`  | 600              |
 /// | `trusted_peers_0conf`                  | []               |
-/// | `log_level`                            | `Debug`          |
+/// | `log_level`                            | Debug            |
 ///
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
@@ -253,7 +252,7 @@ impl Default for Config {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			network: DEFAULT_NETWORK,
-			listening_address: Some(DEFAULT_LISTENING_ADDR.parse().unwrap()),
+			listening_address: None,
 			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
 			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
 			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
