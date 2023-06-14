@@ -273,7 +273,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	stop_sender: tokio::sync::watch::Sender<()>,
 	stop_receiver: tokio::sync::watch::Receiver<()>,
 	config: Arc<Config>,
-	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
+	wallet: Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager<K>>,
