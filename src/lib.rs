@@ -483,9 +483,23 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 			let bind_addr = listening_address
 				.to_socket_addrs()
-				.expect("Unable to resolve listing address")
+				.map_err(|_| {
+					log_error!(
+						self.logger,
+						"Unable to resolve listing address: {:?}",
+						listening_address
+					);
+					Error::InvalidNetAddress
+				})?
 				.next()
-				.expect("Unable to resolve listing address");
+				.ok_or_else(|| {
+					log_error!(
+						self.logger,
+						"Unable to resolve listing address: {:?}",
+						listening_address
+					);
+					Error::InvalidNetAddress
+				})?;
 
 			runtime.spawn(async move {
 				let listener =
