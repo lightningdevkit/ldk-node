@@ -105,6 +105,8 @@ use error::Error;
 pub use event::Event;
 pub use types::NetAddress;
 
+pub use io::utils::generate_entropy_mnemonic;
+
 #[cfg(feature = "uniffi")]
 use {bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
 

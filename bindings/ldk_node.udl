@@ -1,4 +1,5 @@
 namespace ldk_node {
+	Mnemonic generate_entropy_mnemonic();
 };
 
 dictionary Config {
