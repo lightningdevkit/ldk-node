@@ -57,19 +57,16 @@ impl_writeable_tlv_based_enum!(PaymentDirection,
 pub enum PaymentStatus {
 	/// The payment is still pending.
 	Pending,
-	/// The sending of the payment failed and is safe to be retried.
-	SendingFailed,
 	/// The payment suceeded.
 	Succeeded,
-	/// The payment failed and is not retryable.
+	/// The payment failed.
 	Failed,
 }
 
 impl_writeable_tlv_based_enum!(PaymentStatus,
 	(0, Pending) => {},
-	(2, SendingFailed) => {},
-	(4, Succeeded) => {},
-	(6, Failed) => {};
+	(2, Succeeded) => {},
+	(4, Failed) => {};
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]

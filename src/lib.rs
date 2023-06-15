@@ -1518,7 +1518,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
 
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
-			if payment.status != PaymentStatus::SendingFailed {
+			if payment.status == PaymentStatus::Pending
+				|| payment.status == PaymentStatus::Succeeded
+			{
 				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
 				return Err(Error::DuplicatePayment);
 			}
@@ -1565,7 +1567,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							secret: payment_secret,
 							amount_msat: invoice.amount_milli_satoshis(),
 							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::SendingFailed,
+							status: PaymentStatus::Failed,
 						};
 
 						self.payment_store.insert(payment)?;
@@ -1601,7 +1603,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
-			if payment.status != PaymentStatus::SendingFailed {
+			if payment.status == PaymentStatus::Pending
+				|| payment.status == PaymentStatus::Succeeded
+			{
 				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
 				return Err(Error::DuplicatePayment);
 			}
@@ -1668,7 +1672,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							secret: payment_secret,
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::SendingFailed,
+							status: PaymentStatus::Failed,
 						};
 						self.payment_store.insert(payment)?;
 
@@ -1692,7 +1696,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
 
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
-			if payment.status != PaymentStatus::SendingFailed {
+			if payment.status == PaymentStatus::Pending
+				|| payment.status == PaymentStatus::Succeeded
+			{
 				log_error!(self.logger, "Payment error: must not send duplicate payments.");
 				return Err(Error::DuplicatePayment);
 			}
@@ -1741,7 +1747,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							hash: payment_hash,
 							preimage: Some(payment_preimage),
 							secret: None,
-							status: PaymentStatus::SendingFailed,
+							status: PaymentStatus::Failed,
 							direction: PaymentDirection::Outbound,
 							amount_msat: Some(amount_msat),
 						};

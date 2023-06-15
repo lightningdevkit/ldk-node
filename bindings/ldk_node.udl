@@ -128,7 +128,6 @@ enum PaymentDirection {
 
 enum PaymentStatus {
 	"Pending",
-	"SendingFailed",
 	"Succeeded",
 	"Failed",
 };
