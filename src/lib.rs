@@ -48,7 +48,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = NetAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.connect_open_channel(node_id, node_addr, 10000, None, false).unwrap();
+//! 	node.connect_open_channel(node_id, node_addr, 10000, None, None, false).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -137,7 +137,7 @@ use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 
-use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
+use lightning::util::config::{ChannelConfig, ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
 use lightning::util::ser::ReadableArgs;
 
@@ -1371,7 +1371,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// Returns a temporary channel id.
 	pub fn connect_open_channel(
 		&self, node_id: PublicKey, address: NetAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, announce_channel: bool,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		announce_channel: bool,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1401,15 +1402,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		})?;
 
 		let user_config = UserConfig {
-			channel_handshake_limits: ChannelHandshakeLimits {
-				// lnd's max to_self_delay is 2016, so we want to be compatible.
-				their_to_self_delay: 2016,
-				..Default::default()
-			},
+			channel_handshake_limits: Default::default(),
 			channel_handshake_config: ChannelHandshakeConfig {
 				announced_channel: announce_channel,
 				..Default::default()
 			},
+			channel_config: channel_config.unwrap_or_default(),
 			..Default::default()
 		};
 
@@ -1508,6 +1506,16 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			Ok(_) => Ok(()),
 			Err(_) => Err(Error::ChannelClosingFailed),
 		}
+	}
+
+	/// Update the config for a previously opened channel.
+	pub fn update_channel_config(
+		&self, channel_id: &ChannelId, counterparty_node_id: PublicKey,
+		channel_config: &ChannelConfig,
+	) -> Result<(), Error> {
+		self.channel_manager
+			.update_channel_config(&counterparty_node_id, &[channel_id.0], channel_config)
+			.map_err(|_| Error::ChannelConfigUpdateFailed)
 	}
 
 	/// Send a payement given an invoice.

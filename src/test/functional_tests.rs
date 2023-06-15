@@ -87,6 +87,7 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 			node_b.listening_address().unwrap().into(),
 			funding_amount_sat,
 			Some(push_msat),
+			None,
 			true,
 		)
 		.unwrap();
@@ -311,7 +312,8 @@ fn channel_open_fails_when_funds_insufficient() {
 			node_b.listening_address().unwrap().into(),
 			120000,
 			None,
-			true,
+			None,
+			true
 		)
 	);
 }
