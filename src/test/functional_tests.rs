@@ -1,13 +1,12 @@
+use crate::builder::NodeBuilder;
 use crate::io::KVStore;
 use crate::test::utils::*;
 use crate::test::utils::{expect_event, random_config};
-use crate::{Builder, Error, Event, Node, PaymentDirection, PaymentStatus};
+use crate::{Error, Event, Node, PaymentDirection, PaymentStatus};
 
 use bitcoin::Amount;
 use electrsd::bitcoind::BitcoinD;
 use electrsd::ElectrsD;
-
-use std::sync::Arc;
 
 #[test]
 fn channel_full_cycle() {
@@ -15,14 +14,14 @@ fn channel_full_cycle() {
 	println!("== Node A ==");
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config_a = random_config();
-	let builder_a = Builder::from_config(config_a);
+	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build();
 	node_a.start().unwrap();
 
 	println!("\n== Node B ==");
 	let config_b = random_config();
-	let builder_b = Builder::from_config(config_b);
+	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build();
 	node_b.start().unwrap();
@@ -36,7 +35,7 @@ fn channel_full_cycle_0conf() {
 	println!("== Node A ==");
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config_a = random_config();
-	let builder_a = Builder::from_config(config_a);
+	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build();
 	node_a.start().unwrap();
@@ -45,7 +44,7 @@ fn channel_full_cycle_0conf() {
 	let mut config_b = random_config();
 	config_b.trusted_peers_0conf.push(node_a.node_id());
 
-	let builder_b = Builder::from_config(config_b);
+	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url.clone());
 	let node_b = builder_b.build();
 
@@ -55,8 +54,7 @@ fn channel_full_cycle_0conf() {
 }
 
 fn do_channel_full_cycle<K: KVStore + Sync + Send>(
-	node_a: Arc<Node<K>>, node_b: Arc<Node<K>>, bitcoind: &BitcoinD, electrsd: &ElectrsD,
-	allow_0conf: bool,
+	node_a: Node<K>, node_b: Node<K>, bitcoind: &BitcoinD, electrsd: &ElectrsD, allow_0conf: bool,
 ) {
 	let addr_a = node_a.new_funding_address().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
@@ -277,7 +275,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	println!("== Node A ==");
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config_a = random_config();
-	let builder_a = Builder::from_config(config_a);
+	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build();
 	node_a.start().unwrap();
@@ -285,7 +283,7 @@ fn channel_open_fails_when_funds_insufficient() {
 
 	println!("\n== Node B ==");
 	let config_b = random_config();
-	let builder_b = Builder::from_config(config_b);
+	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build();
 	node_b.start().unwrap();
@@ -322,7 +320,7 @@ fn channel_open_fails_when_funds_insufficient() {
 fn connect_to_public_testnet_esplora() {
 	let mut config = random_config();
 	config.network = bitcoin::Network::Testnet;
-	let builder = Builder::from_config(config);
+	let mut builder = NodeBuilder::from_config(config);
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 	let node = builder.build();
 	node.start().unwrap();
@@ -335,7 +333,7 @@ fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config = random_config();
-	let builder = Builder::from_config(config.clone());
+	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
 	let node = builder.build();
 	let expected_node_id = node.node_id();
@@ -365,7 +363,7 @@ fn start_stop_reinit() {
 	assert_eq!(node.stop(), Err(Error::NotRunning));
 	drop(node);
 
-	let new_builder = Builder::from_config(config);
+	let mut new_builder = NodeBuilder::from_config(config);
 	new_builder.set_esplora_server(esplora_url);
 	let reinitialized_node = builder.build();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
@@ -391,7 +389,7 @@ fn start_stop_reinit_fs_store() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config = random_config();
-	let builder = Builder::from_config(config.clone());
+	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
 	let node = builder.build_with_fs_store();
 	let expected_node_id = node.node_id();
@@ -418,7 +416,7 @@ fn start_stop_reinit_fs_store() {
 	assert_eq!(node.stop(), Err(Error::NotRunning));
 	drop(node);
 
-	let new_builder = Builder::from_config(config);
+	let mut new_builder = NodeBuilder::from_config(config);
 	new_builder.set_esplora_server(esplora_url);
 	let reinitialized_node = builder.build_with_fs_store();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
@@ -445,14 +443,14 @@ fn onchain_spend_receive() {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	let config_a = random_config();
-	let builder_a = Builder::from_config(config_a);
+	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
 	let config_b = random_config();
-	let builder_b = Builder::from_config(config_b);
+	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build();
 	node_b.start().unwrap();
@@ -500,7 +498,7 @@ fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config = random_config();
-	let builder = Builder::from_config(config.clone());
+	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
 	let node = builder.build();
 
