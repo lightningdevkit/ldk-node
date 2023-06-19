@@ -30,17 +30,17 @@ lipo target/aarch64-apple-darwin/release-smaller/libldk_node.a target/x86_64-app
 
 $UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language swift -o "$BINDINGS_DIR" || exit 1
 
-swiftc -module-name ldk_node -emit-library -o "$BINDINGS_DIR"/libldk_node.dylib -emit-module -emit-module-path "$BINDINGS_DIR" -parse-as-library -L ./target/release-smaller -lldk_node -Xcc -fmodule-map-file="$BINDINGS_DIR"/ldk_nodeFFI.modulemap "$BINDINGS_DIR"/ldk_node.swift -v || exit 1
+swiftc -module-name LDKNode -emit-library -o "$BINDINGS_DIR"/libldk_node.dylib -emit-module -emit-module-path "$BINDINGS_DIR" -parse-as-library -L ./target/release-smaller -lldk_node -Xcc -fmodule-map-file="$BINDINGS_DIR"/LDKNodeFFI.modulemap "$BINDINGS_DIR"/LDKNode.swift -v || exit 1
 
 # Create xcframework from bindings Swift file and libs
-mkdir -p "$BINDINGS_DIR"/Sources/LightningDevKitNode || exit 1
-mv "$BINDINGS_DIR"/ldk_node.swift "$BINDINGS_DIR"/Sources/LightningDevKitNode/LightningDevKitNode.swift || exit 1
-cp "$BINDINGS_DIR"/ldk_nodeFFI.h "$BINDINGS_DIR"/ldk_nodeFFI.xcframework/ios-arm64/ldk_nodeFFI.framework/Headers || exit 1
-cp "$BINDINGS_DIR"/ldk_nodeFFI.h "$BINDINGS_DIR"/ldk_nodeFFI.xcframework/ios-arm64_x86_64-simulator/ldk_nodeFFI.framework/Headers || exit 1
-cp "$BINDINGS_DIR"/ldk_nodeFFI.h "$BINDINGS_DIR"/ldk_nodeFFI.xcframework/macos-arm64_x86_64/ldk_nodeFFI.framework/Headers || exit 1
-cp target/aarch64-apple-ios/release-smaller/libldk_node.a "$BINDINGS_DIR"/ldk_nodeFFI.xcframework/ios-arm64/ldk_nodeFFI.framework/ldk_nodeFFI || exit 1
-cp target/lipo-ios-sim/release-smaller/libldk_node.a "$BINDINGS_DIR"/ldk_nodeFFI.xcframework/ios-arm64_x86_64-simulator/ldk_nodeFFI.framework/ldk_nodeFFI || exit 1
-cp target/lipo-macos/release-smaller/libldk_node.a "$BINDINGS_DIR"/ldk_nodeFFI.xcframework/macos-arm64_x86_64/ldk_nodeFFI.framework/ldk_nodeFFI || exit 1
-# rm "$BINDINGS_DIR"/ldk_nodeFFI.h || exit 1
-# rm "$BINDINGS_DIR"/ldk_nodeFFI.modulemap || exit 1
+mkdir -p "$BINDINGS_DIR"/Sources/LDKNode || exit 1
+mv "$BINDINGS_DIR"/LDKNode.swift "$BINDINGS_DIR"/Sources/LDKNode/LDKNode.swift || exit 1
+cp "$BINDINGS_DIR"/LDKNodeFFI.h "$BINDINGS_DIR"/LDKNodeFFI.xcframework/ios-arm64/LDKNodeFFI.framework/Headers || exit 1
+cp "$BINDINGS_DIR"/LDKNodeFFI.h "$BINDINGS_DIR"/LDKNodeFFI.xcframework/ios-arm64_x86_64-simulator/LDKNodeFFI.framework/Headers || exit 1
+cp "$BINDINGS_DIR"/LDKNodeFFI.h "$BINDINGS_DIR"/LDKNodeFFI.xcframework/macos-arm64_x86_64/LDKNodeFFI.framework/Headers || exit 1
+cp target/aarch64-apple-ios/release-smaller/libldk_node.a "$BINDINGS_DIR"/LDKNodeFFI.xcframework/ios-arm64/LDKNodeFFI.framework/LDKNodeFFI || exit 1
+cp target/lipo-ios-sim/release-smaller/libldk_node.a "$BINDINGS_DIR"/LDKNodeFFI.xcframework/ios-arm64_x86_64-simulator/LDKNodeFFI.framework/LDKNodeFFI || exit 1
+cp target/lipo-macos/release-smaller/libldk_node.a "$BINDINGS_DIR"/LDKNodeFFI.xcframework/macos-arm64_x86_64/LDKNodeFFI.framework/LDKNodeFFI || exit 1
+# rm "$BINDINGS_DIR"/LDKNodeFFI.h || exit 1
+# rm "$BINDINGS_DIR"/LDKNodeFFI.modulemap || exit 1
 echo finished successfully!

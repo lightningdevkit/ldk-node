@@ -12,8 +12,8 @@ let package = Package(
     products: [
         // Products define the executables and libraries a package produces, and make them visible to other packages.
         .library(
-            name: "LightningDevKitNode",
-            targets: ["ldk_nodeFFI", "LightningDevKitNode"]),
+            name: "LDKNode",
+            targets: ["LDKNodeFFI", "LDKNode"]),
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
@@ -23,13 +23,13 @@ let package = Package(
         // Targets are the basic building blocks of a package. A target can define a module or a test suite.
         // Targets can depend on other targets in this package, and on products in packages this package depends on.
 //        .binaryTarget(
-//            name: "ldk_nodeFFI",
-//            url: "https://github.com/lightningdevkit/ldk-node/releases/download/0.3.0/ldk_nodeFFI.xcframework.zip",
+//            name: "LDKNodeFFI",
+//            url: "https://github.com/lightningdevkit/ldk-node/releases/download/0.3.0/LDKNodeFFI.xcframework.zip",
 //            checksum: "<TBD>"),
-        .binaryTarget(name: "ldk_nodeFFI", path: "./ldk_nodeFFI.xcframework"),
+        .binaryTarget(name: "LDKNodeFFI", path: "./LDKNodeFFI.xcframework"),
         .target(
-            name: "LightningDevKitNode",
-            dependencies: ["ldk_nodeFFI"]),
+            name: "LDKNode",
+            dependencies: ["LDKNodeFFI"]),
 //        .testTarget(
 //            name: "LightningDevKitNodeTests",
 //            dependencies: ["LightningDevKitNode"]),
