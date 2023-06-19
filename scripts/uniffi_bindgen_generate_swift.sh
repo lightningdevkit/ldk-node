@@ -8,10 +8,10 @@ $UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language swift -o "$BINDING
 mkdir -p $BINDINGS_DIR
 
 # Install rust target toolchains
-rustup install nightly-x86_64-apple-darwin
-rustup component add rust-src --toolchain nightly-x86_64-apple-darwin
+rustup install nightly-2023-04-10
+rustup component add rust-src --toolchain nightly-2023-04-10
 rustup target add aarch64-apple-ios x86_64-apple-ios
-rustup target add aarch64-apple-ios-sim --toolchain nightly
+rustup target add aarch64-apple-ios-sim --toolchain nightly-2023-04-10
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
 # Build rust target libs
@@ -20,7 +20,7 @@ cargo build --profile release-smaller --features uniffi --target x86_64-apple-da
 cargo build --profile release-smaller --features uniffi --target aarch64-apple-darwin || exit 1
 cargo build --profile release-smaller --features uniffi --target x86_64-apple-ios || exit 1
 cargo build --profile release-smaller --features uniffi --target aarch64-apple-ios || exit 1
-cargo +nightly build --release --features uniffi --target aarch64-apple-ios-sim || exit 1
+cargo +nightly-2023-04-10 build --release --features uniffi --target aarch64-apple-ios-sim || exit 1
 
 # Combine ios-sim and apple-darwin (macos) libs for x86_64 and aarch64 (m1)
 mkdir -p target/lipo-ios-sim/release-smaller || exit 1
