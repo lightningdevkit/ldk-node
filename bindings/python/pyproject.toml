@@ -1,0 +1,21 @@
+[project]
+name = "ldk_node"
+version = "0.1-alpha.1"
+authors = [
+  { name="Elias Rohrer", email="dev@tnull.de" },
+]
+description = "A ready-to-go Lightning node library built using LDK and BDK."
+readme = "README.md"
+requires-python = ">=3.6"
+classifiers = [
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Security :: Cryptography",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+"Homepage" = "https://lightningdevkit.org/"
+"Github" = "https://github.com/lightningdevkit/ldk-node"
+"Bug Tracker" = "https://github.com/lightningdevkit/ldk-node/issues"
