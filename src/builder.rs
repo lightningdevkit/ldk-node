@@ -202,6 +202,12 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Sets the log dir path if logs need to live separate from the storage directory path.
+	pub fn set_log_dir_path(&mut self, log_dir_path: String) -> &mut Self {
+		self.config.log_dir_path = Some(log_dir_path);
+		self
+	}
+
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&mut self, network: Network) -> &mut Self {
 		self.config.network = network;
@@ -329,6 +335,11 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
 	}
 
+	/// Sets the log dir path if logs need to live separate from the storage directory path.
+	pub fn set_log_dir_path(&self, log_dir_path: String) {
+		self.inner.write().unwrap().set_log_dir_path(log_dir_path);
+	}
+
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&self, network: Network) {
 		self.inner.write().unwrap().set_network(network);
@@ -377,10 +388,15 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let bdk_data_dir = format!("{}/bdk", config.storage_dir_path);
 	fs::create_dir_all(bdk_data_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
 
+	let log_dir = match &config.log_dir_path {
+		Some(log_dir) => String::from(log_dir),
+		None => config.storage_dir_path.clone() + "/logs",
+	};
+
 	// Initialize the Logger
 	let log_file_path = format!(
-		"{}/logs/ldk_node_{}.log",
-		config.storage_dir_path,
+		"{}/ldk_node_{}.log",
+                log_dir,
 		chrono::offset::Local::now().format("%Y_%m_%d")
 	);
 	let logger = Arc::new(
