@@ -3,15 +3,15 @@ namespace ldk_node {
 };
 
 dictionary Config {
-	string storage_dir_path;
-	Network network;
-	NetAddress? listening_address;
-	u32 default_cltv_expiry_delta;
-	u64 onchain_wallet_sync_interval_secs;
-	u64 wallet_sync_interval_secs;
-	u64 fee_rate_cache_update_interval_secs;
-	LogLevel log_level;
-	sequence<PublicKey> trusted_peers_0conf;
+	string storage_dir_path = "/tmp/ldk_node/";
+	Network network = "Bitcoin";
+	NetAddress? listening_address = null;
+	u32 default_cltv_expiry_delta = 144;
+	u64 onchain_wallet_sync_interval_secs = 80;
+	u64 wallet_sync_interval_secs = 30;
+	u64 fee_rate_cache_update_interval_secs = 600;
+	LogLevel log_level = "Debug";
+	sequence<PublicKey> trusted_peers_0conf = [];
 };
 
 interface Builder {
