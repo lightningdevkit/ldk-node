@@ -324,7 +324,6 @@ fn connect_to_public_testnet_esplora() {
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 	let node = builder.build().unwrap();
 	node.start().unwrap();
-	node.sync_wallets().unwrap();
 	node.stop().unwrap();
 }
 
