@@ -23,7 +23,7 @@ fn main() {
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
 
-	let node = builder.build();
+	let node = builder.build().unwrap();
 
 	node.start().unwrap();
 

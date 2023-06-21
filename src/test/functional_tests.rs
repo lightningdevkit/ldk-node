@@ -16,14 +16,14 @@ fn channel_full_cycle() {
 	let config_a = random_config();
 	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build();
+	let node_a = builder_a.build().unwrap();
 	node_a.start().unwrap();
 
 	println!("\n== Node B ==");
 	let config_b = random_config();
 	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
-	let node_b = builder_b.build();
+	let node_b = builder_b.build().unwrap();
 	node_b.start().unwrap();
 
 	do_channel_full_cycle(node_a, node_b, &bitcoind, &electrsd, false);
@@ -37,7 +37,7 @@ fn channel_full_cycle_0conf() {
 	let config_a = random_config();
 	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build();
+	let node_a = builder_a.build().unwrap();
 	node_a.start().unwrap();
 
 	println!("\n== Node B ==");
@@ -46,7 +46,7 @@ fn channel_full_cycle_0conf() {
 
 	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url.clone());
-	let node_b = builder_b.build();
+	let node_b = builder_b.build().unwrap();
 
 	node_b.start().unwrap();
 
@@ -277,7 +277,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	let config_a = random_config();
 	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build();
+	let node_a = builder_a.build().unwrap();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
@@ -285,7 +285,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	let config_b = random_config();
 	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
-	let node_b = builder_b.build();
+	let node_b = builder_b.build().unwrap();
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
@@ -322,9 +322,8 @@ fn connect_to_public_testnet_esplora() {
 	config.network = bitcoin::Network::Testnet;
 	let mut builder = NodeBuilder::from_config(config);
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
-	let node = builder.build();
+	let node = builder.build().unwrap();
 	node.start().unwrap();
-	node.sync_wallets().unwrap();
 	node.stop().unwrap();
 }
 
@@ -335,7 +334,7 @@ fn start_stop_reinit() {
 	let config = random_config();
 	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
-	let node = builder.build();
+	let node = builder.build().unwrap();
 	let expected_node_id = node.node_id();
 
 	let funding_address = node.new_funding_address().unwrap();
@@ -365,7 +364,7 @@ fn start_stop_reinit() {
 
 	let mut new_builder = NodeBuilder::from_config(config);
 	new_builder.set_esplora_server(esplora_url);
-	let reinitialized_node = builder.build();
+	let reinitialized_node = builder.build().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
 	reinitialized_node.start().unwrap();
@@ -391,7 +390,7 @@ fn start_stop_reinit_fs_store() {
 	let config = random_config();
 	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
-	let node = builder.build_with_fs_store();
+	let node = builder.build_with_fs_store().unwrap();
 	let expected_node_id = node.node_id();
 
 	let funding_address = node.new_funding_address().unwrap();
@@ -418,7 +417,7 @@ fn start_stop_reinit_fs_store() {
 
 	let mut new_builder = NodeBuilder::from_config(config);
 	new_builder.set_esplora_server(esplora_url);
-	let reinitialized_node = builder.build_with_fs_store();
+	let reinitialized_node = builder.build_with_fs_store().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
 	reinitialized_node.start().unwrap();
@@ -445,14 +444,14 @@ fn onchain_spend_receive() {
 	let config_a = random_config();
 	let mut builder_a = NodeBuilder::from_config(config_a);
 	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build();
+	let node_a = builder_a.build().unwrap();
 	node_a.start().unwrap();
 	let addr_a = node_a.new_funding_address().unwrap();
 
 	let config_b = random_config();
 	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
-	let node_b = builder_b.build();
+	let node_b = builder_b.build().unwrap();
 	node_b.start().unwrap();
 	let addr_b = node_b.new_funding_address().unwrap();
 
@@ -500,7 +499,7 @@ fn sign_verify_msg() {
 	let config = random_config();
 	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
-	let node = builder.build();
+	let node = builder.build().unwrap();
 
 	node.start().unwrap();
 

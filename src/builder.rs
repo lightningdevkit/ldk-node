@@ -44,6 +44,7 @@ use bitcoin::BlockHash;
 
 use std::convert::TryInto;
 use std::default::Default;
+use std::fmt;
 use std::fs;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
@@ -65,6 +66,48 @@ enum GossipSourceConfig {
 	P2PNetwork,
 	RapidGossipSync(String),
 }
+
+/// An error encountered during building a [`Node`].
+///
+/// [`Node`]: crate::Node
+#[derive(Debug, Clone)]
+pub enum BuildError {
+	/// The given seed bytes are invalid, e.g., have invalid length.
+	InvalidSeedBytes,
+	/// The given seed file is invalid, e.g., has invalid length, or could not be read.
+	InvalidSeedFile,
+	/// The current system time is invalid, clocks might have gone backwards.
+	InvalidSystemTime,
+	/// We failed to read data from the [`KVStore`].
+	ReadFailed,
+	/// We failed to write data to the [`KVStore`].
+	WriteFailed,
+	/// We failed to access the given `storage_dir_path`.
+	StoragePathAccessFailed,
+	/// We failed to setup the onchain wallet.
+	WalletSetupFailed,
+	/// We failed to setup the logger.
+	LoggerSetupFailed,
+}
+
+impl fmt::Display for BuildError {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match *self {
+			Self::InvalidSeedBytes => write!(f, "Given seed bytes are invalid."),
+			Self::InvalidSeedFile => write!(f, "Given seed file is invalid or could not be read."),
+			Self::InvalidSystemTime => {
+				write!(f, "System time is invalid. Clocks might have gone back in time.")
+			}
+			Self::ReadFailed => write!(f, "Failed to read from store."),
+			Self::WriteFailed => write!(f, "Failed to write to store."),
+			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
+			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
+			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
+		}
+	}
+}
+
+impl std::error::Error for BuildError {}
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
 /// the getgo.
@@ -112,14 +155,14 @@ impl NodeBuilder {
 	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
 	///
 	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
-	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: Vec<u8>) -> &mut Self {
+	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: Vec<u8>) -> Result<&mut Self, BuildError> {
 		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
-			panic!("Failed to set seed due to invalid length.");
+			return Err(BuildError::InvalidSeedBytes);
 		}
 		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
 		bytes.copy_from_slice(&seed_bytes);
 		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(bytes));
-		self
+		Ok(self)
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
@@ -179,18 +222,20 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Node<SqliteStore> {
+	pub fn build(&self) -> Result<Node<SqliteStore>, BuildError> {
 		let storage_dir_path = self.config.storage_dir_path.clone();
-		fs::create_dir_all(storage_dir_path.clone()).expect("Failed to create LDK data directory");
+		fs::create_dir_all(storage_dir_path.clone())
+			.map_err(|_| BuildError::StoragePathAccessFailed)?;
 		let kv_store = Arc::new(SqliteStore::new(storage_dir_path.into()));
 		self.build_with_store(kv_store)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Node<FilesystemStore> {
+	pub fn build_with_fs_store(&self) -> Result<Node<FilesystemStore>, BuildError> {
 		let storage_dir_path = self.config.storage_dir_path.clone();
-		fs::create_dir_all(storage_dir_path.clone()).expect("Failed to create LDK data directory");
+		fs::create_dir_all(storage_dir_path.clone())
+			.map_err(|_| BuildError::StoragePathAccessFailed)?;
 		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path.into()));
 		self.build_with_store(kv_store)
 	}
@@ -198,7 +243,7 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
 		&self, kv_store: Arc<K>,
-	) -> Node<K> {
+	) -> Result<Node<K>, BuildError> {
 		let config = Arc::new(self.config.clone());
 
 		let runtime = Arc::new(RwLock::new(None));
@@ -251,8 +296,8 @@ impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
 	///
 	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
-	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) {
-		self.inner.write().unwrap().set_entropy_seed_bytes(seed_bytes);
+	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_entropy_seed_bytes(seed_bytes).map(|_| ())
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
@@ -301,21 +346,21 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Arc<Node<SqliteStore>> {
-		Arc::new(self.inner.read().unwrap().build())
+	pub fn build(&self) -> Result<Arc<Node<SqliteStore>>, BuildError> {
+		self.inner.read().unwrap().build().map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Arc<Node<FilesystemStore>> {
-		Arc::new(self.inner.read().unwrap().build_with_fs_store())
+	pub fn build_with_fs_store(&self) -> Result<Arc<Node<FilesystemStore>>, BuildError> {
+		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
 		&self, kv_store: Arc<K>,
-	) -> Arc<Node<K>> {
-		Arc::new(self.inner.read().unwrap().build_with_store(kv_store))
+	) -> Result<Arc<Node<K>>, BuildError> {
+		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
 	}
 }
 
@@ -325,12 +370,12 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>, kv_store: Arc<K>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
-) -> Node<K> {
+) -> Result<Node<K>, BuildError> {
 	let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
-	fs::create_dir_all(ldk_data_dir.clone()).expect("Failed to create LDK data directory");
+	fs::create_dir_all(ldk_data_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
 
 	let bdk_data_dir = format!("{}/bdk", config.storage_dir_path);
-	fs::create_dir_all(bdk_data_dir.clone()).expect("Failed to create BDK data directory");
+	fs::create_dir_all(bdk_data_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
 
 	// Initialize the Logger
 	let log_file_path = format!(
@@ -338,13 +383,17 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		config.storage_dir_path,
 		chrono::offset::Local::now().format("%Y_%m_%d")
 	);
-	let logger = Arc::new(FilesystemLogger::new(log_file_path.clone(), config.log_level));
+	let logger = Arc::new(
+		FilesystemLogger::new(log_file_path.clone(), config.log_level)
+			.map_err(|_| BuildError::LoggerSetupFailed)?,
+	);
 
 	// Initialize the on-chain wallet and chain access
 	let seed_bytes = match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => bytes.clone(),
 		Some(EntropySourceConfig::SeedFile(seed_path)) => {
-			io::utils::read_or_generate_seed_file(seed_path)
+			io::utils::read_or_generate_seed_file(seed_path, Arc::clone(&logger))
+				.map_err(|_| BuildError::InvalidSeedFile)?
 		}
 		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
 			Some(passphrase) => mnemonic.to_seed(passphrase),
@@ -353,12 +402,13 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		None => {
 			// Default to read or generate from the default location generate a seed file.
 			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			io::utils::read_or_generate_seed_file(&seed_path)
+			io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
+				.map_err(|_| BuildError::InvalidSeedFile)?
 		}
 	};
 
 	let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
-		.expect("Failed to read wallet master key");
+		.map_err(|_| BuildError::InvalidSeedBytes)?;
 
 	let wallet_name = bdk::wallet::wallet_name_from_descriptor(
 		Bip84(xprv, bdk::KeychainKind::External),
@@ -366,7 +416,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		config.network,
 		&Secp256k1::new(),
 	)
-	.expect("Failed to derive on-chain wallet name");
+	.map_err(|_| BuildError::WalletSetupFailed)?;
 
 	let database_path = format!("{}/bdk_wallet_{}.sqlite", config.storage_dir_path, wallet_name);
 	let database = SqliteDatabase::new(database_path);
@@ -377,7 +427,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		config.network,
 		database,
 	)
-	.expect("Failed to set up on-chain wallet");
+	.map_err(|_| BuildError::WalletSetupFailed)?;
 
 	let (blockchain, tx_sync) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora(server_url)) => {
@@ -413,13 +463,14 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	// Initialize the KeysManager
 	let cur_time = SystemTime::now()
 		.duration_since(SystemTime::UNIX_EPOCH)
-		.expect("System time error: Clock may have gone backwards");
+		.map_err(|_| BuildError::InvalidSystemTime)?;
 	let ldk_seed_bytes: [u8; 32] = xprv.private_key.secret_bytes();
 	let keys_manager = Arc::new(KeysManager::new(
 		&ldk_seed_bytes,
 		cur_time.as_secs(),
 		cur_time.subsec_nanos(),
 		Arc::clone(&wallet),
+		Arc::clone(&logger),
 	));
 
 	// Initialize the network graph, scorer, and router
@@ -430,7 +481,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				if e.kind() == std::io::ErrorKind::NotFound {
 					Arc::new(NetworkGraph::new(config.network, Arc::clone(&logger)))
 				} else {
-					panic!("Failed to read network graph: {}", e.to_string());
+					return Err(BuildError::ReadFailed);
 				}
 			}
 		};
@@ -450,7 +501,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 					Arc::clone(&logger),
 				)))
 			} else {
-				panic!("Failed to read scorer: {}", e.to_string());
+				return Err(BuildError::ReadFailed);
 			}
 		}
 	};
@@ -474,7 +525,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Vec::new()
 			} else {
 				log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
-				panic!("Failed to read channel monitors: {}", e.to_string());
+				return Err(BuildError::ReadFailed);
 			}
 		}
 	};
@@ -507,8 +558,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				channel_monitor_references,
 			);
 			let (_hash, channel_manager) =
-				<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args)
-					.expect("Failed to read channel manager from store");
+				<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args).map_err(|e| {
+					log_error!(logger, "Failed to read channel manager from KVStore: {}", e);
+					BuildError::ReadFailed
+				})?;
 			channel_manager
 		} else {
 			// We're starting a fresh node.
@@ -553,7 +606,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 
 	let cur_time = SystemTime::now()
 		.duration_since(SystemTime::UNIX_EPOCH)
-		.expect("System time error: Clock may have gone backwards");
+		.map_err(|_| BuildError::InvalidSystemTime)?;
 
 	// Initialize the GossipSource
 	// Use the configured gossip source, if the user set one, otherwise default to P2PNetwork.
@@ -570,7 +623,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&kv_store),
 				Arc::clone(&logger),
 			)
-			.expect("Persistence failed");
+			.map_err(|_| BuildError::WriteFailed)?;
 			p2p_source
 		}
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
@@ -608,7 +661,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 
 	let peer_manager = Arc::new(PeerManager::new(
 		msg_handler,
-		cur_time.as_secs().try_into().expect("System time error"),
+		cur_time.as_secs().try_into().map_err(|_| BuildError::InvalidSystemTime)?,
 		&ephemeral_bytes,
 		Arc::clone(&logger),
 		IgnoringMessageHandler {},
@@ -620,8 +673,8 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		Ok(payments) => {
 			Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
 		}
-		Err(e) => {
-			panic!("Failed to read payment information: {}", e.to_string());
+		Err(_) => {
+			return Err(BuildError::ReadFailed);
 		}
 	};
 
@@ -632,7 +685,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			if e.kind() == std::io::ErrorKind::NotFound {
 				Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 			} else {
-				panic!("Failed to read event queue: {}", e.to_string());
+				return Err(BuildError::ReadFailed);
 			}
 		}
 	};
@@ -643,14 +696,14 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			if e.kind() == std::io::ErrorKind::NotFound {
 				Arc::new(PeerStore::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 			} else {
-				panic!("Failed to read peer store: {}", e.to_string());
+				return Err(BuildError::ReadFailed);
 			}
 		}
 	};
 
 	let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
 
-	Node {
+	Ok(Node {
 		runtime,
 		stop_sender,
 		stop_receiver,
@@ -669,5 +722,5 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		scorer,
 		peer_store,
 		payment_store,
-	}
+	})
 }

@@ -38,7 +38,7 @@
 //! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 //! 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
 //!
-//! 	let node = builder.build();
+//! 	let node = builder.build().unwrap();
 //!
 //! 	node.start().unwrap();
 //!
@@ -113,6 +113,7 @@ use {bip39::Mnemonic, bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_ty
 
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
+pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 
@@ -271,7 +272,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	stop_sender: tokio::sync::watch::Sender<()>,
 	stop_receiver: tokio::sync::watch::Receiver<()>,
 	config: Arc<Config>,
-	wallet: Arc<Wallet<bdk::database::SqliteDatabase>>,
+	wallet: Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager<K>>,
@@ -308,22 +309,25 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		// Block to ensure we update our fee rate cache once on startup
 		let wallet = Arc::clone(&self.wallet);
 		let sync_logger = Arc::clone(&self.logger);
-		runtime.block_on(async move {
-			let now = Instant::now();
-			match wallet.update_fee_estimates().await {
-				Ok(()) => {
-					log_info!(
-						sync_logger,
-						"Initial fee rate cache update finished in {}ms.",
-						now.elapsed().as_millis()
-					);
-					Ok(())
+		let runtime_ref = &runtime;
+		tokio::task::block_in_place(move || {
+			runtime_ref.block_on(async move {
+				let now = Instant::now();
+				match wallet.update_fee_estimates().await {
+					Ok(()) => {
+						log_info!(
+							sync_logger,
+							"Initial fee rate cache update finished in {}ms.",
+							now.elapsed().as_millis()
+						);
+						Ok(())
+					}
+					Err(e) => {
+						log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
+						Err(e)
+					}
 				}
-				Err(e) => {
-					log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
-					Err(e)
-				}
-			}
+			})
 		})?;
 
 		// Setup wallet sync
@@ -456,7 +460,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 										Arc::clone(&gossip_sync_store),
 										Arc::clone(&gossip_sync_logger),
 										)
-										.expect("Persistence failed");
+										.unwrap_or_else(|e| {
+											log_error!(gossip_sync_logger, "Persistence failed: {}", e);
+											panic!("Persistence failed");
+										});
 								}
 								Err(e) => log_error!(
 									gossip_sync_logger,
@@ -475,18 +482,38 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
 			let mut stop_listen = self.stop_receiver.clone();
 			let listening_address = listening_address.clone();
+			let listening_logger = Arc::clone(&self.logger);
 
 			let bind_addr = listening_address
 				.to_socket_addrs()
-				.expect("Unable to resolve listing address")
+				.map_err(|_| {
+					log_error!(
+						self.logger,
+						"Unable to resolve listing address: {:?}",
+						listening_address
+					);
+					Error::InvalidNetAddress
+				})?
 				.next()
-				.expect("Unable to resolve listing address");
+				.ok_or_else(|| {
+					log_error!(
+						self.logger,
+						"Unable to resolve listing address: {:?}",
+						listening_address
+					);
+					Error::InvalidNetAddress
+				})?;
 
 			runtime.spawn(async move {
 				let listener =
-					tokio::net::TcpListener::bind(bind_addr).await.expect(
-						"Failed to bind to listen address/port - is something else already listening on it?",
-						);
+					tokio::net::TcpListener::bind(bind_addr).await
+										.unwrap_or_else(|e| {
+											log_error!(listening_logger, "Failed to bind to listen address/port - is something else already listening on it?: {}", e);
+											panic!(
+												"Failed to bind to listen address/port - is something else already listening on it?",
+												);
+										});
+
 				loop {
 					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
 					tokio::select! {
@@ -597,7 +624,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 							let unix_time_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
 							io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
-								.expect("Persistence failed");
+								.unwrap_or_else(|e| {
+									log_error!(bcast_logger, "Persistence failed: {}", e);
+									panic!("Persistence failed");
+								});
 						}
 				}
 			}
@@ -623,6 +653,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
 		let background_logger = Arc::clone(&self.logger);
+		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
 		let stop_bp = self.stop_receiver.clone();
 		let sleeper = move |d| {
@@ -653,7 +684,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				true,
 			)
 			.await
-			.expect("Failed to process events");
+			.unwrap_or_else(|e| {
+				log_error!(background_error_logger, "Failed to process events: {}", e);
+				panic!("Failed to process events");
+			});
 		});
 
 		*runtime_lock = Some(runtime);
@@ -714,9 +748,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
 	pub fn event_handled(&self) {
-		self.event_queue
-			.event_handled()
-			.expect("Couldn't mark event handled due to persistence failure");
+		self.event_queue.event_handled().unwrap_or_else(|e| {
+			log_error!(
+				self.logger,
+				"Couldn't mark event handled due to persistence failure: {}",
+				e
+			);
+			panic!("Couldn't mark event handled due to persistence failure");
+		});
 	}
 
 	/// Returns our own node id
@@ -1332,7 +1371,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// # config.network = Network::Regtest;
 	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();
 	/// # let builder = Builder::from_config(config);
-	/// # let node = builder.build();
+	/// # let node = builder.build().unwrap();
 	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
 	/// ```
 	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(

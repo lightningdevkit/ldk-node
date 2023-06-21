@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
-	Arc<Wallet<bdk::database::SqliteDatabase>>,
-	Arc<Wallet<bdk::database::SqliteDatabase>>,
+	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 	Arc<FilesystemLogger>,
 	Arc<K>,
 >;
@@ -39,21 +39,22 @@ pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
 	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
 	IgnoringMessageHandler,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
+	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 >;
 
 pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
 	Arc<ChainMonitor<K>>,
-	Arc<Wallet<bdk::database::SqliteDatabase>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
-	Arc<Wallet<bdk::database::SqliteDatabase>>,
+	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 	Arc<Router>,
 	Arc<FilesystemLogger>,
 >;
 
-pub(crate) type KeysManager = WalletKeysManager<bdk::database::SqliteDatabase>;
+pub(crate) type KeysManager =
+	WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>;
 
 pub(crate) type Router =
 	DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<Mutex<Scorer>>>;
@@ -80,8 +81,8 @@ pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 >;
 
 pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase>>,
+	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 	Arc<FilesystemLogger>,
 	IgnoringMessageHandler,
 >;

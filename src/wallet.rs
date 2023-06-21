@@ -1,4 +1,4 @@
-use crate::logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, log_trace, Logger};
 
 use crate::Error;
 
@@ -27,12 +27,14 @@ use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, Signing};
 use bitcoin::{Script, Transaction, TxOut, Txid};
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
-pub struct Wallet<D>
+pub struct Wallet<D, L: Deref>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	// A BDK blockchain used for wallet sync.
 	blockchain: EsploraBlockchain,
@@ -42,16 +44,17 @@ where
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	sync_lock: (Mutex<()>, Condvar),
-	logger: Arc<FilesystemLogger>,
+	logger: L,
 }
 
-impl<D> Wallet<D>
+impl<D, L: Deref> Wallet<D, L>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	pub(crate) fn new(
 		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: Arc<FilesystemLogger>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let fee_rate_cache = RwLock::new(HashMap::new());
@@ -286,9 +289,10 @@ where
 	}
 }
 
-impl<D> FeeEstimator for Wallet<D>
+impl<D, L: Deref> FeeEstimator for Wallet<D, L>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
 		(self.estimate_fee_rate(confirmation_target).fee_wu(1000) as u32)
@@ -296,9 +300,10 @@ where
 	}
 }
 
-impl<D> BroadcasterInterface for Wallet<D>
+impl<D, L: Deref> BroadcasterInterface for Wallet<D, L>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	fn broadcast_transaction(&self, tx: &Transaction) {
 		let locked_runtime = self.runtime.read().unwrap();
@@ -325,27 +330,31 @@ where
 
 /// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
 /// directly spendable by the BDK wallet.
-pub struct WalletKeysManager<D>
+pub struct WalletKeysManager<D, L: Deref>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	inner: KeysManager,
-	wallet: Arc<Wallet<D>>,
+	wallet: Arc<Wallet<D, L>>,
+	logger: L,
 }
 
-impl<D> WalletKeysManager<D>
+impl<D, L: Deref> WalletKeysManager<D, L>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
 	///
 	/// See [`KeysManager::new`] for more information on `seed`, `starting_time_secs`, and
 	/// `starting_time_nanos`.
 	pub fn new(
-		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32, wallet: Arc<Wallet<D>>,
+		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
+		wallet: Arc<Wallet<D, L>>, logger: L,
 	) -> Self {
 		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
-		Self { inner, wallet }
+		Self { inner, wallet, logger }
 	}
 
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
@@ -378,9 +387,10 @@ where
 	}
 }
 
-impl<D> NodeSigner for WalletKeysManager<D>
+impl<D, L: Deref> NodeSigner for WalletKeysManager<D, L>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
 		self.inner.get_node_id(recipient)
@@ -407,18 +417,20 @@ where
 	}
 }
 
-impl<D> EntropySource for WalletKeysManager<D>
+impl<D, L: Deref> EntropySource for WalletKeysManager<D, L>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
 		self.inner.get_secure_random_bytes()
 	}
 }
 
-impl<D> SignerProvider for WalletKeysManager<D>
+impl<D, L: Deref> SignerProvider for WalletKeysManager<D, L>
 where
 	D: BatchDatabase,
+	L::Target: Logger,
 {
 	type Signer = InMemorySigner;
 
@@ -439,20 +451,35 @@ where
 	}
 
 	fn get_destination_script(&self) -> Script {
-		let address =
-			self.wallet.get_new_address().expect("Failed to retrieve new address from wallet.");
+		let address = self.wallet.get_new_address().unwrap_or_else(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			panic!("Failed to retrieve new address from wallet");
+		});
 		address.script_pubkey()
 	}
 
 	fn get_shutdown_scriptpubkey(&self) -> ShutdownScript {
-		let address =
-			self.wallet.get_new_address().expect("Failed to retrieve new address from wallet.");
+		let address = self.wallet.get_new_address().unwrap_or_else(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			panic!("Failed to retrieve new address from wallet");
+		});
+
 		match address.payload {
 			bitcoin::util::address::Payload::WitnessProgram { version, program } => {
-				return ShutdownScript::new_witness_program(version, &program)
-					.expect("Invalid shutdown script.");
+				return ShutdownScript::new_witness_program(version, &program).unwrap_or_else(
+					|e| {
+						log_error!(self.logger, "Invalid shutdown script: {:?}", e);
+						panic!("Invalid shutdown script.");
+					},
+				);
 			}
-			_ => panic!("Tried to use a non-witness address. This must not ever happen."),
+			_ => {
+				log_error!(
+					self.logger,
+					"Tried to use a non-witness address. This must never happen."
+				);
+				panic!("Tried to use a non-witness address. This must never happen.");
+			}
 		}
 	}
 }

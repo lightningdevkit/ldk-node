@@ -16,7 +16,7 @@ pub(crate) struct FilesystemLogger {
 }
 
 impl FilesystemLogger {
-	pub(crate) fn new(file_path: String, level: Level) -> Self {
+	pub(crate) fn new(file_path: String, level: Level) -> Result<Self, ()> {
 		if let Some(parent_dir) = Path::new(&file_path).parent() {
 			fs::create_dir_all(parent_dir).expect("Failed to create log parent directory");
 
@@ -25,21 +25,17 @@ impl FilesystemLogger {
 				.create(true)
 				.append(true)
 				.open(file_path.clone())
-				.expect("Failed to open log file");
+				.map_err(|_| ())?;
 
 			// Create a symlink to the current log file, with prior cleanup
 			let log_file_symlink = parent_dir.join("ldk_node_latest.log");
 			if log_file_symlink.as_path().exists() && log_file_symlink.as_path().is_symlink() {
-				fs::remove_file(&log_file_symlink)
-					.expect("Failed to remove an old symlink for the log file");
+				fs::remove_file(&log_file_symlink).map_err(|_| ())?;
 			}
-			symlink(&file_path, &log_file_symlink).expect(&format!(
-				"Failed to create symlink for the log file: {:?}",
-				log_file_symlink
-			));
+			symlink(&file_path, &log_file_symlink).map_err(|_| ())?;
 		}
 
-		Self { file_path, level }
+		Ok(Self { file_path, level })
 	}
 }
 impl Logger for FilesystemLogger {
