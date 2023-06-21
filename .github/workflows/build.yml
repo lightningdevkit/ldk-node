@@ -6,10 +6,17 @@ jobs:
   build:
     strategy:
       matrix:
-        toolchain: [ stable, beta ]
+        toolchain: [
+          stable,
+          beta,
+          1.60.0, # Our MSRV
+      ]
         include:
           - toolchain: stable
             check-fmt: true
+            build-uniffi: true
+          - toolchain: 1.60.0
+            msrv: true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source code
@@ -20,17 +27,27 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           override: true
           profile: minimal
+      - name: Pin packages to allow for MSRV
+        if: matrix.msrv
+        run: cargo update -p hashlink --precise "0.8.1" --verbose # hashlink 0.8.2 requires hashbrown 0.13, requiring 1.61.0
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
+        if: matrix.build-uniffi
         run: cargo build --features uniffi --verbose --color always
+      - name: Build documentation on Rust ${{ matrix.toolchain }}
+        run: |
+          cargo doc --release --verbose --color always
+          cargo doc --document-private-items --verbose --color always
       - name: Check release build on Rust ${{ matrix.toolchain }}
         run: cargo check --release --verbose --color always
       - name: Check release build with UniFFI support on Rust ${{ matrix.toolchain }}
+        if: matrix.build-uniffi
         run: cargo check --release --features uniffi --verbose --color always
       - name: Test on Rust ${{ matrix.toolchain }}
         run: cargo test
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
+        if: matrix.build-uniffi
         run: cargo test --features uniffi
       - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt

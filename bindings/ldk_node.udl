@@ -43,7 +43,7 @@ interface LDKNode {
 	PublicKey node_id();
 	NetAddress? listening_address();
 	[Throws=NodeError]
-	Address new_funding_address();
+	Address new_onchain_address();
 	[Throws=NodeError]
 	Txid send_to_onchain_address([ByRef]Address address, u64 amount_msat);
 	[Throws=NodeError]

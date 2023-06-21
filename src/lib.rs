@@ -42,7 +42,7 @@
 //!
 //! 	node.start().unwrap();
 //!
-//! 	let funding_address = node.new_funding_address();
+//! 	let funding_address = node.new_onchain_address();
 //!
 //! 	// .. fund address ..
 //!
@@ -67,12 +67,7 @@
 //! [`connect_open_channel`]: Node::connect_open_channel
 //! [`send_payment`]: Node::send_payment
 //!
-
-// We currently disable the missing_docs lint due to incompatibility with the generated Uniffi
-// scaffolding.
-// TODO: Re-enable after https://github.com/mozilla/uniffi-rs/issues/1502 has been
-// addressed.
-//#![deny(missing_docs)]
+#![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(rustdoc::private_intra_doc_links)]
 #![allow(bare_trait_objects)]
@@ -769,15 +764,20 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	}
 
 	/// Retrieve a new on-chain/funding address.
-	pub fn new_funding_address(&self) -> Result<Address, Error> {
+	pub fn new_onchain_address(&self) -> Result<Address, Error> {
 		let funding_address = self.wallet.get_new_address()?;
 		log_info!(self.logger, "Generated new funding address: {}", funding_address);
 		Ok(funding_address)
 	}
 
-	/// Retrieve the current on-chain balance.
-	pub fn onchain_balance(&self) -> Result<bdk::Balance, Error> {
-		self.wallet.get_balance()
+	/// Retrieve the currently spendable on-chain balance in satoshis.
+	pub fn spendable_onchain_balance_sats(&self) -> Result<u64, Error> {
+		Ok(self.wallet.get_balance().map(|bal| bal.get_spendable())?)
+	}
+
+	/// Retrieve the current total on-chain balance in satoshis.
+	pub fn total_onchain_balance_sats(&self) -> Result<u64, Error> {
+		Ok(self.wallet.get_balance().map(|bal| bal.get_total())?)
 	}
 
 	/// Send an on-chain payment to the given address.
@@ -805,16 +805,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		self.wallet.send_to_address(address, None)
-	}
-
-	/// Retrieve the currently spendable on-chain balance in satoshis.
-	pub fn spendable_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_spendable())?)
-	}
-
-	/// Retrieve the current total on-chain balance in satoshis.
-	pub fn total_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_total())?)
 	}
 
 	/// Retrieve a list of known channels.

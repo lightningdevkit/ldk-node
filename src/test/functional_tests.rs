@@ -56,8 +56,8 @@ fn channel_full_cycle_0conf() {
 fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	node_a: Node<K>, node_b: Node<K>, bitcoind: &BitcoinD, electrsd: &ElectrsD, allow_0conf: bool,
 ) {
-	let addr_a = node_a.new_funding_address().unwrap();
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_a = node_a.new_onchain_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 
 	let premine_amount_sat = 100_000;
 
@@ -69,8 +69,8 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_a.onchain_balance().unwrap().get_spendable(), premine_amount_sat);
-	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), premine_amount_sat);
+	assert_eq!(node_a.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
 
 	// Check we haven't got any events yet
 	assert_eq!(node_a.next_event(), None);
@@ -116,12 +116,11 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	node_b.sync_wallets().unwrap();
 
 	let onchain_fee_buffer_sat = 1500;
-	let node_a_balance = node_a.onchain_balance().unwrap();
 	let node_a_upper_bound_sat = premine_amount_sat - funding_amount_sat;
 	let node_a_lower_bound_sat = premine_amount_sat - funding_amount_sat - onchain_fee_buffer_sat;
-	assert!(node_a_balance.get_spendable() < node_a_upper_bound_sat);
-	assert!(node_a_balance.get_spendable() > node_a_lower_bound_sat);
-	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), premine_amount_sat);
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() < node_a_upper_bound_sat);
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() > node_a_lower_bound_sat);
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
 
 	expect_event!(node_a, ChannelReady);
 
@@ -254,10 +253,10 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	let node_a_upper_bound_sat =
 		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
 	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
-	assert!(node_a.onchain_balance().unwrap().get_spendable() > node_a_lower_bound_sat);
-	assert!(node_a.onchain_balance().unwrap().get_spendable() < node_a_upper_bound_sat);
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() > node_a_lower_bound_sat);
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() < node_a_upper_bound_sat);
 	let expected_final_amount_node_b_sat = premine_amount_sat + sum_of_all_payments_sat;
-	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), expected_final_amount_node_b_sat);
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), expected_final_amount_node_b_sat);
 
 	// Check we handled all events
 	assert_eq!(node_a.next_event(), None);
@@ -279,7 +278,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build().unwrap();
 	node_a.start().unwrap();
-	let addr_a = node_a.new_funding_address().unwrap();
+	let addr_a = node_a.new_onchain_address().unwrap();
 
 	println!("\n== Node B ==");
 	let config_b = random_config();
@@ -287,7 +286,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build().unwrap();
 	node_b.start().unwrap();
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 
 	let premine_amount_sat = 100_000;
 
@@ -299,8 +298,8 @@ fn channel_open_fails_when_funds_insufficient() {
 	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_a.onchain_balance().unwrap().get_spendable(), premine_amount_sat);
-	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), premine_amount_sat);
+	assert_eq!(node_a.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
 
 	println!("\nA -- connect_open_channel -> B");
 	assert_eq!(
@@ -337,17 +336,17 @@ fn start_stop_reinit() {
 	let node = builder.build().unwrap();
 	let expected_node_id = node.node_id();
 
-	let funding_address = node.new_funding_address().unwrap();
+	let funding_address = node.new_onchain_address().unwrap();
 	let expected_amount = Amount::from_sat(100000);
 
 	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
-	assert_eq!(node.onchain_balance().unwrap().get_total(), 0);
+	assert_eq!(node.total_onchain_balance_sats().unwrap(), 0);
 
 	node.start().unwrap();
 	assert_eq!(node.start(), Err(Error::AlreadyRunning));
 
 	node.sync_wallets().unwrap();
-	assert_eq!(node.onchain_balance().unwrap().get_spendable(), expected_amount.to_sat());
+	assert_eq!(node.spendable_onchain_balance_sats().unwrap(), expected_amount.to_sat());
 
 	let log_file_symlink = format!("{}/logs/ldk_node_latest.log", config.storage_dir_path);
 	assert!(std::path::Path::new(&log_file_symlink).is_symlink());
@@ -370,13 +369,13 @@ fn start_stop_reinit() {
 	reinitialized_node.start().unwrap();
 
 	assert_eq!(
-		reinitialized_node.onchain_balance().unwrap().get_spendable(),
+		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
 		expected_amount.to_sat()
 	);
 
 	reinitialized_node.sync_wallets().unwrap();
 	assert_eq!(
-		reinitialized_node.onchain_balance().unwrap().get_spendable(),
+		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
 		expected_amount.to_sat()
 	);
 
@@ -393,17 +392,17 @@ fn start_stop_reinit_fs_store() {
 	let node = builder.build_with_fs_store().unwrap();
 	let expected_node_id = node.node_id();
 
-	let funding_address = node.new_funding_address().unwrap();
+	let funding_address = node.new_onchain_address().unwrap();
 	let expected_amount = Amount::from_sat(100000);
 
 	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
-	assert_eq!(node.onchain_balance().unwrap().get_total(), 0);
+	assert_eq!(node.total_onchain_balance_sats().unwrap(), 0);
 
 	node.start().unwrap();
 	assert_eq!(node.start(), Err(Error::AlreadyRunning));
 
 	node.sync_wallets().unwrap();
-	assert_eq!(node.onchain_balance().unwrap().get_spendable(), expected_amount.to_sat());
+	assert_eq!(node.spendable_onchain_balance_sats().unwrap(), expected_amount.to_sat());
 
 	node.stop().unwrap();
 	assert_eq!(node.stop(), Err(Error::NotRunning));
@@ -423,13 +422,13 @@ fn start_stop_reinit_fs_store() {
 	reinitialized_node.start().unwrap();
 
 	assert_eq!(
-		reinitialized_node.onchain_balance().unwrap().get_spendable(),
+		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
 		expected_amount.to_sat()
 	);
 
 	reinitialized_node.sync_wallets().unwrap();
 	assert_eq!(
-		reinitialized_node.onchain_balance().unwrap().get_spendable(),
+		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
 		expected_amount.to_sat()
 	);
 
@@ -446,14 +445,14 @@ fn onchain_spend_receive() {
 	builder_a.set_esplora_server(esplora_url.clone());
 	let node_a = builder_a.build().unwrap();
 	node_a.start().unwrap();
-	let addr_a = node_a.new_funding_address().unwrap();
+	let addr_a = node_a.new_onchain_address().unwrap();
 
 	let config_b = random_config();
 	let mut builder_b = NodeBuilder::from_config(config_b);
 	builder_b.set_esplora_server(esplora_url);
 	let node_b = builder_b.build().unwrap();
 	node_b.start().unwrap();
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 
 	premine_and_distribute_funds(
 		&bitcoind,
@@ -464,7 +463,7 @@ fn onchain_spend_receive() {
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_b.onchain_balance().unwrap().get_spendable(), 100000);
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), 100000);
 
 	assert_eq!(Err(Error::InsufficientFunds), node_a.send_to_onchain_address(&addr_b, 1000));
 
@@ -475,11 +474,11 @@ fn onchain_spend_receive() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.onchain_balance().unwrap().get_spendable(), 1000);
-	assert!(node_b.onchain_balance().unwrap().get_spendable() > 98000);
-	assert!(node_b.onchain_balance().unwrap().get_spendable() < 100000);
+	assert_eq!(node_a.spendable_onchain_balance_sats().unwrap(), 1000);
+	assert!(node_b.spendable_onchain_balance_sats().unwrap() > 98000);
+	assert!(node_b.spendable_onchain_balance_sats().unwrap() < 100000);
 
-	let addr_b = node_b.new_funding_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
 	let txid = node_a.send_all_to_onchain_address(&addr_b).unwrap();
 	generate_blocks_and_wait(&bitcoind, &electrsd, 6);
 	wait_for_tx(&electrsd, txid);
@@ -487,9 +486,9 @@ fn onchain_spend_receive() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.onchain_balance().unwrap().get_total(), 0);
-	assert!(node_b.onchain_balance().unwrap().get_spendable() > 99000);
-	assert!(node_b.onchain_balance().unwrap().get_spendable() < 100000);
+	assert_eq!(node_a.total_onchain_balance_sats().unwrap(), 0);
+	assert!(node_b.spendable_onchain_balance_sats().unwrap() > 99000);
+	assert!(node_b.spendable_onchain_balance_sats().unwrap() < 100000);
 }
 
 #[test]

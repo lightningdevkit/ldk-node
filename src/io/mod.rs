@@ -54,6 +54,7 @@ pub(crate) const LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY: &str = "latest_node_ann_bc
 /// Keys and namespaces are required to be valid ASCII strings and the empty namespace (`""`) is
 /// assumed to be valid namespace.
 pub trait KVStore: KVStorePersister {
+	/// A reader as returned by [`Self::read`].
 	type Reader: Read;
 	/// Returns a [`Read`] for the given `namespace` and `key` from which [`Readable`]s may be
 	/// read.

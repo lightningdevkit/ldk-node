@@ -68,7 +68,7 @@ afterEvaluate {
                 pom {
                     name.set("ldk-node-android")
                     description.set(
-                        "LDK Node, a ready-to-go node implementation built using LDK."
+                        "LDK Node, a ready-to-go Lightning node library built using LDK and BDK."
                     )
                     url.set("https://lightningdevkit.org")
                     licenses {
@@ -85,12 +85,7 @@ afterEvaluate {
                         developer {
                             id.set("tnull")
                             name.set("Elias Rohrer")
-                            email.set("tnull@noreply.github.org")
-                        }
-                        developer {
-                            id.set("jurvis")
-                            name.set("Jurvis Tan")
-                            email.set("jurvis@noreply.github.org")
+                            email.set("dev@tnull.de")
                         }
                     }
                     scm {
@@ -111,23 +106,3 @@ signing {
     useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
     sign(publishing.publications)
 }
-
-//tasks.named<Test>("test") {
-//    // Use JUnit Platform for unit tests.
-//    useJUnitPlatform()
-//
-//	testLogging {
-//        events(PASSED, SKIPPED, FAILED, STANDARD_OUT, STANDARD_ERROR)
-//        exceptionFormat = FULL
-//        showExceptions = true
-//        showCauses = true
-//        showStackTraces = true
-//		showStandardStreams = true
-//    }
-//}
-
-//// This task dependency ensures that we build the bindings
-//// binaries before running the tests
-//tasks.withType<KotlinCompile> {
-//    dependsOn("buildAndroidLib")
-//}
