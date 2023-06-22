@@ -87,22 +87,22 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(2, PaymentReceived) => {
 		(0, payment_hash, required),
-		(1, amount_msat, required),
+		(2, amount_msat, required),
 	},
 	(3, ChannelReady) => {
 		(0, channel_id, required),
-		(1, user_channel_id, required),
+		(2, user_channel_id, required),
 	},
 	(4, ChannelPending) => {
 		(0, channel_id, required),
-		(1, user_channel_id, required),
-		(2, former_temporary_channel_id, required),
-		(3, counterparty_node_id, required),
-		(4, funding_txo, required),
+		(2, user_channel_id, required),
+		(4, former_temporary_channel_id, required),
+		(6, counterparty_node_id, required),
+		(8, funding_txo, required),
 	},
 	(5, ChannelClosed) => {
 		(0, channel_id, required),
-		(1, user_channel_id, required),
+		(2, user_channel_id, required),
 	};
 );
 
