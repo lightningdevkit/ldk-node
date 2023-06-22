@@ -31,11 +31,11 @@ pub struct PaymentDetails {
 
 impl_writeable_tlv_based!(PaymentDetails, {
 	(0, hash, required),
-	(1, preimage, required),
-	(2, secret, required),
-	(3, amount_msat, required),
-	(4, direction, required),
-	(5, status, required)
+	(2, preimage, required),
+	(4, secret, required),
+	(6, amount_msat, required),
+	(8, direction, required),
+	(10, status, required)
 });
 
 /// Represents the direction of a payment.
