@@ -1,4 +1,4 @@
-# 0.1 - Jun 22, 2023
+# 0.1.0 - Jun 22, 2023
 This is the first non-experimental release of LDK Node.
 
 - Log files are now split based on the start date of the node (#116).
