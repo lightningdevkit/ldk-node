@@ -1,3 +1,25 @@
+# 0.1 - Jun 22, 2023
+This is the first non-experimental release of LDK Node.
+
+- Log files are now split based on the start date of the node (#116).
+- Support for allowing inbound trusted 0conf channels has been added (#69).
+- Non-permanently connected peers are now included in `Node::list_peers` (#95).
+- A utility method for generating a BIP39 mnemonic is now exposed in bindings (#113).
+- A `ChannelConfig` may now be specified on channel open or updated afterwards (#122).
+- Logging has been improved and `Builder` now returns an error rather than panicking if encountering a build failure (#119).
+- In Rust, `Builder::build` now returns a `Node` object rather than wrapping it in an `Arc` (#115).
+- A number of `Config` defaults have been updated and are now exposed in bindings (#124).
+- The API has been updated to be more aligned between Rust and bindings (#114).
+
+## Compatibility Notes
+- Our currently supported minimum Rust version (MSRV) is 1.60.0.
+- The superfluous `SendingFailed` payment status has been removed, breaking serialization compatibility with alpha releases (#125).
+- The serialization formats of `PaymentDetails` and `Event` types have been updated, ensuring users upgrading from an alpha release fail to start rather than continuing operating with bogus data. Alpha users should wipe their persisted payment metadata (`payments/*`) and event queue (`events`) after the update (#130).
+
+In total, this release includes changes in 52 commits from 2 authors:
+- Elias Rohrer
+- Richard Ulrich
+
 # 0.1-alpha.1 - Jun 6, 2023
 - Generation of Swift, Kotlin (JVM and Android), and Python bindings is now supported through UniFFI (#25).
 - Lists of connected peers and channels may now be retrieved in bindings (#56).
