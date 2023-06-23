@@ -394,13 +394,8 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	};
 
 	// Initialize the Logger
-	let log_file_path = format!(
-		"{}/ldk_node_{}.log",
-                log_dir,
-		chrono::offset::Local::now().format("%Y_%m_%d")
-	);
 	let logger = Arc::new(
-		FilesystemLogger::new(log_file_path.clone(), config.log_level)
+		FilesystemLogger::new(log_dir, config.log_level)
 			.map_err(|_| BuildError::LoggerSetupFailed)?,
 	);
 
