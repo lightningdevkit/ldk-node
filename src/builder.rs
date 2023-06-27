@@ -694,12 +694,11 @@ fn build_with_store_internal(
 	// for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
-
-	if !config.trusted_peers_0conf.is_empty() {
-		// Manually accept inbound channels if we expect 0conf channel requests, avoid
-		// generating the events otherwise.
-		user_config.manually_accept_inbound_channels = true;
-	}
+	user_config.manually_accept_inbound_channels = true;
+	// Note the channel_handshake_config will be overwritten in `connect_open_channel`, but we
+	// still set a default here.
+	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
+		config.anchor_channels_config.is_some();
 
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll

@@ -1,6 +1,7 @@
 use crate::types::{DynStore, Sweeper, Wallet};
 use crate::{
-	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
+	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, NetworkGraph, PeerInfo,
+	PeerStore, UserChannelId,
 };
 
 use crate::payment::payment_store::{
@@ -12,9 +13,10 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, log_info, Logger};
+use crate::logger::{log_debug, log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::ConfirmationTarget;
+use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
@@ -314,6 +316,7 @@ where
 {
 	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
+	bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 	channel_manager: Arc<ChannelManager>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<NetworkGraph>,
@@ -329,14 +332,17 @@ where
 	L::Target: Logger,
 {
 	pub fn new(
-		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
-		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
+		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>,
+		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
+		channel_manager: Arc<ChannelManager>, output_sweeper: Arc<Sweeper>,
+		network_graph: Arc<NetworkGraph>, payment_store: Arc<PaymentStore<L>>,
+		peer_store: Arc<PeerStore<L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
+			bump_tx_event_handler,
 			channel_manager,
 			output_sweeper,
 			network_graph,
@@ -930,7 +936,35 @@ where
 			},
 			LdkEvent::DiscardFunding { .. } => {},
 			LdkEvent::HTLCIntercepted { .. } => {},
-			LdkEvent::BumpTransaction(_) => {},
+			LdkEvent::BumpTransaction(bte) => {
+				let (channel_id, counterparty_node_id) = match bte {
+					BumpTransactionEvent::ChannelClose {
+						ref channel_id,
+						ref counterparty_node_id,
+						..
+					} => (channel_id, counterparty_node_id),
+					BumpTransactionEvent::HTLCResolution {
+						ref channel_id,
+						ref counterparty_node_id,
+						..
+					} => (channel_id, counterparty_node_id),
+				};
+
+				if let Some(anchor_channels_config) = self.config.anchor_channels_config.as_ref() {
+					if anchor_channels_config
+						.trusted_peers_no_reserve
+						.contains(counterparty_node_id)
+					{
+						log_debug!(self.logger,
+								"Ignoring BumpTransactionEvent for channel {} due to trusted counterparty {}",
+								channel_id, counterparty_node_id
+							);
+						return;
+					}
+				}
+
+				self.bump_tx_event_handler.handle_event(&bte);
+			},
 			LdkEvent::InvoiceRequestFailed { .. } => {},
 			LdkEvent::InvoiceGenerated { .. } => {},
 			LdkEvent::ConnectionNeeded { .. } => {},

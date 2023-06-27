@@ -143,6 +143,14 @@ pub(crate) type Sweeper = OutputSweeper<
 	Arc<FilesystemLogger>,
 >;
 
+pub(crate) type BumpTransactionEventHandler =
+	lightning::events::bump_transaction::BumpTransactionEventHandler<
+		Arc<Broadcaster>,
+		Arc<lightning::events::bump_transaction::Wallet<Arc<Wallet>, Arc<FilesystemLogger>>>,
+		Arc<KeysManager>,
+		Arc<FilesystemLogger>,
+	>;
+
 /// A local, potentially user-provided, identifier of a channel.
 ///
 /// By default, this will be randomly generated for the user to ensure local uniqueness.
