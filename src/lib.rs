@@ -1445,9 +1445,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	}
 
 	/// Remove the payment with the given hash from the store.
-	///
-	/// Returns `true` if the payment was present and `false` otherwise.
-	pub fn remove_payment(&self, payment_hash: &PaymentHash) -> Result<bool, Error> {
+	pub fn remove_payment(&self, payment_hash: &PaymentHash) -> Result<(), Error> {
 		self.payment_store.remove(&payment_hash)
 	}
 

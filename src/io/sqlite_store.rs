@@ -116,11 +116,11 @@ impl KVStore for SqliteStore {
 			})
 	}
 
-	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<bool> {
+	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<()> {
 		let locked_conn = self.connection.lock().unwrap();
 
 		let sql = format!("DELETE FROM {} WHERE namespace=:namespace AND key=:key;", KV_TABLE_NAME);
-		let changes = locked_conn
+		locked_conn
 			.execute(
 				&sql,
 				named_params! {
@@ -132,10 +132,7 @@ impl KVStore for SqliteStore {
 				let msg = format!("Failed to delete key {}/{}: {}", namespace, key, e);
 				std::io::Error::new(std::io::ErrorKind::Other, msg)
 			})?;
-
-		let was_present = changes != 0;
-
-		Ok(was_present)
+		Ok(())
 	}
 
 	fn list(&self, namespace: &str) -> std::io::Result<Vec<String>> {

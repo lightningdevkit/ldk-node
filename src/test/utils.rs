@@ -96,13 +96,14 @@ impl KVStore for TestStore {
 		Ok(())
 	}
 
-	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<bool> {
+	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<()> {
 		match self.persisted_bytes.write().unwrap().entry(namespace.to_string()) {
 			hash_map::Entry::Occupied(mut e) => {
 				self.did_persist.store(true, Ordering::SeqCst);
-				Ok(e.get_mut().remove(&key.to_string()).is_some())
+				e.get_mut().remove(&key.to_string());
+				Ok(())
 			}
-			hash_map::Entry::Vacant(_) => Ok(false),
+			hash_map::Entry::Vacant(_) => Ok(()),
 		}
 	}
 
