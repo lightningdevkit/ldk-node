@@ -413,7 +413,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	};
 
 	let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
-		.map_err(|_| BuildError::InvalidSeedBytes)?;
+		.map_err(|e| {
+			log_error!(logger, "Failed to derive master secret: {}", e);
+			BuildError::InvalidSeedBytes
+		})?;
 
 	let wallet_name = bdk::wallet::wallet_name_from_descriptor(
 		Bip84(xprv, bdk::KeychainKind::External),
@@ -421,7 +424,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		config.network,
 		&Secp256k1::new(),
 	)
-	.map_err(|_| BuildError::WalletSetupFailed)?;
+	.map_err(|e| {
+		log_error!(logger, "Failed to derive wallet name: {}", e);
+		BuildError::WalletSetupFailed
+	})?;
 
 	let database_path = format!("{}/bdk_wallet_{}.sqlite", config.storage_dir_path, wallet_name);
 	let database = SqliteDatabase::new(database_path);
@@ -432,7 +438,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		config.network,
 		database,
 	)
-	.map_err(|_| BuildError::WalletSetupFailed)?;
+	.map_err(|e| {
+		log_error!(logger, "Failed to set up wallet: {}", e);
+		BuildError::WalletSetupFailed
+	})?;
 
 	let (blockchain, tx_sync) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora(server_url)) => {
@@ -466,9 +475,11 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	));
 
 	// Initialize the KeysManager
-	let cur_time = SystemTime::now()
-		.duration_since(SystemTime::UNIX_EPOCH)
-		.map_err(|_| BuildError::InvalidSystemTime)?;
+	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
+		log_error!(logger, "Failed to get current time: {}", e);
+		BuildError::InvalidSystemTime
+	})?;
+
 	let ldk_seed_bytes: [u8; 32] = xprv.private_key.secret_bytes();
 	let keys_manager = Arc::new(KeysManager::new(
 		&ldk_seed_bytes,
@@ -609,10 +620,6 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	));
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
 
-	let cur_time = SystemTime::now()
-		.duration_since(SystemTime::UNIX_EPOCH)
-		.map_err(|_| BuildError::InvalidSystemTime)?;
-
 	// Initialize the GossipSource
 	// Use the configured gossip source, if the user set one, otherwise default to P2PNetwork.
 	let gossip_source_config = gossip_source_config.unwrap_or(&GossipSourceConfig::P2PNetwork);
@@ -628,7 +635,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&kv_store),
 				Arc::clone(&logger),
 			)
-			.map_err(|_| BuildError::WriteFailed)?;
+			.map_err(|e| {
+				log_error!(logger, "Failed writing to store: {}", e);
+				BuildError::WriteFailed
+			})?;
 			p2p_source
 		}
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
@@ -664,9 +674,17 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		}
 	};
 
+	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
+		log_error!(logger, "Failed to get current time: {}", e);
+		BuildError::InvalidSystemTime
+	})?;
+
 	let peer_manager = Arc::new(PeerManager::new(
 		msg_handler,
-		cur_time.as_secs().try_into().map_err(|_| BuildError::InvalidSystemTime)?,
+		cur_time.as_secs().try_into().map_err(|e| {
+			log_error!(logger, "Failed to get current time: {}", e);
+			BuildError::InvalidSystemTime
+		})?,
 		&ephemeral_bytes,
 		Arc::clone(&logger),
 		IgnoringMessageHandler {},
