@@ -382,12 +382,6 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	gossip_source_config: Option<&GossipSourceConfig>, kv_store: Arc<K>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 ) -> Result<Node<K>, BuildError> {
-	let ldk_data_dir = format!("{}/ldk", config.storage_dir_path);
-	fs::create_dir_all(ldk_data_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
-
-	let bdk_data_dir = format!("{}/bdk", config.storage_dir_path);
-	fs::create_dir_all(bdk_data_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
-
 	let log_dir = match &config.log_dir_path {
 		Some(log_dir) => String::from(log_dir),
 		None => config.storage_dir_path.clone() + "/logs",
