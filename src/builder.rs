@@ -250,14 +250,21 @@ impl NodeBuilder {
 	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
 		&self, kv_store: Arc<K>,
 	) -> Result<Node<K>, BuildError> {
+		let logger = setup_logger(&self.config)?;
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
 		let config = Arc::new(self.config.clone());
 
 		let runtime = Arc::new(RwLock::new(None));
 		build_with_store_internal(
 			config,
-			self.entropy_source_config.as_ref(),
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
+			seed_bytes,
+			logger,
 			kv_store,
 			runtime,
 		)
@@ -377,41 +384,12 @@ impl ArcedNodeBuilder {
 
 /// Builds a [`Node`] instance according to the options previously configured.
 fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
-	config: Arc<Config>, entropy_source_config: Option<&EntropySourceConfig>,
-	chain_data_source_config: Option<&ChainDataSourceConfig>,
-	gossip_source_config: Option<&GossipSourceConfig>, kv_store: Arc<K>,
+	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
+	gossip_source_config: Option<&GossipSourceConfig>, seed_bytes: [u8; 64],
+	logger: Arc<FilesystemLogger>, kv_store: Arc<K>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 ) -> Result<Node<K>, BuildError> {
-	let log_dir = match &config.log_dir_path {
-		Some(log_dir) => String::from(log_dir),
-		None => config.storage_dir_path.clone() + "/logs",
-	};
-
-	// Initialize the Logger
-	let logger = Arc::new(
-		FilesystemLogger::new(log_dir, config.log_level)
-			.map_err(|_| BuildError::LoggerSetupFailed)?,
-	);
-
 	// Initialize the on-chain wallet and chain access
-	let seed_bytes = match entropy_source_config {
-		Some(EntropySourceConfig::SeedBytes(bytes)) => bytes.clone(),
-		Some(EntropySourceConfig::SeedFile(seed_path)) => {
-			io::utils::read_or_generate_seed_file(seed_path, Arc::clone(&logger))
-				.map_err(|_| BuildError::InvalidSeedFile)?
-		}
-		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
-			Some(passphrase) => mnemonic.to_seed(passphrase),
-			None => mnemonic.to_seed(""),
-		},
-		None => {
-			// Default to read or generate from the default location generate a seed file.
-			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
-				.map_err(|_| BuildError::InvalidSeedFile)?
-		}
-	};
-
 	let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
 		.map_err(|e| {
 			log_error!(logger, "Failed to derive master secret: {}", e);
@@ -747,4 +725,39 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		peer_store,
 		payment_store,
 	})
+}
+
+fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
+	let log_dir = match &config.log_dir_path {
+		Some(log_dir) => String::from(log_dir),
+		None => config.storage_dir_path.clone() + "/logs",
+	};
+
+	Ok(Arc::new(
+		FilesystemLogger::new(log_dir, config.log_level)
+			.map_err(|_| BuildError::LoggerSetupFailed)?,
+	))
+}
+
+fn seed_bytes_from_config(
+	config: &Config, entropy_source_config: Option<&EntropySourceConfig>,
+	logger: Arc<FilesystemLogger>,
+) -> Result<[u8; 64], BuildError> {
+	match entropy_source_config {
+		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
+		Some(EntropySourceConfig::SeedFile(seed_path)) => {
+			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
+				.map_err(|_| BuildError::InvalidSeedFile)?)
+		}
+		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
+			Some(passphrase) => Ok(mnemonic.to_seed(passphrase)),
+			None => Ok(mnemonic.to_seed("")),
+		},
+		None => {
+			// Default to read or generate from the default location generate a seed file.
+			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
+			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
+				.map_err(|_| BuildError::InvalidSeedFile)?)
+		}
+	}
 }
