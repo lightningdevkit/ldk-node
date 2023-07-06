@@ -198,21 +198,26 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 ///
 /// ### Defaults
 ///
-/// | Parameter                              | Value            |
-/// |----------------------------------------|------------------|
-/// | `storage_dir_path`                     | /tmp/ldk_node/   |
-/// | `network`                              | Bitcoin          |
-/// | `listening_address`                    | None             |
-/// | `default_cltv_expiry_delta`            | 144              |
-/// | `onchain_wallet_sync_interval_secs`    | 80               |
-/// | `wallet_sync_interval_secs`            | 30               |
-/// | `fee_rate_cache_update_interval_secs`  | 600              |
-/// | `trusted_peers_0conf`                  | []               |
-/// | `log_level`                            | Debug            |
+/// | Parameter                              | Value              |
+/// |----------------------------------------|--------------------|
+/// | `storage_dir_path`                     | /tmp/ldk_node/     |
+/// | `log_dir_path`                         | None               |
+/// | `network`                              | Bitcoin            |
+/// | `listening_address`                    | None               |
+/// | `default_cltv_expiry_delta`            | 144                |
+/// | `onchain_wallet_sync_interval_secs`    | 80                 |
+/// | `wallet_sync_interval_secs`            | 30                 |
+/// | `fee_rate_cache_update_interval_secs`  | 600                |
+/// | `trusted_peers_0conf`                  | []                 |
+/// | `log_level`                            | Debug              |
 ///
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
+	/// The path where logs are stored.
+	///
+	/// If set to `None`, logs can be found in the `logs` subdirectory in [`Config::storage_dir_path`].
+	pub log_dir_path: Option<String>,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The IP address and TCP port the node will listen on.
@@ -247,6 +252,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
+			log_dir_path: None,
 			network: DEFAULT_NETWORK,
 			listening_address: None,
 			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,

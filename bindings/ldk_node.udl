@@ -4,6 +4,7 @@ namespace ldk_node {
 
 dictionary Config {
 	string storage_dir_path = "/tmp/ldk_node/";
+	string? log_dir_path = null;
 	Network network = "Bitcoin";
 	NetAddress? listening_address = null;
 	u32 default_cltv_expiry_delta = 144;
