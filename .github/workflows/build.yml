@@ -10,7 +10,7 @@ jobs:
           stable,
           beta,
           1.60.0, # Our MSRV
-      ]
+          ]
         include:
           - toolchain: stable
             check-fmt: true
@@ -20,13 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Install Rust ${{ matrix.toolchain }} toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ matrix.toolchain }}
-          override: true
-          profile: minimal
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
+          rustup override set ${{ matrix.toolchain }}
       - name: Pin packages to allow for MSRV
         if: matrix.msrv
         run: cargo update -p hashlink --precise "0.8.1" --verbose # hashlink 0.8.2 requires hashbrown 0.13, requiring 1.61.0
