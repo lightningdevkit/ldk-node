@@ -8,7 +8,7 @@ use crate::payment_store::{
 };
 
 use crate::io::{KVStore, EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_NAMESPACE};
-use crate::logger::{log_error, log_info, Logger};
+use crate::logger::{log_debug, log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::events::Event as LdkEvent;
@@ -564,7 +564,10 @@ where
 					&Secp256k1::new(),
 				);
 				match res {
-					Ok(spending_tx) => self.wallet.broadcast_transaction(&spending_tx),
+					Ok(Some(spending_tx)) => self.wallet.broadcast_transaction(&spending_tx),
+					Ok(None) => {
+						log_debug!(self.logger, "Omitted spending static outputs: {:?}", outputs);
+					}
 					Err(err) => {
 						log_error!(self.logger, "Error spending outputs: {:?}", err);
 					}
