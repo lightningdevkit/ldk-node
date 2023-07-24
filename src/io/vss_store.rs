@@ -1,17 +1,16 @@
 use std::io::Cursor;
-use std::io::{Read, Write};
-use std::{error::Error, io, marker};
+use std::io::Read;
+use std::sync::Arc;
+use std::sync::RwLock;
+use std::{error::Error, io};
 
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::Writeable;
-use std::sync::RwLock;
-use std::sync::{Arc, RwLockReadGuard};
-use tokio::runtime::Handle;
 use tokio::runtime::Runtime;
 use vss_client::client::VssClient;
+use vss_client::types::{GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest};
 
 use crate::KVStore;
-use vss_client::types::{GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest};
 
 /// pss
 pub struct VssKVStore {
@@ -28,30 +27,34 @@ impl VssKVStore {
 		let client = VssClient::new(base_url);
 		Ok(Self { client, store_id, runtime })
 	}
+
+	fn run_async_block<F, T, E>(&self, async_block: F) -> Result<T, E>
+	where
+		F: FnOnce(
+			Arc<VssClient>,
+		) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send>>,
+		T: Send + 'static,
+		E: Send + 'static + std::fmt::Debug,
+	{
+		let client = Arc::new(self.client.clone());
+		let locked_runtime = self.runtime.read().unwrap();
+		match *locked_runtime {
+			Some(ref rt) => rt.block_on(async_block(client)),
+			None => Runtime::new().unwrap().block_on(async_block(client)),
+		}
+	}
 }
 
 impl KVStore for VssKVStore {
 	type Reader = Box<dyn Read>;
 
 	fn read(&self, namespace: &str, key: &str) -> io::Result<Self::Reader> {
-		let locked_runtime = self.runtime.read().unwrap();
 		let request =
 			GetObjectRequest { store_id: self.store_id.to_string(), key: key.to_string() };
 
-		let resp = if locked_runtime.as_ref().is_some() {
-			tokio::task::block_in_place(move || {
-				locked_runtime
-					.as_ref()
-					.unwrap()
-					.block_on(async move { self.client.get_object(&request).await })
-			})
-			.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
-		} else {
-			Runtime::new()
-				.unwrap()
-				.block_on(self.client.get_object(&request))
-				.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
-		};
+		let resp = self
+			.run_async_block(|client| Box::pin(async move { client.get_object(&request).await }))
+			.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
 		let v = resp.value.unwrap().value;
 		if v.is_empty() {
