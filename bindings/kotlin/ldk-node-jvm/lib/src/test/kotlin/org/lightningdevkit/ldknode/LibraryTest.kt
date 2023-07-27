@@ -155,10 +155,10 @@ class LibraryTest {
         println("Spendable balance 2: $spendableBalance1")
         println("Total balance 1: $totalBalance1")
         println("Total balance 2: $totalBalance1")
-        assertEquals(100000u, spendableBalance1)
-        assertEquals(100000u, spendableBalance2)
-        assertEquals(100000u, totalBalance1)
-        assertEquals(100000u, totalBalance2)
+        assertEquals(100000uL, spendableBalance1)
+        assertEquals(100000uL, spendableBalance2)
+        assertEquals(100000uL, totalBalance1)
+        assertEquals(100000uL, totalBalance2)
 
         node1.connectOpenChannel(nodeId2, listenAddress2, 50000u, null, null, true)
 
@@ -190,7 +190,7 @@ class LibraryTest {
         println("Spendable balance 2 after open: $spendableBalance2AfterOpen")
         assert(spendableBalance1AfterOpen > 49000u)
         assert(spendableBalance1AfterOpen < 50000u)
-        assertEquals(100000u, spendableBalance2AfterOpen)
+        assertEquals(100000uL, spendableBalance2AfterOpen)
 
         val channelReadyEvent1 = node1.waitNextEvent()
         println("Got event: $channelReadyEvent1")
@@ -247,7 +247,7 @@ class LibraryTest {
         println("Spendable balance 2 after close: $spendableBalance2AfterClose")
         assert(spendableBalance1AfterClose > 95000u)
         assert(spendableBalance1AfterClose < 100000u)
-        assertEquals(101000u, spendableBalance2AfterClose)
+        assertEquals(101000uL, spendableBalance2AfterClose)
 
         node1.stop()
         node2.stop()
