@@ -29,7 +29,9 @@ jobs:
           profile: minimal
       - name: Pin packages to allow for MSRV
         if: matrix.msrv
-        run: cargo update -p hashlink --precise "0.8.1" --verbose # hashlink 0.8.2 requires hashbrown 0.13, requiring 1.61.0
+        run: |
+          cargo update -p hashlink --precise "0.8.1" --verbose # hashlink 0.8.2 requires hashbrown 0.13, requiring 1.61.0
+          cargo update -p tempfile --precise "3.6.0" --verbose # tempfile 3.7.0 requires rustc 1.63.0
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
