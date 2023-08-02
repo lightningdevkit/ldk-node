@@ -85,6 +85,7 @@ pub mod io;
 mod logger;
 mod payment_store;
 mod peer_store;
+mod sweep;
 #[cfg(test)]
 mod test;
 mod tx_broadcaster;

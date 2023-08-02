@@ -3,6 +3,7 @@ use crate::WALLET_KEYS_SEED_LEN;
 
 use crate::logger::log_error;
 use crate::peer_store::PeerStore;
+use crate::sweep::SpendableOutputInfo;
 use crate::{Error, EventQueue, PaymentDetails};
 
 use lightning::routing::gossip::NetworkGraph;
@@ -195,6 +196,36 @@ where
 			)
 		})?;
 		res.push(payment);
+	}
+	Ok(res)
+}
+
+/// Read previously persisted spendable output information from the store.
+pub(crate) fn read_spendable_outputs<K: KVStore + Sync + Send, L: Deref>(
+	kv_store: Arc<K>, logger: L,
+) -> Result<Vec<SpendableOutputInfo>, std::io::Error>
+where
+	L::Target: Logger,
+{
+	let mut res = Vec::new();
+
+	for stored_key in kv_store.list(
+		SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	)? {
+		let mut reader = Cursor::new(kv_store.read(
+			SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			&stored_key,
+		)?);
+		let output = SpendableOutputInfo::read(&mut reader).map_err(|e| {
+			log_error!(logger, "Failed to deserialize SpendableOutputInfo: {}", e);
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"Failed to deserialize SpendableOutputInfo",
+			)
+		})?;
+		res.push(output);
 	}
 	Ok(res)
 }

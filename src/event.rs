@@ -611,12 +611,7 @@ where
 				);
 
 				match res {
-					Ok(Some(spending_tx)) => {
-						self.tx_broadcaster.broadcast_transactions(&[&spending_tx])
-					}
-					Ok(None) => {
-						log_debug!(self.logger, "Omitted spending static outputs: {:?}", outputs);
-					}
+					Ok(spending_tx) => self.tx_broadcaster.broadcast_transactions(&[&spending_tx]),
 					Err(err) => {
 						log_error!(self.logger, "Error spending outputs: {:?}", err);
 					}

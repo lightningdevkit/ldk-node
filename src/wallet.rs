@@ -282,25 +282,15 @@ where
 		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
 		change_destination_script: Script, feerate_sat_per_1000_weight: u32,
 		locktime: Option<PackedLockTime>, secp_ctx: &Secp256k1<C>,
-	) -> Result<Option<Transaction>, ()> {
-		let only_non_static = &descriptors
-			.iter()
-			.filter(|desc| !matches!(desc, SpendableOutputDescriptor::StaticOutput { .. }))
-			.copied()
-			.collect::<Vec<_>>();
-		if only_non_static.is_empty() {
-			return Ok(None);
-		}
-		self.inner
-			.spend_spendable_outputs(
-				only_non_static,
-				outputs,
-				change_destination_script,
-				feerate_sat_per_1000_weight,
-				locktime,
-				secp_ctx,
-			)
-			.map(Some)
+	) -> Result<Transaction, ()> {
+		self.inner.spend_spendable_outputs(
+			descriptors,
+			outputs,
+			change_destination_script,
+			feerate_sat_per_1000_weight,
+			locktime,
+			secp_ctx,
+		)
 	}
 
 	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
