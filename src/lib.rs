@@ -1036,7 +1036,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			.map_err(|_| Error::ChannelConfigUpdateFailed)
 	}
 
-	/// Send a payement given an invoice.
+	/// Send a payment given an invoice.
 	pub fn send_payment(&self, invoice: &Invoice) -> Result<PaymentHash, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
