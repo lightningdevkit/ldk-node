@@ -730,6 +730,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		gossip_source,
 		kv_store,
 		logger,
+		router,
 		scorer,
 		peer_store,
 		payment_store,
