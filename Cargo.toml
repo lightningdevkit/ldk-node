@@ -63,7 +63,7 @@ bitcoin = "0.29.2"
 bip39 = "2.0.0"
 
 rand = "0.8.5"
-chrono = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 futures = "0.3"
 serde_json = { version = "1.0" }
 tokio = { version = "1", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
