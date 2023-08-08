@@ -26,7 +26,7 @@
 //! [`send_payment`], etc.:
 //!
 //! ```no_run
-//! use ldk_node::{Builder, NetAddress};
+//! use ldk_node::{Builder, SocketAddress};
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use ldk_node::bitcoin::Network;
@@ -47,7 +47,7 @@
 //! 	// .. fund address ..
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
-//! 	let node_addr = NetAddress::from_str("IP_ADDR:PORT").unwrap();
+//! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
 //! 	node.connect_open_channel(node_id, node_addr, 10000, None, None, false).unwrap();
 //!
 //! 	let event = node.wait_next_event();
@@ -100,7 +100,7 @@ use error::Error;
 
 pub use event::Event;
 pub use types::ChannelConfig;
-pub use types::NetAddress;
+pub use types::SocketAddress;
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -115,20 +115,21 @@ pub use builder::NodeBuilder as Builder;
 
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
-use io::KVStore;
 use payment_store::PaymentStore;
 pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
 use types::{ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Router, Scorer};
-pub use types::{ChannelDetails, ChannelId, PeerDetails, UserChannelId};
+pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 use wallet::Wallet;
 
-use logger::{log_debug, log_error, log_info, log_trace, FilesystemLogger, Logger};
+use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::Confirm;
 use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
-use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
 use lightning::sign::EntropySource;
+
+use lightning::util::persist::KVStore;
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -137,7 +138,7 @@ use lightning_background_processor::process_events_async;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
-use lightning::routing::router::{PaymentParameters, RouteParameters, Router as LdkRouter};
+use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning_invoice::{payment, Bolt11Invoice, Currency};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -149,7 +150,6 @@ use bitcoin::{Address, Txid};
 
 use rand::Rng;
 
-use std::collections::HashMap;
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
@@ -225,7 +225,7 @@ pub struct Config {
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The IP address and TCP port the node will listen on.
-	pub listening_address: Option<NetAddress>,
+	pub listening_address: Option<SocketAddress>,
 	/// The default CLTV expiry delta to be used for payments.
 	pub default_cltv_expiry_delta: u32,
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
@@ -294,7 +294,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	gossip_source: Arc<GossipSource>,
 	kv_store: Arc<K>,
 	logger: Arc<FilesystemLogger>,
-	router: Arc<Router>,
+	_router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<K, Arc<FilesystemLogger>>>,
 	payment_store: Arc<PaymentStore<K, Arc<FilesystemLogger>>>,
@@ -504,7 +504,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						"Unable to resolve listing address: {:?}",
 						listening_address
 					);
-					Error::InvalidNetAddress
+					Error::InvalidSocketAddress
 				})?
 				.next()
 				.ok_or_else(|| {
@@ -513,7 +513,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						"Unable to resolve listing address: {:?}",
 						listening_address
 					);
-					Error::InvalidNetAddress
+					Error::InvalidSocketAddress
 				})?;
 
 			runtime.spawn(async move {
@@ -781,7 +781,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	}
 
 	/// Returns our own listening address.
-	pub fn listening_address(&self) -> Option<NetAddress> {
+	pub fn listening_address(&self) -> Option<SocketAddress> {
 		self.config.listening_address.clone()
 	}
 
@@ -838,7 +838,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
 	pub fn connect(
-		&self, node_id: PublicKey, address: NetAddress, persist: bool,
+		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -903,7 +903,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// Returns a temporary channel id.
 	pub fn connect_open_channel(
-		&self, node_id: PublicKey, address: NetAddress, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
 		announce_channel: bool,
 	) -> Result<(), Error> {
@@ -1036,7 +1036,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		&self, channel_id: &ChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
 		self.peer_store.remove_peer(&counterparty_node_id)?;
-		match self.channel_manager.close_channel(&channel_id.0, &counterparty_node_id) {
+		match self.channel_manager.close_channel(&channel_id, &counterparty_node_id) {
 			Ok(_) => Ok(()),
 			Err(_) => Err(Error::ChannelClosingFailed),
 		}
@@ -1050,7 +1050,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		self.channel_manager
 			.update_channel_config(
 				&counterparty_node_id,
-				&[channel_id.0],
+				&[*channel_id],
 				&(*channel_config).clone().into(),
 			)
 			.map_err(|_| Error::ChannelConfigUpdateFailed)
@@ -1160,7 +1160,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		let payment_id = PaymentId(invoice.payment_hash().into_inner());
-		let payment_secret = Some(*invoice.payment_secret());
+		let payment_secret = invoice.payment_secret();
 		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
 		let mut payment_params = PaymentParameters::from_node_id(
 			invoice.recover_payee_pub_key(),
@@ -1174,10 +1174,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				.with_bolt11_features(features.clone())
 				.map_err(|_| Error::InvalidInvoice)?;
 		}
-		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
+		let route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
 
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let recipient_fields = RecipientOnionFields { payment_secret, payment_metadata: None };
+		let recipient_fields = RecipientOnionFields::secret_only(*payment_secret);
 
 		match self
 			.channel_manager
@@ -1196,7 +1197,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				let payment = PaymentDetails {
 					hash: payment_hash,
 					preimage: None,
-					secret: payment_secret,
+					secret: Some(*payment_secret),
 					amount_msat: Some(amount_msat),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
@@ -1220,7 +1221,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						let payment = PaymentDetails {
 							hash: payment_hash,
 							preimage: None,
-							secret: payment_secret,
+							secret: Some(*payment_secret),
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
@@ -1255,13 +1256,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		}
 
-		let route_params = RouteParameters {
-			payment_params: PaymentParameters::from_node_id(
-				node_id,
-				self.config.default_cltv_expiry_delta,
-			),
-			final_value_msat: amount_msat,
-		};
+		let route_params = RouteParameters::from_payment_params_and_value(
+			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
+			amount_msat,
+		);
 		let recipient_fields = RecipientOnionFields::spontaneous_empty();
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(
@@ -1324,52 +1322,32 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// payment. To mitigate this issue, channels with available liquidity less than the required
 	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
 	/// pre-flight probes.
-	pub fn send_payment_probe(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
+	pub fn send_payment_probes(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
-		let amount_msat = if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
-			invoice_amount_msat
-		} else {
-			log_error!(self.logger, "Failed to send probe as no amount was given in the invoice.");
-			return Err(Error::InvalidAmount);
-		};
+		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
 
-		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
-		let mut payment_params = PaymentParameters::from_node_id(
-			invoice.recover_payee_pub_key(),
-			invoice.min_final_cltv_expiry_delta() as u32,
+		payment::preflight_probe_invoice(
+			invoice,
+			&*self.channel_manager,
+			liquidity_limit_multiplier,
 		)
-		.with_expiry_time(expiry_time.as_secs())
-		.with_route_hints(invoice.route_hints())
-		.map_err(|_| Error::InvalidInvoice)?;
-		if let Some(features) = invoice.features() {
-			payment_params = payment_params
-				.with_bolt11_features(features.clone())
-				.map_err(|_| Error::InvalidInvoice)?;
-		}
-		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to send payment probes: {:?}", e);
+			Error::ProbeSendingFailed
+		})?;
 
-		self.send_payment_probe_internal(route_params)
+		Ok(())
 	}
 
 	/// Sends payment probes over all paths of a route that would be used to pay the given
 	/// amount to the given `node_id`.
 	///
-	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
-	/// the actual payment. Note this is only useful if there likely is sufficient time for the
-	/// probe to settle before sending out the actual payment, e.g., when waiting for user
-	/// confirmation in a wallet UI.
-	///
-	/// Otherwise, there is a chance the probe could take up some liquidity needed to complete the
-	/// actual payment. Users should therefore be cautious and might avoid sending probes if
-	/// liquidity is scarce and/or they don't expect the probe to return before they send the
-	/// payment. To mitigate this issue, channels with available liquidity less than the required
-	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
-	/// pre-flight probes.
-	pub fn send_spontaneous_payment_probe(
+	/// See [`Self::send_payment_probes`] for more information.
+	pub fn send_spontaneous_payment_probes(
 		&self, amount_msat: u64, node_id: PublicKey,
 	) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
@@ -1377,63 +1355,60 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			return Err(Error::NotRunning);
 		}
 
-		let payment_params =
-			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta);
+		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
+		let cltv_expiry_delta = self.config.default_cltv_expiry_delta;
 
-		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
+		self.channel_manager
+			.send_spontaneous_preflight_probes(
+				node_id,
+				amount_msat,
+				cltv_expiry_delta,
+				liquidity_limit_multiplier,
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to send payment probes: {:?}", e);
+				Error::ProbeSendingFailed
+			})?;
 
-		self.send_payment_probe_internal(route_params)
+		Ok(())
 	}
 
-	fn send_payment_probe_internal(&self, route_params: RouteParameters) -> Result<(), Error> {
-		let payer = self.channel_manager.get_our_node_id();
-		let usable_channels = self.channel_manager.list_usable_channels();
-		let first_hops = usable_channels.iter().collect::<Vec<_>>();
-		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
-
-		let route = self
-			.router
-			.find_route(&payer, &route_params, Some(&first_hops), inflight_htlcs)
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to find path for payment probe: {:?}", e);
-				Error::ProbeSendingFailed
-			})?;
-
-		let mut used_liquidity_map = HashMap::with_capacity(first_hops.len());
-		for path in route.paths {
-			if path.hops.len() + path.blinded_tail.as_ref().map_or(0, |t| t.hops.len()) < 2 {
-				log_debug!(
-					self.logger,
-					"Skipped sending payment probe over path with less than two hops."
-				);
-				continue;
-			}
-
-			if let Some(first_path_hop) = path.hops.first() {
-				if let Some(first_hop) = first_hops.iter().find(|h| {
-					h.get_outbound_payment_scid() == Some(first_path_hop.short_channel_id)
-				}) {
-					let path_value = path.final_value_msat() + path.fee_msat();
-					let used_liquidity =
-						used_liquidity_map.entry(first_path_hop.short_channel_id).or_insert(0);
-
-					if first_hop.next_outbound_htlc_limit_msat
-						< (*used_liquidity + path_value)
-							* self.config.probing_liquidity_limit_multiplier
-					{
-						log_debug!(self.logger, "Skipped sending payment probe to avoid putting channel {} under the liquidity limit.", first_path_hop.short_channel_id);
-						continue;
-					} else {
-						*used_liquidity += path_value;
-					}
-				}
-			}
-
-			self.channel_manager.send_probe(path).map_err(|e| {
-				log_error!(self.logger, "Failed to send payment probe: {:?}", e);
-				Error::ProbeSendingFailed
-			})?;
+	/// Sends payment probes over all paths of a route that would be used to pay the given
+	/// zero-value invoice using the given amount.
+	///
+	/// This can be used to send pre-flight probes for a so-called "zero-amount" invoice, i.e., an
+	/// invoice that leaves the amount paid to be determined by the user.
+	///
+	/// See [`Self::send_payment_probes`] for more information.
+	pub fn send_payment_probes_using_amount(
+		&self, invoice: &Bolt11Invoice, amount_msat: u64,
+	) -> Result<(), Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
 		}
+
+		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
+			if amount_msat < invoice_amount_msat {
+				log_error!(
+					self.logger,
+					"Failed to send probes as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.", invoice_amount_msat, amount_msat);
+				return Err(Error::InvalidAmount);
+			}
+		}
+
+		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
+
+		payment::preflight_probe_zero_value_invoice(
+			invoice,
+			amount_msat,
+			&*self.channel_manager,
+			liquidity_limit_multiplier,
+		)
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to send payment probes: {:?}", e);
+			Error::ProbeSendingFailed
+		})?;
 
 		Ok(())
 	}
@@ -1541,7 +1516,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			let stored_peer = self.peer_store.get_peer(&node_id);
 			let stored_addr_opt = stored_peer.as_ref().map(|p| p.address.clone());
 			let address = match (con_addr_opt, stored_addr_opt) {
-				(Some(con_addr), _) => NetAddress(con_addr),
+				(Some(con_addr), _) => SocketAddress(con_addr),
 				(None, Some(stored_addr)) => stored_addr,
 				(None, None) => continue,
 			};
@@ -1595,7 +1570,7 @@ impl<K: KVStore + Sync + Send + 'static> Drop for Node<K> {
 }
 
 async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
-	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager<K>>,
+	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
 	for (pman_node_id, _pman_addr) in peer_manager.get_peer_node_ids() {
@@ -1608,7 +1583,7 @@ async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
 }
 
 async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
-	node_id: PublicKey, addr: NetAddress, peer_manager: Arc<PeerManager<K>>,
+	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
 	log_info!(logger, "Connecting to peer: {}@{}", node_id, addr);
@@ -1617,7 +1592,7 @@ async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
 		.to_socket_addrs()
 		.map_err(|e| {
 			log_error!(logger, "Failed to resolve network address: {}", e);
-			Error::InvalidNetAddress
+			Error::InvalidSocketAddress
 		})?
 		.next()
 		.ok_or(Error::ConnectionFailed)?;

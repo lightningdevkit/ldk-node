@@ -32,21 +32,21 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.0.116", features = ["max_level_trace", "std"] }
-lightning-invoice = { version = "0.24.0" }
-lightning-net-tokio = { version = "0.0.116" }
-lightning-persister = { version = "0.0.116" }
-lightning-background-processor = { version = "0.0.116", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.116" }
-lightning-transaction-sync = { version = "0.0.116", features = ["esplora-async-https"] }
+lightning = { version = "0.0.117", features = ["max_level_trace", "std"] }
+lightning-invoice = { version = "0.25.0" }
+lightning-net-tokio = { version = "0.0.117" }
+lightning-persister = { version = "0.0.117" }
+lightning-background-processor = { version = "0.0.117", features = ["futures"] }
+lightning-rapid-gossip-sync = { version = "0.0.117" }
+lightning-transaction-sync = { version = "0.0.117", features = ["esplora-async-https"] }
 
-#lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std"] }
-#lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-#lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-#lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-#lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["futures"] }
-#lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
-#lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["esplora-async"] }
+# lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std"] }
+# lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+# lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+# lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+# lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["futures"] }
+# lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
+# lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["esplora-async"] }
 
 #lightning = { path = "../rust-lightning/lightning", features = ["max_level_trace", "std"] }
 #lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
@@ -57,6 +57,7 @@ lightning-transaction-sync = { version = "0.0.116", features = ["esplora-async-h
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
 
 bdk = { version = "0.28.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
+
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.28.0", features = ["bundled"] }
 bitcoin = "0.29.2"
@@ -74,6 +75,8 @@ uniffi = { version = "0.23.0", features = ["build"], optional = true }
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
+lightning = { version = "0.0.117", features = ["max_level_trace", "std", "_test_utils"] }
+#lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std", "_test_utils"] }
 electrsd = { version = "0.22.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_23_0"] }
 electrum-client = "0.12.0"
 proptest = "1.0.0"

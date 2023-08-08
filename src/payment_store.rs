@@ -1,9 +1,12 @@
 use crate::hex_utils;
-use crate::io::{KVStore, PAYMENT_INFO_PERSISTENCE_NAMESPACE};
+use crate::io::{
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use crate::logger::{log_error, Logger};
 use crate::Error;
 
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::util::persist::KVStore;
 use lightning::util::ser::Writeable;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 
@@ -123,16 +126,24 @@ where
 
 	pub(crate) fn remove(&self, hash: &PaymentHash) -> Result<(), Error> {
 		let store_key = hex_utils::to_string(&hash.0);
-		self.kv_store.remove(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &store_key).map_err(|e| {
-			log_error!(
-				self.logger,
-				"Removing payment data for key {}/{} failed due to: {}",
-				PAYMENT_INFO_PERSISTENCE_NAMESPACE,
-				store_key,
-				e
-			);
-			Error::PersistenceFailed
-		})
+		self.kv_store
+			.remove(
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key,
+				false,
+			)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Removing payment data for key {}/{}/{} failed due to: {}",
+					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+					store_key,
+					e
+				);
+				Error::PersistenceFailed
+			})
 	}
 
 	pub(crate) fn get(&self, hash: &PaymentHash) -> Option<PaymentDetails> {
@@ -183,18 +194,24 @@ where
 	fn persist_info(&self, hash: &PaymentHash, payment: &PaymentDetails) -> Result<(), Error> {
 		let store_key = hex_utils::to_string(&hash.0);
 		let data = payment.encode();
-		self.kv_store.write(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &store_key, &data).map_err(
-			|e| {
+		self.kv_store
+			.write(
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key,
+				&data,
+			)
+			.map_err(|e| {
 				log_error!(
 					self.logger,
-					"Write for key {}/{} failed due to: {}",
-					PAYMENT_INFO_PERSISTENCE_NAMESPACE,
+					"Write for key {}/{}/{} failed due to: {}",
+					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 					store_key,
 					e
 				);
 				Error::PersistenceFailed
-			},
-		)?;
+			})?;
 		Ok(())
 	}
 }
@@ -202,17 +219,27 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test::utils::{TestLogger, TestStore};
+	use crate::test::utils::TestLogger;
+	use lightning::util::test_utils::TestStore;
 	use std::sync::Arc;
 
 	#[test]
 	fn payment_info_is_persisted() {
-		let store = Arc::new(TestStore::new());
+		let store = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let payment_store = PaymentStore::new(Vec::new(), Arc::clone(&store), logger);
 
 		let hash = PaymentHash([42u8; 32]);
 		assert!(!payment_store.get(&hash).is_some());
+
+		let store_key = hex_utils::to_string(&hash.0);
+		assert!(store
+			.read(
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key
+			)
+			.is_err());
 
 		let payment = PaymentDetails {
 			hash,
@@ -223,18 +250,23 @@ mod tests {
 			status: PaymentStatus::Pending,
 		};
 
-		assert!(!store.get_and_clear_did_persist());
-
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
-		assert!(store.get_and_clear_did_persist());
+		assert!(payment_store.get(&hash).is_some());
+		assert!(store
+			.read(
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key
+			)
+			.is_ok());
 
 		assert_eq!(Ok(true), payment_store.insert(payment));
-		assert!(store.get_and_clear_did_persist());
+		assert!(payment_store.get(&hash).is_some());
 
 		let mut update = PaymentDetailsUpdate::new(hash);
 		update.status = Some(PaymentStatus::Succeeded);
 		assert_eq!(Ok(true), payment_store.update(&update));
-		assert!(store.get_and_clear_did_persist());
+		assert!(payment_store.get(&hash).is_some());
 
 		assert_eq!(PaymentStatus::Succeeded, payment_store.get(&hash).unwrap().status);
 	}

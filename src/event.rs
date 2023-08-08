@@ -1,22 +1,25 @@
 use crate::{
-	hex_utils, ChannelId, ChannelManager, Config, Error, KeysManager, NetworkGraph, UserChannelId,
-	Wallet,
+	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, UserChannelId, Wallet,
 };
 
 use crate::payment_store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentStatus, PaymentStore,
 };
 
-use crate::io::{KVStore, EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_NAMESPACE};
+use crate::io::{
+	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use crate::logger::{log_debug, log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::events::Event as LdkEvent;
 use lightning::events::PaymentPurpose;
 use lightning::impl_writeable_tlv_based_enum;
-use lightning::ln::PaymentHash;
+use lightning::ln::{ChannelId, PaymentHash};
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
@@ -68,6 +71,10 @@ pub enum Event {
 		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
 		user_channel_id: UserChannelId,
+		/// The `node_id` of the channel counterparty.
+		///
+		/// This will be `None` for events serialized by LDK Node XXX TODO and prior.
+		counterparty_node_id: Option<PublicKey>,
 	},
 	/// A channel has been closed.
 	ChannelClosed {
@@ -75,6 +82,10 @@ pub enum Event {
 		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
 		user_channel_id: UserChannelId,
+		/// The `node_id` of the channel counterparty.
+		///
+		/// This will be `None` for events serialized by LDK Node XXX TODO and prior.
+		counterparty_node_id: Option<PublicKey>,
 	},
 }
 
@@ -91,6 +102,7 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(3, ChannelReady) => {
 		(0, channel_id, required),
+		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
 	},
 	(4, ChannelPending) => {
@@ -102,6 +114,7 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(5, ChannelClosed) => {
 		(0, channel_id, required),
+		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
 	};
 );
@@ -161,12 +174,18 @@ where
 	fn persist_queue(&self, locked_queue: &VecDeque<Event>) -> Result<(), Error> {
 		let data = EventQueueSerWrapper(locked_queue).encode();
 		self.kv_store
-			.write(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY, &data)
+			.write(
+				EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+				EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+				EVENT_QUEUE_PERSISTENCE_KEY,
+				&data,
+			)
 			.map_err(|e| {
 				log_error!(
 					self.logger,
-					"Write for key {}/{} failed due to: {}",
-					EVENT_QUEUE_PERSISTENCE_NAMESPACE,
+					"Write for key {}/{}/{} failed due to: {}",
+					EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+					EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 					EVENT_QUEUE_PERSISTENCE_KEY,
 					e
 				);
@@ -402,6 +421,8 @@ where
 				purpose,
 				amount_msat,
 				receiver_node_id: _,
+				htlcs: _,
+				sender_intended_total_msat: _,
 			} => {
 				log_info!(
 					self.logger,
@@ -552,7 +573,7 @@ where
 					});
 				}
 			}
-			LdkEvent::SpendableOutputs { outputs } => {
+			LdkEvent::SpendableOutputs { outputs, channel_id: _ } => {
 				// TODO: We should eventually remember the outputs and supply them to the wallet's coin selection, once BDK allows us to do so.
 				let destination_address = self.wallet.get_new_address().unwrap_or_else(|e| {
 					log_error!(self.logger, "Failed to get destination address: {}", e);
@@ -643,7 +664,7 @@ where
 				let nodes = read_only_network_graph.nodes();
 				let channels = self.channel_manager.list_channels();
 
-				let node_str = |channel_id: &Option<[u8; 32]>| {
+				let node_str = |channel_id: &Option<ChannelId>| {
 					channel_id
 						.and_then(|channel_id| channels.iter().find(|c| c.channel_id == channel_id))
 						.and_then(|channel| {
@@ -657,11 +678,9 @@ where
 								})
 						})
 				};
-				let channel_str = |channel_id: &Option<[u8; 32]>| {
+				let channel_str = |channel_id: &Option<ChannelId>| {
 					channel_id
-						.map(|channel_id| {
-							format!(" with channel {}", hex_utils::to_string(&channel_id))
-						})
+						.map(|channel_id| format!(" with channel {}", channel_id))
 						.unwrap_or_default()
 				};
 				let from_prev_str = format!(
@@ -704,16 +723,14 @@ where
 				log_info!(
 					self.logger,
 					"New channel {} with counterparty {} has been created and is pending confirmation on chain.",
-					hex_utils::to_string(&channel_id),
+					channel_id,
 					counterparty_node_id,
 				);
 				self.event_queue
 					.add_event(Event::ChannelPending {
-						channel_id: ChannelId(channel_id),
+						channel_id,
 						user_channel_id: UserChannelId(user_channel_id),
-						former_temporary_channel_id: ChannelId(
-							former_temporary_channel_id.unwrap(),
-						),
+						former_temporary_channel_id: former_temporary_channel_id.unwrap(),
 						counterparty_node_id,
 						funding_txo,
 					})
@@ -728,30 +745,33 @@ where
 				log_info!(
 					self.logger,
 					"Channel {} with counterparty {} ready to be used.",
-					hex_utils::to_string(&channel_id),
+					channel_id,
 					counterparty_node_id,
 				);
 				self.event_queue
 					.add_event(Event::ChannelReady {
-						channel_id: ChannelId(channel_id),
+						channel_id,
 						user_channel_id: UserChannelId(user_channel_id),
+						counterparty_node_id: Some(counterparty_node_id),
 					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
 			}
-			LdkEvent::ChannelClosed { channel_id, reason, user_channel_id } => {
-				log_info!(
-					self.logger,
-					"Channel {} closed due to: {:?}",
-					hex_utils::to_string(&channel_id),
-					reason
-				);
+			LdkEvent::ChannelClosed {
+				channel_id,
+				reason,
+				user_channel_id,
+				counterparty_node_id,
+				..
+			} => {
+				log_info!(self.logger, "Channel {} closed due to: {:?}", channel_id, reason);
 				self.event_queue
 					.add_event(Event::ChannelClosed {
-						channel_id: ChannelId(channel_id),
+						channel_id,
 						user_channel_id: UserChannelId(user_channel_id),
+						counterparty_node_id,
 					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
@@ -768,11 +788,12 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test::utils::{TestLogger, TestStore};
+	use crate::test::utils::TestLogger;
+	use lightning::util::test_utils::TestStore;
 
 	#[test]
 	fn event_queue_persistence() {
-		let store = Arc::new(TestStore::new());
+		let store = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = EventQueue::new(Arc::clone(&store), Arc::clone(&logger));
 		assert_eq!(event_queue.next_event(), None);
@@ -780,29 +801,29 @@ mod tests {
 		let expected_event = Event::ChannelReady {
 			channel_id: ChannelId([23u8; 32]),
 			user_channel_id: UserChannelId(2323),
+			counterparty_node_id: None,
 		};
 		event_queue.add_event(expected_event.clone()).unwrap();
-		assert!(store.get_and_clear_did_persist());
 
 		// Check we get the expected event and that it is returned until we mark it handled.
 		for _ in 0..5 {
 			assert_eq!(event_queue.wait_next_event(), expected_event);
 			assert_eq!(event_queue.next_event(), Some(expected_event.clone()));
-			assert_eq!(false, store.get_and_clear_did_persist());
 		}
 
 		// Check we can read back what we persisted.
 		let persisted_bytes = store
-			.get_persisted_bytes(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY)
+			.read(
+				EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+				EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+				EVENT_QUEUE_PERSISTENCE_KEY,
+			)
 			.unwrap();
 		let deser_event_queue =
 			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
 		assert_eq!(deser_event_queue.wait_next_event(), expected_event);
-		assert!(!store.get_and_clear_did_persist());
 
-		// Check we persisted on `event_handled()`
 		event_queue.event_handled().unwrap();
-
-		assert!(store.get_and_clear_did_persist());
+		assert_eq!(event_queue.next_event(), None);
 	}
 }

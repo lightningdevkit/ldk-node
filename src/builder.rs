@@ -1,15 +1,13 @@
 use crate::event::EventQueue;
 use crate::gossip::GossipSource;
 use crate::io;
-use crate::io::fs_store::FilesystemStore;
 use crate::io::sqlite_store::SqliteStore;
-use crate::io::{KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_NAMESPACE};
 use crate::logger::{log_error, FilesystemLogger, Logger};
 use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::types::{
-	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetAddress,
-	NetworkGraph, OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
+	OnionMessenger, PeerManager, SocketAddress,
 };
 use crate::wallet::Wallet;
 use crate::LogLevel;
@@ -29,7 +27,13 @@ use lightning::routing::scoring::{
 use lightning::sign::EntropySource;
 
 use lightning::util::config::UserConfig;
+use lightning::util::persist::{
+	read_channel_monitors, KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning::util::ser::ReadableArgs;
+
+use lightning_persister::fs_store::FilesystemStore;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
@@ -48,6 +52,8 @@ use std::convert::TryInto;
 use std::default::Default;
 use std::fmt;
 use std::fs;
+use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -80,12 +86,16 @@ pub enum BuildError {
 	InvalidSeedFile,
 	/// The current system time is invalid, clocks might have gone backwards.
 	InvalidSystemTime,
+	/// The a read channel monitor is invalid.
+	InvalidChannelMonitor,
 	/// We failed to read data from the [`KVStore`].
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
 	StoragePathAccessFailed,
+	/// We failed to setup our [`KVStore`].
+	KVStoreSetupFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
 	/// We failed to setup the logger.
@@ -100,9 +110,13 @@ impl fmt::Display for BuildError {
 			Self::InvalidSystemTime => {
 				write!(f, "System time is invalid. Clocks might have gone back in time.")
 			}
+			Self::InvalidChannelMonitor => {
+				write!(f, "Failed to watch a deserialzed ChannelMonitor")
+			}
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
+			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
 		}
@@ -155,8 +169,6 @@ impl NodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
-	///
-	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
 	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: Vec<u8>) -> Result<&mut Self, BuildError> {
 		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
 			return Err(BuildError::InvalidSeedBytes);
@@ -217,7 +229,7 @@ impl NodeBuilder {
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
-	pub fn set_listening_address(&mut self, listening_address: NetAddress) -> &mut Self {
+	pub fn set_listening_address(&mut self, listening_address: SocketAddress) -> &mut Self {
 		self.config.listening_address = Some(listening_address);
 		self
 	}
@@ -234,17 +246,26 @@ impl NodeBuilder {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
-		let kv_store = Arc::new(SqliteStore::new(storage_dir_path.into()));
+		let kv_store = Arc::new(
+			SqliteStore::new(
+				storage_dir_path.into(),
+				Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+				Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+			)
+			.map_err(|_| BuildError::KVStoreSetupFailed)?,
+		);
 		self.build_with_store(kv_store)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
 	pub fn build_with_fs_store(&self) -> Result<Node<FilesystemStore>, BuildError> {
-		let storage_dir_path = self.config.storage_dir_path.clone();
+		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
+		storage_dir_path.push("fs_store");
+
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
-		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path.into()));
+		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path));
 		self.build_with_store(kv_store)
 	}
 
@@ -353,7 +374,7 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
-	pub fn set_listening_address(&self, listening_address: NetAddress) {
+	pub fn set_listening_address(&self, listening_address: SocketAddress) {
 		self.inner.write().unwrap().set_listening_address(listening_address);
 	}
 
@@ -510,7 +531,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	));
 
 	// Read ChannelMonitor state from store
-	let mut channel_monitors = match io::utils::read_channel_monitors(
+	let mut channel_monitors = match read_channel_monitors(
 		Arc::clone(&kv_store),
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
@@ -536,9 +557,12 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		user_config.manually_accept_inbound_channels = true;
 	}
 	let channel_manager = {
-		if let Ok(mut reader) =
-			kv_store.read(CHANNEL_MANAGER_PERSISTENCE_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_KEY)
-		{
+		if let Ok(res) = kv_store.read(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		) {
+			let mut reader = Cursor::new(res);
 			let channel_monitor_references =
 				channel_monitors.iter_mut().map(|(_, chanmon)| chanmon).collect();
 			let read_args = ChannelManagerReadArgs::new(
@@ -589,7 +613,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
 		let funding_outpoint = channel_monitor.get_funding_txo().0;
-		chain_monitor.watch_channel(funding_outpoint, channel_monitor);
+		chain_monitor.watch_channel(funding_outpoint, channel_monitor).map_err(|e| {
+			log_error!(logger, "Failed to watch channel monitor: {:?}", e);
+			BuildError::InvalidChannelMonitor
+		})?;
 	}
 
 	// Initialize the PeerManager
@@ -726,7 +753,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		gossip_source,
 		kv_store,
 		logger,
-		router,
+		_router: router,
 		scorer,
 		peer_store,
 		payment_store,

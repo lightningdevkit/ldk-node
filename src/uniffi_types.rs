@@ -2,14 +2,14 @@ use crate::UniffiCustomTypeConverter;
 
 use crate::error::Error;
 use crate::hex_utils;
-use crate::io::SqliteStore;
-use crate::{ChannelId, NetAddress, Node, UserChannelId};
+use crate::io::sqlite_store::SqliteStore;
+use crate::{Node, SocketAddress, UserChannelId};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Txid};
-use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning_invoice::{Bolt11Invoice, SignedRawBolt11Invoice};
 
 use bip39::Mnemonic;
@@ -176,10 +176,10 @@ impl UniffiCustomTypeConverter for Mnemonic {
 	}
 }
 
-impl UniffiCustomTypeConverter for NetAddress {
+impl UniffiCustomTypeConverter for SocketAddress {
 	type Builtin = String;
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Ok(NetAddress::from_str(&val).map_err(|_| Error::InvalidNetAddress)?)
+		Ok(SocketAddress::from_str(&val).map_err(|_| Error::InvalidSocketAddress)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {

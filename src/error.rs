@@ -38,7 +38,7 @@ pub enum Error {
 	/// The given address is invalid.
 	InvalidAddress,
 	/// The given network address is invalid.
-	InvalidNetAddress,
+	InvalidSocketAddress,
 	/// The given public key is invalid.
 	InvalidPublicKey,
 	/// The given secret key is invalid.
@@ -85,7 +85,7 @@ impl fmt::Display for Error {
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
-			Self::InvalidNetAddress => write!(f, "The given network address is invalid."),
+			Self::InvalidSocketAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
 			Self::InvalidSecretKey => write!(f, "The given secret key is invalid."),
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
