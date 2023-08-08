@@ -162,8 +162,11 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 		node_a.send_payment_using_amount(&invoice, underpaid_amount)
 	);
 
+	println!("\nB overpaid receive_payment");
 	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
+
+	println!("\nA overpaid send_payment");
 	let payment_hash = node_a.send_payment_using_amount(&invoice, overpaid_amount_msat).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {
@@ -185,9 +188,11 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
 
 	// Test "zero-amount" invoice payment
+	println!("\nB receive_variable_amount_payment");
 	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
 	let determined_amount_msat = 2345_678;
 	assert_eq!(Err(Error::InvalidInvoice), node_a.send_payment(&variable_amount_invoice));
+	println!("\nA send_payment_using_amount");
 	let payment_hash =
 		node_a.send_payment_using_amount(&variable_amount_invoice, determined_amount_msat).unwrap();
 
@@ -210,6 +215,40 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
 
+	// Test spontaneous/keysend payments
+	println!("\nA send_spontaneous_payment");
+	let keysend_amount_msat = 2500_000;
+	let keysend_payment_hash =
+		node_a.send_spontaneous_payment(keysend_amount_msat, node_b.node_id()).unwrap();
+	expect_event!(node_a, PaymentSuccessful);
+	let received_keysend_amount = match node_b.wait_next_event() {
+		ref e @ Event::PaymentReceived { amount_msat, .. } => {
+			println!("{} got event {:?}", std::stringify!(node_b), e);
+			node_b.event_handled();
+			amount_msat
+		}
+		ref e => {
+			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+		}
+	};
+	assert_eq!(received_keysend_amount, keysend_amount_msat);
+	assert_eq!(node_a.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(
+		node_a.payment(&keysend_payment_hash).unwrap().direction,
+		PaymentDirection::Outbound
+	);
+	assert_eq!(
+		node_a.payment(&keysend_payment_hash).unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
+	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&keysend_payment_hash).unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
+
+	println!("\nB close_channel");
 	node_b.close_channel(&channel_id, node_a.node_id()).unwrap();
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
@@ -220,8 +259,12 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	let sum_of_all_payments_sat =
-		(push_msat + invoice_amount_1_msat + overpaid_amount_msat + determined_amount_msat) / 1000;
+	let sum_of_all_payments_sat = (push_msat
+		+ invoice_amount_1_msat
+		+ overpaid_amount_msat
+		+ determined_amount_msat
+		+ keysend_amount_msat)
+		/ 1000;
 	let node_a_upper_bound_sat =
 		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
 	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
