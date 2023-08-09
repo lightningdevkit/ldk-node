@@ -15,6 +15,8 @@ pub enum Error {
 	InvoiceCreationFailed,
 	/// Sending a payment has failed.
 	PaymentSendingFailed,
+	/// Sending a payment probe has failed.
+	ProbeSendingFailed,
 	/// A channel could not be opened.
 	ChannelCreationFailed,
 	/// A channel could not be closed.
@@ -72,6 +74,7 @@ impl fmt::Display for Error {
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
+			Self::ProbeSendingFailed => write!(f, "Failed to send the given payment probe."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
 			Self::ChannelConfigUpdateFailed => write!(f, "Failed to update channel config."),

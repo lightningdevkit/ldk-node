@@ -72,6 +72,10 @@ interface LDKNode {
 	[Throws=NodeError]
 	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
+	void send_payment_probe([ByRef]Invoice invoice);
+	[Throws=NodeError]
+	void send_spontaneous_payment_probe(u64 amount_msat, PublicKey node_id);
+	[Throws=NodeError]
 	Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
 	[Throws=NodeError]
 	Invoice receive_variable_amount_payment([ByRef]string description, u32 expiry_secs);
@@ -94,6 +98,7 @@ enum NodeError {
 	"ConnectionFailed",
 	"InvoiceCreationFailed",
 	"PaymentSendingFailed",
+	"ProbeSendingFailed",
 	"ChannelCreationFailed",
 	"ChannelClosingFailed",
 	"ChannelConfigUpdateFailed",

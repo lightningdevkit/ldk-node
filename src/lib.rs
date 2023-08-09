@@ -118,11 +118,11 @@ use io::KVStore;
 use payment_store::PaymentStore;
 pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
-use types::{ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Scorer};
+use types::{ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Router, Scorer};
 pub use types::{ChannelDetails, ChannelId, PeerDetails, UserChannelId};
 use wallet::Wallet;
 
-use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
+use logger::{log_debug, log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::keysinterface::EntropySource;
 use lightning::chain::Confirm;
@@ -136,7 +136,7 @@ use lightning_background_processor::process_events_async;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
-use lightning::routing::router::{PaymentParameters, RouteParameters};
+use lightning::routing::router::{PaymentParameters, RouteParameters, Router as LdkRouter};
 use lightning_invoice::{payment, Currency, Invoice};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -284,6 +284,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	gossip_source: Arc<GossipSource>,
 	kv_store: Arc<K>,
 	logger: Arc<FilesystemLogger>,
+	router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<K, Arc<FilesystemLogger>>>,
 	payment_store: Arc<PaymentStore<K, Arc<FilesystemLogger>>>,
@@ -1035,7 +1036,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			.map_err(|_| Error::ChannelConfigUpdateFailed)
 	}
 
-	/// Send a payement given an invoice.
+	/// Send a payment given an invoice.
 	pub fn send_payment(&self, invoice: &Invoice) -> Result<PaymentHash, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1285,6 +1286,99 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				}
 			}
 		}
+	}
+
+	/// Sends payment probes over all paths of a route that would be used to pay the given invoice.
+	///
+	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
+	/// the actual payment. Note this is only useful if there likely is sufficient time for the
+	/// probe to settle before sending out the actual payment, e.g., when waiting for user
+	/// confirmation in a wallet UI.
+	pub fn send_payment_probe(&self, invoice: &Invoice) -> Result<(), Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		let amount_msat = if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
+			invoice_amount_msat
+		} else {
+			log_error!(self.logger, "Failed to send probe as no amount was given in the invoice.");
+			return Err(Error::InvalidAmount);
+		};
+
+		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
+		let mut payment_params = PaymentParameters::from_node_id(
+			invoice.recover_payee_pub_key(),
+			invoice.min_final_cltv_expiry_delta() as u32,
+		)
+		.with_expiry_time(expiry_time.as_secs())
+		.with_route_hints(invoice.route_hints());
+		if let Some(features) = invoice.features() {
+			payment_params = payment_params.with_features(features.clone());
+		}
+		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
+
+		self.send_payment_probe_internal(route_params)
+	}
+
+	/// Sends payment probes over all paths of a route that would be used to pay the given
+	/// amount to the given `node_id`.
+	///
+	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
+	/// the actual payment. Note this is only useful if there likely is sufficient time for the
+	/// probe to settle before sending out the actual payment, e.g., when waiting for user
+	/// confirmation in a wallet UI.
+	pub fn send_spontaneous_payment_probe(
+		&self, amount_msat: u64, node_id: PublicKey,
+	) -> Result<(), Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		let payment_params =
+			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta);
+
+		let route_params = RouteParameters { payment_params, final_value_msat: amount_msat };
+
+		self.send_payment_probe_internal(route_params)
+	}
+
+	fn send_payment_probe_internal(&self, route_params: RouteParameters) -> Result<(), Error> {
+		let payer = self.channel_manager.get_our_node_id();
+		let first_hops = self.channel_manager.list_usable_channels();
+		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
+
+		let route = self
+			.router
+			.find_route(
+				&payer,
+				&route_params,
+				Some(&first_hops.iter().collect::<Vec<_>>()),
+				&inflight_htlcs,
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to find path for payment probe: {:?}", e);
+				Error::ProbeSendingFailed
+			})?;
+
+		for path in route.paths {
+			if path.hops.len() + path.blinded_tail.as_ref().map_or(0, |t| t.hops.len()) < 2 {
+				log_debug!(
+					self.logger,
+					"Skipped sending payment probe over path with less than two hops."
+				);
+				continue;
+			}
+
+			self.channel_manager.send_probe(path).map_err(|e| {
+				log_error!(self.logger, "Failed to send payment probe: {:?}", e);
+				Error::ProbeSendingFailed
+			})?;
+		}
+
+		Ok(())
 	}
 
 	/// Returns a payable invoice that can be used to request and receive a payment of the amount
