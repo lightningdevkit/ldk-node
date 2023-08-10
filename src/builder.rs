@@ -6,6 +6,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::logger::{log_error, FilesystemLogger, Logger};
 use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
+use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
@@ -777,6 +778,25 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		}
 	};
 
+	let best_block = channel_manager.current_best_block();
+	let output_sweeper =
+		match io::utils::read_spendable_outputs(Arc::clone(&kv_store), Arc::clone(&logger)) {
+			Ok(outputs) => Arc::new(OutputSweeper::new(
+				outputs,
+				Arc::clone(&wallet),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&keys_manager),
+				Arc::clone(&kv_store),
+				best_block,
+				Some(Arc::clone(&tx_sync)),
+				Arc::clone(&logger),
+			)),
+			Err(_) => {
+				return Err(BuildError::ReadFailed);
+			}
+		};
+
 	let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
 
 	Ok(Node {
@@ -791,6 +811,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		event_queue,
 		channel_manager,
 		chain_monitor,
+		output_sweeper,
 		peer_manager,
 		keys_manager,
 		network_graph,
