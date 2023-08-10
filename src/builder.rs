@@ -258,7 +258,6 @@ impl NodeBuilder {
 		)?;
 		let config = Arc::new(self.config.clone());
 
-		let runtime = Arc::new(RwLock::new(None));
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -266,7 +265,6 @@ impl NodeBuilder {
 			seed_bytes,
 			logger,
 			kv_store,
-			runtime,
 		)
 	}
 }
@@ -387,7 +385,6 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>, seed_bytes: [u8; 64],
 	logger: Arc<FilesystemLogger>, kv_store: Arc<K>,
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 ) -> Result<Node<K>, BuildError> {
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
@@ -440,6 +437,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		}
 	};
 
+	let runtime = Arc::new(RwLock::new(None));
 	let wallet =
 		Arc::new(Wallet::new(blockchain, bdk_wallet, Arc::clone(&runtime), Arc::clone(&logger)));
 
