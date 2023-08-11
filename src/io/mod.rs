@@ -69,9 +69,7 @@ pub trait KVStore: KVStorePersister {
 	/// Will create the given `namespace` if not already present in the store.
 	fn write(&self, namespace: &str, key: &str, buf: &[u8]) -> std::io::Result<()>;
 	/// Removes any data that had previously been persisted under the given `key`.
-	///
-	/// Returns `true` if the `key` was present in the given `namespace`, and `false` otherwise.
-	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<bool>;
+	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<()>;
 	/// Returns a list of keys that are stored under the given `namespace`.
 	///
 	/// Will return an empty list if the `namespace` is unknown.

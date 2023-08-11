@@ -121,7 +121,7 @@ where
 		Ok(updated)
 	}
 
-	pub(crate) fn remove(&self, hash: &PaymentHash) -> Result<bool, Error> {
+	pub(crate) fn remove(&self, hash: &PaymentHash) -> Result<(), Error> {
 		let store_key = hex_utils::to_string(&hash.0);
 		self.kv_store.remove(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &store_key).map_err(|e| {
 			log_error!(

@@ -81,7 +81,7 @@ interface LDKNode {
 	Invoice receive_variable_amount_payment([ByRef]string description, u32 expiry_secs);
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
-	boolean remove_payment([ByRef]PaymentHash payment_hash);
+	void remove_payment([ByRef]PaymentHash payment_hash);
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();

@@ -136,7 +136,7 @@ impl KVStore for FilesystemStore {
 		Ok(())
 	}
 
-	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<bool> {
+	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<()> {
 		let mut outer_lock = self.locks.lock().unwrap();
 		let lock_key = (namespace.to_string(), key.to_string());
 		let inner_lock_ref = Arc::clone(&outer_lock.entry(lock_key.clone()).or_default());
@@ -148,7 +148,7 @@ impl KVStore for FilesystemStore {
 		dest_file_path.push(key);
 
 		if !dest_file_path.is_file() {
-			return Ok(false);
+			return Ok(());
 		}
 
 		fs::remove_file(&dest_file_path)?;
@@ -190,7 +190,7 @@ impl KVStore for FilesystemStore {
 		// Garbage collect all lock entries that are not referenced anymore.
 		outer_lock.retain(|_, v| Arc::strong_count(&v) > 1);
 
-		Ok(true)
+		Ok(())
 	}
 
 	fn list(&self, namespace: &str) -> std::io::Result<Vec<String>> {
