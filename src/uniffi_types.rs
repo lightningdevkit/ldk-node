@@ -10,7 +10,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Txid};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning_invoice::{Invoice, SignedRawInvoice};
+use lightning_invoice::{Bolt11Invoice, SignedRawBolt11Invoice};
 
 use bip39::Mnemonic;
 
@@ -53,12 +53,12 @@ impl UniffiCustomTypeConverter for Address {
 	}
 }
 
-impl UniffiCustomTypeConverter for Invoice {
+impl UniffiCustomTypeConverter for Bolt11Invoice {
 	type Builtin = String;
 
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		if let Ok(signed) = val.parse::<SignedRawInvoice>() {
-			if let Ok(invoice) = Invoice::from_signed(signed) {
+		if let Ok(signed) = val.parse::<SignedRawBolt11Invoice>() {
+			if let Ok(invoice) = Bolt11Invoice::from_signed(signed) {
 				return Ok(invoice);
 			}
 		}

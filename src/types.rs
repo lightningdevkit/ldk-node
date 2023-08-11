@@ -2,14 +2,16 @@ use crate::logger::FilesystemLogger;
 use crate::wallet::{Wallet, WalletKeysManager};
 
 use lightning::chain::chainmonitor;
-use lightning::chain::keysinterface::InMemorySigner;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::NetAddress as LdkNetAddress;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::ProbabilisticScorer;
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
+use lightning::sign::InMemorySigner;
+use lightning::util::config::ChannelConfig as LdkChannelConfig;
+use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::ser::{Hostname, Readable, Writeable, Writer};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
@@ -21,7 +23,7 @@ use std::convert::TryFrom;
 use std::fmt::Display;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -56,8 +58,13 @@ pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManage
 pub(crate) type KeysManager =
 	WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>;
 
-pub(crate) type Router =
-	DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<Mutex<Scorer>>>;
+pub(crate) type Router = DefaultRouter<
+	Arc<NetworkGraph>,
+	Arc<FilesystemLogger>,
+	Arc<Mutex<Scorer>>,
+	ProbabilisticScoringFeeParameters,
+	Scorer,
+>;
 pub(crate) type Scorer = ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
@@ -84,8 +91,21 @@ pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
 	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
 	Arc<FilesystemLogger>,
+	Arc<FakeMessageRouter>,
+	IgnoringMessageHandler,
 	IgnoringMessageHandler,
 >;
+
+pub(crate) struct FakeMessageRouter {}
+
+impl lightning::onion_message::MessageRouter for FakeMessageRouter {
+	fn find_path(
+		&self, _sender: PublicKey, _peers: Vec<PublicKey>,
+		_destination: lightning::onion_message::Destination,
+	) -> Result<lightning::onion_message::OnionMessagePath, ()> {
+		unimplemented!()
+	}
+}
 
 /// The global identifier of a channel.
 ///
@@ -373,5 +393,106 @@ impl Readable for NetAddress {
 	fn read<R: std::io::Read>(reader: &mut R) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let addr: LdkNetAddress = Readable::read(reader)?;
 		Ok(Self(addr))
+	}
+}
+
+/// Options which apply on a per-channel basis.
+///
+/// See documentation of [`LdkChannelConfig`] for details.
+#[derive(Debug)]
+pub struct ChannelConfig {
+	inner: RwLock<LdkChannelConfig>,
+}
+
+impl Clone for ChannelConfig {
+	fn clone(&self) -> Self {
+		self.inner.read().unwrap().clone().into()
+	}
+}
+
+impl ChannelConfig {
+	/// Constructs a new `ChannelConfig`.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Returns the set `forwarding_fee_proportional_millionths`.
+	pub fn forwarding_fee_proportional_millionths(&self) -> u32 {
+		self.inner.read().unwrap().forwarding_fee_proportional_millionths
+	}
+
+	/// Sets the `forwarding_fee_proportional_millionths`.
+	pub fn set_forwarding_fee_proportional_millionths(&self, value: u32) {
+		self.inner.write().unwrap().forwarding_fee_proportional_millionths = value;
+	}
+
+	/// Returns the set `forwarding_fee_base_msat`.
+	pub fn forwarding_fee_base_msat(&self) -> u32 {
+		self.inner.read().unwrap().forwarding_fee_base_msat
+	}
+
+	/// Sets the `forwarding_fee_base_msat`.
+	pub fn set_forwarding_fee_base_msat(&self, fee_msat: u32) {
+		self.inner.write().unwrap().forwarding_fee_base_msat = fee_msat;
+	}
+
+	/// Returns the set `cltv_expiry_delta`.
+	pub fn cltv_expiry_delta(&self) -> u16 {
+		self.inner.read().unwrap().cltv_expiry_delta
+	}
+
+	/// Sets the `cltv_expiry_delta`.
+	pub fn set_cltv_expiry_delta(&self, value: u16) {
+		self.inner.write().unwrap().cltv_expiry_delta = value;
+	}
+
+	/// Returns the set `force_close_avoidance_max_fee_satoshis`.
+	pub fn force_close_avoidance_max_fee_satoshis(&self) -> u64 {
+		self.inner.read().unwrap().force_close_avoidance_max_fee_satoshis
+	}
+
+	/// Sets the `force_close_avoidance_max_fee_satoshis`.
+	pub fn set_force_close_avoidance_max_fee_satoshis(&self, value_sat: u64) {
+		self.inner.write().unwrap().force_close_avoidance_max_fee_satoshis = value_sat;
+	}
+
+	/// Returns the set `accept_underpaying_htlcs`.
+	pub fn accept_underpaying_htlcs(&self) -> bool {
+		self.inner.read().unwrap().accept_underpaying_htlcs
+	}
+
+	/// Sets the `accept_underpaying_htlcs`.
+	pub fn set_accept_underpaying_htlcs(&self, value: bool) {
+		self.inner.write().unwrap().accept_underpaying_htlcs = value;
+	}
+
+	/// Sets the `max_dust_htlc_exposure` from a fixed limit.
+	pub fn set_max_dust_htlc_exposure_from_fixed_limit(&self, limit_msat: u64) {
+		self.inner.write().unwrap().max_dust_htlc_exposure =
+			LdkMaxDustHTLCExposure::FixedLimitMsat(limit_msat);
+	}
+
+	/// Sets the `max_dust_htlc_exposure` from a fee rate multiplier.
+	pub fn set_max_dust_htlc_exposure_from_fee_rate_multiplier(&self, multiplier: u64) {
+		self.inner.write().unwrap().max_dust_htlc_exposure =
+			LdkMaxDustHTLCExposure::FeeRateMultiplier(multiplier);
+	}
+}
+
+impl From<LdkChannelConfig> for ChannelConfig {
+	fn from(value: LdkChannelConfig) -> Self {
+		Self { inner: RwLock::new(value) }
+	}
+}
+
+impl From<ChannelConfig> for LdkChannelConfig {
+	fn from(value: ChannelConfig) -> Self {
+		*value.inner.read().unwrap()
+	}
+}
+
+impl Default for ChannelConfig {
+	fn default() -> Self {
+		LdkChannelConfig::default().into()
 	}
 }

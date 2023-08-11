@@ -8,8 +8,8 @@ use crate::logger::{log_error, FilesystemLogger, Logger};
 use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::types::{
-	ChainMonitor, ChannelManager, GossipSync, KeysManager, NetAddress, NetworkGraph,
-	OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetAddress,
+	NetworkGraph, OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::LogLevel;
@@ -18,13 +18,15 @@ use crate::{
 	WALLET_KEYS_SEED_LEN,
 };
 
-use lightning::chain::keysinterface::EntropySource;
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
+use lightning::routing::scoring::{
+	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
+};
+use lightning::sign::EntropySource;
 
 use lightning::util::config::UserConfig;
 use lightning::util::ser::ReadableArgs;
@@ -486,7 +488,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		Ok(scorer) => Arc::new(Mutex::new(scorer)),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
-				let params = ProbabilisticScoringParameters::default();
+				let params = ProbabilisticScoringDecayParameters::default();
 				Arc::new(Mutex::new(ProbabilisticScorer::new(
 					params,
 					Arc::clone(&network_graph),
@@ -498,11 +500,13 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		}
 	};
 
+	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 		keys_manager.get_secure_random_bytes(),
 		Arc::clone(&scorer),
+		scoring_fee_params,
 	));
 
 	// Read ChannelMonitor state from store
@@ -575,6 +579,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&keys_manager),
 				user_config,
 				chain_params,
+				cur_time.as_secs() as u32,
 			)
 		}
 	};
@@ -592,6 +597,8 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
+		Arc::new(FakeMessageRouter {}),
+		IgnoringMessageHandler {},
 		IgnoringMessageHandler {},
 	));
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
@@ -638,12 +645,14 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			route_handler: Arc::clone(&p2p_gossip_sync)
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
 			onion_message_handler: onion_messenger,
+			custom_message_handler: IgnoringMessageHandler {},
 		},
 		GossipSync::Rapid(_) => MessageHandler {
 			chan_handler: Arc::clone(&channel_manager),
 			route_handler: Arc::new(IgnoringMessageHandler {})
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
 			onion_message_handler: onion_messenger,
+			custom_message_handler: IgnoringMessageHandler {},
 		},
 		GossipSync::None => {
 			unreachable!("We must always have a gossip sync!");
@@ -663,7 +672,6 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		})?,
 		&ephemeral_bytes,
 		Arc::clone(&logger),
-		IgnoringMessageHandler {},
 		Arc::clone(&keys_manager),
 	));
 

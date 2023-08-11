@@ -137,7 +137,7 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	};
 
 	println!("\nB receive_payment");
-	let invoice_amount_1_msat = 1000000;
+	let invoice_amount_1_msat = 2500_000;
 	let invoice = node_b.receive_payment(invoice_amount_1_msat, &"asdf", 9217).unwrap();
 
 	println!("\nA send_payment");
@@ -181,7 +181,7 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Test under-/overpayment
-	let invoice_amount_2_msat = 1000_000;
+	let invoice_amount_2_msat = 2500_000;
 	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 
 	let underpaid_amount = invoice_amount_2_msat - 1;
@@ -214,7 +214,7 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 
 	// Test "zero-amount" invoice payment
 	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
-	let determined_amount_msat = 1234_567;
+	let determined_amount_msat = 2345_678;
 	assert_eq!(Err(Error::InvalidInvoice), node_a.send_payment(&variable_amount_invoice));
 	let payment_hash =
 		node_a.send_payment_using_amount(&variable_amount_invoice, determined_amount_msat).unwrap();
