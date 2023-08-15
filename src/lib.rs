@@ -1302,7 +1302,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
 	/// the actual payment. Note this is only useful if there likely is sufficient time for the
 	/// probe to settle before sending out the actual payment, e.g., when waiting for user
-	/// confirmation in a wallet UI.
+	/// confirmation in a wallet UI. Otherwise, there is a chance the probe could take up some
+	/// liquidity needed to complete the actual payment. Users should therefore be cautious and
+	/// might avoid sending probes if liquidity is scarce and/or they don't expect the probe to
+	/// return before they send the payment.
 	pub fn send_payment_probe(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1340,7 +1343,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
 	/// the actual payment. Note this is only useful if there likely is sufficient time for the
 	/// probe to settle before sending out the actual payment, e.g., when waiting for user
-	/// confirmation in a wallet UI.
+	/// confirmation in a wallet UI. Otherwise, there is a chance the probe could take up some
+	/// liquidity needed to complete the actual payment. Users should therefore be cautious and
+	/// might avoid sending probes if liquidity is scarce and/or they don't expect the probe to
+	/// return before they send the payment.
 	pub fn send_spontaneous_payment_probe(
 		&self, amount_msat: u64, node_id: PublicKey,
 	) -> Result<(), Error> {
