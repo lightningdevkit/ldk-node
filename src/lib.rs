@@ -149,6 +149,7 @@ use bitcoin::{Address, Txid};
 
 use rand::Rng;
 
+use std::collections::HashMap;
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
@@ -164,6 +165,7 @@ const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
+const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
@@ -210,6 +212,7 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `wallet_sync_interval_secs`            | 30                 |
 /// | `fee_rate_cache_update_interval_secs`  | 600                |
 /// | `trusted_peers_0conf`                  | []                 |
+/// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 ///
 pub struct Config {
@@ -243,6 +246,11 @@ pub struct Config {
 	/// funding transaction ends up never being confirmed on-chain. Zero-confirmation channels
 	/// should therefore only be accepted from trusted peers.
 	pub trusted_peers_0conf: Vec<PublicKey>,
+	/// The liquidity factor by which we filter the outgoing channels used for sending probes.
+	///
+	/// Channels with available liquidity less than the required amount times this value won't be
+	/// used to send pre-flight probes.
+	pub probing_liquidity_limit_multiplier: u64,
 	/// The level at which we log messages.
 	///
 	/// Any messages below this level will be excluded from the logs.
@@ -261,6 +269,7 @@ impl Default for Config {
 			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
 			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
 			trusted_peers_0conf: Vec::new(),
+			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
@@ -1302,10 +1311,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
 	/// the actual payment. Note this is only useful if there likely is sufficient time for the
 	/// probe to settle before sending out the actual payment, e.g., when waiting for user
-	/// confirmation in a wallet UI. Otherwise, there is a chance the probe could take up some
-	/// liquidity needed to complete the actual payment. Users should therefore be cautious and
-	/// might avoid sending probes if liquidity is scarce and/or they don't expect the probe to
-	/// return before they send the payment.
+	/// confirmation in a wallet UI.
+	///
+	/// Otherwise, there is a chance the probe could take up some liquidity needed to complete the
+	/// actual payment. Users should therefore be cautious and might avoid sending probes if
+	/// liquidity is scarce and/or they don't expect the probe to return before they send the
+	/// payment. To mitigate this issue, channels with available liquidity less than the required
+	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
+	/// pre-flight probes.
 	pub fn send_payment_probe(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1343,10 +1356,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
 	/// the actual payment. Note this is only useful if there likely is sufficient time for the
 	/// probe to settle before sending out the actual payment, e.g., when waiting for user
-	/// confirmation in a wallet UI. Otherwise, there is a chance the probe could take up some
-	/// liquidity needed to complete the actual payment. Users should therefore be cautious and
-	/// might avoid sending probes if liquidity is scarce and/or they don't expect the probe to
-	/// return before they send the payment.
+	/// confirmation in a wallet UI.
+	///
+	/// Otherwise, there is a chance the probe could take up some liquidity needed to complete the
+	/// actual payment. Users should therefore be cautious and might avoid sending probes if
+	/// liquidity is scarce and/or they don't expect the probe to return before they send the
+	/// payment. To mitigate this issue, channels with available liquidity less than the required
+	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
+	/// pre-flight probes.
 	pub fn send_spontaneous_payment_probe(
 		&self, amount_msat: u64, node_id: PublicKey,
 	) -> Result<(), Error> {
@@ -1365,22 +1382,19 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	fn send_payment_probe_internal(&self, route_params: RouteParameters) -> Result<(), Error> {
 		let payer = self.channel_manager.get_our_node_id();
-		let first_hops = self.channel_manager.list_usable_channels();
+		let usable_channels = self.channel_manager.list_usable_channels();
+		let first_hops = usable_channels.iter().collect::<Vec<_>>();
 		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
 
 		let route = self
 			.router
-			.find_route(
-				&payer,
-				&route_params,
-				Some(&first_hops.iter().collect::<Vec<_>>()),
-				inflight_htlcs,
-			)
+			.find_route(&payer, &route_params, Some(&first_hops), inflight_htlcs)
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to find path for payment probe: {:?}", e);
 				Error::ProbeSendingFailed
 			})?;
 
+		let mut used_liquidity_map = HashMap::with_capacity(first_hops.len());
 		for path in route.paths {
 			if path.hops.len() + path.blinded_tail.as_ref().map_or(0, |t| t.hops.len()) < 2 {
 				log_debug!(
@@ -1388,6 +1402,26 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					"Skipped sending payment probe over path with less than two hops."
 				);
 				continue;
+			}
+
+			if let Some(first_path_hop) = path.hops.first() {
+				if let Some(first_hop) = first_hops.iter().find(|h| {
+					h.get_outbound_payment_scid() == Some(first_path_hop.short_channel_id)
+				}) {
+					let path_value = path.final_value_msat() + path.fee_msat();
+					let used_liquidity =
+						used_liquidity_map.entry(first_path_hop.short_channel_id).or_insert(0);
+
+					if first_hop.next_outbound_htlc_limit_msat
+						< (*used_liquidity + path_value)
+							* self.config.probing_liquidity_limit_multiplier
+					{
+						log_debug!(self.logger, "Skipped sending payment probe to avoid putting channel {} under the liquidity limit.", first_path_hop.short_channel_id);
+						continue;
+					} else {
+						*used_liquidity += path_value;
+					}
+				}
 			}
 
 			self.channel_manager.send_probe(path).map_err(|e| {

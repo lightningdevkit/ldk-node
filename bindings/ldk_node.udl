@@ -11,8 +11,9 @@ dictionary Config {
 	u64 onchain_wallet_sync_interval_secs = 80;
 	u64 wallet_sync_interval_secs = 30;
 	u64 fee_rate_cache_update_interval_secs = 600;
-	LogLevel log_level = "Debug";
 	sequence<PublicKey> trusted_peers_0conf = [];
+	u64 probing_liquidity_limit_multiplier = 3;
+	LogLevel log_level = "Debug";
 };
 
 interface Builder {
