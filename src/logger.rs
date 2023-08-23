@@ -7,6 +7,7 @@ use lightning::util::ser::Writer;
 use chrono::Utc;
 
 use std::fs;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
@@ -31,14 +32,18 @@ impl FilesystemLogger {
 				.open(log_file_path.clone())
 				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
 
-			// Create a symlink to the current log file, with prior cleanup
-			let log_file_symlink = parent_dir.join("ldk_node_latest.log");
-			if log_file_symlink.as_path().is_symlink() {
-				fs::remove_file(&log_file_symlink)
-					.map_err(|e| eprintln!("ERROR: Failed to remove log file symlink: {}", e))?;
+			#[cfg(not(target_os = "windows"))]
+			{
+				// Create a symlink to the current log file, with prior cleanup
+				let log_file_symlink = parent_dir.join("ldk_node_latest.log");
+				if log_file_symlink.as_path().is_symlink() {
+					fs::remove_file(&log_file_symlink).map_err(|e| {
+						eprintln!("ERROR: Failed to remove log file symlink: {}", e)
+					})?;
+				}
+				symlink(&log_file_name, &log_file_symlink)
+					.map_err(|e| eprintln!("ERROR: Failed to create log file symlink: {}", e))?;
 			}
-			symlink(&log_file_name, &log_file_symlink)
-				.map_err(|e| eprintln!("ERROR: Failed to create log file symlink: {}", e))?;
 		}
 
 		Ok(Self { file_path: log_file_path, level })
