@@ -1,5 +1,6 @@
-use crate::io::KVStore;
-use crate::Config;
+use crate::builder::NodeBuilder;
+use crate::io::{FilesystemStore, KVStore, SqliteStore};
+use crate::{Config, Node};
 use lightning::util::logger::{Level, Logger, Record};
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::Writeable;
@@ -110,6 +111,118 @@ impl KVStore for TestStore {
 }
 
 impl KVStorePersister for TestStore {
+	fn persist<W: Writeable>(&self, prefixed_key: &str, object: &W) -> std::io::Result<()> {
+		let msg = format!("Could not persist file for key {}.", prefixed_key);
+		let dest_file = PathBuf::from_str(prefixed_key).map_err(|_| {
+			lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg.clone())
+		})?;
+
+		let parent_directory = dest_file.parent().ok_or(lightning::io::Error::new(
+			lightning::io::ErrorKind::InvalidInput,
+			msg.clone(),
+		))?;
+		let namespace = parent_directory.display().to_string();
+
+		let dest_without_namespace = dest_file
+			.strip_prefix(&namespace)
+			.map_err(|_| lightning::io::Error::new(lightning::io::ErrorKind::InvalidInput, msg))?;
+		let key = dest_without_namespace.display().to_string();
+
+		let data = object.encode();
+		self.write(&namespace, &key, &data)?;
+		Ok(())
+	}
+}
+
+// A `KVStore` impl for testing purposes that wraps all our `KVStore`s and asserts their synchronicity.
+pub(crate) struct TestSyncStore {
+	fs_store: FilesystemStore,
+	sqlite_store: SqliteStore,
+}
+
+impl TestSyncStore {
+	pub(crate) fn new(dest_dir: PathBuf) -> Self {
+		let fs_store = FilesystemStore::new(dest_dir.clone());
+		let sqlite_store = SqliteStore::new(dest_dir);
+		Self { fs_store, sqlite_store }
+	}
+}
+
+impl KVStore for TestSyncStore {
+	type Reader = io::Cursor<Vec<u8>>;
+
+	fn read(&self, namespace: &str, key: &str) -> std::io::Result<Self::Reader> {
+		// For now, we only assert `Ok` with the `fs_reader` here, as it's too complicated to track
+		// the read status of both seperately, however, the `Reader` concept is going away anyways
+		// at which point we can assert on simply on the returned values of `KVStore::read`.
+		let fs_res = self.fs_store.read(namespace, key);
+		let sqlite_res = self.sqlite_store.read(namespace, key);
+
+		match sqlite_res {
+			Ok(read) => {
+				assert!(fs_res.is_ok());
+				Ok(read)
+			}
+			Err(e) => {
+				assert!(fs_res.is_err());
+				assert_eq!(e.kind(), unsafe { fs_res.unwrap_err_unchecked().kind() });
+				Err(e)
+			}
+		}
+	}
+
+	fn write(&self, namespace: &str, key: &str, buf: &[u8]) -> std::io::Result<()> {
+		let fs_res = self.fs_store.write(namespace, key, buf);
+		let sqlite_res = self.sqlite_store.write(namespace, key, buf);
+
+		assert!(self.list(namespace).unwrap().contains(&key.to_string()));
+
+		match fs_res {
+			Ok(()) => {
+				assert!(sqlite_res.is_ok());
+				Ok(())
+			}
+			Err(e) => {
+				assert!(sqlite_res.is_err());
+				Err(e)
+			}
+		}
+	}
+
+	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<()> {
+		let fs_res = self.fs_store.remove(namespace, key);
+		let sqlite_res = self.sqlite_store.remove(namespace, key);
+
+		match fs_res {
+			Ok(()) => {
+				assert!(sqlite_res.is_ok());
+				Ok(())
+			}
+			Err(e) => {
+				assert!(sqlite_res.is_err());
+				Err(e)
+			}
+		}
+	}
+
+	fn list(&self, namespace: &str) -> std::io::Result<Vec<String>> {
+		let fs_res = self.fs_store.list(namespace);
+		let sqlite_res = self.sqlite_store.list(namespace);
+
+		match fs_res {
+			Ok(list) => {
+				assert_eq!(list, sqlite_res.unwrap());
+				Ok(list)
+			}
+			Err(e) => {
+				assert!(sqlite_res.is_err());
+				Err(e)
+			}
+		}
+	}
+}
+
+impl KVStorePersister for TestSyncStore {
 	fn persist<W: Writeable>(&self, prefixed_key: &str, object: &W) -> std::io::Result<()> {
 		let msg = format!("Could not persist file for key {}.", prefixed_key);
 		let dest_file = PathBuf::from_str(prefixed_key).map_err(|_| {
@@ -266,6 +379,32 @@ pub fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	electrsd_conf.network = "regtest";
 	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
 	(bitcoind, electrsd)
+}
+
+pub(crate) fn setup_two_nodes(
+	electrsd: &ElectrsD, allow_0conf: bool,
+) -> (Node<TestSyncStore>, Node<TestSyncStore>) {
+	println!("== Node A ==");
+	let config_a = random_config();
+	let node_a = setup_node(electrsd, config_a);
+
+	println!("\n== Node B ==");
+	let mut config_b = random_config();
+	if allow_0conf {
+		config_b.trusted_peers_0conf.push(node_a.node_id());
+	}
+	let node_b = setup_node(electrsd, config_b);
+	(node_a, node_b)
+}
+
+pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> Node<TestSyncStore> {
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let mut builder = NodeBuilder::from_config(config.clone());
+	builder.set_esplora_server(esplora_url.clone());
+	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
+	let node = builder.build_with_store(test_sync_store).unwrap();
+	node.start().unwrap();
+	node
 }
 
 pub fn generate_blocks_and_wait(bitcoind: &BitcoinD, electrsd: &ElectrsD, num: usize) {
