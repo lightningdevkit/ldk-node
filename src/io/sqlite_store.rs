@@ -160,6 +160,7 @@ impl KVStore for SqliteStore {
 			})?);
 		}
 
+		keys.sort();
 		Ok(keys)
 	}
 }

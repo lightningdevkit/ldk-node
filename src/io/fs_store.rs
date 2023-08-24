@@ -222,6 +222,8 @@ impl KVStore for FilesystemStore {
 			}
 		}
 
+		keys.sort();
+
 		Ok(keys)
 	}
 }
