@@ -2,10 +2,19 @@ name: Continuous Integration Checks
 
 on: [push, pull_request]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
       matrix:
+        platform: [
+          ubuntu-latest,
+          macos-latest,
+          windows-latest,
+          ]
         toolchain: [
           stable,
           beta,
@@ -15,9 +24,14 @@ jobs:
           - toolchain: stable
             check-fmt: true
             build-uniffi: true
+            platform: ubuntu-latest
+          - toolchain: stable
+            platform: macos-latest
+          - toolchain: stable
+            platform: windows-latest
           - toolchain: 1.63.0
             msrv: true
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v3
@@ -44,9 +58,10 @@ jobs:
         if: matrix.build-uniffi
         run: cargo check --release --features uniffi --verbose --color always
       - name: Test on Rust ${{ matrix.toolchain }}
+        if: "matrix.platform != 'windows-latest'"
         run: cargo test
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
-        if: matrix.build-uniffi
+        if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: cargo test --features uniffi
       - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt
