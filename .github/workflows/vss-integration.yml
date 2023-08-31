@@ -1,0 +1,82 @@
+name: VSS Integration Test
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:latest
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: YOU_MUST_CHANGE_THIS_PASSWORD
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          path: ldk-node
+      - name: Checkout VSS
+        uses: actions/checkout@v3
+        with:
+          repository: lightningdevkit/vss-server
+          path: vss-server
+
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'corretto'
+          java-version: '17'
+
+      - name: Start Tomcat
+        run: |
+          docker run -d --network=host --name tomcat tomcat:latest
+
+      - name: Setup Gradle
+        uses: gradle/gradle-build-action@v2
+        with:
+          gradle-version: release-candidate
+
+      - name: Create database table
+        run: |
+          psql -h localhost -U postgres -d postgres -f ./vss-server/app/src/main/java/org/vss/impl/postgres/sql/v0_create_vss_db.sql
+        env:
+          PGPASSWORD: YOU_MUST_CHANGE_THIS_PASSWORD
+
+      - name: Build and Deploy VSS
+        run: |
+          # Print Info
+          java -version
+          gradle --version
+
+          cd vss-server
+          gradle wrapper --gradle-version 8.1.1
+          ./gradlew --version
+          ./gradlew build
+
+          docker cp app/build/libs/app-1.0.war tomcat:/usr/local/tomcat/webapps/vss.war
+          cd ../
+      - name: Run VSS Integration tests against vss-instance.
+        run: |
+          cd ldk-node
+          export TEST_VSS_BASE_URL="http://localhost:8080/vss"
+          RUSTFLAGS="--cfg=vss_test --cfg=vss" cargo build --verbose --color always
+          RUSTFLAGS="--cfg=vss_test --cfg=vss" cargo test -- --nocapture
+
+      - name: Cleanup
+        run: |
+          docker stop tomcat && docker rm tomcat
