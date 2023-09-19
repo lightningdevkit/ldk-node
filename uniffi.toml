@@ -10,3 +10,8 @@ module_name = "LDKNode"
 ffi_module_name = "LDKNodeFFI"
 ffi_module_filename ="LDKNodeFFI"
 cdylib_name = "ldk_node"
+
+[bindings.csharp]
+module_name = "LdkNode"
+type_name = "LdkNode"
+cdylib_name = "ldk_node"
