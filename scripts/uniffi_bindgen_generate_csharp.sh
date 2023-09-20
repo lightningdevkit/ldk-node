@@ -1,5 +1,5 @@
 #!/bin/bash
-# cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs
+# cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.2.3+v0.23.0
 BINDINGS_DIR="./bindings/csharp"
 
 mkdir -p $BINDINGS_DIR
