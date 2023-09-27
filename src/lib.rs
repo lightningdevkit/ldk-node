@@ -708,6 +708,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		Ok(())
 	}
 
+	/// Returns whether the [`Node`] is running.
+	pub fn is_running(&self) -> bool {
+		self.runtime.read().unwrap().is_some()
+	}
+
 	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
