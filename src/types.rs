@@ -152,7 +152,7 @@ impl Readable for UserChannelId {
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
 /// [`Node::list_channels`]: crate::Node::list_channels
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ChannelDetails {
 	/// The channel ID (prior to funding transaction generation, this is a random 32-byte
 	/// identifier, afterwards this is the transaction ID of the funding transaction XOR the
@@ -226,6 +226,52 @@ pub struct ChannelDetails {
 	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
 	/// the channel.
 	pub cltv_expiry_delta: Option<u16>,
+	/// The value, in satoshis, that must always be held in the channel for our counterparty. This
+	/// value ensures that if our counterparty broadcasts a revoked state, we can punish them by
+	/// claiming at least this value on chain.
+	///
+	/// This value is not included in [`inbound_capacity_msat`] as it can never be spent.
+	///
+	/// [`inbound_capacity_msat`]: ChannelDetails::inbound_capacity_msat
+	pub counterparty_unspendable_punishment_reserve: u64,
+	/// The smallest value HTLC (in msat) the remote peer will accept, for this channel.
+	pub counterparty_outbound_htlc_minimum_msat: u64,
+	/// The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
+	pub counterparty_outbound_htlc_maximum_msat: Option<u64>,
+	/// Base routing fee in millisatoshis.
+	pub counterparty_forwarding_info_fee_base_msat: Option<u32>,
+	/// Proportional fee, in millionths of a satoshi the channel will charge per transferred satoshi.
+	pub counterparty_forwarding_info_fee_proportional_millionths: Option<u32>,
+	/// The minimum difference in CLTV expiry between an ingoing HTLC and its outgoing counterpart,
+	/// such that the outgoing HTLC is forwardable to this counterparty.
+	pub counterparty_forwarding_info_cltv_expiry_delta: Option<u16>,
+	/// The available outbound capacity for sending a single HTLC to the remote peer. This is
+	/// similar to [`ChannelDetails::outbound_capacity_msat`] but it may be further restricted by
+	/// the current state and per-HTLC limit(s). This is intended for use when routing, allowing us
+	/// to use a limit as close as possible to the HTLC limit we can currently send.
+	///
+	/// See also [`ChannelDetails::next_outbound_htlc_minimum_msat`],
+	/// [`ChannelDetails::balance_msat`], and [`ChannelDetails::outbound_capacity_msat`].
+	pub next_outbound_htlc_limit_msat: u64,
+	/// The minimum value for sending a single HTLC to the remote peer. This is the equivalent of
+	/// [`ChannelDetails::next_outbound_htlc_limit_msat`] but represents a lower-bound, rather than
+	/// an upper-bound. This is intended for use when routing, allowing us to ensure we pick a
+	/// route which is valid.
+	pub next_outbound_htlc_minimum_msat: u64,
+	/// The number of blocks (after our commitment transaction confirms) that we will need to wait
+	/// until we can claim our funds after we force-close the channel. During this time our
+	/// counterparty is allowed to punish us if we broadcasted a stale state. If our counterparty
+	/// force-closes the channel and broadcasts a commitment transaction we do not have to wait any
+	/// time to claim our non-HTLC-encumbered funds.
+	///
+	/// This value will be `None` for outbound channels until the counterparty accepts the channel.
+	pub force_close_spend_delay: Option<u16>,
+	/// The smallest value HTLC (in msat) we will accept, for this channel.
+	pub inbound_htlc_minimum_msat: u64,
+	/// The largest value HTLC (in msat) we currently will accept, for this channel.
+	pub inbound_htlc_maximum_msat: Option<u64>,
+	/// Set of configurable parameters that affect channel operation.
+	pub config: Arc<ChannelConfig>,
 }
 
 impl From<LdkChannelDetails> for ChannelDetails {
@@ -247,7 +293,36 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			is_channel_ready: value.is_channel_ready,
 			is_usable: value.is_usable,
 			is_public: value.is_public,
-			cltv_expiry_delta: value.config.and_then(|c| Some(c.cltv_expiry_delta)),
+			cltv_expiry_delta: value.config.map(|c| c.cltv_expiry_delta),
+			counterparty_unspendable_punishment_reserve: value
+				.counterparty
+				.unspendable_punishment_reserve,
+			counterparty_outbound_htlc_minimum_msat: value
+				.counterparty
+				.outbound_htlc_minimum_msat
+				.unwrap(),
+			counterparty_outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
+			counterparty_forwarding_info_fee_base_msat: value
+				.counterparty
+				.forwarding_info
+				.as_ref()
+				.map(|f| f.fee_base_msat),
+			counterparty_forwarding_info_fee_proportional_millionths: value
+				.counterparty
+				.forwarding_info
+				.as_ref()
+				.map(|f| f.fee_proportional_millionths),
+			counterparty_forwarding_info_cltv_expiry_delta: value
+				.counterparty
+				.forwarding_info
+				.as_ref()
+				.map(|f| f.cltv_expiry_delta),
+			next_outbound_htlc_limit_msat: value.next_outbound_htlc_limit_msat,
+			next_outbound_htlc_minimum_msat: value.next_outbound_htlc_minimum_msat,
+			force_close_spend_delay: value.force_close_spend_delay,
+			inbound_htlc_minimum_msat: value.inbound_htlc_minimum_msat.unwrap(),
+			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
+			config: value.config.map(|c| Arc::new(c.into())).unwrap(),
 		}
 	}
 }
