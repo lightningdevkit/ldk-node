@@ -1,3 +1,4 @@
+use crate::peer_store::{PeerInfo, PeerStore};
 use crate::{
 	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, UserChannelId, Wallet,
 };
@@ -251,6 +252,7 @@ where
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
+	peer_store: Arc<PeerStore<K, L>>,
 }
 
 impl<K: KVStore + Sync + Send + 'static, L: Deref> EventHandler<K, L>
@@ -262,6 +264,7 @@ where
 		channel_manager: Arc<ChannelManager<K>>, network_graph: Arc<NetworkGraph>,
 		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
 		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
+		peer_store: Arc<PeerStore<K, L>>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -273,6 +276,7 @@ where
 			logger,
 			runtime,
 			config,
+			peer_store,
 		}
 	}
 
@@ -739,6 +743,37 @@ where
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
+				let network_graph = self.network_graph.read_only();
+				let channels =
+					self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+				if let Some(pending_channel) =
+					channels.into_iter().find(|c| c.channel_id == channel_id)
+				{
+					if !pending_channel.is_outbound
+						&& self.peer_store.get_peer(&counterparty_node_id).is_none()
+					{
+						if let Some(address) = network_graph
+							.nodes()
+							.get(&NodeId::from_pubkey(&counterparty_node_id))
+							.and_then(|node_info| node_info.announcement_info.as_ref())
+							.and_then(|ann_info| ann_info.addresses().first())
+						{
+							let peer = PeerInfo {
+								node_id: counterparty_node_id,
+								address: address.clone(),
+							};
+
+							self.peer_store.add_peer(peer).unwrap_or_else(|e| {
+								log_error!(
+									self.logger,
+									"Failed to add peer {} to peer store: {}",
+									counterparty_node_id,
+									e
+								);
+							});
+						}
+					}
+				}
 			}
 			LdkEvent::ChannelReady {
 				channel_id, user_channel_id, counterparty_node_id, ..

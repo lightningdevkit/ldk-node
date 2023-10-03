@@ -570,13 +570,20 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 									.filter(|id| !pm_peers.contains(id))
 									{
 										if let Some(peer_info) = connect_peer_store.get_peer(&node_id) {
-											let _ = do_connect_peer(
+											let res = do_connect_peer(
 												peer_info.node_id,
 												peer_info.address,
 												Arc::clone(&connect_pm),
 												Arc::clone(&connect_logger),
-												)
-												.await;
+												).await;
+											match res {
+												Ok(_) => {
+													log_info!(connect_logger, "Successfully reconnected to peer {}", node_id);
+												},
+												Err(e) => {
+													log_error!(connect_logger, "Failed to reconnect to peer {}: {}", node_id, e);
+												}
+											}
 										}
 									}
 						}
@@ -656,6 +663,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
+			Arc::clone(&self.peer_store),
 		));
 
 		// Setup background processing
