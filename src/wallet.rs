@@ -154,6 +154,13 @@ where
 		Ok(())
 	}
 
+	pub(crate) async fn get_height(&self) -> Result<u32, Error> {
+		Ok(self.blockchain.get_height().await.map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve blockchain height: {}", e);
+			Error::ConnectionFailed
+		})?)
+	}
+
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: Script, value_sats: u64, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,

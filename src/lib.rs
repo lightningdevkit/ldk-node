@@ -802,6 +802,25 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		Ok(self.wallet.get_balance().map(|bal| bal.get_total())?)
 	}
 
+	/// Retrieve the current block height.
+	pub fn block_height(&self) -> Result<u32, Error> {
+		let wallet = Arc::clone(&self.wallet);
+		tokio::task::block_in_place(move || {
+			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+				async move {
+					match wallet.get_height().await {
+						Ok(h) => {
+							return Ok(h);
+						}
+						Err(e) => {
+							return Err(e);
+						}
+					};
+				},
+			)
+		})
+	}
+
 	/// Send an on-chain payment to the given address.
 	pub fn send_to_onchain_address(
 		&self, address: &bitcoin::Address, amount_sats: u64,
