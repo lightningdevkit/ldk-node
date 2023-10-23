@@ -197,6 +197,18 @@ dictionary ChannelDetails {
 	boolean is_usable;
 	boolean is_public;
 	u16? cltv_expiry_delta;
+	u64 counterparty_unspendable_punishment_reserve;
+	u64 counterparty_outbound_htlc_minimum_msat;
+	u64? counterparty_outbound_htlc_maximum_msat;
+	u32? counterparty_forwarding_info_fee_base_msat;
+	u32? counterparty_forwarding_info_fee_proportional_millionths;
+	u16? counterparty_forwarding_info_cltv_expiry_delta;
+	u64 next_outbound_htlc_limit_msat;
+	u64 next_outbound_htlc_minimum_msat;
+	u16? force_close_spend_delay;
+	u64 inbound_htlc_minimum_msat;
+	u64? inbound_htlc_maximum_msat;
+	ChannelConfig config;
 };
 
 dictionary PeerDetails {
