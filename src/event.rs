@@ -287,7 +287,7 @@ where
 			} => {
 				// Construct the raw transaction with the output that is paid the amount of the
 				// channel.
-				let confirmation_target = ConfirmationTarget::Normal;
+				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
 
 				// We set nLockTime to the current height to discourage fee sniping.
 				let cur_height = self.channel_manager.current_best_block().height();
@@ -581,8 +581,9 @@ where
 				});
 
 				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
-				let tx_feerate =
-					self.wallet.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
+				let tx_feerate = self
+					.wallet
+					.get_est_sat_per_1000_weight(ConfirmationTarget::NonAnchorChannelFee);
 
 				// We set nLockTime to the current height to discourage fee sniping.
 				let cur_height = self.channel_manager.current_best_block().height();
@@ -781,6 +782,7 @@ where
 			LdkEvent::DiscardFunding { .. } => {}
 			LdkEvent::HTLCIntercepted { .. } => {}
 			LdkEvent::BumpTransaction(_) => {}
+			LdkEvent::InvoiceRequestFailed { .. } => {}
 		}
 	}
 }

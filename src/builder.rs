@@ -7,7 +7,7 @@ use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::types::{
 	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
-	OnionMessenger, PeerManager, SocketAddress,
+	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::LogLevel;
@@ -18,7 +18,7 @@ use crate::{
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
-use lightning::ln::msgs::RoutingMessageHandler;
+use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{

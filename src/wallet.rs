@@ -116,29 +116,48 @@ where
 		let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
 
 		let confirmation_targets = vec![
-			ConfirmationTarget::MempoolMinimum,
-			ConfirmationTarget::Background,
-			ConfirmationTarget::Normal,
-			ConfirmationTarget::HighPriority,
+			ConfirmationTarget::OnChainSweep,
+			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee,
+			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
+			ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
+			ConfirmationTarget::AnchorChannelFee,
+			ConfirmationTarget::NonAnchorChannelFee,
+			ConfirmationTarget::ChannelCloseMinimum,
 		];
 		for target in confirmation_targets {
 			let num_blocks = match target {
-				ConfirmationTarget::MempoolMinimum => 1008,
-				ConfirmationTarget::Background => 12,
-				ConfirmationTarget::Normal => 6,
-				ConfirmationTarget::HighPriority => 3,
+				ConfirmationTarget::OnChainSweep => 6,
+				ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => 1,
+				ConfirmationTarget::MinAllowedAnchorChannelRemoteFee => 1008,
+				ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 144,
+				ConfirmationTarget::AnchorChannelFee => 1008,
+				ConfirmationTarget::NonAnchorChannelFee => 12,
+				ConfirmationTarget::ChannelCloseMinimum => 144,
 			};
 
 			let est_fee_rate = self.blockchain.estimate_fee(num_blocks).await;
 
 			match est_fee_rate {
 				Ok(rate) => {
-					locked_fee_rate_cache.insert(target, rate);
+					// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+					// require some post-estimation adjustments to the fee rates, which we do here.
+					let adjusted_fee_rate = match target {
+						ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => {
+							let really_high_prio = rate.as_sat_per_vb() * 10.0;
+							FeeRate::from_sat_per_vb(really_high_prio)
+						}
+						ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => {
+							let slightly_less_than_background = rate.fee_wu(1000) - 250;
+							FeeRate::from_sat_per_kwu(slightly_less_than_background as f32)
+						}
+						_ => rate,
+					};
+					locked_fee_rate_cache.insert(target, adjusted_fee_rate);
 					log_trace!(
 						self.logger,
 						"Fee rate estimation updated for {:?}: {} sats/kwu",
 						target,
-						rate.fee_wu(1000)
+						adjusted_fee_rate.fee_wu(1000)
 					);
 				}
 				Err(e) => {
@@ -211,7 +230,7 @@ where
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, amount_msat_or_drain: Option<u64>,
 	) -> Result<Txid, Error> {
-		let confirmation_target = ConfirmationTarget::Normal;
+		let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
 		let fee_rate = self.estimate_fee_rate(confirmation_target);
 
 		let tx = {
@@ -284,10 +303,13 @@ where
 		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
 
 		let fallback_sats_kwu = match confirmation_target {
-			ConfirmationTarget::MempoolMinimum => FEERATE_FLOOR_SATS_PER_KW,
-			ConfirmationTarget::Background => 500,
-			ConfirmationTarget::Normal => 2000,
-			ConfirmationTarget::HighPriority => 5000,
+			ConfirmationTarget::OnChainSweep => 5000,
+			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => 25 * 250,
+			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
+			ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
+			ConfirmationTarget::AnchorChannelFee => 500,
+			ConfirmationTarget::NonAnchorChannelFee => 1000,
+			ConfirmationTarget::ChannelCloseMinimum => 500,
 		};
 
 		// We'll fall back on this, if we really don't have any other information.

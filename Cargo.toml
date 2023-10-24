@@ -32,13 +32,13 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.0.117", features = ["max_level_trace", "std"] }
-lightning-invoice = { version = "0.25.0" }
-lightning-net-tokio = { version = "0.0.117" }
-lightning-persister = { version = "0.0.117" }
-lightning-background-processor = { version = "0.0.117", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.117" }
-lightning-transaction-sync = { version = "0.0.117", features = ["esplora-async-https"] }
+lightning = { version = "0.0.118", features = ["max_level_trace", "std"] }
+lightning-invoice = { version = "0.26.0" }
+lightning-net-tokio = { version = "0.0.118" }
+lightning-persister = { version = "0.0.118" }
+lightning-background-processor = { version = "0.0.118", features = ["futures"] }
+lightning-rapid-gossip-sync = { version = "0.0.118" }
+lightning-transaction-sync = { version = "0.0.118", features = ["esplora-async-https"] }
 
 # lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std"] }
 # lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -75,7 +75,7 @@ uniffi = { version = "0.23.0", features = ["build"], optional = true }
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.0.117", features = ["max_level_trace", "std", "_test_utils"] }
+lightning = { version = "0.0.118", features = ["max_level_trace", "std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["max_level_trace", "std", "_test_utils"] }
 electrsd = { version = "0.22.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_23_0"] }
 electrum-client = "0.12.0"
