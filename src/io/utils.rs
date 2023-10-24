@@ -5,25 +5,26 @@ use crate::logger::log_error;
 use crate::peer_store::PeerStore;
 use crate::{Error, EventQueue, PaymentDetails};
 
-use lightning::chain::channelmonitor::ChannelMonitor;
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
-use lightning::sign::{EntropySource, SignerProvider};
 use lightning::util::logger::Logger;
+use lightning::util::persist::{
+	KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
+use lightning::util::string::PrintableString;
 
 use bip39::Mnemonic;
-use bitcoin::hash_types::{BlockHash, Txid};
-use bitcoin::hashes::hex::FromHex;
 use rand::{thread_rng, RngCore};
 
 use std::fs;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
-
-use super::KVStore;
 
 /// Generates a random [BIP 39] mnemonic.
 ///
@@ -90,51 +91,6 @@ where
 	}
 }
 
-/// Read previously persisted [`ChannelMonitor`]s from the store.
-pub(crate) fn read_channel_monitors<K: KVStore + Sync + Send, ES: Deref, SP: Deref>(
-	kv_store: Arc<K>, entropy_source: ES, signer_provider: SP,
-) -> std::io::Result<Vec<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>)>>
-where
-	ES::Target: EntropySource + Sized,
-	SP::Target: SignerProvider + Sized,
-{
-	let mut res = Vec::new();
-
-	for stored_key in kv_store.list(CHANNEL_MONITOR_PERSISTENCE_NAMESPACE)? {
-		let txid = Txid::from_hex(stored_key.split_at(64).0).map_err(|_| {
-			std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid tx ID in stored key")
-		})?;
-
-		let index: u16 = stored_key.split_at(65).1.parse().map_err(|_| {
-			std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid tx index in stored key")
-		})?;
-
-		match <(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>)>::read(
-			&mut kv_store.read(CHANNEL_MONITOR_PERSISTENCE_NAMESPACE, &stored_key)?,
-			(&*entropy_source, &*signer_provider),
-		) {
-			Ok((block_hash, channel_monitor)) => {
-				if channel_monitor.get_funding_txo().0.txid != txid
-					|| channel_monitor.get_funding_txo().0.index != index
-				{
-					return Err(std::io::Error::new(
-						std::io::ErrorKind::InvalidData,
-						"ChannelMonitor was stored under the wrong key",
-					));
-				}
-				res.push((block_hash, channel_monitor));
-			}
-			Err(e) => {
-				return Err(std::io::Error::new(
-					std::io::ErrorKind::InvalidData,
-					format!("Failed to deserialize ChannelMonitor: {}", e),
-				))
-			}
-		}
-	}
-	Ok(res)
-}
-
 /// Read a previously persisted [`NetworkGraph`] from the store.
 pub(crate) fn read_network_graph<K: KVStore + Sync + Send, L: Deref + Clone>(
 	kv_store: Arc<K>, logger: L,
@@ -142,8 +98,11 @@ pub(crate) fn read_network_graph<K: KVStore + Sync + Send, L: Deref + Clone>(
 where
 	L::Target: Logger,
 {
-	let mut reader =
-		kv_store.read(NETWORK_GRAPH_PERSISTENCE_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY)?;
+	let mut reader = Cursor::new(kv_store.read(
+		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_KEY,
+	)?);
 	NetworkGraph::read(&mut reader, logger.clone()).map_err(|e| {
 		log_error!(logger, "Failed to deserialize NetworkGraph: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NetworkGraph")
@@ -162,7 +121,11 @@ where
 	L::Target: Logger,
 {
 	let params = ProbabilisticScoringDecayParameters::default();
-	let mut reader = kv_store.read(SCORER_PERSISTENCE_NAMESPACE, SCORER_PERSISTENCE_KEY)?;
+	let mut reader = Cursor::new(kv_store.read(
+		SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+		SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+		SCORER_PERSISTENCE_KEY,
+	)?);
 	let args = (params, network_graph, logger.clone());
 	ProbabilisticScorer::read(&mut reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize scorer: {}", e);
@@ -177,8 +140,11 @@ pub(crate) fn read_event_queue<K: KVStore + Sync + Send, L: Deref + Clone>(
 where
 	L::Target: Logger,
 {
-	let mut reader =
-		kv_store.read(EVENT_QUEUE_PERSISTENCE_NAMESPACE, EVENT_QUEUE_PERSISTENCE_KEY)?;
+	let mut reader = Cursor::new(kv_store.read(
+		EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+		EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+		EVENT_QUEUE_PERSISTENCE_KEY,
+	)?);
 	EventQueue::read(&mut reader, (kv_store, logger.clone())).map_err(|e| {
 		log_error!(logger, "Failed to deserialize event queue: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize EventQueue")
@@ -192,7 +158,11 @@ pub(crate) fn read_peer_info<K: KVStore + Sync + Send, L: Deref + Clone>(
 where
 	L::Target: Logger,
 {
-	let mut reader = kv_store.read(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY)?;
+	let mut reader = Cursor::new(kv_store.read(
+		PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		PEER_INFO_PERSISTENCE_KEY,
+	)?);
 	PeerStore::read(&mut reader, (kv_store, logger.clone())).map_err(|e| {
 		log_error!(logger, "Failed to deserialize peer store: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize PeerStore")
@@ -208,11 +178,16 @@ where
 {
 	let mut res = Vec::new();
 
-	for stored_key in kv_store.list(PAYMENT_INFO_PERSISTENCE_NAMESPACE)? {
-		let payment = PaymentDetails::read(
-			&mut kv_store.read(PAYMENT_INFO_PERSISTENCE_NAMESPACE, &stored_key)?,
-		)
-		.map_err(|e| {
+	for stored_key in kv_store.list(
+		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	)? {
+		let mut reader = Cursor::new(kv_store.read(
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			&stored_key,
+		)?);
+		let payment = PaymentDetails::read(&mut reader).map_err(|e| {
 			log_error!(logger, "Failed to deserialize PaymentDetails: {}", e);
 			std::io::Error::new(
 				std::io::ErrorKind::InvalidData,
@@ -230,8 +205,11 @@ pub(crate) fn read_latest_rgs_sync_timestamp<K: KVStore + Sync + Send, L: Deref>
 where
 	L::Target: Logger,
 {
-	let mut reader =
-		kv_store.read(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY)?;
+	let mut reader = Cursor::new(kv_store.read(
+		LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
+		LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
+		LATEST_RGS_SYNC_TIMESTAMP_KEY,
+	)?);
 	u32::read(&mut reader).map_err(|e| {
 		log_error!(logger, "Failed to deserialize latest RGS sync timestamp: {}", e);
 		std::io::Error::new(
@@ -249,12 +227,18 @@ where
 {
 	let data = updated_timestamp.encode();
 	kv_store
-		.write(LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE, LATEST_RGS_SYNC_TIMESTAMP_KEY, &data)
+		.write(
+			LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
+			LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
+			LATEST_RGS_SYNC_TIMESTAMP_KEY,
+			&data,
+		)
 		.map_err(|e| {
 			log_error!(
 				logger,
-				"Writing data to key {}/{} failed due to: {}",
-				LATEST_RGS_SYNC_TIMESTAMP_NAMESPACE,
+				"Writing data to key {}/{}/{} failed due to: {}",
+				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
+				LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
 				LATEST_RGS_SYNC_TIMESTAMP_KEY,
 				e
 			);
@@ -268,8 +252,11 @@ pub(crate) fn read_latest_node_ann_bcast_timestamp<K: KVStore + Sync + Send, L: 
 where
 	L::Target: Logger,
 {
-	let mut reader = kv_store
-		.read(LATEST_NODE_ANN_BCAST_TIMESTAMP_NAMESPACE, LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY)?;
+	let mut reader = Cursor::new(kv_store.read(
+		LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
+		LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
+		LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
+	)?);
 	u64::read(&mut reader).map_err(|e| {
 		log_error!(
 			logger,
@@ -292,20 +279,113 @@ where
 	let data = updated_timestamp.encode();
 	kv_store
 		.write(
-			LATEST_NODE_ANN_BCAST_TIMESTAMP_NAMESPACE,
+			LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
+			LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
 			LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
 			&data,
 		)
 		.map_err(|e| {
 			log_error!(
 				logger,
-				"Writing data to key {}/{} failed due to: {}",
-				LATEST_NODE_ANN_BCAST_TIMESTAMP_NAMESPACE,
+				"Writing data to key {}/{}/{} failed due to: {}",
+				LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
+				LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
 				LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
 				e
 			);
 			Error::PersistenceFailed
 		})
+}
+
+pub(crate) fn is_valid_kvstore_str(key: &str) -> bool {
+	key.len() <= KVSTORE_NAMESPACE_KEY_MAX_LEN
+		&& key.chars().all(|c| KVSTORE_NAMESPACE_KEY_ALPHABET.contains(c))
+}
+
+pub(crate) fn check_namespace_key_validity(
+	primary_namespace: &str, secondary_namespace: &str, key: Option<&str>, operation: &str,
+) -> Result<(), std::io::Error> {
+	if let Some(key) = key {
+		if key.is_empty() {
+			debug_assert!(
+				false,
+				"Failed to {} {}/{}/{}: key may not be empty.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}/{}: key may not be empty.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+		}
+
+		if primary_namespace.is_empty() && !secondary_namespace.is_empty() {
+			debug_assert!(false,
+				"Failed to {} {}/{}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.",
+				operation,
+				PrintableString(primary_namespace), PrintableString(secondary_namespace), PrintableString(key));
+			let msg = format!(
+				"Failed to {} {}/{}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.", operation,
+				PrintableString(primary_namespace), PrintableString(secondary_namespace), PrintableString(key));
+			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+		}
+
+		if !is_valid_kvstore_str(primary_namespace)
+			|| !is_valid_kvstore_str(secondary_namespace)
+			|| !is_valid_kvstore_str(key)
+		{
+			debug_assert!(
+				false,
+				"Failed to {} {}/{}/{}: primary namespace, secondary namespace, and key must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}/{}: primary namespace, secondary namespace, and key must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+		}
+	} else {
+		if primary_namespace.is_empty() && !secondary_namespace.is_empty() {
+			debug_assert!(false,
+				"Failed to {} {}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.",
+				operation, PrintableString(primary_namespace), PrintableString(secondary_namespace));
+			let msg = format!(
+				"Failed to {} {}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.",
+				operation, PrintableString(primary_namespace), PrintableString(secondary_namespace));
+			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+		}
+		if !is_valid_kvstore_str(primary_namespace) || !is_valid_kvstore_str(secondary_namespace) {
+			debug_assert!(
+				false,
+				"Failed to {} {}/{}: primary namespace and secondary namespace must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}: primary namespace and secondary namespace must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace)
+			);
+			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+		}
+	}
+
+	Ok(())
 }
 
 #[cfg(test)]

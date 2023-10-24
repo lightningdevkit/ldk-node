@@ -6,7 +6,7 @@ dictionary Config {
 	string storage_dir_path = "/tmp/ldk_node/";
 	string? log_dir_path = null;
 	Network network = "Bitcoin";
-	NetAddress? listening_address = null;
+	SocketAddress? listening_address = null;
 	u32 default_cltv_expiry_delta = 144;
 	u64 onchain_wallet_sync_interval_secs = 80;
 	u64 wallet_sync_interval_secs = 30;
@@ -29,7 +29,7 @@ interface Builder {
 	void set_gossip_source_rgs(string rgs_server_url);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_network(Network network);
-	void set_listening_address(NetAddress listening_address);
+	void set_listening_address(SocketAddress listening_address);
 	[Throws=BuildError]
 	LDKNode build();
 };
@@ -43,7 +43,7 @@ interface LDKNode {
 	Event wait_next_event();
 	void event_handled();
 	PublicKey node_id();
-	NetAddress? listening_address();
+	SocketAddress? listening_address();
 	[Throws=NodeError]
 	Address new_onchain_address();
 	[Throws=NodeError]
@@ -55,11 +55,11 @@ interface LDKNode {
 	[Throws=NodeError]
 	u64 total_onchain_balance_sats();
 	[Throws=NodeError]
-	void connect(PublicKey node_id, NetAddress address, boolean persist);
+	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
 	[Throws=NodeError]
-	void connect_open_channel(PublicKey node_id, NetAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config, boolean announce_channel);
+	void connect_open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config, boolean announce_channel);
 	[Throws=NodeError]
 	void close_channel([ByRef]ChannelId channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
@@ -73,9 +73,11 @@ interface LDKNode {
 	[Throws=NodeError]
 	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
-	void send_payment_probe([ByRef]Bolt11Invoice invoice);
+	void send_payment_probes([ByRef]Bolt11Invoice invoice);
 	[Throws=NodeError]
-	void send_spontaneous_payment_probe(u64 amount_msat, PublicKey node_id);
+	void send_spontaneous_payment_probes(u64 amount_msat, PublicKey node_id);
+	[Throws=NodeError]
+	void send_payment_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
 	[Throws=NodeError]
 	Bolt11Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
 	[Throws=NodeError]
@@ -111,7 +113,7 @@ enum NodeError {
 	"TxSyncFailed",
 	"GossipUpdateFailed",
 	"InvalidAddress",
-	"InvalidNetAddress",
+	"InvalidSocketAddress",
 	"InvalidPublicKey",
 	"InvalidSecretKey",
 	"InvalidPaymentHash",
@@ -130,9 +132,11 @@ enum BuildError {
 	"InvalidSeedBytes",
 	"InvalidSeedFile",
 	"InvalidSystemTime",
+	"InvalidChannelMonitor",
 	"ReadFailed",
 	"WriteFailed",
 	"StoragePathAccessFailed",
+	"KVStoreSetupFailed",
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
 };
@@ -143,8 +147,8 @@ interface Event {
 	PaymentFailed( PaymentHash payment_hash );
 	PaymentReceived( PaymentHash payment_hash, u64 amount_msat);
 	ChannelPending ( ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo );
-	ChannelReady ( ChannelId channel_id, UserChannelId user_channel_id );
-	ChannelClosed ( ChannelId channel_id, UserChannelId user_channel_id );
+	ChannelReady ( ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id );
+	ChannelClosed ( ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id );
 };
 
 enum PaymentDirection {
@@ -213,7 +217,7 @@ dictionary ChannelDetails {
 
 dictionary PeerDetails {
 	PublicKey node_id;
-	NetAddress address;
+	SocketAddress address;
 	boolean is_persisted;
 	boolean is_connected;
 };
@@ -247,7 +251,7 @@ enum LogLevel {
 typedef string Txid;
 
 [Custom]
-typedef string NetAddress;
+typedef string SocketAddress;
 
 [Custom]
 typedef string PublicKey;

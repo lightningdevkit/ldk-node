@@ -1,8 +1,12 @@
-use crate::io::{KVStore, PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_NAMESPACE};
+use crate::io::{
+	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use crate::logger::{log_error, Logger};
-use crate::{Error, NetAddress};
+use crate::{Error, SocketAddress};
 
 use lightning::impl_writeable_tlv_based;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use bitcoin::secp256k1::PublicKey;
@@ -58,12 +62,18 @@ where
 	fn persist_peers(&self, locked_peers: &HashMap<PublicKey, PeerInfo>) -> Result<(), Error> {
 		let data = PeerStoreSerWrapper(&*locked_peers).encode();
 		self.kv_store
-			.write(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY, &data)
+			.write(
+				PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				PEER_INFO_PERSISTENCE_KEY,
+				&data,
+			)
 			.map_err(|e| {
 				log_error!(
 					self.logger,
-					"Write for key {}/{} failed due to: {}",
-					PEER_INFO_PERSISTENCE_NAMESPACE,
+					"Write for key {}/{}/{} failed due to: {}",
+					PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+					PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 					PEER_INFO_PERSISTENCE_KEY,
 					e
 				);
@@ -122,7 +132,7 @@ impl Writeable for PeerStoreSerWrapper<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PeerInfo {
 	pub node_id: PublicKey,
-	pub address: NetAddress,
+	pub address: SocketAddress,
 }
 
 impl_writeable_tlv_based!(PeerInfo, {
@@ -133,13 +143,16 @@ impl_writeable_tlv_based!(PeerInfo, {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test::utils::{TestLogger, TestStore};
+	use crate::test::utils::TestLogger;
+
+	use lightning::util::test_utils::TestStore;
+
 	use std::str::FromStr;
 	use std::sync::Arc;
 
 	#[test]
 	fn peer_info_persistence() {
-		let store = Arc::new(TestStore::new());
+		let store = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
 
@@ -147,14 +160,24 @@ mod tests {
 			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
 		)
 		.unwrap();
-		let address = NetAddress::from_str("127.0.0.1:9738").unwrap();
+		let address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
 		let expected_peer_info = PeerInfo { node_id, address };
+		assert!(store
+			.read(
+				PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				PEER_INFO_PERSISTENCE_KEY,
+			)
+			.is_err());
 		peer_store.add_peer(expected_peer_info.clone()).unwrap();
-		assert!(store.get_and_clear_did_persist());
 
 		// Check we can read back what we persisted.
 		let persisted_bytes = store
-			.get_persisted_bytes(PEER_INFO_PERSISTENCE_NAMESPACE, PEER_INFO_PERSISTENCE_KEY)
+			.read(
+				PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				PEER_INFO_PERSISTENCE_KEY,
+			)
 			.unwrap();
 		let deser_peer_store =
 			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
@@ -163,6 +186,5 @@ mod tests {
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
 		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
-		assert!(!store.get_and_clear_did_persist());
 	}
 }

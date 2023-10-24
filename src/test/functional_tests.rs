@@ -1,55 +1,27 @@
 use crate::builder::NodeBuilder;
-use crate::io::KVStore;
+use crate::io::test_utils::TestSyncStore;
 use crate::test::utils::*;
-use crate::test::utils::{expect_event, random_config};
+use crate::test::utils::{expect_event, random_config, setup_two_nodes};
 use crate::{Error, Event, Node, PaymentDirection, PaymentStatus};
 
 use bitcoin::Amount;
 use electrsd::bitcoind::BitcoinD;
 use electrsd::ElectrsD;
+use lightning::util::persist::KVStore;
+
+use std::sync::Arc;
 
 #[test]
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	println!("== Node A ==");
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	let config_a = random_config();
-	let mut builder_a = NodeBuilder::from_config(config_a);
-	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build().unwrap();
-	node_a.start().unwrap();
-
-	println!("\n== Node B ==");
-	let config_b = random_config();
-	let mut builder_b = NodeBuilder::from_config(config_b);
-	builder_b.set_esplora_server(esplora_url);
-	let node_b = builder_b.build().unwrap();
-	node_b.start().unwrap();
-
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind, &electrsd, false);
 }
 
 #[test]
 fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	println!("== Node A ==");
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	let config_a = random_config();
-	let mut builder_a = NodeBuilder::from_config(config_a);
-	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build().unwrap();
-	node_a.start().unwrap();
-
-	println!("\n== Node B ==");
-	let mut config_b = random_config();
-	config_b.trusted_peers_0conf.push(node_a.node_id());
-
-	let mut builder_b = NodeBuilder::from_config(config_b);
-	builder_b.set_esplora_server(esplora_url.clone());
-	let node_b = builder_b.build().unwrap();
-
-	node_b.start().unwrap();
-
+	let (node_a, node_b) = setup_two_nodes(&electrsd, true);
 	do_channel_full_cycle(node_a, node_b, &bitcoind, &electrsd, true)
 }
 
@@ -190,8 +162,11 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 		node_a.send_payment_using_amount(&invoice, underpaid_amount)
 	);
 
+	println!("\nB overpaid receive_payment");
 	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
+
+	println!("\nA overpaid send_payment");
 	let payment_hash = node_a.send_payment_using_amount(&invoice, overpaid_amount_msat).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {
@@ -213,9 +188,11 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
 
 	// Test "zero-amount" invoice payment
+	println!("\nB receive_variable_amount_payment");
 	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
 	let determined_amount_msat = 2345_678;
 	assert_eq!(Err(Error::InvalidInvoice), node_a.send_payment(&variable_amount_invoice));
+	println!("\nA send_payment_using_amount");
 	let payment_hash =
 		node_a.send_payment_using_amount(&variable_amount_invoice, determined_amount_msat).unwrap();
 
@@ -238,6 +215,40 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
 
+	// Test spontaneous/keysend payments
+	println!("\nA send_spontaneous_payment");
+	let keysend_amount_msat = 2500_000;
+	let keysend_payment_hash =
+		node_a.send_spontaneous_payment(keysend_amount_msat, node_b.node_id()).unwrap();
+	expect_event!(node_a, PaymentSuccessful);
+	let received_keysend_amount = match node_b.wait_next_event() {
+		ref e @ Event::PaymentReceived { amount_msat, .. } => {
+			println!("{} got event {:?}", std::stringify!(node_b), e);
+			node_b.event_handled();
+			amount_msat
+		}
+		ref e => {
+			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+		}
+	};
+	assert_eq!(received_keysend_amount, keysend_amount_msat);
+	assert_eq!(node_a.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(
+		node_a.payment(&keysend_payment_hash).unwrap().direction,
+		PaymentDirection::Outbound
+	);
+	assert_eq!(
+		node_a.payment(&keysend_payment_hash).unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
+	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&keysend_payment_hash).unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
+
+	println!("\nB close_channel");
 	node_b.close_channel(&channel_id, node_a.node_id()).unwrap();
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
@@ -248,8 +259,12 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	let sum_of_all_payments_sat =
-		(push_msat + invoice_amount_1_msat + overpaid_amount_msat + determined_amount_msat) / 1000;
+	let sum_of_all_payments_sat = (push_msat
+		+ invoice_amount_1_msat
+		+ overpaid_amount_msat
+		+ determined_amount_msat
+		+ keysend_amount_msat)
+		/ 1000;
 	let node_a_upper_bound_sat =
 		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
 	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
@@ -271,21 +286,9 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 #[test]
 fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	println!("== Node A ==");
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	let config_a = random_config();
-	let mut builder_a = NodeBuilder::from_config(config_a);
-	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build().unwrap();
-	node_a.start().unwrap();
-	let addr_a = node_a.new_onchain_address().unwrap();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
 
-	println!("\n== Node B ==");
-	let config_b = random_config();
-	let mut builder_b = NodeBuilder::from_config(config_b);
-	builder_b.set_esplora_server(esplora_url);
-	let node_b = builder_b.build().unwrap();
-	node_b.start().unwrap();
+	let addr_a = node_a.new_onchain_address().unwrap();
 	let addr_b = node_b.new_onchain_address().unwrap();
 
 	let premine_amount_sat = 100_000;
@@ -329,12 +332,20 @@ fn connect_to_public_testnet_esplora() {
 #[test]
 fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config = random_config();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
+
 	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
-	let node = builder.build().unwrap();
+
+	let node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
+	node.start().unwrap();
+
 	let expected_node_id = node.node_id();
+	assert_eq!(node.start(), Err(Error::AlreadyRunning));
 
 	let funding_address = node.new_onchain_address().unwrap();
 	let expected_amount = Amount::from_sat(100000);
@@ -342,13 +353,10 @@ fn start_stop_reinit() {
 	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
 	assert_eq!(node.total_onchain_balance_sats().unwrap(), 0);
 
-	node.start().unwrap();
-	assert_eq!(node.start(), Err(Error::AlreadyRunning));
-
 	node.sync_wallets().unwrap();
 	assert_eq!(node.spendable_onchain_balance_sats().unwrap(), expected_amount.to_sat());
 
-	let log_file_symlink = format!("{}/logs/ldk_node_latest.log", config.storage_dir_path);
+	let log_file_symlink = format!("{}/logs/ldk_node_latest.log", config.clone().storage_dir_path);
 	assert!(std::path::Path::new(&log_file_symlink).is_symlink());
 
 	node.stop().unwrap();
@@ -361,65 +369,12 @@ fn start_stop_reinit() {
 	assert_eq!(node.stop(), Err(Error::NotRunning));
 	drop(node);
 
-	let mut new_builder = NodeBuilder::from_config(config);
-	new_builder.set_esplora_server(esplora_url);
-	let reinitialized_node = builder.build().unwrap();
-	assert_eq!(reinitialized_node.node_id(), expected_node_id);
-
-	reinitialized_node.start().unwrap();
-
-	assert_eq!(
-		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
-		expected_amount.to_sat()
-	);
-
-	reinitialized_node.sync_wallets().unwrap();
-	assert_eq!(
-		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
-		expected_amount.to_sat()
-	);
-
-	reinitialized_node.stop().unwrap();
-}
-
-#[test]
-fn start_stop_reinit_fs_store() {
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	let config = random_config();
 	let mut builder = NodeBuilder::from_config(config.clone());
 	builder.set_esplora_server(esplora_url.clone());
-	let node = builder.build_with_fs_store().unwrap();
-	let expected_node_id = node.node_id();
 
-	let funding_address = node.new_onchain_address().unwrap();
-	let expected_amount = Amount::from_sat(100000);
-
-	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
-	assert_eq!(node.total_onchain_balance_sats().unwrap(), 0);
-
-	node.start().unwrap();
-	assert_eq!(node.start(), Err(Error::AlreadyRunning));
-
-	node.sync_wallets().unwrap();
-	assert_eq!(node.spendable_onchain_balance_sats().unwrap(), expected_amount.to_sat());
-
-	node.stop().unwrap();
-	assert_eq!(node.stop(), Err(Error::NotRunning));
-
-	node.start().unwrap();
-	assert_eq!(node.start(), Err(Error::AlreadyRunning));
-
-	node.stop().unwrap();
-	assert_eq!(node.stop(), Err(Error::NotRunning));
-	drop(node);
-
-	let mut new_builder = NodeBuilder::from_config(config);
-	new_builder.set_esplora_server(esplora_url);
-	let reinitialized_node = builder.build_with_fs_store().unwrap();
-	assert_eq!(reinitialized_node.node_id(), expected_node_id);
-
+	let reinitialized_node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
 	reinitialized_node.start().unwrap();
+	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
 	assert_eq!(
 		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
@@ -438,20 +393,9 @@ fn start_stop_reinit_fs_store() {
 #[test]
 fn onchain_spend_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
 
-	let config_a = random_config();
-	let mut builder_a = NodeBuilder::from_config(config_a);
-	builder_a.set_esplora_server(esplora_url.clone());
-	let node_a = builder_a.build().unwrap();
-	node_a.start().unwrap();
 	let addr_a = node_a.new_onchain_address().unwrap();
-
-	let config_b = random_config();
-	let mut builder_b = NodeBuilder::from_config(config_b);
-	builder_b.set_esplora_server(esplora_url);
-	let node_b = builder_b.build().unwrap();
-	node_b.start().unwrap();
 	let addr_b = node_b.new_onchain_address().unwrap();
 
 	premine_and_distribute_funds(
@@ -494,13 +438,8 @@ fn onchain_spend_receive() {
 #[test]
 fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config = random_config();
-	let mut builder = NodeBuilder::from_config(config.clone());
-	builder.set_esplora_server(esplora_url.clone());
-	let node = builder.build().unwrap();
-
-	node.start().unwrap();
+	let node = setup_node(&electrsd, config);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();

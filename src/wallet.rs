@@ -440,6 +440,18 @@ where
 	fn sign_gossip_message(&self, msg: UnsignedGossipMessage<'_>) -> Result<Signature, ()> {
 		self.inner.sign_gossip_message(msg)
 	}
+
+	fn sign_bolt12_invoice(
+		&self, invoice: &lightning::offers::invoice::UnsignedBolt12Invoice,
+	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
+		self.inner.sign_bolt12_invoice(invoice)
+	}
+
+	fn sign_bolt12_invoice_request(
+		&self, invoice_request: &lightning::offers::invoice_request::UnsignedInvoiceRequest,
+	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
+		self.inner.sign_bolt12_invoice_request(invoice_request)
+	}
 }
 
 impl<D, L: Deref> EntropySource for WalletKeysManager<D, L>
