@@ -4,7 +4,7 @@ use crate::wallet::{Wallet, WalletKeysManager};
 use lightning::chain::chainmonitor;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
-use lightning::ln::msgs::SocketAddress as LdkSocketAddress;
+use lightning::ln::msgs::SocketAddress;
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::ChannelId;
 use lightning::routing::gossip;
@@ -20,9 +20,6 @@ use lightning_transaction_sync::EsploraSyncClient;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
 
-use std::fmt::Display;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
@@ -318,106 +315,6 @@ pub struct PeerDetails {
 	pub is_persisted: bool,
 	/// Indicates whether we currently have an active connection with the peer.
 	pub is_connected: bool,
-}
-
-/// The network address of a Lightning node.
-///
-/// Currently only IPv4, IPv6, and DNS hostnames are supported.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SocketAddress(pub LdkSocketAddress);
-
-impl Display for SocketAddress {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self.0 {
-			LdkSocketAddress::TcpIpV4 { addr, port } => {
-				let ip_addr = Ipv4Addr::from(addr);
-				write!(f, "{}:{}", ip_addr, port)
-			}
-			LdkSocketAddress::TcpIpV6 { addr, port } => {
-				let ip_addr = Ipv6Addr::from(addr);
-				write!(f, "[{}]:{}", ip_addr, port)
-			}
-			LdkSocketAddress::Hostname { ref hostname, port } => {
-				write!(f, "{}:{}", hostname.as_str(), port)
-			}
-			LdkSocketAddress::OnionV2(o) => {
-				write!(f, "OnionV2 (unsupported): {:?}", o)
-			}
-			LdkSocketAddress::OnionV3 { ed25519_pubkey, checksum, version, port } => write!(
-				f,
-				"OnionV3 (unsupported): {:?}/{:?}/{:?}/{:?}",
-				ed25519_pubkey, checksum, version, port
-			),
-		}
-	}
-}
-
-impl FromStr for SocketAddress {
-	type Err = ();
-
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		Ok(Self(LdkSocketAddress::from_str(s).map_err(|_| ())?))
-	}
-}
-
-impl From<SocketAddr> for SocketAddress {
-	fn from(value: SocketAddr) -> Self {
-		match value {
-			SocketAddr::V4(v4addr) => SocketAddress::from(v4addr),
-			SocketAddr::V6(v6addr) => SocketAddress::from(v6addr),
-		}
-	}
-}
-
-impl From<SocketAddrV4> for SocketAddress {
-	fn from(value: SocketAddrV4) -> Self {
-		Self(LdkSocketAddress::TcpIpV4 { addr: value.ip().octets(), port: value.port() })
-	}
-}
-
-impl From<SocketAddrV6> for SocketAddress {
-	fn from(value: SocketAddrV6) -> Self {
-		Self(LdkSocketAddress::TcpIpV6 { addr: value.ip().octets(), port: value.port() })
-	}
-}
-
-impl ToSocketAddrs for SocketAddress {
-	type Iter = std::option::IntoIter<SocketAddr>;
-
-	fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
-		match self.0 {
-			LdkSocketAddress::TcpIpV4 { addr, port } => {
-				let ip_addr = Ipv4Addr::from(addr);
-				(ip_addr, port).to_socket_addrs()
-			}
-			LdkSocketAddress::TcpIpV6 { addr, port } => {
-				let ip_addr = Ipv6Addr::from(addr);
-				(ip_addr, port).to_socket_addrs()
-			}
-			LdkSocketAddress::Hostname { ref hostname, port } => {
-				Ok((hostname.as_str(), port).to_socket_addrs()?.next().into_iter())
-			}
-			LdkSocketAddress::OnionV2(..) => {
-				Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-			}
-			LdkSocketAddress::OnionV3 { .. } => {
-				Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-			}
-		}
-	}
-}
-
-impl Writeable for SocketAddress {
-	fn write<W: lightning::util::ser::Writer>(&self, writer: &mut W) -> Result<(), std::io::Error> {
-		self.0.write(writer)
-	}
-}
-
-impl Readable for SocketAddress {
-	fn read<R: std::io::Read>(reader: &mut R) -> Result<Self, lightning::ln::msgs::DecodeError> {
-		let addr: LdkSocketAddress = Readable::read(reader)?;
-		Ok(Self(addr))
-	}
 }
 
 /// Options which apply on a per-channel basis.

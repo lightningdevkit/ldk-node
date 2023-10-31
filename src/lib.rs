@@ -26,8 +26,9 @@
 //! [`send_payment`], etc.:
 //!
 //! ```no_run
-//! use ldk_node::{Builder, SocketAddress};
+//! use ldk_node::Builder;
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
+//! use ldk_node::lightning::ln::msgs::SocketAddress;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use ldk_node::bitcoin::Network;
 //! use std::str::FromStr;
@@ -100,7 +101,6 @@ use error::Error;
 
 pub use event::Event;
 pub use types::ChannelConfig;
-pub use types::SocketAddress;
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -126,6 +126,7 @@ use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::Confirm;
 use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
+use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
 use lightning::sign::EntropySource;
 
@@ -631,7 +632,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							}
 
 							let addresses =
-								bcast_config.listening_address.iter().cloned().map(|a| a.0).collect();
+								bcast_config.listening_address.iter().cloned().collect();
 							bcast_pm.broadcast_node_announcement([0; 3], [0; 32], addresses);
 
 							let unix_time_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
@@ -1516,7 +1517,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			let stored_peer = self.peer_store.get_peer(&node_id);
 			let stored_addr_opt = stored_peer.as_ref().map(|p| p.address.clone());
 			let address = match (con_addr_opt, stored_addr_opt) {
-				(Some(con_addr), _) => SocketAddress(con_addr),
+				(Some(con_addr), _) => con_addr,
 				(None, Some(stored_addr)) => stored_addr,
 				(None, None) => continue,
 			};
