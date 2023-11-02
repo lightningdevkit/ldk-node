@@ -12,20 +12,21 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 
-import org.lightningdevkit.ldknode.*;
+fun runCommandAndWait(vararg cmd: String): String {
+    println("Running command \"${cmd.joinToString(" ")}\"")
 
-fun runCommandAndWait(cmd: String): String {
-    println("Running command \"$cmd\"")
-    val p = Runtime.getRuntime().exec(cmd)
-    p.waitFor()
-    val stdout = p.inputStream.bufferedReader().lineSequence().joinToString("\n")
-    val stderr = p.errorStream.bufferedReader().lineSequence().joinToString("\n")
+    val processBuilder = ProcessBuilder(cmd.toList())
+    val process = processBuilder.start()
+
+    process.waitFor()
+    val stdout = process.inputStream.bufferedReader().lineSequence().joinToString("\n")
+    val stderr = process.errorStream.bufferedReader().lineSequence().joinToString("\n")
     return stdout + stderr
 }
 
 fun mine(blocks: UInt): String {
-    val address = runCommandAndWait("bitcoin-cli -regtest getnewaddress")
-    val output = runCommandAndWait("bitcoin-cli -regtest generatetoaddress $blocks $address")
+    val address = runCommandAndWait("bitcoin-cli", "-regtest", "getnewaddress")
+    val output = runCommandAndWait("bitcoin-cli", "-regtest", "generatetoaddress", blocks.toString(), address)
     println("Mining output: $output")
     val re = Regex("\n.+\n\\]$")
     val lastBlock = re.find(output)!!.value.replace("]","").replace("\"", "").replace("\n","").trim()
@@ -40,13 +41,13 @@ fun mineAndWait(esploraEndpoint: String, blocks: UInt) {
 
 fun sendToAddress(address: String, amountSats: UInt): String {
     val amountBtc = amountSats.toDouble() / 100000000.0
-    val output = runCommandAndWait("bitcoin-cli -regtest sendtoaddress $address $amountBtc")
+    val output = runCommandAndWait("bitcoin-cli", "-regtest", "sendtoaddress", address, amountBtc.toString())
     return output
 }
 
 fun setup() {
-    runCommandAndWait("bitcoin-cli -regtest createwallet ldk_node_test")
-    runCommandAndWait("bitcoin-cli -regtest loadwallet ldk_node_test true")
+    runCommandAndWait("bitcoin-cli", "-regtest", "createwallet", "ldk_node_test")
+    runCommandAndWait("bitcoin-cli", "-regtest", "loadwallet", "ldk_node_test", "true")
     mine(101u)
     Thread.sleep(5_000)
 }
@@ -77,7 +78,6 @@ fun waitForBlock(esploraEndpoint: String, blockHash: String) {
             .build();
 
         val response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        val body = response.body()
 
         esploraPickedUpBlock = re.containsMatchIn(response.body());
         Thread.sleep(500)
@@ -96,8 +96,6 @@ class LibraryTest {
 
         val listenAddress1 = "127.0.0.1:2323"
         val listenAddress2 = "127.0.0.1:2324"
-
-        val logLevel = LogLevel.TRACE;
 
         val config1 = Config()
         config1.storageDirPath = tmpDir1
