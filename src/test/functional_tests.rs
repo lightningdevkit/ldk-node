@@ -348,10 +348,11 @@ fn start_stop_reinit() {
 	assert_eq!(node.start(), Err(Error::AlreadyRunning));
 
 	let funding_address = node.new_onchain_address().unwrap();
-	let expected_amount = Amount::from_sat(100000);
 
-	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
 	assert_eq!(node.total_onchain_balance_sats().unwrap(), 0);
+
+	let expected_amount = Amount::from_sat(100000);
+	premine_and_distribute_funds(&bitcoind, &electrsd, vec![funding_address], expected_amount);
 
 	node.sync_wallets().unwrap();
 	assert_eq!(node.spendable_onchain_balance_sats().unwrap(), expected_amount.to_sat());
