@@ -205,7 +205,7 @@ class LibraryTest {
                 else -> return
         }
 
-        val invoice = node2.receivePayment(1000000u, "asdf", 9217u)
+        val invoice = node2.receivePayment(2500000u, "asdf", 9217u)
 
         node1.sendPayment(invoice)
 
@@ -245,7 +245,7 @@ class LibraryTest {
         println("Spendable balance 2 after close: $spendableBalance2AfterClose")
         assert(spendableBalance1AfterClose > 95000u)
         assert(spendableBalance1AfterClose < 100000u)
-        assertEquals(101000uL, spendableBalance2AfterClose)
+        assertEquals(102500uL, spendableBalance2AfterClose)
 
         node1.stop()
         node2.stop()
