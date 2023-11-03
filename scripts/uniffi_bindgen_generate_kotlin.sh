@@ -3,7 +3,7 @@ BINDINGS_DIR="bindings/kotlin"
 TARGET_DIR="target/bindings/kotlin"
 PROJECT_DIR="ldk-node-jvm"
 PACKAGE_DIR="org/lightningdevkit/ldknode"
-UNIFFI_BINDGEN_BIN="cargo run --features=uniffi/cli --bin uniffi-bindgen"
+UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
 
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
 	rustup target add x86_64-unknown-linux-gnu || exit 1
