@@ -17,10 +17,6 @@ categories = ["cryptography::cryptocurrencies"]
 crate-type = ["lib", "staticlib", "cdylib"]
 name = "ldk_node"
 
-[[bin]]
-name = "uniffi-bindgen"
-path = "uniffi-bindgen.rs"
-
 [profile.release-smaller]
 inherits = "release"
 opt-level = 'z'     # Optimize for size.
@@ -83,7 +79,7 @@ proptest = "1.0.0"
 regex = "1.5.6"
 
 [build-dependencies]
-uniffi = { version = "0.23.0", features = ["build", "cli"], optional = true }
+uniffi = { version = "0.23.0", features = ["build"], optional = true }
 
 [profile.release]
 panic = "abort"
