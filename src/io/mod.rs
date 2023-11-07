@@ -4,6 +4,8 @@ pub mod sqlite_store;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub(crate) mod utils;
+#[cfg(any(vss, vss_test))]
+pub(crate) mod vss_store;
 
 /// The event queue will be persisted under this key.
 pub(crate) const EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE: &str = "";

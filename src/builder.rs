@@ -37,6 +37,8 @@ use lightning_persister::fs_store::FilesystemStore;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
+#[cfg(any(vss, vss_test))]
+use crate::io::vss_store::VssStore;
 use bdk::bitcoin::secp256k1::Secp256k1;
 use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::database::SqliteDatabase;
@@ -267,6 +269,16 @@ impl NodeBuilder {
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
 		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path));
 		self.build_with_store(kv_store)
+	}
+
+	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
+	/// previously configured.
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store(
+		&self, url: &str, store_id: String,
+	) -> Result<Node<VssStore>, BuildError> {
+		let vss = Arc::new(VssStore::new(url, store_id));
+		self.build_with_store(vss)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
