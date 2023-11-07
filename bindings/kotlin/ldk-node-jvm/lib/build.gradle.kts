@@ -12,6 +12,7 @@ plugins {
     id("java-library")
     id("maven-publish")
     id("signing")
+    id("org.jlleitschuh.gradle.ktlint") version "11.6.1"
 }
 
 repositories {
@@ -110,4 +111,12 @@ signing {
 //    val signingPassword: String? by project
 //    useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
     sign(publishing.publications)
+}
+
+ktlint {
+    filter {
+        exclude { entry ->
+            entry.file.toString().contains("main")
+        }
+    }
 }
