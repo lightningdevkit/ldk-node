@@ -1,0 +1,47 @@
+name: Continuous Integration Checks - Kotlin
+
+on: [push, pull_request]
+
+jobs:
+  check-kotlin:
+    runs-on: ubuntu-latest
+
+    env:
+      LDK_NODE_JVM_DIR: bindings/kotlin/ldk-node-jvm
+      LDK_NODE_ANDROID_DIR: bindings/kotlin/ldk-node-android
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: Run ktlintCheck on ldk-node-jvm
+        run: |
+          cd $LDK_NODE_JVM_DIR
+          ./gradlew ktlintCheck
+
+      - name: Run ktlintCheck on ldk-node-android
+        run: |
+          cd $LDK_NODE_ANDROID_DIR
+          ./gradlew ktlintCheck
+
+      - name: Generate Kotlin JVM
+        run: ./scripts/uniffi_bindgen_generate_kotlin.sh
+
+      - name: Start bitcoind and electrs
+        run: docker compose up -d
+
+      - name: Run ldk-node-jvm tests
+        run: |
+          cd $LDK_NODE_JVM_DIR
+          ./gradlew test -Penv=ci
+
+      - name: Run ldk-node-android tests
+        run: |
+          cd $LDK_NODE_ANDROID_DIR
+          ./gradlew test

@@ -64,6 +64,23 @@ tasks.named<Test>("test") {
     }
 }
 
+tasks.test {
+    doFirst {
+        if (project.hasProperty("env") && project.property("env") == "ci") {
+            environment("BITCOIN_CLI_BIN", "docker exec ldk-node-bitcoin-1 bitcoin-cli")
+            environment("BITCOIND_RPC_USER", "user")
+            environment("BITCOIND_RPC_PASSWORD", "pass")
+            environment("ESPLORA_ENDPOINT", "http://127.0.0.1:3002")
+        } else {
+            // Adapt these to your local environment
+            environment("BITCOIN_CLI_BIN", "bitcoin-cli")
+            environment("BITCOIND_RPC_USER", "")
+            environment("BITCOIND_RPC_PASSWORD", "")
+            environment("ESPLORA_ENDPOINT", "http://127.0.0.1:3002")
+        }
+    }
+}
+
 afterEvaluate {
     publishing {
         publications {

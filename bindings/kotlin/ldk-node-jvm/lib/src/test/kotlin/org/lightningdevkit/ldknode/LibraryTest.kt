@@ -1,9 +1,8 @@
 package org.lightningdevkit.ldknode
 
-import kotlin.UInt
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.io.path.createTempDirectory
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -23,9 +22,26 @@ fun runCommandAndWait(vararg cmd: String): String {
     return stdout + stderr
 }
 
+fun bitcoinCli(vararg cmd: String): String {
+    val bitcoinCliBin = System.getenv("BITCOIN_CLI_BIN")?.split(" ") ?: listOf("bitcoin-cli")
+    val bitcoinDRpcUser = System.getenv("BITCOIND_RPC_USER") ?: ""
+    val bitcoinDRpcPassword = System.getenv("BITCOIND_RPC_PASSWORD") ?: ""
+
+    val baseCommand = bitcoinCliBin + "-regtest"
+
+    val rpcAuth = if (bitcoinDRpcUser.isNotBlank() && bitcoinDRpcPassword.isNotBlank()) {
+        listOf("-rpcuser=$bitcoinDRpcUser", "-rpcpassword=$bitcoinDRpcPassword")
+    } else {
+        emptyList()
+    }
+
+    val fullCommand = baseCommand + rpcAuth + cmd.toList()
+    return runCommandAndWait(*fullCommand.toTypedArray())
+}
+
 fun mine(blocks: UInt): String {
-    val address = runCommandAndWait("bitcoin-cli", "-regtest", "getnewaddress")
-    val output = runCommandAndWait("bitcoin-cli", "-regtest", "generatetoaddress", blocks.toString(), address)
+    val address = bitcoinCli("getnewaddress")
+    val output = bitcoinCli("generatetoaddress", blocks.toString(), address)
     println("Mining output: $output")
     val re = Regex("\n.+\n\\]$")
     val lastBlock = re.find(output)!!.value.replace("]", "").replace("\"", "").replace("\n", "").trim()
@@ -40,15 +56,8 @@ fun mineAndWait(esploraEndpoint: String, blocks: UInt) {
 
 fun sendToAddress(address: String, amountSats: UInt): String {
     val amountBtc = amountSats.toDouble() / 100000000.0
-    val output = runCommandAndWait("bitcoin-cli", "-regtest", "sendtoaddress", address, amountBtc.toString())
+    val output = bitcoinCli("sendtoaddress", address, amountBtc.toString())
     return output
-}
-
-fun setup() {
-    runCommandAndWait("bitcoin-cli", "-regtest", "createwallet", "ldk_node_test")
-    runCommandAndWait("bitcoin-cli", "-regtest", "loadwallet", "ldk_node_test", "true")
-    mine(101u)
-    Thread.sleep(5_000)
 }
 
 fun waitForTx(esploraEndpoint: String, txid: String) {
@@ -83,11 +92,20 @@ fun waitForBlock(esploraEndpoint: String, blockHash: String) {
     }
 }
 
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class LibraryTest {
-    @Test fun fullCycle() {
-        val esploraEndpoint = "http://127.0.0.1:3002"
-        setup()
 
+    val esploraEndpoint = System.getenv("ESPLORA_ENDPOINT")
+
+    @BeforeAll
+    fun setup() {
+        bitcoinCli("createwallet", "ldk_node_test")
+        bitcoinCli("loadwallet", "ldk_node_test", "true")
+        mine(101u)
+        Thread.sleep(5_000)
+    }
+
+    @Test fun fullCycle() {
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
         val tmpDir2 = createTempDirectory("ldk_node").toString()
