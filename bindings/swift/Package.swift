@@ -17,8 +17,7 @@ let package = Package(
     targets: [
         .target(
             name: "LDKNode",
-            dependencies: ["LDKNodeFFI"],
-            swiftSettings: [.unsafeFlags(["-suppress-warnings"])]
+            dependencies: ["LDKNodeFFI"]
         ),
         .binaryTarget(
             name: "LDKNodeFFI",
