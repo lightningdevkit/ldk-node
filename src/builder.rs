@@ -113,7 +113,7 @@ impl fmt::Display for BuildError {
 				write!(f, "System time is invalid. Clocks might have gone back in time.")
 			}
 			Self::InvalidChannelMonitor => {
-				write!(f, "Failed to watch a deserialzed ChannelMonitor")
+				write!(f, "Failed to watch a deserialized ChannelMonitor")
 			}
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
