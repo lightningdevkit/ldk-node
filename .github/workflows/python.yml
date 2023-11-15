@@ -1,0 +1,39 @@
+name: Continuous Integration Checks - Python
+
+on: [push, pull_request]
+
+jobs:
+  check-python:
+    runs-on: ubuntu-latest
+
+    env:
+      LDK_NODE_PYTHON_DIR: bindings/python
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Generate Python bindings
+        run: ./scripts/uniffi_bindgen_generate_python.sh
+
+      - name: Start bitcoind and electrs
+        run: docker compose up -d
+
+      - name: Install testing prerequisites
+        run: |
+          pip3 install requests
+
+      - name: Run Python unit tests
+        env:
+          BITCOIN_CLI_BIN: "docker exec ldk-node-bitcoin-1 bitcoin-cli"
+          BITCOIND_RPC_USER: "user"
+          BITCOIND_RPC_PASSWORD: "pass"
+          ESPLORA_ENDPOINT: "http://127.0.0.1:3002"
+        run: |
+          cd $LDK_NODE_PYTHON_DIR
+          python3 -m unittest discover -s src/ldk_node
