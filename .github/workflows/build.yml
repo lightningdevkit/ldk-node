@@ -46,6 +46,7 @@ jobs:
           cargo update -p proptest --precise "1.2.0" --verbose # proptest 1.3.0 requires rustc 1.64.0
           cargo update -p reqwest --precise "0.11.20" --verbose # reqwest 0.11.21 broke 1.63.0 MSRV
           cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
+          cargo update -p jobserver --precise "0.1.26" --verbose # jobserver 0.1.27 requires rustc 1.66.0
           cargo update -p zstd-sys --precise "2.0.8+zstd.1.5.5" --verbose # zstd-sys 2.0.9+zstd.1.5.5 requires rustc 1.64.0
           cargo update -p petgraph --precise "0.6.3" --verbose # petgraph v0.6.4, requires rustc 1.64 or newer
       - name: Build on Rust ${{ matrix.toolchain }}
