@@ -116,7 +116,7 @@ class LibraryTest {
 
         val config1 = Config()
         config1.storageDirPath = tmpDir1
-        config1.listeningAddress = listenAddress1
+        config1.listeningAddresses = listOf(listenAddress1)
         config1.network = Network.REGTEST
         config1.logLevel = LogLevel.TRACE
 
@@ -124,7 +124,7 @@ class LibraryTest {
 
         val config2 = Config()
         config2.storageDirPath = tmpDir2
-        config2.listeningAddress = listenAddress2
+        config2.listeningAddresses = listOf(listenAddress2)
         config2.network = Network.REGTEST
         config2.logLevel = LogLevel.TRACE
         println("Config 2: $config2")

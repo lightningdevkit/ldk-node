@@ -207,7 +207,7 @@ const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `storage_dir_path`                     | /tmp/ldk_node/     |
 /// | `log_dir_path`                         | None               |
 /// | `network`                              | Bitcoin            |
-/// | `listening_address`                    | None               |
+/// | `listening_addresses`                  | None               |
 /// | `default_cltv_expiry_delta`            | 144                |
 /// | `onchain_wallet_sync_interval_secs`    | 80                 |
 /// | `wallet_sync_interval_secs`            | 30                 |
@@ -225,8 +225,8 @@ pub struct Config {
 	pub log_dir_path: Option<String>,
 	/// The used Bitcoin network.
 	pub network: Network,
-	/// The IP address and TCP port the node will listen on.
-	pub listening_address: Option<SocketAddress>,
+	/// The addresses on which the node will listen for incoming connections.
+	pub listening_addresses: Option<Vec<SocketAddress>>,
 	/// The default CLTV expiry delta to be used for payments.
 	pub default_cltv_expiry_delta: u32,
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
@@ -264,7 +264,7 @@ impl Default for Config {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			log_dir_path: None,
 			network: DEFAULT_NETWORK,
-			listening_address: None,
+			listening_addresses: None,
 			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
 			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
 			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
@@ -490,38 +490,33 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			});
 		}
 
-		if let Some(listening_address) = &self.config.listening_address {
+		if let Some(listening_addresses) = &self.config.listening_addresses {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
 			let mut stop_listen = self.stop_receiver.clone();
-			let listening_address = listening_address.clone();
 			let listening_logger = Arc::clone(&self.logger);
 
-			let bind_addr = listening_address
-				.to_socket_addrs()
-				.map_err(|_| {
+			let mut bind_addrs = Vec::with_capacity(listening_addresses.len());
+
+			for listening_addr in listening_addresses {
+				let resolved_address = listening_addr.to_socket_addrs().map_err(|e| {
 					log_error!(
 						self.logger,
-						"Unable to resolve listing address: {:?}",
-						listening_address
-					);
-					Error::InvalidSocketAddress
-				})?
-				.next()
-				.ok_or_else(|| {
-					log_error!(
-						self.logger,
-						"Unable to resolve listing address: {:?}",
-						listening_address
+						"Unable to resolve listening address: {:?}. Error details: {}",
+						listening_addr,
+						e,
 					);
 					Error::InvalidSocketAddress
 				})?;
 
+				bind_addrs.extend(resolved_address);
+			}
+
 			runtime.spawn(async move {
 				let listener =
-					tokio::net::TcpListener::bind(bind_addr).await
+					tokio::net::TcpListener::bind(&*bind_addrs).await
 										.unwrap_or_else(|e| {
-											log_error!(listening_logger, "Failed to bind to listen address/port - is something else already listening on it?: {}", e);
+											log_error!(listening_logger, "Failed to bind to listen addresses/ports - is something else already listening on it?: {}", e);
 											panic!(
 												"Failed to bind to listen address/port - is something else already listening on it?",
 												);
@@ -631,8 +626,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								continue;
 							}
 
-							let addresses =
-								bcast_config.listening_address.iter().cloned().collect();
+							let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
+
+							if addresses.is_empty() {
+								// Skip if we are not listening on any addresses.
+								continue;
+							}
+
 							bcast_pm.broadcast_node_announcement([0; 3], [0; 32], addresses);
 
 							let unix_time_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
@@ -781,9 +781,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		self.channel_manager.get_our_node_id()
 	}
 
-	/// Returns our own listening address.
-	pub fn listening_address(&self) -> Option<SocketAddress> {
-		self.config.listening_address.clone()
+	/// Returns our own listening addresses.
+	pub fn listening_addresses(&self) -> Option<Vec<SocketAddress>> {
+		self.config.listening_addresses.clone()
 	}
 
 	/// Retrieve a new on-chain/funding address.

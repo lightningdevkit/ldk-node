@@ -6,7 +6,7 @@ dictionary Config {
 	string storage_dir_path = "/tmp/ldk_node/";
 	string? log_dir_path = null;
 	Network network = "Bitcoin";
-	SocketAddress? listening_address = null;
+	sequence<SocketAddress>? listening_addresses = null;
 	u32 default_cltv_expiry_delta = 144;
 	u64 onchain_wallet_sync_interval_secs = 80;
 	u64 wallet_sync_interval_secs = 30;
@@ -29,7 +29,8 @@ interface Builder {
 	void set_gossip_source_rgs(string rgs_server_url);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_network(Network network);
-	void set_listening_address(SocketAddress listening_address);
+	[Throws=BuildError]
+	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
 	LDKNode build();
 };
@@ -43,7 +44,7 @@ interface LDKNode {
 	Event wait_next_event();
 	void event_handled();
 	PublicKey node_id();
-	SocketAddress? listening_address();
+	sequence<SocketAddress>? listening_addresses();
 	[Throws=NodeError]
 	Address new_onchain_address();
 	[Throws=NodeError]
@@ -133,6 +134,7 @@ enum BuildError {
 	"InvalidSeedFile",
 	"InvalidSystemTime",
 	"InvalidChannelMonitor",
+	"InvalidListeningAddresses",
 	"ReadFailed",
 	"WriteFailed",
 	"StoragePathAccessFailed",
