@@ -1,6 +1,7 @@
 use crate::builder::NodeBuilder;
 use crate::io::test_utils::TestSyncStore;
 use crate::{Config, Node};
+use lightning::ln::msgs::SocketAddress;
 use lightning::util::logger::{Level, Logger, Record};
 
 use bitcoin::{Address, Amount, Network, OutPoint, Txid};
@@ -134,6 +135,19 @@ pub fn random_port() -> u16 {
 	rng.gen_range(5000..65535)
 }
 
+pub fn random_listening_addresses() -> Vec<SocketAddress> {
+	let num_addresses = 2;
+	let mut listening_addresses = Vec::with_capacity(num_addresses);
+
+	for _ in 0..num_addresses {
+		let rand_port = random_port();
+		let address: SocketAddress = format!("127.0.0.1:{}", rand_port).parse().unwrap();
+		listening_addresses.push(address);
+	}
+
+	listening_addresses
+}
+
 pub fn random_config() -> Config {
 	let mut config = Config::default();
 
@@ -144,10 +158,9 @@ pub fn random_config() -> Config {
 	println!("Setting random LDK storage dir: {}", rand_dir.display());
 	config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
 
-	let rand_port = random_port();
-	println!("Setting random LDK listening port: {}", rand_port);
-	let listening_address_str = format!("127.0.0.1:{}", rand_port);
-	config.listening_address = Some(listening_address_str.parse().unwrap());
+	let rand_listening_addresses = random_listening_addresses();
+	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
+	config.listening_addresses = Some(rand_listening_addresses);
 
 	config.log_level = Level::Trace;
 

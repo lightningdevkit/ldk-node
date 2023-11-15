@@ -90,6 +90,8 @@ pub enum BuildError {
 	InvalidSystemTime,
 	/// The a read channel monitor is invalid.
 	InvalidChannelMonitor,
+	/// The given listening addresses are invalid, e.g. too many were passed.
+	InvalidListeningAddresses,
 	/// We failed to read data from the [`KVStore`].
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
@@ -115,6 +117,7 @@ impl fmt::Display for BuildError {
 			Self::InvalidChannelMonitor => {
 				write!(f, "Failed to watch a deserialized ChannelMonitor")
 			}
+			Self::InvalidListeningAddresses => write!(f, "Given listening addresses are invalid."),
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
@@ -231,9 +234,15 @@ impl NodeBuilder {
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
-	pub fn set_listening_address(&mut self, listening_address: SocketAddress) -> &mut Self {
-		self.config.listening_address = Some(listening_address);
-		self
+	pub fn set_listening_addresses(
+		&mut self, listening_addresses: Vec<SocketAddress>,
+	) -> Result<&mut Self, BuildError> {
+		if listening_addresses.len() > 100 {
+			return Err(BuildError::InvalidListeningAddresses);
+		}
+
+		self.config.listening_addresses = Some(listening_addresses);
+		Ok(self)
 	}
 
 	/// Sets the level at which [`Node`] will log messages.
@@ -386,8 +395,10 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
-	pub fn set_listening_address(&self, listening_address: SocketAddress) {
-		self.inner.write().unwrap().set_listening_address(listening_address);
+	pub fn set_listening_addresses(
+		&self, listening_addresses: Vec<SocketAddress>,
+	) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
 	}
 
 	/// Sets the level at which [`Node`] will log messages.

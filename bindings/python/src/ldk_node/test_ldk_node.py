@@ -80,13 +80,13 @@ def send_to_address(address, amount_sats):
     return res
 
 
-def setup_node(tmp_dir, esplora_endpoint, listening_address):
+def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
     config = Config()
     builder = Builder.from_config(config)
     builder.set_storage_dir_path(tmp_dir)
     builder.set_esplora_server(esplora_endpoint)
     builder.set_network(DEFAULT_TEST_NETWORK)
-    builder.set_listening_address(listening_address)
+    builder.set_listening_addresses(listening_addresses)
     return builder.build()
 
 def get_esplora_endpoint():
@@ -109,8 +109,8 @@ class TestLdkNode(unittest.TestCase):
         tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
         print("TMP DIR 1:", tmp_dir_1.name)
 
-        listening_address_1 = "127.0.0.1:2323"
-        node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_address_1)
+        listening_addresses_1 = ["127.0.0.1:2323"]
+        node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
         node_1.start()
         node_id_1 = node_1.node_id()
         print("Node ID 1:", node_id_1)
@@ -119,8 +119,8 @@ class TestLdkNode(unittest.TestCase):
         tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
         print("TMP DIR 2:", tmp_dir_2.name)
 
-        listening_address_2 = "127.0.0.1:2324"
-        node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_address_2)
+        listening_addresses_2 = ["127.0.0.1:2324"]
+        node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
         node_2.start()
         node_id_2 = node_2.node_id()
         print("Node ID 2:", node_id_2)
@@ -155,7 +155,7 @@ class TestLdkNode(unittest.TestCase):
         print("TOTAL 2:", total_balance_2)
         self.assertEqual(total_balance_2, 100000)
 
-        node_1.connect_open_channel(node_id_2, listening_address_2, 50000, None, None, True)
+        node_1.connect_open_channel(node_id_2, listening_addresses_2[0], 50000, None, None, True)
 
         channel_pending_event_1 = node_1.wait_next_event()
         assert isinstance(channel_pending_event_1, Event.CHANNEL_PENDING)

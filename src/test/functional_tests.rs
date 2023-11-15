@@ -77,7 +77,7 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	node_a
 		.connect_open_channel(
 			node_b.node_id(),
-			node_b.listening_address().unwrap().into(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
 			funding_amount_sat,
 			Some(push_msat),
 			None,
@@ -332,7 +332,7 @@ fn channel_open_fails_when_funds_insufficient() {
 		Err(Error::InsufficientFunds),
 		node_a.connect_open_channel(
 			node_b.node_id(),
-			node_b.listening_address().unwrap().into(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
 			120000,
 			None,
 			None,

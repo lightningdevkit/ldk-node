@@ -26,8 +26,8 @@ class AndroidLibTest {
         val listenAddress1 = "127.0.0.1:2323"
         val listenAddress2 = "127.0.0.1:2324"
 
-        val config1 = Config(tmpDir1, network, listenAddress1, 2048u)
-        val config2 = Config(tmpDir2, network, listenAddress2, 2048u)
+        val config1 = Config(tmpDir1, network, listOf(listenAddress1), 2048u)
+        val config2 = Config(tmpDir2, network, listOf(listenAddress2), 2048u)
 
         val builder1 = Builder.fromConfig(config1)
         val builder2 = Builder.fromConfig(config2)
