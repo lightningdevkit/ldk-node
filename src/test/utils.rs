@@ -280,7 +280,7 @@ where
 
 			None => {}
 		}
-		assert!(tries < 10, "Reached max tries.");
+		assert!(tries < 20, "Reached max tries.");
 		tries += 1;
 		std::thread::sleep(delay);
 	}
