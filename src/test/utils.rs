@@ -1,8 +1,9 @@
 use crate::builder::NodeBuilder;
 use crate::io::test_utils::TestSyncStore;
-use crate::{Config, Node};
+use crate::{Config, Event, Node};
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::logger::{Level, Logger, Record};
+use lightning::util::persist::KVStore;
 
 use bitcoin::{Address, Amount, Network, OutPoint, Txid};
 
@@ -26,7 +27,7 @@ macro_rules! expect_event {
 	($node: expr, $event_type: ident) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::$event_type { .. } => {
-				println!("{} got event {:?}", std::stringify!($node), e);
+				println!("{} got event {:?}", $node.node_id(), e);
 				$node.event_handled();
 			}
 			ref e => {
@@ -37,6 +38,24 @@ macro_rules! expect_event {
 }
 
 pub(crate) use expect_event;
+
+macro_rules! expect_channel_pending_event {
+	($node: expr, $counterparty_node_id: expr) => {{
+		match $node.wait_next_event() {
+			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
+				println!("{} got event {:?}", $node.node_id(), e);
+				assert_eq!(counterparty_node_id, $counterparty_node_id);
+				$node.event_handled();
+				funding_txo
+			}
+			ref e => {
+				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+			}
+		}
+	}};
+}
+
+pub(crate) use expect_channel_pending_event;
 
 // Copied over from upstream LDK
 #[allow(dead_code)]
@@ -162,7 +181,7 @@ pub fn random_config() -> Config {
 	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
 	config.listening_addresses = Some(rand_listening_addresses);
 
-	config.log_level = Level::Trace;
+	config.log_level = Level::Gossip;
 
 	config
 }
@@ -214,6 +233,7 @@ pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> Node<TestSyncSt
 }
 
 pub fn generate_blocks_and_wait(bitcoind: &BitcoinD, electrsd: &ElectrsD, num: usize) {
+	print!("Generating {} blocks...", num);
 	let cur_height = bitcoind.client.get_block_count().expect("failed to get current block height");
 	let address = bitcoind
 		.client
@@ -222,6 +242,8 @@ pub fn generate_blocks_and_wait(bitcoind: &BitcoinD, electrsd: &ElectrsD, num: u
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.client.generate_to_address(num as u64, &address);
 	wait_for_block(electrsd, cur_height as usize + num);
+	print!(" Done!");
+	println!("\n");
 }
 
 pub fn wait_for_block(electrsd: &ElectrsD, min_height: usize) {
@@ -313,4 +335,26 @@ pub fn premine_and_distribute_funds(
 	}
 
 	generate_blocks_and_wait(bitcoind, electrsd, 1);
+}
+
+pub fn open_channel<K: KVStore + Sync + Send>(
+	node_a: &Node<K>, node_b: &Node<K>, funding_amount_sat: u64, announce: bool,
+	electrsd: &ElectrsD,
+) {
+	node_a
+		.connect_open_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			funding_amount_sat,
+			None,
+			None,
+			announce,
+		)
+		.unwrap();
+	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
+
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(funding_txo_a, funding_txo_b);
+	wait_for_tx(&electrsd, funding_txo_a.txid);
 }
