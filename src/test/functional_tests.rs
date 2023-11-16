@@ -1,7 +1,7 @@
 use crate::builder::NodeBuilder;
 use crate::io::test_utils::TestSyncStore;
 use crate::test::utils::*;
-use crate::test::utils::{expect_event, random_config, setup_two_nodes};
+use crate::test::utils::{expect_channel_pending_event, expect_event, open_channel, random_config};
 use crate::{Error, Event, Node, PaymentDirection, PaymentStatus};
 
 use bitcoin::Amount;
@@ -86,24 +86,13 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 		.unwrap();
 
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
-	expect_event!(node_a, ChannelPending);
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(funding_txo_a, funding_txo_b);
 
-	let funding_txo = match node_b.wait_next_event() {
-		ref e @ Event::ChannelPending { funding_txo, .. } => {
-			println!("{} got event {:?}", std::stringify!(node_b), e);
-			assert_eq!(node_b.next_event().as_ref(), Some(e));
-			node_b.event_handled();
-			funding_txo
-		}
-		ref e => {
-			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
-		}
-	};
-
-	wait_for_tx(&electrsd, funding_txo.txid);
+	wait_for_tx(&electrsd, funding_txo_a.txid);
 
 	if !allow_0conf {
-		println!("\n .. generating blocks ..");
 		generate_blocks_and_wait(&bitcoind, &electrsd, 6);
 	}
 
@@ -276,7 +265,7 @@ fn do_channel_full_cycle<K: KVStore + Sync + Send>(
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(&electrsd, funding_txo);
+	wait_for_outpoint_spend(&electrsd, funding_txo_b);
 
 	generate_blocks_and_wait(&bitcoind, &electrsd, 1);
 	node_a.sync_wallets().unwrap();
@@ -339,6 +328,82 @@ fn channel_open_fails_when_funds_insufficient() {
 			true
 		)
 	);
+}
+
+#[test]
+fn multi_hop_sending() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	// Setup and fund 5 nodes
+	let mut nodes = Vec::new();
+	for _ in 0..5 {
+		let config = random_config();
+		let mut builder = NodeBuilder::from_config(config);
+		builder.set_esplora_server(esplora_url.clone());
+		let node = builder.build().unwrap();
+		node.start().unwrap();
+		nodes.push(node);
+	}
+
+	let addresses = nodes.iter().map(|n| n.new_onchain_address().unwrap()).collect();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind,
+		&electrsd,
+		addresses,
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	for n in &nodes {
+		n.sync_wallets().unwrap();
+		assert_eq!(n.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+		assert_eq!(n.next_event(), None);
+	}
+
+	// Setup channel topology:
+	//                    (1M:0)- N2 -(1M:0)
+	//                   /                  \
+	//  N0 -(100k:0)-> N1                    N4
+	//                   \                  /
+	//                    (1M:0)- N3 -(1M:0)
+
+	open_channel(&nodes[0], &nodes[1], 100_000, true, &electrsd);
+	open_channel(&nodes[1], &nodes[2], 1_000_000, true, &electrsd);
+	// We need to sync wallets in-between back-to-back channel opens from the same node so BDK
+	// wallet picks up on the broadcast funding tx and doesn't double-spend itself.
+	//
+	// TODO: Remove once fixed in BDK.
+	nodes[1].sync_wallets().unwrap();
+	open_channel(&nodes[1], &nodes[3], 1_000_000, true, &electrsd);
+	open_channel(&nodes[2], &nodes[4], 1_000_000, true, &electrsd);
+	open_channel(&nodes[3], &nodes[4], 1_000_000, true, &electrsd);
+
+	generate_blocks_and_wait(&bitcoind, &electrsd, 6);
+
+	for n in &nodes {
+		n.sync_wallets().unwrap();
+	}
+
+	expect_event!(nodes[0], ChannelReady);
+	expect_event!(nodes[1], ChannelReady);
+	expect_event!(nodes[1], ChannelReady);
+	expect_event!(nodes[1], ChannelReady);
+	expect_event!(nodes[2], ChannelReady);
+	expect_event!(nodes[2], ChannelReady);
+	expect_event!(nodes[3], ChannelReady);
+	expect_event!(nodes[3], ChannelReady);
+	expect_event!(nodes[4], ChannelReady);
+	expect_event!(nodes[4], ChannelReady);
+
+	// Sleep a bit for gossip to propagate.
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	let invoice = nodes[4].receive_payment(2_500_000, &"asdf", 9217).unwrap();
+	nodes[0].send_payment(&invoice).unwrap();
+
+	expect_event!(nodes[4], PaymentReceived);
+	expect_event!(nodes[0], PaymentSuccessful);
 }
 
 #[test]
