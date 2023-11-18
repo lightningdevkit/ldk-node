@@ -20,6 +20,11 @@ jobs:
           distribution: temurin
           java-version: 11
 
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm
+
       - name: Install Android NDK
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
