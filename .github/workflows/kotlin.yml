@@ -22,9 +22,10 @@ jobs:
 
       - name: Install Android NDK
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r26-linux-x86_64.zip
-          unzip -q android-ndk-r26-linux-x86_64.zip
-          echo "ANDROID_NDK_ROOT=$(pwd)/android-ndk-r26" >> $GITHUB_ENV
+          wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+          echo "ANDROID_NDK_ROOT=$(pwd)/android-ndk-r26b" >> $GITHUB_ENV
+
 
 #      - name: Run ktlintCheck on ldk-node-jvm
 #        run: |
