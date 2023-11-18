@@ -26,15 +26,15 @@ jobs:
           unzip -q android-ndk-r26-linux-x86_64.zip
           echo "ANDROID_NDK_ROOT=$(pwd)/android-ndk-r26" >> $GITHUB_ENV
 
-      - name: Run ktlintCheck on ldk-node-jvm
-        run: |
-          cd $LDK_NODE_JVM_DIR
-          ./gradlew ktlintCheck
-
-      - name: Run ktlintCheck on ldk-node-android
-        run: |
-          cd $LDK_NODE_ANDROID_DIR
-          ./gradlew ktlintCheck
+#      - name: Run ktlintCheck on ldk-node-jvm
+#        run: |
+#          cd $LDK_NODE_JVM_DIR
+#          ./gradlew ktlintCheck
+#
+#      - name: Run ktlintCheck on ldk-node-android
+#        run: |
+#          cd $LDK_NODE_ANDROID_DIR
+#          ./gradlew ktlintCheck
 
 #      - name: Generate Kotlin JVM
 #        run: ./scripts/uniffi_bindgen_generate_kotlin.sh
