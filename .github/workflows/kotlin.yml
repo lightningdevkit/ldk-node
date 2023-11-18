@@ -20,6 +20,12 @@ jobs:
           distribution: temurin
           java-version: 11
 
+      - name: Install Android NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26-linux-x86_64.zip
+          unzip -q android-ndk-r26-linux-x86_64.zip
+          echo "ANDROID_NDK_ROOT=$(pwd)/android-ndk-r26" >> $GITHUB_ENV
+
       - name: Run ktlintCheck on ldk-node-jvm
         run: |
           cd $LDK_NODE_JVM_DIR
@@ -30,8 +36,11 @@ jobs:
           cd $LDK_NODE_ANDROID_DIR
           ./gradlew ktlintCheck
 
-      - name: Generate Kotlin JVM
-        run: ./scripts/uniffi_bindgen_generate_kotlin.sh
+#      - name: Generate Kotlin JVM
+#        run: ./scripts/uniffi_bindgen_generate_kotlin.sh
+
+      - name: Generate Kotlin Android
+        run: ./scripts/uniffi_bindgen_generate_kotlin_android.sh
 
       - name: Start bitcoind and electrs
         run: docker compose up -d
