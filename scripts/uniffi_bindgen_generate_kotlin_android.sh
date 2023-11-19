@@ -5,18 +5,18 @@ TARGET_DIR="target"
 PROJECT_DIR="ldk-node-android"
 PACKAGE_DIR="org/lightningdevkit/ldknode"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
-ANDROID_NDK_ROOT="/opt/homebrew/share/android-ndk"
-LLVM_ARCH_PATH="darwin-x86_64"
-PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$LLVM_ARCH_PATH/bin:$PATH"
 
 # The `export`s are required to make the variables available to subprocesses.
 export CFLAGS="-D__ANDROID_MIN_SDK_VERSION__=21"
 export AR=llvm-ar
 
+OS=$(uname -s)
+
 # TODO: Remove setting OPENSSL_DIR after BDK upgrade. Depends on: https://github.com/lightningdevkit/ldk-node/issues/195
 # The OPENSSL_DIR configuration is currently necessary due to default features being enabled in our esplora-client.
+# Check and set OPENSSL_DIR
 if [ -z "$OPENSSL_DIR" ]; then
-    case "$(uname -s)" in
+    case "$OS" in
         Darwin)
             # macOS
             export OPENSSL_DIR="/opt/homebrew/Cellar/openssl@3/3.1.4"
@@ -28,6 +28,38 @@ if [ -z "$OPENSSL_DIR" ]; then
         *)
     esac
 fi
+
+# Check and set ANDROID_NDK_ROOT
+if [ -z "$ANDROID_NDK_ROOT" ]; then
+    case "$OS" in
+        Darwin)
+            # macOS
+            export ANDROID_NDK_ROOT="/opt/homebrew/share/android-ndk"
+            ;;
+        Linux)
+            # Linux
+            export ANDROID_NDK_ROOT="/opt/android-ndk"
+            ;;
+        *)
+    esac
+fi
+
+# Check and set LLVM_ARCH_PATH
+if [ -z "$LLVM_ARCH_PATH" ]; then
+    case "$OS" in
+        Darwin)
+            # macOS
+            export LLVM_ARCH_PATH="darwin-x86_64"
+            ;;
+        Linux)
+            # Linux
+            export LLVM_ARCH_PATH="linux-x86_64"
+            ;;
+        *)
+    esac
+fi
+
+PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$LLVM_ARCH_PATH/bin:$PATH"
 
 rustup target add x86_64-linux-android aarch64-linux-android armv7-linux-androideabi
 CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="x86_64-linux-android21-clang" CC="x86_64-linux-android21-clang" cargo build --profile release-smaller --features uniffi --target x86_64-linux-android || exit 1
