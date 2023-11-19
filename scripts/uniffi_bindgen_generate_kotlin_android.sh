@@ -24,13 +24,15 @@ if [ -z "$OPENSSL_DIR" ]; then
         Linux)
             # Linux
             export OPENSSL_DIR="/usr/local/openssl"
+            export OPENSSL_INCLUDE_DIR="/usr/include/openssl"
+            export OPENSSL_LIB_DIR="/usr/lib/ssl"
             ;;
         *)
     esac
 fi
 
 rustup target add x86_64-linux-android aarch64-linux-android armv7-linux-androideabi
-CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="x86_64-linux-android21-clang" CC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux/bin/x86_64-linux-android21-clang" cargo build --profile release-smaller --features uniffi --target x86_64-linux-android || exit 1
+CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="x86_64-linux-android21-clang" CC="x86_64-linux-android21-clang" cargo build --profile release-smaller --features uniffi --target x86_64-linux-android || exit 1
 CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="armv7a-linux-androideabi21-clang" CC="armv7a-linux-androideabi21-clang" cargo build --profile release-smaller --features uniffi --target armv7-linux-androideabi || exit 1
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="aarch64-linux-android21-clang" CC="aarch64-linux-android21-clang" cargo build --profile release-smaller --features uniffi --target aarch64-linux-android || exit 1
 $UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language kotlin -o "$BINDINGS_DIR"/"$PROJECT_DIR"/lib/src/main/kotlin || exit 1
