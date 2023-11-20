@@ -6,58 +6,36 @@ PROJECT_DIR="ldk-node-android"
 PACKAGE_DIR="org/lightningdevkit/ldknode"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
 
-# The `export`s are required to make the variables available to subprocesses.
-export CFLAGS="-D__ANDROID_MIN_SDK_VERSION__=21"
-export AR=llvm-ar
+export_variable_if_not_present() {
+  local name="$1"
+  local value="$2"
 
-OS=$(uname -s)
+  # Check if the variable is already set
+  if [ -z "${!name}" ]; then
+    export "$name=$value"
+    echo "Exported $name=$value"
+  else
+    echo "$name is already set to ${!name}, not exporting."
+  fi
+}
 
 # TODO: Remove setting OPENSSL_DIR after BDK upgrade. Depends on: https://github.com/lightningdevkit/ldk-node/issues/195
 # The OPENSSL_DIR configuration is currently necessary due to default features being enabled in our esplora-client.
-# Check and set OPENSSL_DIR
-if [ -z "$OPENSSL_DIR" ]; then
-    case "$OS" in
-        Darwin)
-            # macOS
-            export OPENSSL_DIR="/opt/homebrew/Cellar/openssl@3/3.1.4"
-            ;;
-        Linux)
-            # Linux
-            export OPENSSL_DIR="/usr/local/openssl"
-            ;;
-        *)
+case "$OSTYPE" in
+    linux-gnu)
+      export_variable_if_not_present "OPENSSL_DIR" "/usr/local/openssl"
+      export_variable_if_not_present "ANDROID_NDK_ROOT" "/opt/android-ndk"
+      export_variable_if_not_present "LLVM_ARCH_PATH" "linux-x86_64"
+      ;;
+    darwin*)
+      export_variable_if_not_present "OPENSSL_DIR" "/opt/homebrew/Cellar/openssl@3/3.1.4"
+      export_variable_if_not_present "ANDROID_NDK_ROOT" "/opt/homebrew/share/android-ndk"
+      export_variable_if_not_present "LLVM_ARCH_PATH" "darwin-x86_64"
+      ;;
+    *)
+      echo "Unknown operating system: $OSTYPE"
+      ;;
     esac
-fi
-
-# Check and set ANDROID_NDK_ROOT
-if [ -z "$ANDROID_NDK_ROOT" ]; then
-    case "$OS" in
-        Darwin)
-            # macOS
-            export ANDROID_NDK_ROOT="/opt/homebrew/share/android-ndk"
-            ;;
-        Linux)
-            # Linux
-            export ANDROID_NDK_ROOT="/opt/android-ndk"
-            ;;
-        *)
-    esac
-fi
-
-# Check and set LLVM_ARCH_PATH
-if [ -z "$LLVM_ARCH_PATH" ]; then
-    case "$OS" in
-        Darwin)
-            # macOS
-            export LLVM_ARCH_PATH="darwin-x86_64"
-            ;;
-        Linux)
-            # Linux
-            export LLVM_ARCH_PATH="linux-x86_64"
-            ;;
-        *)
-    esac
-fi
 
 PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$LLVM_ARCH_PATH/bin:$PATH"
 
