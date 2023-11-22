@@ -1,4 +1,4 @@
-use crate::types::Wallet;
+use crate::types::{Broadcaster, Wallet};
 use crate::{
 	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -244,16 +244,17 @@ pub(crate) struct EventHandler<K: KVStore + Sync + Send, L: Deref>
 where
 	L::Target: Logger,
 {
-	wallet: Arc<Wallet>,
 	event_queue: Arc<EventQueue<K, L>>,
+	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager<K>>,
+	tx_broadcaster: Arc<Broadcaster>,
 	network_graph: Arc<NetworkGraph>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore<K, L>>,
+	peer_store: Arc<PeerStore<K, L>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
-	peer_store: Arc<PeerStore<K, L>>,
 }
 
 impl<K: KVStore + Sync + Send + 'static, L: Deref> EventHandler<K, L>
@@ -261,23 +262,24 @@ where
 	L::Target: Logger,
 {
 	pub fn new(
-		wallet: Arc<Wallet>, event_queue: Arc<EventQueue<K, L>>,
-		channel_manager: Arc<ChannelManager<K>>, network_graph: Arc<NetworkGraph>,
-		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
+		event_queue: Arc<EventQueue<K, L>>, wallet: Arc<Wallet>,
+		channel_manager: Arc<ChannelManager<K>>, tx_broadcaster: Arc<Broadcaster>,
+		network_graph: Arc<NetworkGraph>, keys_manager: Arc<KeysManager>,
+		payment_store: Arc<PaymentStore<K, L>>, peer_store: Arc<PeerStore<K, L>>,
 		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
-		peer_store: Arc<PeerStore<K, L>>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
 			channel_manager,
+			tx_broadcaster,
 			network_graph,
 			keys_manager,
 			payment_store,
+			peer_store,
 			logger,
 			runtime,
 			config,
-			peer_store,
 		}
 	}
 
@@ -604,7 +606,9 @@ where
 				);
 
 				match res {
-					Ok(Some(spending_tx)) => self.wallet.broadcast_transactions(&[&spending_tx]),
+					Ok(Some(spending_tx)) => {
+						self.tx_broadcaster.broadcast_transactions(&[&spending_tx])
+					}
 					Ok(None) => {
 						log_debug!(self.logger, "Omitted spending static outputs: {:?}", outputs);
 					}

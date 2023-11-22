@@ -31,9 +31,10 @@ use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
-pub struct Wallet<D, L: Deref>
+pub struct Wallet<D, B: Deref, L: Deref>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	// A BDK blockchain used for wallet sync.
@@ -41,25 +42,25 @@ where
 	// A BDK on-chain wallet.
 	inner: Mutex<bdk::Wallet<D>>,
 	// A cache storing the most recently retrieved fee rate estimations.
+	broadcaster: B,
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	sync_lock: (Mutex<()>, Condvar),
 	logger: L,
 }
 
-impl<D, L: Deref> Wallet<D, L>
+impl<D, B: Deref, L: Deref> Wallet<D, B, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	pub(crate) fn new(
-		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L,
+		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>, broadcaster: B, logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let fee_rate_cache = RwLock::new(HashMap::new());
 		let sync_lock = (Mutex::new(()), Condvar::new());
-		Self { blockchain, inner, fee_rate_cache, runtime, sync_lock, logger }
+		Self { blockchain, inner, broadcaster, fee_rate_cache, sync_lock, logger }
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
@@ -275,7 +276,7 @@ where
 			psbt.extract_tx()
 		};
 
-		self.broadcast_transactions(&[&tx]);
+		self.broadcaster.broadcast_transactions(&[&tx]);
 
 		let txid = tx.txid();
 
@@ -319,9 +320,10 @@ where
 	}
 }
 
-impl<D, L: Deref> FeeEstimator for Wallet<D, L>
+impl<D, B: Deref, L: Deref> FeeEstimator for Wallet<D, B, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
@@ -330,60 +332,23 @@ where
 	}
 }
 
-impl<D, L: Deref> BroadcasterInterface for Wallet<D, L>
-where
-	D: BatchDatabase,
-	L::Target: Logger,
-{
-	fn broadcast_transactions(&self, txs: &[&Transaction]) {
-		let locked_runtime = self.runtime.read().unwrap();
-		if locked_runtime.as_ref().is_none() {
-			log_error!(self.logger, "Failed to broadcast transaction: No runtime.");
-			return;
-		}
-
-		let errors = tokio::task::block_in_place(move || {
-			locked_runtime.as_ref().unwrap().block_on(async move {
-				let mut handles = Vec::new();
-				let mut errors = Vec::new();
-
-				for tx in txs {
-					handles.push((tx.txid(), self.blockchain.broadcast(tx)));
-				}
-
-				for handle in handles {
-					match handle.1.await {
-						Ok(_) => {}
-						Err(e) => {
-							errors.push((e, handle.0));
-						}
-					}
-				}
-				errors
-			})
-		});
-
-		for (e, txid) in errors {
-			log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
-		}
-	}
-}
-
 /// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
 /// directly spendable by the BDK wallet.
-pub struct WalletKeysManager<D, L: Deref>
+pub struct WalletKeysManager<D, B: Deref, L: Deref>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	inner: KeysManager,
-	wallet: Arc<Wallet<D, L>>,
+	wallet: Arc<Wallet<D, B, L>>,
 	logger: L,
 }
 
-impl<D, L: Deref> WalletKeysManager<D, L>
+impl<D, B: Deref, L: Deref> WalletKeysManager<D, B, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
@@ -392,7 +357,7 @@ where
 	/// `starting_time_nanos`.
 	pub fn new(
 		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
-		wallet: Arc<Wallet<D, L>>, logger: L,
+		wallet: Arc<Wallet<D, B, L>>, logger: L,
 	) -> Self {
 		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
 		Self { inner, wallet, logger }
@@ -434,9 +399,10 @@ where
 	}
 }
 
-impl<D, L: Deref> NodeSigner for WalletKeysManager<D, L>
+impl<D, B: Deref, L: Deref> NodeSigner for WalletKeysManager<D, B, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
@@ -476,9 +442,10 @@ where
 	}
 }
 
-impl<D, L: Deref> EntropySource for WalletKeysManager<D, L>
+impl<D, B: Deref, L: Deref> EntropySource for WalletKeysManager<D, B, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
@@ -486,9 +453,10 @@ where
 	}
 }
 
-impl<D, L: Deref> SignerProvider for WalletKeysManager<D, L>
+impl<D, B: Deref, L: Deref> SignerProvider for WalletKeysManager<D, B, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
 	type Signer = InMemorySigner;

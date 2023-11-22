@@ -86,6 +86,7 @@ mod payment_store;
 mod peer_store;
 #[cfg(test)]
 mod test;
+mod tx_broadcaster;
 mod types;
 #[cfg(feature = "uniffi")]
 mod uniffi_types;
@@ -119,7 +120,8 @@ use payment_store::PaymentStore;
 pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
-	ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Router, Scorer, Wallet,
+	Broadcaster, ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Router,
+	Scorer, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
@@ -287,6 +289,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+	tx_broadcaster: Arc<Broadcaster>,
 	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager<K>>,
 	chain_monitor: Arc<ChainMonitor<K>>,
@@ -654,17 +657,36 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		});
 
+		let mut stop_tx_bcast = self.stop_receiver.clone();
+		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
+		runtime.spawn(async move {
+			// Every second we try to clear our broadcasting queue.
+			let mut interval = tokio::time::interval(Duration::from_secs(1));
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+						_ = stop_tx_bcast.changed() => {
+							return;
+						}
+						_ = interval.tick() => {
+							tx_bcaster.process_queue().await;
+						}
+				}
+			}
+		});
+
 		let event_handler = Arc::new(EventHandler::new(
-			Arc::clone(&self.wallet),
 			Arc::clone(&self.event_queue),
+			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.tx_broadcaster),
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.peer_store),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
-			Arc::clone(&self.peer_store),
 		));
 
 		// Setup background processing

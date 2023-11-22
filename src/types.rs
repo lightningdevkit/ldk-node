@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, RwLock};
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
-	Arc<Wallet>,
+	Arc<Broadcaster>,
 	Arc<Wallet>,
 	Arc<FilesystemLogger>,
 	Arc<K>,
@@ -42,7 +42,7 @@ pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
 
 pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
 	Arc<ChainMonitor<K>>,
-	Arc<Wallet>,
+	Arc<Broadcaster>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
@@ -51,11 +51,16 @@ pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManage
 	Arc<FilesystemLogger>,
 >;
 
-pub(crate) type Wallet =
-	crate::wallet::Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>;
+pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<FilesystemLogger>>;
 
-pub(crate) type KeysManager =
-	crate::wallet::WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>;
+pub(crate) type Wallet =
+	crate::wallet::Wallet<bdk::database::SqliteDatabase, Arc<Broadcaster>, Arc<FilesystemLogger>>;
+
+pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
+	bdk::database::SqliteDatabase,
+	Arc<Broadcaster>,
+	Arc<FilesystemLogger>,
+>;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<NetworkGraph>,
