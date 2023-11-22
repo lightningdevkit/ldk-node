@@ -118,9 +118,10 @@ use gossip::GossipSource;
 use payment_store::PaymentStore;
 pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
-use types::{ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Router, Scorer};
+use types::{
+	ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Router, Scorer, Wallet,
+};
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
-use wallet::Wallet;
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -284,7 +285,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	stop_sender: tokio::sync::watch::Sender<()>,
 	stop_receiver: tokio::sync::watch::Receiver<()>,
 	config: Arc<Config>,
-	wallet: Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	wallet: Arc<Wallet>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager<K>>,
