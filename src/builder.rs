@@ -1,4 +1,5 @@
 use crate::event::EventQueue;
+use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io;
 use crate::io::sqlite_store::SqliteStore;
@@ -465,7 +466,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		BuildError::WalletSetupFailed
 	})?;
 
-	let (blockchain, tx_sync, tx_broadcaster) = match chain_data_source_config {
+	let (blockchain, tx_sync, tx_broadcaster, fee_estimator) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora(server_url)) => {
 			let tx_sync = Arc::new(EsploraSyncClient::new(server_url.clone(), Arc::clone(&logger)));
 			let blockchain =
@@ -475,7 +476,9 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				tx_sync.client().clone(),
 				Arc::clone(&logger),
 			));
-			(blockchain, tx_sync, tx_broadcaster)
+			let fee_estimator =
+				Arc::new(OnchainFeeEstimator::new(tx_sync.client().clone(), Arc::clone(&logger)));
+			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
 		}
 		None => {
 			// Default to Esplora client.
@@ -488,7 +491,9 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				tx_sync.client().clone(),
 				Arc::clone(&logger),
 			));
-			(blockchain, tx_sync, tx_broadcaster)
+			let fee_estimator =
+				Arc::new(OnchainFeeEstimator::new(tx_sync.client().clone(), Arc::clone(&logger)));
+			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
 		}
 	};
 
@@ -497,6 +502,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		blockchain,
 		bdk_wallet,
 		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
 		Arc::clone(&logger),
 	));
 
@@ -505,7 +511,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		Some(Arc::clone(&tx_sync)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
-		Arc::clone(&wallet),
+		Arc::clone(&fee_estimator),
 		Arc::clone(&kv_store),
 	));
 
@@ -605,7 +611,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
-				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
 				Arc::clone(&chain_monitor),
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&router),
@@ -629,7 +635,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				best_block: BestBlock::new(genesis_block_hash, 0),
 			};
 			channelmanager::ChannelManager::new(
-				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
 				Arc::clone(&chain_monitor),
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&router),
@@ -781,6 +787,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		wallet,
 		tx_sync,
 		tx_broadcaster,
+		fee_estimator,
 		event_queue,
 		channel_manager,
 		chain_monitor,

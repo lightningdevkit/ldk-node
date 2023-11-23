@@ -25,7 +25,7 @@ pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	Arc<Broadcaster>,
-	Arc<Wallet>,
+	Arc<FeeEstimator>,
 	Arc<FilesystemLogger>,
 	Arc<K>,
 >;
@@ -46,19 +46,26 @@ pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManage
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
-	Arc<Wallet>,
+	Arc<FeeEstimator>,
 	Arc<Router>,
 	Arc<FilesystemLogger>,
 >;
 
 pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<FilesystemLogger>>;
 
-pub(crate) type Wallet =
-	crate::wallet::Wallet<bdk::database::SqliteDatabase, Arc<Broadcaster>, Arc<FilesystemLogger>>;
+pub(crate) type FeeEstimator = crate::fee_estimator::OnchainFeeEstimator<Arc<FilesystemLogger>>;
+
+pub(crate) type Wallet = crate::wallet::Wallet<
+	bdk::database::SqliteDatabase,
+	Arc<Broadcaster>,
+	Arc<FeeEstimator>,
+	Arc<FilesystemLogger>,
+>;
 
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
 	bdk::database::SqliteDatabase,
 	Arc<Broadcaster>,
+	Arc<FeeEstimator>,
 	Arc<FilesystemLogger>,
 >;
 
