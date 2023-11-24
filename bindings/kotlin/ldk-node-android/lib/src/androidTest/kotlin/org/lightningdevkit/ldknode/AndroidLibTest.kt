@@ -16,8 +16,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 @RunWith(AndroidJUnit4::class)
 class AndroidLibTest {
     @Test fun node_start_stop() {
-        val network = Network.REGTEST
-
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
         val tmpDir2 = createTempDirectory("ldk_node").toString()
@@ -26,8 +24,17 @@ class AndroidLibTest {
         val listenAddress1 = "127.0.0.1:2323"
         val listenAddress2 = "127.0.0.1:2324"
 
-        val config1 = Config(tmpDir1, network, listOf(listenAddress1), 2048u)
-        val config2 = Config(tmpDir2, network, listOf(listenAddress2), 2048u)
+        val config1 = Config()
+        config1.storageDirPath = tmpDir1
+        config1.listeningAddresses = listOf(listenAddress1)
+        config1.network = Network.REGTEST
+        config1.logLevel = LogLevel.TRACE
+
+        val config2 = Config()
+        config2.storageDirPath = tmpDir2
+        config2.listeningAddresses = listOf(listenAddress2)
+        config2.network = Network.REGTEST
+        config2.logLevel = LogLevel.TRACE
 
         val builder1 = Builder.fromConfig(config1)
         val builder2 = Builder.fromConfig(config2)
