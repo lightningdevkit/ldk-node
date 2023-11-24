@@ -4,7 +4,7 @@ on: [push, pull_request]
 
 jobs:
   check-kotlin:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
 
     env:
       LDK_NODE_JVM_DIR: bindings/kotlin/ldk-node-jvm
@@ -20,6 +20,12 @@ jobs:
           distribution: temurin
           java-version: 11
 
+      - name: Show default version of NDK
+        run: echo $ANDROID_NDK_ROOT
+
+      - name: Set default Rust version to 1.73.0
+        run: rustup default 1.73.0
+
       - name: Run ktlintCheck on ldk-node-jvm
         run: |
           cd $LDK_NODE_JVM_DIR
@@ -32,6 +38,9 @@ jobs:
 
       - name: Generate Kotlin JVM
         run: ./scripts/uniffi_bindgen_generate_kotlin.sh
+
+      - name: Generate Kotlin Android
+        run: ./scripts/uniffi_bindgen_generate_kotlin_android.sh
 
       - name: Start bitcoind and electrs
         run: docker compose up -d
