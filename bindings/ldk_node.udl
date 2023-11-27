@@ -204,7 +204,7 @@ dictionary ChannelDetails {
 	boolean is_public;
 	u16? cltv_expiry_delta;
 	u64 counterparty_unspendable_punishment_reserve;
-	u64 counterparty_outbound_htlc_minimum_msat;
+	u64? counterparty_outbound_htlc_minimum_msat;
 	u64? counterparty_outbound_htlc_maximum_msat;
 	u32? counterparty_forwarding_info_fee_base_msat;
 	u32? counterparty_forwarding_info_fee_proportional_millionths;
