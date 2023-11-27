@@ -1,4 +1,4 @@
-use crate::logger::{log_error, log_trace, Logger};
+use crate::logger::{log_debug, log_error, log_trace, Logger};
 
 use lightning::chain::chaininterface::BroadcasterInterface;
 
@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 use std::ops::Deref;
+use std::time::Duration;
 
 const BCAST_PACKAGE_QUEUE_SIZE: usize = 50;
 
@@ -40,14 +41,43 @@ where
 					Ok(()) => {
 						log_trace!(self.logger, "Successfully broadcast transaction {}", tx.txid());
 					}
-					Err(e) => {
-						log_error!(
-							self.logger,
-							"Failed to broadcast transaction {}: {}",
-							tx.txid(),
-							e
-						);
-					}
+					Err(e) => match e {
+						esplora_client::Error::Reqwest(_) => {
+							// Wait 500 ms and retry in case we get a `Reqwest` error (typically
+							// 429)
+							tokio::time::sleep(Duration::from_millis(500)).await;
+							log_error!(
+								self.logger,
+								"Sync failed due to HTTP connection error, retrying: {}",
+								e
+							);
+							match self.esplora_client.broadcast(tx).await {
+								Ok(()) => {
+									log_debug!(
+										self.logger,
+										"Successfully broadcast transaction {}",
+										tx.txid()
+									);
+								}
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to broadcast transaction {}: {}",
+										tx.txid(),
+										e
+									);
+								}
+							}
+						}
+						_ => {
+							log_error!(
+								self.logger,
+								"Failed to broadcast transaction {}: {}",
+								tx.txid(),
+								e
+							);
+						}
+					},
 				}
 			}
 		}
