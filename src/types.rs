@@ -210,7 +210,10 @@ pub struct ChannelDetails {
 	/// [`inbound_capacity_msat`]: ChannelDetails::inbound_capacity_msat
 	pub counterparty_unspendable_punishment_reserve: u64,
 	/// The smallest value HTLC (in msat) the remote peer will accept, for this channel.
-	pub counterparty_outbound_htlc_minimum_msat: u64,
+	///
+	/// This field is only `None` before we have received either the `OpenChannel` or
+	/// `AcceptChannel` message from the remote peer.
+	pub counterparty_outbound_htlc_minimum_msat: Option<u64>,
 	/// The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
 	pub counterparty_outbound_htlc_maximum_msat: Option<u64>,
 	/// Base routing fee in millisatoshis.
@@ -258,6 +261,8 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			channel_value_sats: value.channel_value_satoshis,
 			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
 			user_channel_id: UserChannelId(value.user_channel_id),
+			// unwrap safety: This value will be `None` for objects serialized with LDK versions
+			// prior to 0.0.115.
 			feerate_sat_per_1000_weight: value.feerate_sat_per_1000_weight.unwrap(),
 			balance_msat: value.balance_msat,
 			outbound_capacity_msat: value.outbound_capacity_msat,
@@ -272,10 +277,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			counterparty_unspendable_punishment_reserve: value
 				.counterparty
 				.unspendable_punishment_reserve,
-			counterparty_outbound_htlc_minimum_msat: value
-				.counterparty
-				.outbound_htlc_minimum_msat
-				.unwrap(),
+			counterparty_outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat,
 			counterparty_outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
 			counterparty_forwarding_info_fee_base_msat: value
 				.counterparty
@@ -295,8 +297,10 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			next_outbound_htlc_limit_msat: value.next_outbound_htlc_limit_msat,
 			next_outbound_htlc_minimum_msat: value.next_outbound_htlc_minimum_msat,
 			force_close_spend_delay: value.force_close_spend_delay,
-			inbound_htlc_minimum_msat: value.inbound_htlc_minimum_msat.unwrap(),
+			// unwrap safety: This field is only `None` for objects serialized prior to LDK 0.0.107
+			inbound_htlc_minimum_msat: value.inbound_htlc_minimum_msat.unwrap_or(0),
 			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
+			// unwrap safety: `config` is only `None` for LDK objects serialized prior to 0.0.109.
 			config: value.config.map(|c| Arc::new(c.into())).unwrap(),
 		}
 	}
