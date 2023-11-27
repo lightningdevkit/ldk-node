@@ -33,6 +33,9 @@ jobs:
       - name: Generate Kotlin JVM
         run: ./scripts/uniffi_bindgen_generate_kotlin.sh
 
+      - name: Generate Kotlin Android
+        run: ./scripts/uniffi_bindgen_generate_kotlin_android.sh
+
       - name: Start bitcoind and electrs
         run: docker compose up -d
 
