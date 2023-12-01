@@ -1003,7 +1003,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		];
 
 		tokio::task::block_in_place(move || {
-			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
 				async move {
 					let now = Instant::now();
 					match wallet.sync().await {
