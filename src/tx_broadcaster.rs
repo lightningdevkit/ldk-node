@@ -1,6 +1,7 @@
-use crate::logger::{log_debug, log_error, log_trace, Logger};
+use crate::logger::{log_bytes, log_debug, log_error, log_trace, Logger};
 
 use lightning::chain::chaininterface::BroadcasterInterface;
+use lightning::util::ser::Writeable;
 
 use esplora_client::AsyncClient as EsploraClient;
 
@@ -66,6 +67,11 @@ where
 										tx.txid(),
 										e
 									);
+									log_trace!(
+										self.logger,
+										"Failed broadcast transaction bytes: {}",
+										log_bytes!(tx.encode())
+									);
 								}
 							}
 						}
@@ -75,6 +81,11 @@ where
 								"Failed to broadcast transaction {}: {}",
 								tx.txid(),
 								e
+							);
+							log_trace!(
+								self.logger,
+								"Failed broadcast transaction bytes: {}",
+								log_bytes!(tx.encode())
 							);
 						}
 					},

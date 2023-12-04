@@ -1,5 +1,5 @@
 pub(crate) use lightning::util::logger::Logger;
-pub(crate) use lightning::{log_debug, log_error, log_info, log_trace};
+pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace};
 
 use lightning::util::logger::{Level, Record};
 use lightning::util::ser::Writer;
