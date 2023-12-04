@@ -2,9 +2,7 @@ use crate::logger::{log_error, log_info, log_trace, Logger};
 
 use crate::Error;
 
-use lightning::chain::chaininterface::{
-	BroadcasterInterface, ConfirmationTarget, FeeEstimator, FEERATE_FLOOR_SATS_PER_KW,
-};
+use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
@@ -15,10 +13,11 @@ use lightning::sign::{
 
 use lightning::util::message_signing;
 
-use bdk::blockchain::{Blockchain, EsploraBlockchain};
+use bdk::blockchain::EsploraBlockchain;
 use bdk::database::BatchDatabase;
 use bdk::wallet::AddressIndex;
-use bdk::{FeeRate, SignOptions, SyncOptions};
+use bdk::FeeRate;
+use bdk::{SignOptions, SyncOptions};
 
 use bitcoin::bech32::u5;
 use bitcoin::secp256k1::ecdh::SharedSecret;
@@ -26,14 +25,15 @@ use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, Signing};
 use bitcoin::{LockTime, PackedLockTime, Script, Transaction, TxOut, Txid};
 
-use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-pub struct Wallet<D, L: Deref>
+pub struct Wallet<D, B: Deref, E: Deref, L: Deref>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
 	// A BDK blockchain used for wallet sync.
@@ -41,25 +41,26 @@ where
 	// A BDK on-chain wallet.
 	inner: Mutex<bdk::Wallet<D>>,
 	// A cache storing the most recently retrieved fee rate estimations.
-	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+	broadcaster: B,
+	fee_estimator: E,
 	sync_lock: (Mutex<()>, Condvar),
 	logger: L,
 }
 
-impl<D, L: Deref> Wallet<D, L>
+impl<D, B: Deref, E: Deref, L: Deref> Wallet<D, B, E, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
 	pub(crate) fn new(
-		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L,
+		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>, broadcaster: B, fee_estimator: E,
+		logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
-		let fee_rate_cache = RwLock::new(HashMap::new());
 		let sync_lock = (Mutex::new(()), Condvar::new());
-		Self { blockchain, inner, fee_rate_cache, runtime, sync_lock, logger }
+		Self { blockchain, inner, broadcaster, fee_estimator, sync_lock, logger }
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
@@ -112,72 +113,13 @@ where
 		res
 	}
 
-	pub(crate) async fn update_fee_estimates(&self) -> Result<(), Error> {
-		let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
-
-		let confirmation_targets = vec![
-			ConfirmationTarget::OnChainSweep,
-			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee,
-			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
-			ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
-			ConfirmationTarget::AnchorChannelFee,
-			ConfirmationTarget::NonAnchorChannelFee,
-			ConfirmationTarget::ChannelCloseMinimum,
-		];
-		for target in confirmation_targets {
-			let num_blocks = match target {
-				ConfirmationTarget::OnChainSweep => 6,
-				ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => 1,
-				ConfirmationTarget::MinAllowedAnchorChannelRemoteFee => 1008,
-				ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 144,
-				ConfirmationTarget::AnchorChannelFee => 1008,
-				ConfirmationTarget::NonAnchorChannelFee => 12,
-				ConfirmationTarget::ChannelCloseMinimum => 144,
-			};
-
-			let est_fee_rate = self.blockchain.estimate_fee(num_blocks).await;
-
-			match est_fee_rate {
-				Ok(rate) => {
-					// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
-					// require some post-estimation adjustments to the fee rates, which we do here.
-					let adjusted_fee_rate = match target {
-						ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => {
-							let really_high_prio = rate.as_sat_per_vb() * 10.0;
-							FeeRate::from_sat_per_vb(really_high_prio)
-						}
-						ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => {
-							let slightly_less_than_background = rate.fee_wu(1000) - 250;
-							FeeRate::from_sat_per_kwu(slightly_less_than_background as f32)
-						}
-						_ => rate,
-					};
-					locked_fee_rate_cache.insert(target, adjusted_fee_rate);
-					log_trace!(
-						self.logger,
-						"Fee rate estimation updated for {:?}: {} sats/kwu",
-						target,
-						adjusted_fee_rate.fee_wu(1000)
-					);
-				}
-				Err(e) => {
-					log_error!(
-						self.logger,
-						"Failed to update fee rate estimation for {:?}: {}",
-						target,
-						e
-					);
-				}
-			}
-		}
-		Ok(())
-	}
-
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: Script, value_sats: u64, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,
 	) -> Result<Transaction, Error> {
-		let fee_rate = self.estimate_fee_rate(confirmation_target);
+		let fee_rate = FeeRate::from_sat_per_kwu(
+			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
+		);
 
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
@@ -231,7 +173,9 @@ where
 		&self, address: &bitcoin::Address, amount_msat_or_drain: Option<u64>,
 	) -> Result<Txid, Error> {
 		let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
-		let fee_rate = self.estimate_fee_rate(confirmation_target);
+		let fee_rate = FeeRate::from_sat_per_kwu(
+			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
+		);
 
 		let tx = {
 			let locked_wallet = self.inner.lock().unwrap();
@@ -275,7 +219,7 @@ where
 			psbt.extract_tx()
 		};
 
-		self.broadcast_transactions(&[&tx]);
+		self.broadcaster.broadcast_transactions(&[&tx]);
 
 		let txid = tx.txid();
 
@@ -298,92 +242,27 @@ where
 
 		Ok(txid)
 	}
-
-	fn estimate_fee_rate(&self, confirmation_target: ConfirmationTarget) -> FeeRate {
-		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
-
-		let fallback_sats_kwu = match confirmation_target {
-			ConfirmationTarget::OnChainSweep => 5000,
-			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => 25 * 250,
-			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
-			ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
-			ConfirmationTarget::AnchorChannelFee => 500,
-			ConfirmationTarget::NonAnchorChannelFee => 1000,
-			ConfirmationTarget::ChannelCloseMinimum => 500,
-		};
-
-		// We'll fall back on this, if we really don't have any other information.
-		let fallback_rate = FeeRate::from_sat_per_kwu(fallback_sats_kwu as f32);
-
-		*locked_fee_rate_cache.get(&confirmation_target).unwrap_or(&fallback_rate)
-	}
-}
-
-impl<D, L: Deref> FeeEstimator for Wallet<D, L>
-where
-	D: BatchDatabase,
-	L::Target: Logger,
-{
-	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
-		(self.estimate_fee_rate(confirmation_target).fee_wu(1000) as u32)
-			.max(FEERATE_FLOOR_SATS_PER_KW)
-	}
-}
-
-impl<D, L: Deref> BroadcasterInterface for Wallet<D, L>
-where
-	D: BatchDatabase,
-	L::Target: Logger,
-{
-	fn broadcast_transactions(&self, txs: &[&Transaction]) {
-		let locked_runtime = self.runtime.read().unwrap();
-		if locked_runtime.as_ref().is_none() {
-			log_error!(self.logger, "Failed to broadcast transaction: No runtime.");
-			return;
-		}
-
-		let errors = tokio::task::block_in_place(move || {
-			locked_runtime.as_ref().unwrap().block_on(async move {
-				let mut handles = Vec::new();
-				let mut errors = Vec::new();
-
-				for tx in txs {
-					handles.push((tx.txid(), self.blockchain.broadcast(tx)));
-				}
-
-				for handle in handles {
-					match handle.1.await {
-						Ok(_) => {}
-						Err(e) => {
-							errors.push((e, handle.0));
-						}
-					}
-				}
-				errors
-			})
-		});
-
-		for (e, txid) in errors {
-			log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
-		}
-	}
 }
 
 /// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
 /// directly spendable by the BDK wallet.
-pub struct WalletKeysManager<D, L: Deref>
+pub struct WalletKeysManager<D, B: Deref, E: Deref, L: Deref>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
 	inner: KeysManager,
-	wallet: Arc<Wallet<D, L>>,
+	wallet: Arc<Wallet<D, B, E, L>>,
 	logger: L,
 }
 
-impl<D, L: Deref> WalletKeysManager<D, L>
+impl<D, B: Deref, E: Deref, L: Deref> WalletKeysManager<D, B, E, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
 	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
@@ -392,7 +271,7 @@ where
 	/// `starting_time_nanos`.
 	pub fn new(
 		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
-		wallet: Arc<Wallet<D, L>>, logger: L,
+		wallet: Arc<Wallet<D, B, E, L>>, logger: L,
 	) -> Self {
 		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
 		Self { inner, wallet, logger }
@@ -434,9 +313,11 @@ where
 	}
 }
 
-impl<D, L: Deref> NodeSigner for WalletKeysManager<D, L>
+impl<D, B: Deref, E: Deref, L: Deref> NodeSigner for WalletKeysManager<D, B, E, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
@@ -476,9 +357,11 @@ where
 	}
 }
 
-impl<D, L: Deref> EntropySource for WalletKeysManager<D, L>
+impl<D, B: Deref, E: Deref, L: Deref> EntropySource for WalletKeysManager<D, B, E, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
@@ -486,9 +369,11 @@ where
 	}
 }
 
-impl<D, L: Deref> SignerProvider for WalletKeysManager<D, L>
+impl<D, B: Deref, E: Deref, L: Deref> SignerProvider for WalletKeysManager<D, B, E, L>
 where
 	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
 	type Signer = InMemorySigner;

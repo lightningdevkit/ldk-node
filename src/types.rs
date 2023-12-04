@@ -1,5 +1,4 @@
 use crate::logger::FilesystemLogger;
-use crate::wallet::{Wallet, WalletKeysManager};
 
 use lightning::chain::chainmonitor;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
@@ -25,8 +24,8 @@ use std::sync::{Arc, Mutex, RwLock};
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
-	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
-	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<Broadcaster>,
+	Arc<FeeEstimator>,
 	Arc<FilesystemLogger>,
 	Arc<K>,
 >;
@@ -38,22 +37,37 @@ pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
 	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
 	IgnoringMessageHandler,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<KeysManager>,
 >;
 
 pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
 	Arc<ChainMonitor<K>>,
-	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
-	Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<Broadcaster>,
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<FeeEstimator>,
 	Arc<Router>,
 	Arc<FilesystemLogger>,
 >;
 
-pub(crate) type KeysManager =
-	WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>;
+pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<FilesystemLogger>>;
+
+pub(crate) type FeeEstimator = crate::fee_estimator::OnchainFeeEstimator<Arc<FilesystemLogger>>;
+
+pub(crate) type Wallet = crate::wallet::Wallet<
+	bdk::database::SqliteDatabase,
+	Arc<Broadcaster>,
+	Arc<FeeEstimator>,
+	Arc<FilesystemLogger>,
+>;
+
+pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
+	bdk::database::SqliteDatabase,
+	Arc<Broadcaster>,
+	Arc<FeeEstimator>,
+	Arc<FilesystemLogger>,
+>;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<NetworkGraph>,
@@ -85,8 +99,8 @@ pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 >;
 
 pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
-	Arc<WalletKeysManager<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	Arc<KeysManager>,
+	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
 	Arc<FakeMessageRouter>,
 	IgnoringMessageHandler,

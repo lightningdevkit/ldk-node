@@ -1,6 +1,7 @@
-use crate::peer_store::{PeerInfo, PeerStore};
+use crate::types::{Broadcaster, FeeEstimator, Wallet};
 use crate::{
-	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, UserChannelId, Wallet,
+	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, PeerInfo, PeerStore,
+	UserChannelId,
 };
 
 use crate::payment_store::{
@@ -13,7 +14,9 @@ use crate::io::{
 };
 use crate::logger::{log_debug, log_error, log_info, Logger};
 
-use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
+use lightning::chain::chaininterface::{
+	BroadcasterInterface, ConfirmationTarget, FeeEstimator as LDKFeeEstimator,
+};
 use lightning::events::Event as LdkEvent;
 use lightning::events::PaymentPurpose;
 use lightning::impl_writeable_tlv_based_enum;
@@ -243,16 +246,18 @@ pub(crate) struct EventHandler<K: KVStore + Sync + Send, L: Deref>
 where
 	L::Target: Logger,
 {
-	wallet: Arc<Wallet<bdk::database::SqliteDatabase, L>>,
 	event_queue: Arc<EventQueue<K, L>>,
+	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager<K>>,
+	tx_broadcaster: Arc<Broadcaster>,
+	fee_estimator: Arc<FeeEstimator>,
 	network_graph: Arc<NetworkGraph>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore<K, L>>,
+	peer_store: Arc<PeerStore<K, L>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
-	peer_store: Arc<PeerStore<K, L>>,
 }
 
 impl<K: KVStore + Sync + Send + 'static, L: Deref> EventHandler<K, L>
@@ -260,23 +265,26 @@ where
 	L::Target: Logger,
 {
 	pub fn new(
-		wallet: Arc<Wallet<bdk::database::SqliteDatabase, L>>, event_queue: Arc<EventQueue<K, L>>,
-		channel_manager: Arc<ChannelManager<K>>, network_graph: Arc<NetworkGraph>,
+		event_queue: Arc<EventQueue<K, L>>, wallet: Arc<Wallet>,
+		channel_manager: Arc<ChannelManager<K>>, tx_broadcaster: Arc<Broadcaster>,
+		fee_estimator: Arc<FeeEstimator>, network_graph: Arc<NetworkGraph>,
 		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
-		peer_store: Arc<PeerStore<K, L>>,
+		peer_store: Arc<PeerStore<K, L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
 			channel_manager,
+			tx_broadcaster,
+			fee_estimator,
 			network_graph,
 			keys_manager,
 			payment_store,
+			peer_store,
 			logger,
 			runtime,
 			config,
-			peer_store,
 		}
 	}
 
@@ -586,7 +594,7 @@ where
 
 				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
 				let tx_feerate = self
-					.wallet
+					.fee_estimator
 					.get_est_sat_per_1000_weight(ConfirmationTarget::NonAnchorChannelFee);
 
 				// We set nLockTime to the current height to discourage fee sniping.
@@ -603,7 +611,9 @@ where
 				);
 
 				match res {
-					Ok(Some(spending_tx)) => self.wallet.broadcast_transactions(&[&spending_tx]),
+					Ok(Some(spending_tx)) => {
+						self.tx_broadcaster.broadcast_transactions(&[&spending_tx])
+					}
 					Ok(None) => {
 						log_debug!(self.logger, "Omitted spending static outputs: {:?}", outputs);
 					}

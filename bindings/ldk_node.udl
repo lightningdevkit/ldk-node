@@ -108,6 +108,7 @@ enum NodeError {
 	"ChannelClosingFailed",
 	"ChannelConfigUpdateFailed",
 	"PersistenceFailed",
+	"FeerateEstimationUpdateFailed",
 	"WalletOperationFailed",
 	"OnchainTxSigningFailed",
 	"MessageSigningFailed",

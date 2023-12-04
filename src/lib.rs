@@ -78,6 +78,7 @@
 mod builder;
 mod error;
 mod event;
+mod fee_estimator;
 mod gossip;
 mod hex_utils;
 pub mod io;
@@ -86,6 +87,7 @@ mod payment_store;
 mod peer_store;
 #[cfg(test)]
 mod test;
+mod tx_broadcaster;
 mod types;
 #[cfg(feature = "uniffi")]
 mod uniffi_types;
@@ -118,9 +120,11 @@ use gossip::GossipSource;
 use payment_store::PaymentStore;
 pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
-use types::{ChainMonitor, ChannelManager, KeysManager, NetworkGraph, PeerManager, Router, Scorer};
+use types::{
+	Broadcaster, ChainMonitor, ChannelManager, FeeEstimator, KeysManager, NetworkGraph,
+	PeerManager, Router, Scorer, Wallet,
+};
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
-use wallet::Wallet;
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -284,8 +288,10 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	stop_sender: tokio::sync::watch::Sender<()>,
 	stop_receiver: tokio::sync::watch::Receiver<()>,
 	config: Arc<Config>,
-	wallet: Arc<Wallet<bdk::database::SqliteDatabase, Arc<FilesystemLogger>>>,
+	wallet: Arc<Wallet>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+	tx_broadcaster: Arc<Broadcaster>,
+	fee_estimator: Arc<FeeEstimator>,
 	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager<K>>,
 	chain_monitor: Arc<ChainMonitor<K>>,
@@ -320,13 +326,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
 		// Block to ensure we update our fee rate cache once on startup
-		let wallet = Arc::clone(&self.wallet);
+		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let sync_logger = Arc::clone(&self.logger);
 		let runtime_ref = &runtime;
 		tokio::task::block_in_place(move || {
 			runtime_ref.block_on(async move {
 				let now = Instant::now();
-				match wallet.update_fee_estimates().await {
+				match fee_estimator.update_fee_estimates().await {
 					Ok(()) => {
 						log_info!(
 							sync_logger,
@@ -349,8 +355,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let mut stop_sync = self.stop_receiver.clone();
 		let onchain_wallet_sync_interval_secs =
 			self.config.onchain_wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-		let fee_rate_cache_update_interval_secs =
-			self.config.fee_rate_cache_update_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 		std::thread::spawn(move || {
 			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
 				async move {
@@ -359,11 +363,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					);
 					onchain_wallet_sync_interval
 						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-					let mut fee_rate_update_interval = tokio::time::interval(Duration::from_secs(
-						fee_rate_cache_update_interval_secs,
-					));
-					// We just blocked on updating, so skip the first tick.
-					fee_rate_update_interval.reset();
 					loop {
 						tokio::select! {
 							_ = stop_sync.changed() => {
@@ -386,27 +385,48 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 									}
 								}
 							}
-							_ = fee_rate_update_interval.tick() => {
-								let now = Instant::now();
-								match wallet.update_fee_estimates().await {
-									Ok(()) => log_trace!(
-										sync_logger,
-										"Background update of fee rate cache finished in {}ms.",
-										now.elapsed().as_millis()
-										),
-									Err(err) => {
-										log_error!(
-											sync_logger,
-											"Background update of fee rate cache failed: {}",
-											err
-											)
-									}
-								}
-							}
 						}
 					}
 				},
 			);
+		});
+
+		let mut stop_fee_updates = self.stop_receiver.clone();
+		let fee_update_logger = Arc::clone(&self.logger);
+		let fee_estimator = Arc::clone(&self.fee_estimator);
+		let fee_rate_cache_update_interval_secs =
+			self.config.fee_rate_cache_update_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+		runtime.spawn(async move {
+			let mut fee_rate_update_interval =
+				tokio::time::interval(Duration::from_secs(fee_rate_cache_update_interval_secs));
+			// We just blocked on updating, so skip the first tick.
+			fee_rate_update_interval.reset();
+			fee_rate_update_interval
+				.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					_ = stop_fee_updates.changed() => {
+						return;
+					}
+					_ = fee_rate_update_interval.tick() => {
+						let now = Instant::now();
+						match fee_estimator.update_fee_estimates().await {
+							Ok(()) => log_trace!(
+								fee_update_logger,
+								"Background update of fee rate cache finished in {}ms.",
+								now.elapsed().as_millis()
+								),
+							Err(err) => {
+								log_error!(
+									fee_update_logger,
+									"Background update of fee rate cache failed: {}",
+									err
+									)
+							}
+						}
+					}
+				}
+			}
 		});
 
 		let tx_sync = Arc::clone(&self.tx_sync);
@@ -653,17 +673,37 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		});
 
+		let mut stop_tx_bcast = self.stop_receiver.clone();
+		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
+		runtime.spawn(async move {
+			// Every second we try to clear our broadcasting queue.
+			let mut interval = tokio::time::interval(Duration::from_secs(1));
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+						_ = stop_tx_bcast.changed() => {
+							return;
+						}
+						_ = interval.tick() => {
+							tx_bcaster.process_queue().await;
+						}
+				}
+			}
+		});
+
 		let event_handler = Arc::new(EventHandler::new(
-			Arc::clone(&self.wallet),
 			Arc::clone(&self.event_queue),
+			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.tx_broadcaster),
+			Arc::clone(&self.fee_estimator),
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.peer_store),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
-			Arc::clone(&self.peer_store),
 		));
 
 		// Setup background processing

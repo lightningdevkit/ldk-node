@@ -1,10 +1,12 @@
 use crate::event::EventQueue;
+use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io;
 use crate::io::sqlite_store::SqliteStore;
 use crate::logger::{log_error, FilesystemLogger, Logger};
 use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
+use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
 	OnionMessenger, PeerManager,
@@ -464,13 +466,19 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		BuildError::WalletSetupFailed
 	})?;
 
-	let (blockchain, tx_sync) = match chain_data_source_config {
+	let (blockchain, tx_sync, tx_broadcaster, fee_estimator) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora(server_url)) => {
 			let tx_sync = Arc::new(EsploraSyncClient::new(server_url.clone(), Arc::clone(&logger)));
 			let blockchain =
 				EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
 					.with_concurrency(BDK_CLIENT_CONCURRENCY);
-			(blockchain, tx_sync)
+			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
+				tx_sync.client().clone(),
+				Arc::clone(&logger),
+			));
+			let fee_estimator =
+				Arc::new(OnchainFeeEstimator::new(tx_sync.client().clone(), Arc::clone(&logger)));
+			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
 		}
 		None => {
 			// Default to Esplora client.
@@ -479,20 +487,31 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			let blockchain =
 				EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
 					.with_concurrency(BDK_CLIENT_CONCURRENCY);
-			(blockchain, tx_sync)
+			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
+				tx_sync.client().clone(),
+				Arc::clone(&logger),
+			));
+			let fee_estimator =
+				Arc::new(OnchainFeeEstimator::new(tx_sync.client().clone(), Arc::clone(&logger)));
+			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
 		}
 	};
 
 	let runtime = Arc::new(RwLock::new(None));
-	let wallet =
-		Arc::new(Wallet::new(blockchain, bdk_wallet, Arc::clone(&runtime), Arc::clone(&logger)));
+	let wallet = Arc::new(Wallet::new(
+		blockchain,
+		bdk_wallet,
+		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
+		Arc::clone(&logger),
+	));
 
 	// Initialize the ChainMonitor
 	let chain_monitor: Arc<ChainMonitor<K>> = Arc::new(chainmonitor::ChainMonitor::new(
 		Some(Arc::clone(&tx_sync)),
-		Arc::clone(&wallet),
+		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
-		Arc::clone(&wallet),
+		Arc::clone(&fee_estimator),
 		Arc::clone(&kv_store),
 	));
 
@@ -592,9 +611,9 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
-				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
 				Arc::clone(&chain_monitor),
-				Arc::clone(&wallet),
+				Arc::clone(&tx_broadcaster),
 				Arc::clone(&router),
 				Arc::clone(&logger),
 				user_config,
@@ -616,9 +635,9 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				best_block: BestBlock::new(genesis_block_hash, 0),
 			};
 			channelmanager::ChannelManager::new(
-				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
 				Arc::clone(&chain_monitor),
-				Arc::clone(&wallet),
+				Arc::clone(&tx_broadcaster),
 				Arc::clone(&router),
 				Arc::clone(&logger),
 				Arc::clone(&keys_manager),
@@ -767,6 +786,8 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		config,
 		wallet,
 		tx_sync,
+		tx_broadcaster,
+		fee_estimator,
 		event_queue,
 		channel_manager,
 		chain_monitor,
