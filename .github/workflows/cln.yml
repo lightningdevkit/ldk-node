@@ -1,0 +1,26 @@
+name: Continuous Integration Checks - CLN
+
+on: [push, pull_request]
+
+jobs:
+  check-cln:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y socat
+
+      - name: Start bitcoind, electrs, and lightningd
+        run: docker compose -f docker-compose-cln.yml up -d
+
+      - name: Forward lightningd RPC socket
+        run: |
+          docker exec ldk-node-cln-1 sh -c "socat -d -d TCP-LISTEN:9937,fork,reuseaddr UNIX-CONNECT:/root/.lightning/regtest/lightning-rpc&"
+          socat -d -d UNIX-LISTEN:/tmp/lightning-rpc,reuseaddr,fork TCP:127.0.0.1:9937&
+
+      - name: Run CLN integration tests
+        run: RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln
