@@ -1,7 +1,6 @@
-use crate::types::{Broadcaster, FeeEstimator, Wallet};
+use crate::types::{Sweeper, Wallet};
 use crate::{
-	hex_utils, ChannelManager, Config, Error, KeysManager, NetworkGraph, PeerInfo, PeerStore,
-	UserChannelId,
+	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
 };
 
 use crate::payment_store::{
@@ -12,11 +11,9 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_debug, log_error, log_info, Logger};
+use crate::logger::{log_error, log_info, Logger};
 
-use lightning::chain::chaininterface::{
-	BroadcasterInterface, ConfirmationTarget, FeeEstimator as LDKFeeEstimator,
-};
+use lightning::chain::chaininterface::ConfirmationTarget;
 use lightning::events::Event as LdkEvent;
 use lightning::events::PaymentPurpose;
 use lightning::impl_writeable_tlv_based_enum;
@@ -26,8 +23,8 @@ use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use bitcoin::{LockTime, OutPoint, PackedLockTime};
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::{LockTime, OutPoint};
 use rand::{thread_rng, Rng};
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -249,10 +246,8 @@ where
 	event_queue: Arc<EventQueue<K, L>>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager<K>>,
-	tx_broadcaster: Arc<Broadcaster>,
-	fee_estimator: Arc<FeeEstimator>,
+	output_sweeper: Arc<Sweeper<K>>,
 	network_graph: Arc<NetworkGraph>,
-	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore<K, L>>,
 	peer_store: Arc<PeerStore<K, L>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
@@ -266,9 +261,8 @@ where
 {
 	pub fn new(
 		event_queue: Arc<EventQueue<K, L>>, wallet: Arc<Wallet>,
-		channel_manager: Arc<ChannelManager<K>>, tx_broadcaster: Arc<Broadcaster>,
-		fee_estimator: Arc<FeeEstimator>, network_graph: Arc<NetworkGraph>,
-		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore<K, L>>,
+		channel_manager: Arc<ChannelManager<K>>, output_sweeper: Arc<Sweeper<K>>,
+		network_graph: Arc<NetworkGraph>, payment_store: Arc<PaymentStore<K, L>>,
 		peer_store: Arc<PeerStore<K, L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 		logger: L, config: Arc<Config>,
 	) -> Self {
@@ -276,10 +270,8 @@ where
 			event_queue,
 			wallet,
 			channel_manager,
-			tx_broadcaster,
-			fee_estimator,
+			output_sweeper,
 			network_graph,
-			keys_manager,
 			payment_store,
 			peer_store,
 			logger,
@@ -585,42 +577,8 @@ where
 					});
 				}
 			}
-			LdkEvent::SpendableOutputs { outputs, channel_id: _ } => {
-				// TODO: We should eventually remember the outputs and supply them to the wallet's coin selection, once BDK allows us to do so.
-				let destination_address = self.wallet.get_new_address().unwrap_or_else(|e| {
-					log_error!(self.logger, "Failed to get destination address: {}", e);
-					panic!("Failed to get destination address");
-				});
-
-				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
-				let tx_feerate = self
-					.fee_estimator
-					.get_est_sat_per_1000_weight(ConfirmationTarget::NonAnchorChannelFee);
-
-				// We set nLockTime to the current height to discourage fee sniping.
-				let cur_height = self.channel_manager.current_best_block().height();
-				let locktime: PackedLockTime =
-					LockTime::from_height(cur_height).map_or(PackedLockTime::ZERO, |l| l.into());
-				let res = self.keys_manager.spend_spendable_outputs(
-					output_descriptors,
-					Vec::new(),
-					destination_address.script_pubkey(),
-					tx_feerate,
-					Some(locktime),
-					&Secp256k1::new(),
-				);
-
-				match res {
-					Ok(Some(spending_tx)) => {
-						self.tx_broadcaster.broadcast_transactions(&[&spending_tx])
-					}
-					Ok(None) => {
-						log_debug!(self.logger, "Omitted spending static outputs: {:?}", outputs);
-					}
-					Err(err) => {
-						log_error!(self.logger, "Error spending outputs: {:?}", err);
-					}
-				}
+			LdkEvent::SpendableOutputs { outputs, channel_id } => {
+				self.output_sweeper.add_outputs(outputs, channel_id)
 			}
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,

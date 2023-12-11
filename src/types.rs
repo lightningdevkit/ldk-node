@@ -1,4 +1,5 @@
 use crate::logger::FilesystemLogger;
+use crate::sweep::OutputSweeper;
 
 use lightning::chain::chainmonitor;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
@@ -117,6 +118,14 @@ impl lightning::onion_message::MessageRouter for FakeMessageRouter {
 		unimplemented!()
 	}
 }
+
+pub(crate) type Sweeper<K> = OutputSweeper<
+	Arc<Broadcaster>,
+	Arc<FeeEstimator>,
+	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+	Arc<K>,
+	Arc<FilesystemLogger>,
+>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///

@@ -85,6 +85,7 @@ pub mod io;
 mod logger;
 mod payment_store;
 mod peer_store;
+mod sweep;
 #[cfg(test)]
 mod test;
 mod tx_broadcaster;
@@ -122,7 +123,7 @@ pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, ChainMonitor, ChannelManager, FeeEstimator, KeysManager, NetworkGraph,
-	PeerManager, Router, Scorer, Wallet,
+	PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
@@ -295,6 +296,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager<K>>,
 	chain_monitor: Arc<ChainMonitor<K>>,
+	output_sweeper: Arc<Sweeper<K>>,
 	peer_manager: Arc<PeerManager<K>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
@@ -432,6 +434,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
+		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
 		let mut stop_sync = self.stop_receiver.clone();
 		let wallet_sync_interval_secs =
@@ -449,6 +452,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						let confirmables = vec![
 							&*sync_cman as &(dyn Confirm + Sync + Send),
 							&*sync_cmon as &(dyn Confirm + Sync + Send),
+							&*sync_sweeper as &(dyn Confirm + Sync + Send),
 						];
 						let now = Instant::now();
 						match tx_sync.sync(confirmables).await {
@@ -695,10 +699,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
-			Arc::clone(&self.tx_broadcaster),
-			Arc::clone(&self.fee_estimator),
+			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
-			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.runtime),
@@ -1036,10 +1038,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
+		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
 		let confirmables = vec![
 			&*sync_cman as &(dyn Confirm + Sync + Send),
 			&*sync_cmon as &(dyn Confirm + Sync + Send),
+			&*sync_sweeper as &(dyn Confirm + Sync + Send),
 		];
 
 		tokio::task::block_in_place(move || {
