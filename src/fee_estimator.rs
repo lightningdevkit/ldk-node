@@ -8,6 +8,8 @@ use lightning::chain::chaininterface::{
 use bdk::FeeRate;
 use esplora_client::AsyncClient as EsploraClient;
 
+use bitcoin::blockdata::weight::Weight;
+
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::RwLock;
@@ -33,7 +35,6 @@ where
 	pub(crate) async fn update_fee_estimates(&self) -> Result<(), Error> {
 		let confirmation_targets = vec![
 			ConfirmationTarget::OnChainSweep,
-			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee,
 			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
 			ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
 			ConfirmationTarget::AnchorChannelFee,
@@ -43,7 +44,6 @@ where
 		for target in confirmation_targets {
 			let num_blocks = match target {
 				ConfirmationTarget::OnChainSweep => 6,
-				ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => 1,
 				ConfirmationTarget::MinAllowedAnchorChannelRemoteFee => 1008,
 				ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 144,
 				ConfirmationTarget::AnchorChannelFee => 1008,
@@ -77,12 +77,9 @@ where
 			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
 			// require some post-estimation adjustments to the fee rates, which we do here.
 			let adjusted_fee_rate = match target {
-				ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => {
-					let really_high_prio = fee_rate.as_sat_per_vb() * 10.0;
-					FeeRate::from_sat_per_vb(really_high_prio)
-				}
 				ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => {
-					let slightly_less_than_background = fee_rate.fee_wu(1000) - 250;
+					let slightly_less_than_background =
+						fee_rate.fee_wu(Weight::from_wu(1000)) - 250;
 					FeeRate::from_sat_per_kwu(slightly_less_than_background as f32)
 				}
 				_ => fee_rate,
@@ -94,7 +91,7 @@ where
 				self.logger,
 				"Fee rate estimation updated for {:?}: {} sats/kwu",
 				target,
-				adjusted_fee_rate.fee_wu(1000)
+				adjusted_fee_rate.fee_wu(Weight::from_wu(1000))
 			);
 		}
 		Ok(())
@@ -105,7 +102,6 @@ where
 
 		let fallback_sats_kwu = match confirmation_target {
 			ConfirmationTarget::OnChainSweep => 5000,
-			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee => 25 * 250,
 			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
 			ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
 			ConfirmationTarget::AnchorChannelFee => 500,
@@ -125,7 +121,7 @@ where
 	L::Target: Logger,
 {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
-		(self.estimate_fee_rate(confirmation_target).fee_wu(1000) as u32)
+		(self.estimate_fee_rate(confirmation_target).fee_wu(Weight::from_wu(1000)) as u32)
 			.max(FEERATE_FLOOR_SATS_PER_KW)
 	}
 }

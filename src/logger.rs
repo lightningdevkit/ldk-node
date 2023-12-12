@@ -50,7 +50,7 @@ impl FilesystemLogger {
 	}
 }
 impl Logger for FilesystemLogger {
-	fn log(&self, record: &Record) {
+	fn log(&self, record: Record) {
 		if record.level < self.level {
 			return;
 		}

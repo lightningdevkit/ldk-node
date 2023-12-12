@@ -26,11 +26,10 @@
 //! [`send_payment`], etc.:
 //!
 //! ```no_run
-//! use ldk_node::Builder;
+//! use ldk_node::{Builder, Network};
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
-//! use ldk_node::bitcoin::Network;
 //! use std::str::FromStr;
 //!
 //! fn main() {
@@ -125,7 +124,7 @@ use types::{
 	Broadcaster, ChainMonitor, ChannelManager, FeeEstimator, KeysManager, NetworkGraph,
 	PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, PeerDetails, UserChannelId};
+pub use types::{ChannelDetails, Network, PeerDetails, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -150,7 +149,6 @@ use lightning_invoice::{payment, Bolt11Invoice, Currency};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::Network;
 
 use bitcoin::{Address, Txid};
 
@@ -745,6 +743,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				Some(background_scorer),
 				sleeper,
 				true,
+				|| Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap()),
 			)
 			.await
 			.unwrap_or_else(|e| {
@@ -1004,6 +1003,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			channel_amount_sats,
 			push_msat,
 			user_channel_id,
+			None,
 			Some(user_config),
 		) {
 			Ok(_) => {
@@ -1116,7 +1116,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			return Err(Error::NotRunning);
 		}
 
-		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+		let (payment_hash, recipient_onion, route_params) = payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
+			log_error!(self.logger, "Failed to send payment due to the given invoice being \"zero-amount\". Please use send_payment_using_amount instead.");
+			Error::InvalidInvoice
+		})?;
 
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
 			if payment.status == PaymentStatus::Pending
@@ -1128,13 +1131,17 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		let payment_secret = Some(*invoice.payment_secret());
+		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
+		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 
-		match lightning_invoice::payment::pay_invoice(
-			&invoice,
-			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
-			self.channel_manager.as_ref(),
+		match self.channel_manager.send_payment(
+			payment_hash,
+			recipient_onion,
+			payment_id,
+			route_params,
+			retry_strategy,
 		) {
-			Ok(_payment_id) => {
+			Ok(()) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
@@ -1151,11 +1158,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 				Ok(payment_hash)
 			}
-			Err(payment::PaymentError::Invoice(e)) => {
-				log_error!(self.logger, "Failed to send payment due to invalid invoice: {}", e);
-				Err(Error::InvalidInvoice)
-			}
-			Err(payment::PaymentError::Sending(e)) => {
+			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					channelmanager::RetryableSendFailure::DuplicatePayment => {
@@ -1202,7 +1205,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		}
 
-		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
@@ -1212,7 +1215,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		}
 
-		let payment_id = PaymentId(invoice.payment_hash().into_inner());
+		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
 		let payment_secret = invoice.payment_secret();
 		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
 		let mut payment_params = PaymentParameters::from_node_id(
@@ -1233,11 +1236,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let recipient_fields = RecipientOnionFields::secret_only(*payment_secret);
 
-		match self
-			.channel_manager
-			.send_payment(payment_hash, recipient_fields, payment_id, route_params, retry_strategy)
-			.map_err(payment::PaymentError::Sending)
-		{
+		match self.channel_manager.send_payment(
+			payment_hash,
+			recipient_fields,
+			payment_id,
+			route_params,
+			retry_strategy,
+		) {
 			Ok(_payment_id) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
 				log_info!(
@@ -1259,11 +1264,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 				Ok(payment_hash)
 			}
-			Err(payment::PaymentError::Invoice(e)) => {
-				log_error!(self.logger, "Failed to send payment due to invalid invoice: {}", e);
-				Err(Error::InvalidInvoice)
-			}
-			Err(payment::PaymentError::Sending(e)) => {
+			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
 				match e {
@@ -1298,7 +1299,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
-		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
+		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).to_byte_array());
 
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
 			if payment.status == PaymentStatus::Pending
@@ -1381,17 +1382,19 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			return Err(Error::NotRunning);
 		}
 
+		let (_payment_hash, _recipient_onion, route_params) = payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
+			log_error!(self.logger, "Failed to send probes due to the given invoice being \"zero-amount\". Please use send_payment_probes_using_amount instead.");
+			Error::InvalidInvoice
+		})?;
+
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
 
-		payment::preflight_probe_invoice(
-			invoice,
-			&*self.channel_manager,
-			liquidity_limit_multiplier,
-		)
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to send payment probes: {:?}", e);
-			Error::ProbeSendingFailed
-		})?;
+		self.channel_manager
+			.send_preflight_probes(route_params, liquidity_limit_multiplier)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to send payment probes: {:?}", e);
+				Error::ProbeSendingFailed
+			})?;
 
 		Ok(())
 	}
@@ -1441,27 +1444,35 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			return Err(Error::NotRunning);
 		}
 
-		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
+		let (_payment_hash, _recipient_onion, route_params) = if let Some(invoice_amount_msat) =
+			invoice.amount_milli_satoshis()
+		{
 			if amount_msat < invoice_amount_msat {
 				log_error!(
 					self.logger,
 					"Failed to send probes as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.", invoice_amount_msat, amount_msat);
 				return Err(Error::InvalidAmount);
 			}
-		}
+
+			payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
+				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being \"zero-amount\".");
+				Error::InvalidInvoice
+			})?
+		} else {
+			payment::payment_parameters_from_zero_amount_invoice(&invoice, amount_msat).map_err(|_| {
+				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being not \"zero-amount\".");
+				Error::InvalidInvoice
+			})?
+		};
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
 
-		payment::preflight_probe_zero_value_invoice(
-			invoice,
-			amount_msat,
-			&*self.channel_manager,
-			liquidity_limit_multiplier,
-		)
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to send payment probes: {:?}", e);
-			Error::ProbeSendingFailed
-		})?;
+		self.channel_manager
+			.send_preflight_probes(route_params, liquidity_limit_multiplier)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to send payment probes: {:?}", e);
+				Error::ProbeSendingFailed
+			})?;
 
 		Ok(())
 	}
@@ -1485,7 +1496,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	fn receive_payment_inner(
 		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let currency = Currency::from(self.config.network);
+		let currency = Currency::from(bitcoin::Network::from(self.config.network));
 		let keys_manager = Arc::clone(&self.keys_manager);
 		let invoice = match lightning_invoice::utils::create_invoice_from_channelmanager(
 			&self.channel_manager,
@@ -1507,7 +1518,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		};
 
-		let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 		let payment = PaymentDetails {
 			hash: payment_hash,
 			preimage: None,
@@ -1538,8 +1549,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
-	/// # use ldk_node::{Builder, Config, PaymentDirection};
-	/// # use ldk_node::bitcoin::Network;
+	/// # use ldk_node::{Builder, Config, Network, PaymentDirection};
 	/// # let mut config = Config::default();
 	/// # config.network = Network::Regtest;
 	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();

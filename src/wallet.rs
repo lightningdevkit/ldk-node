@@ -20,10 +20,11 @@ use bdk::FeeRate;
 use bdk::{SignOptions, SyncOptions};
 
 use bitcoin::bech32::u5;
+use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, Signing};
-use bitcoin::{LockTime, PackedLockTime, Script, Transaction, TxOut, Txid};
+use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
@@ -114,7 +115,7 @@ where
 	}
 
 	pub(crate) fn create_funding_transaction(
-		&self, output_script: Script, value_sats: u64, confirmation_target: ConfirmationTarget,
+		&self, output_script: ScriptBuf, value_sats: u64, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,
 	) -> Result<Transaction, Error> {
 		let fee_rate = FeeRate::from_sat_per_kwu(
@@ -280,8 +281,8 @@ where
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
 	pub fn spend_spendable_outputs<C: Signing>(
 		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
-		change_destination_script: Script, feerate_sat_per_1000_weight: u32,
-		locktime: Option<PackedLockTime>, secp_ctx: &Secp256k1<C>,
+		change_destination_script: ScriptBuf, feerate_sat_per_1000_weight: u32,
+		locktime: Option<LockTime>, secp_ctx: &Secp256k1<C>,
 	) -> Result<Transaction, ()> {
 		self.inner.spend_spendable_outputs(
 			descriptors,
@@ -366,7 +367,7 @@ where
 	E::Target: FeeEstimator,
 	L::Target: Logger,
 {
-	type Signer = InMemorySigner;
+	type EcdsaSigner = InMemorySigner;
 
 	fn generate_channel_keys_id(
 		&self, inbound: bool, channel_value_satoshis: u64, user_channel_id: u128,
@@ -376,15 +377,15 @@ where
 
 	fn derive_channel_signer(
 		&self, channel_value_satoshis: u64, channel_keys_id: [u8; 32],
-	) -> Self::Signer {
+	) -> Self::EcdsaSigner {
 		self.inner.derive_channel_signer(channel_value_satoshis, channel_keys_id)
 	}
 
-	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::Signer, DecodeError> {
+	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::EcdsaSigner, DecodeError> {
 		self.inner.read_chan_signer(reader)
 	}
 
-	fn get_destination_script(&self) -> Result<Script, ()> {
+	fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
 		let address = self.wallet.get_new_address().map_err(|e| {
 			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
 		})?;
@@ -397,8 +398,8 @@ where
 		})?;
 
 		match address.payload {
-			bitcoin::util::address::Payload::WitnessProgram { version, program } => {
-				ShutdownScript::new_witness_program(version, &program).map_err(|e| {
+			bitcoin::address::Payload::WitnessProgram(program) => {
+				ShutdownScript::new_witness_program(&program).map_err(|e| {
 					log_error!(self.logger, "Invalid shutdown script: {:?}", e);
 				})
 			}
