@@ -1,0 +1,3 @@
+include ./src/ldk_node/libldk_node.dylib
+include ./src/ldk_node/libldk_node.so
+include ./src/ldk_node/libldk_node.dll
