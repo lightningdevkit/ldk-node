@@ -3,7 +3,7 @@
 
 import PackageDescription
 
-let tag = "v0.1.0"
+let tag = "v0.2.0"
 let checksum = "2ef0b46c84f7349e1940ff0b592be4dea9f2761a69d2bdad8f979dbef68fb1e8"
 let url = "https://github.com/lightningdevkit/ldk-node/releases/download/\(tag)/LDKNodeFFI.xcframework.zip"
 
