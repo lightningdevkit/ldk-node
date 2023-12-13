@@ -1,3 +1,37 @@
+# 0.2.0 - Dec 13, 2023
+
+## Feature and API updates
+- The capability to send pre-flight probes has been added (#147).
+- Pre-flight probes will skip outbound channels based on the liquidity available (#156).
+- Additional fields are now exposed via `ChannelDetails` (#165).
+- The location of the `logs` directory is now customizable (#129).
+- Listening on multiple socket addresses is now supported (#187).
+- If available, peer information is now persisted for inbound channels (#170).
+- Transaction broadcasting and fee estimation have been reworked and made more robust (#205).
+- A module persisting, sweeping, and rebroadcasting output spends has been added (#152).
+
+## Bug Fixes
+- No errors are logged anymore when we choose to omit spending of `StaticOutput`s (#137).
+- An inconsistent state of the log file symlink no longer results in an error during startup (#153).
+
+## Compatibility Notes
+- Our currently supported minimum Rust version (MSRV) is 1.63.0.
+- The Rust crate edition has been bumped to 2021.
+- Building on Windows is now supported (#160).
+- LDK has been updated to version 0.0.118 (#105, #151, #175).
+
+In total, this release features 57 files changed, 7369 insertions, 1738 deletions in 132 commits from 9 authors, in alphabetical order:
+
+- Austin Kelsay
+- alexanderwiederin
+- Elias Rohrer
+- Galder Zamarreño
+- Gursharan Singh
+- jbesraa
+- Justin Moeller
+- Max Fang
+- Orbital
+
 # 0.1.0 - Jun 22, 2023
 This is the first non-experimental release of LDK Node.
 

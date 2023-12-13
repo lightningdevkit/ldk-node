@@ -11,16 +11,16 @@ Cargo.lock
 
 # Ignore generated swift related files
 .swiftpm/
-ldk_nodeFFI.*
+LDKNodeFFI.*
 ldk_node.swift
 libldk_node.dylib
-LightningDevKitNode.swift
-ldk_node.swiftmodule
+LDKNode.swift
+LDKNode.swiftmodule
 swift.swiftsourceinfo
 swift.abi.json
 swift.swiftdoc
 
-# Ignore ldk_nodeFFI.xcframework files
-/bindings/swift/ldk_nodeFFI.xcframework
+# Ignore LDKNodeFFI.xcframework files
+/bindings/swift/LDKNodeFFI.xcframework
 /bindings/kotlin/ldk-node-android/lib/src/main/jniLibs
 /bindings/kotlin/ldk-node-android/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
