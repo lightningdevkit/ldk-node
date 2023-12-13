@@ -23,8 +23,7 @@ let package = Package(
         .target(
             name: "LDKNode",
             dependencies: ["LDKNodeFFI"],
-            path: "./bindings/swift/Sources",
-            swiftSettings: [.unsafeFlags(["-suppress-warnings"])]
+            path: "./bindings/swift/Sources"
         ),
         .binaryTarget(
             name: "LDKNodeFFI",
