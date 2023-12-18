@@ -49,6 +49,7 @@ jobs:
           cargo update -p jobserver --precise "0.1.26" --verbose # jobserver 0.1.27 requires rustc 1.66.0
           cargo update -p zstd-sys --precise "2.0.8+zstd.1.5.5" --verbose # zstd-sys 2.0.9+zstd.1.5.5 requires rustc 1.64.0
           cargo update -p petgraph --precise "0.6.3" --verbose # petgraph v0.6.4, requires rustc 1.64 or newer
+          cargo update -p home --precise "0.5.5" --verbose # home v0.5.9, requires rustc 1.70 or newer
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
