@@ -1,8 +1,9 @@
-#![cfg(cln_test)]
+#![cfg(any(cln_test, vss_test))]
 
-use ldk_node::{Config, LogLevel, Network};
+use ldk_node::{Config, Event, LogLevel, Network, Node, NodeError, PaymentDirection, PaymentStatus};
 
 use lightning::ln::msgs::SocketAddress;
+use lightning::util::persist::KVStore;
 
 use bitcoin::{Address, Amount, OutPoint, Txid};
 
@@ -10,12 +11,13 @@ use bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
 use bitcoincore_rpc::Client as BitcoindClient;
 use bitcoincore_rpc::RpcApi;
 
-use electrum_client::Client as ElectrumClient;
+use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
 use electrum_client::ElectrumApi;
 
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 
+use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -71,6 +73,26 @@ macro_rules! expect_channel_ready_event {
 
 pub(crate) use expect_channel_ready_event;
 
+pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
+	let bitcoind_exe =
+		env::var("BITCOIND_EXE").ok().or_else(|| bitcoind::downloaded_exe_path().ok()).expect(
+			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
+		);
+	let mut bitcoind_conf = bitcoind::Conf::default();
+	bitcoind_conf.network = "regtest";
+	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
+
+	let electrs_exe = env::var("ELECTRS_EXE")
+		.ok()
+		.or_else(electrsd::downloaded_exe_path)
+		.expect("you need to provide env var ELECTRS_EXE or specify an electrsd version feature");
+	let mut electrsd_conf = electrsd::Conf::default();
+	electrsd_conf.http_enabled = true;
+	electrsd_conf.network = "regtest";
+	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	(bitcoind, electrsd)
+}
+
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
 	let mut rng = thread_rng();
@@ -116,8 +138,8 @@ pub(crate) fn random_config() -> Config {
 	config
 }
 
-pub(crate) fn generate_blocks_and_wait(
-	bitcoind: &BitcoindClient, electrs: &ElectrumClient, num: usize,
+pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
 	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
 	let _ = bitcoind.load_wallet("ldk_node_test");
@@ -135,14 +157,14 @@ pub(crate) fn generate_blocks_and_wait(
 	println!("\n");
 }
 
-pub(crate) fn wait_for_block(electrs: &ElectrumClient, min_height: usize) {
+pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 	let mut header = match electrs.block_headers_subscribe() {
 		Ok(header) => header,
 		Err(_) => {
 			// While subscribing should succeed the first time around, we ran into some cases where
 			// it didn't. Since we can't proceed without subscribing, we try again after a delay
 			// and panic if it still fails.
-			std::thread::sleep(Duration::from_secs(1));
+			std::thread::sleep(Duration::from_secs(3));
 			electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
 		}
 	};
@@ -157,7 +179,7 @@ pub(crate) fn wait_for_block(electrs: &ElectrumClient, min_height: usize) {
 	}
 }
 
-pub(crate) fn wait_for_tx(electrs: &ElectrumClient, txid: Txid) {
+pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	let mut tx_res = electrs.transaction_get(&txid);
 	loop {
 		if tx_res.is_ok() {
@@ -170,7 +192,7 @@ pub(crate) fn wait_for_tx(electrs: &ElectrumClient, txid: Txid) {
 	}
 }
 
-pub(crate) fn wait_for_outpoint_spend(electrs: &ElectrumClient, outpoint: OutPoint) {
+pub(crate) fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
 	let mut is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
@@ -207,8 +229,8 @@ where
 	}
 }
 
-pub(crate) fn premine_and_distribute_funds(
-	bitcoind: &BitcoindClient, electrs: &ElectrumClient, addrs: Vec<Address>, amount: Amount,
+pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
 	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
 	let _ = bitcoind.load_wallet("ldk_node_test");
@@ -221,4 +243,241 @@ pub(crate) fn premine_and_distribute_funds(
 	}
 
 	generate_blocks_and_wait(bitcoind, electrs, 1);
+}
+
+pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
+	node_a: Node<K>, node_b: Node<K>, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
+) {
+	let addr_a = node_a.new_onchain_address().unwrap();
+	let addr_b = node_b.new_onchain_address().unwrap();
+
+	let premine_amount_sat = 100_000;
+
+	premine_and_distribute_funds(
+		&bitcoind,
+		electrsd,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+
+	// Check we haven't got any events yet
+	assert_eq!(node_a.next_event(), None);
+	assert_eq!(node_b.next_event(), None);
+
+	println!("\nA -- connect_open_channel -> B");
+	let funding_amount_sat = 80_000;
+	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
+	node_a
+		.connect_open_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			funding_amount_sat,
+			Some(push_msat),
+			None,
+			true,
+		)
+		.unwrap();
+
+	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(funding_txo_a, funding_txo_b);
+
+	wait_for_tx(electrsd, funding_txo_a.txid);
+
+	if !allow_0conf {
+		generate_blocks_and_wait(&bitcoind, electrsd, 6);
+	}
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let onchain_fee_buffer_sat = 1500;
+	let node_a_upper_bound_sat = premine_amount_sat - funding_amount_sat;
+	let node_a_lower_bound_sat = premine_amount_sat - funding_amount_sat - onchain_fee_buffer_sat;
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() < node_a_upper_bound_sat);
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() > node_a_lower_bound_sat);
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+
+	let channel_id = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	println!("\nB receive_payment");
+	let invoice_amount_1_msat = 2500_000;
+	let invoice = node_b.receive_payment(invoice_amount_1_msat, &"asdf", 9217).unwrap();
+
+	println!("\nA send_payment");
+	let payment_hash = node_a.send_payment(&invoice).unwrap();
+	assert_eq!(node_a.send_payment(&invoice), Err(NodeError::DuplicatePayment));
+
+	assert_eq!(node_a.list_payments().first().unwrap().hash, payment_hash);
+
+	let outbound_payments_a =
+		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	assert_eq!(outbound_payments_a.len(), 1);
+
+	let inbound_payments_a =
+		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	assert_eq!(inbound_payments_a.len(), 0);
+
+	let outbound_payments_b =
+		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	assert_eq!(outbound_payments_b.len(), 0);
+
+	let inbound_payments_b =
+		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	assert_eq!(inbound_payments_b.len(), 1);
+
+	expect_event!(node_a, PaymentSuccessful);
+	expect_event!(node_b, PaymentReceived);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+
+	// Assert we fail duplicate outbound payments and check the status hasn't changed.
+	assert_eq!(Err(NodeError::DuplicatePayment), node_a.send_payment(&invoice));
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+
+	// Test under-/overpayment
+	let invoice_amount_2_msat = 2500_000;
+	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+
+	let underpaid_amount = invoice_amount_2_msat - 1;
+	assert_eq!(
+		Err(NodeError::InvalidAmount),
+		node_a.send_payment_using_amount(&invoice, underpaid_amount)
+	);
+
+	println!("\nB overpaid receive_payment");
+	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let overpaid_amount_msat = invoice_amount_2_msat + 100;
+
+	println!("\nA overpaid send_payment");
+	let payment_hash = node_a.send_payment_using_amount(&invoice, overpaid_amount_msat).unwrap();
+	expect_event!(node_a, PaymentSuccessful);
+	let received_amount = match node_b.wait_next_event() {
+		ref e @ Event::PaymentReceived { amount_msat, .. } => {
+			println!("{} got event {:?}", std::stringify!(node_b), e);
+			node_b.event_handled();
+			amount_msat
+		}
+		ref e => {
+			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+		}
+	};
+	assert_eq!(received_amount, overpaid_amount_msat);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
+
+	// Test "zero-amount" invoice payment
+	println!("\nB receive_variable_amount_payment");
+	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
+	let determined_amount_msat = 2345_678;
+	assert_eq!(Err(NodeError::InvalidInvoice), node_a.send_payment(&variable_amount_invoice));
+	println!("\nA send_payment_using_amount");
+	let payment_hash =
+		node_a.send_payment_using_amount(&variable_amount_invoice, determined_amount_msat).unwrap();
+
+	expect_event!(node_a, PaymentSuccessful);
+	let received_amount = match node_b.wait_next_event() {
+		ref e @ Event::PaymentReceived { amount_msat, .. } => {
+			println!("{} got event {:?}", std::stringify!(node_b), e);
+			node_b.event_handled();
+			amount_msat
+		}
+		ref e => {
+			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+		}
+	};
+	assert_eq!(received_amount, determined_amount_msat);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
+	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
+
+	// Test spontaneous/keysend payments
+	println!("\nA send_spontaneous_payment");
+	let keysend_amount_msat = 2500_000;
+	let keysend_payment_hash =
+		node_a.send_spontaneous_payment(keysend_amount_msat, node_b.node_id()).unwrap();
+	expect_event!(node_a, PaymentSuccessful);
+	let received_keysend_amount = match node_b.wait_next_event() {
+		ref e @ Event::PaymentReceived { amount_msat, .. } => {
+			println!("{} got event {:?}", std::stringify!(node_b), e);
+			node_b.event_handled();
+			amount_msat
+		}
+		ref e => {
+			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+		}
+	};
+	assert_eq!(received_keysend_amount, keysend_amount_msat);
+	assert_eq!(node_a.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(
+		node_a.payment(&keysend_payment_hash).unwrap().direction,
+		PaymentDirection::Outbound
+	);
+	assert_eq!(
+		node_a.payment(&keysend_payment_hash).unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
+	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&keysend_payment_hash).unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
+
+	println!("\nB close_channel");
+	node_b.close_channel(&channel_id, node_a.node_id()).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	expect_event!(node_b, ChannelClosed);
+
+	wait_for_outpoint_spend(electrsd, funding_txo_b);
+
+	generate_blocks_and_wait(&bitcoind, electrsd, 1);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let sum_of_all_payments_sat = (push_msat
+		+ invoice_amount_1_msat
+		+ overpaid_amount_msat
+		+ determined_amount_msat
+		+ keysend_amount_msat)
+		/ 1000;
+	let node_a_upper_bound_sat =
+		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
+	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() > node_a_lower_bound_sat);
+	assert!(node_a.spendable_onchain_balance_sats().unwrap() < node_a_upper_bound_sat);
+	let expected_final_amount_node_b_sat = premine_amount_sat + sum_of_all_payments_sat;
+	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), expected_final_amount_node_b_sat);
+
+	// Check we handled all events
+	assert_eq!(node_a.next_event(), None);
+	assert_eq!(node_b.next_event(), None);
+
+	node_a.stop().unwrap();
+	println!("\nA stopped");
+	node_b.stop().unwrap();
+	println!("\nB stopped");
 }
