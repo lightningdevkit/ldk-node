@@ -1,4 +1,4 @@
-name: VSS Integration Test
+name: CI Checks - VSS Integration Tests
 
 on: [push, pull_request]
 

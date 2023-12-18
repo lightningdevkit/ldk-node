@@ -1,4 +1,4 @@
-name: Continuous Integration Checks - Kotlin
+name: CI Checks - Kotlin Tests
 
 on: [push, pull_request]
 
