@@ -1,9 +1,15 @@
-#![cfg(any(cln_test, vss_test))]
+#![cfg(any(test, cln_test, vss_test))]
+#![allow(dead_code)]
 
-use ldk_node::{Config, Event, LogLevel, Network, Node, NodeError, PaymentDirection, PaymentStatus};
+use ldk_node::io::sqlite_store::SqliteStore;
+use ldk_node::{
+	Builder, Config, Event, LogLevel, Network, Node, NodeError, PaymentDirection, PaymentStatus,
+};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::persist::KVStore;
+use lightning::util::test_utils::TestStore;
+use lightning_persister::fs_store::FilesystemStore;
 
 use bitcoin::{Address, Amount, OutPoint, Txid};
 
@@ -19,6 +25,7 @@ use rand::{thread_rng, Rng};
 
 use std::env;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 macro_rules! expect_event {
@@ -138,6 +145,48 @@ pub(crate) fn random_config() -> Config {
 	config
 }
 
+#[cfg(feature = "uniffi")]
+type TestNode<K> = Arc<Node<K>>;
+#[cfg(not(feature = "uniffi"))]
+type TestNode<K> = Node<K>;
+
+macro_rules! setup_builder {
+	($builder: ident, $config: expr) => {
+		#[cfg(feature = "uniffi")]
+		let $builder = Builder::from_config($config.clone());
+		#[cfg(not(feature = "uniffi"))]
+		let mut $builder = Builder::from_config($config.clone());
+	};
+}
+
+pub(crate) use setup_builder;
+
+pub(crate) fn setup_two_nodes(
+	electrsd: &ElectrsD, allow_0conf: bool,
+) -> (TestNode<TestSyncStore>, TestNode<TestSyncStore>) {
+	println!("== Node A ==");
+	let config_a = random_config();
+	let node_a = setup_node(electrsd, config_a);
+
+	println!("\n== Node B ==");
+	let mut config_b = random_config();
+	if allow_0conf {
+		config_b.trusted_peers_0conf.push(node_a.node_id());
+	}
+	let node_b = setup_node(electrsd, config_b);
+	(node_a, node_b)
+}
+
+pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode<TestSyncStore> {
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	setup_builder!(builder, config);
+	builder.set_esplora_server(esplora_url.clone());
+	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
+	let node = builder.build_with_store(test_sync_store).unwrap();
+	node.start().unwrap();
+	node
+}
+
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
@@ -245,8 +294,31 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	generate_blocks_and_wait(bitcoind, electrs, 1);
 }
 
+pub fn open_channel<K: KVStore + Sync + Send>(
+	node_a: &TestNode<K>, node_b: &TestNode<K>, funding_amount_sat: u64, announce: bool,
+	electrsd: &ElectrsD,
+) {
+	node_a
+		.connect_open_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			funding_amount_sat,
+			None,
+			None,
+			announce,
+		)
+		.unwrap();
+	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
+
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(funding_txo_a, funding_txo_b);
+	wait_for_tx(&electrsd.client, funding_txo_a.txid);
+}
+
 pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
-	node_a: Node<K>, node_b: Node<K>, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
+	node_a: TestNode<K>, node_b: TestNode<K>, bitcoind: &BitcoindClient, electrsd: &E,
+	allow_0conf: bool,
 ) {
 	let addr_a = node_a.new_onchain_address().unwrap();
 	let addr_b = node_b.new_onchain_address().unwrap();
@@ -480,4 +552,149 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 	println!("\nA stopped");
 	node_b.stop().unwrap();
 	println!("\nB stopped");
+}
+
+// A `KVStore` impl for testing purposes that wraps all our `KVStore`s and asserts their synchronicity.
+pub(crate) struct TestSyncStore {
+	serializer: RwLock<()>,
+	test_store: TestStore,
+	fs_store: FilesystemStore,
+	sqlite_store: SqliteStore,
+}
+
+impl TestSyncStore {
+	pub(crate) fn new(dest_dir: PathBuf) -> Self {
+		let serializer = RwLock::new(());
+		let mut fs_dir = dest_dir.clone();
+		fs_dir.push("fs_store");
+		let fs_store = FilesystemStore::new(fs_dir);
+		let mut sql_dir = dest_dir.clone();
+		sql_dir.push("sqlite_store");
+		let sqlite_store = SqliteStore::new(
+			sql_dir,
+			Some("test_sync_db".to_string()),
+			Some("test_sync_table".to_string()),
+		)
+		.unwrap();
+		let test_store = TestStore::new(false);
+		Self { serializer, fs_store, sqlite_store, test_store }
+	}
+
+	fn do_list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> std::io::Result<Vec<String>> {
+		let fs_res = self.fs_store.list(primary_namespace, secondary_namespace);
+		let sqlite_res = self.sqlite_store.list(primary_namespace, secondary_namespace);
+		let test_res = self.test_store.list(primary_namespace, secondary_namespace);
+
+		match fs_res {
+			Ok(mut list) => {
+				list.sort();
+
+				let mut sqlite_list = sqlite_res.unwrap();
+				sqlite_list.sort();
+				assert_eq!(list, sqlite_list);
+
+				let mut test_list = test_res.unwrap();
+				test_list.sort();
+				assert_eq!(list, test_list);
+
+				Ok(list)
+			}
+			Err(e) => {
+				assert!(sqlite_res.is_err());
+				assert!(test_res.is_err());
+				Err(e)
+			}
+		}
+	}
+}
+
+impl KVStore for TestSyncStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> std::io::Result<Vec<u8>> {
+		let _guard = self.serializer.read().unwrap();
+
+		let fs_res = self.fs_store.read(primary_namespace, secondary_namespace, key);
+		let sqlite_res = self.sqlite_store.read(primary_namespace, secondary_namespace, key);
+		let test_res = self.test_store.read(primary_namespace, secondary_namespace, key);
+
+		match fs_res {
+			Ok(read) => {
+				assert_eq!(read, sqlite_res.unwrap());
+				assert_eq!(read, test_res.unwrap());
+				Ok(read)
+			}
+			Err(e) => {
+				assert!(sqlite_res.is_err());
+				assert_eq!(e.kind(), unsafe { sqlite_res.unwrap_err_unchecked().kind() });
+				assert!(test_res.is_err());
+				assert_eq!(e.kind(), unsafe { test_res.unwrap_err_unchecked().kind() });
+				Err(e)
+			}
+		}
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+	) -> std::io::Result<()> {
+		let _guard = self.serializer.write().unwrap();
+		let fs_res = self.fs_store.write(primary_namespace, secondary_namespace, key, buf);
+		let sqlite_res = self.sqlite_store.write(primary_namespace, secondary_namespace, key, buf);
+		let test_res = self.test_store.write(primary_namespace, secondary_namespace, key, buf);
+
+		assert!(self
+			.do_list(primary_namespace, secondary_namespace)
+			.unwrap()
+			.contains(&key.to_string()));
+
+		match fs_res {
+			Ok(()) => {
+				assert!(sqlite_res.is_ok());
+				assert!(test_res.is_ok());
+				Ok(())
+			}
+			Err(e) => {
+				assert!(sqlite_res.is_err());
+				assert!(test_res.is_err());
+				Err(e)
+			}
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> std::io::Result<()> {
+		let _guard = self.serializer.write().unwrap();
+		let fs_res = self.fs_store.remove(primary_namespace, secondary_namespace, key, lazy);
+		let sqlite_res =
+			self.sqlite_store.remove(primary_namespace, secondary_namespace, key, lazy);
+		let test_res = self.test_store.remove(primary_namespace, secondary_namespace, key, lazy);
+
+		assert!(!self
+			.do_list(primary_namespace, secondary_namespace)
+			.unwrap()
+			.contains(&key.to_string()));
+
+		match fs_res {
+			Ok(()) => {
+				assert!(sqlite_res.is_ok());
+				assert!(test_res.is_ok());
+				Ok(())
+			}
+			Err(e) => {
+				assert!(sqlite_res.is_err());
+				assert!(test_res.is_err());
+				Err(e)
+			}
+		}
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> std::io::Result<Vec<String>> {
+		let _guard = self.serializer.read().unwrap();
+		self.do_list(primary_namespace, secondary_namespace)
+	}
 }

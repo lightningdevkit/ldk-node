@@ -219,8 +219,7 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test::utils::TestLogger;
-	use lightning::util::test_utils::TestStore;
+	use lightning::util::test_utils::{TestLogger, TestStore};
 	use std::sync::Arc;
 
 	#[test]

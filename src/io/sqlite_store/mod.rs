@@ -284,8 +284,9 @@ impl KVStore for SqliteStore {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::io::test_utils::{do_read_write_remove_list_persist, do_test_store};
-	use crate::test::utils::random_storage_path;
+	use crate::io::test_utils::{
+		do_read_write_remove_list_persist, do_test_store, random_storage_path,
+	};
 
 	impl Drop for SqliteStore {
 		fn drop(&mut self) {
