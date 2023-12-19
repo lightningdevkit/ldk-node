@@ -82,7 +82,9 @@ mod fee_estimator;
 mod gossip;
 mod hex_utils;
 pub mod io;
+mod liquidity;
 mod logger;
+mod message_handler;
 mod payment_store;
 mod peer_store;
 mod sweep;
@@ -116,6 +118,7 @@ pub use builder::NodeBuilder as Builder;
 
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
+use liquidity::LiquiditySource;
 use payment_store::PaymentStore;
 pub use payment_store::{PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
@@ -311,6 +314,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
 	gossip_source: Arc<GossipSource>,
+	liquidity_source: Option<Arc<LiquiditySource<K, Arc<FilesystemLogger>>>>,
 	kv_store: Arc<K>,
 	logger: Arc<FilesystemLogger>,
 	_router: Arc<Router>,
@@ -763,6 +767,21 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				panic!("Failed to process events");
 			});
 		});
+
+		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
+			let mut stop_liquidity_handler = self.stop_receiver.clone();
+			let liquidity_handler = Arc::clone(&liquidity_source);
+			runtime.spawn(async move {
+				loop {
+					tokio::select! {
+						_ = stop_liquidity_handler.changed() => {
+							return;
+						}
+						_ = liquidity_handler.handle_next_event() => {}
+					}
+				}
+			});
+		}
 
 		*runtime_lock = Some(runtime);
 

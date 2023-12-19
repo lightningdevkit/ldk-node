@@ -1,4 +1,5 @@
 use crate::logger::FilesystemLogger;
+use crate::message_handler::NodeCustomMessageHandler;
 use crate::sweep::OutputSweeper;
 
 use lightning::blinded_path::BlindedPath;
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
-	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+	Arc<ChainSource>,
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
 	Arc<FilesystemLogger>,
@@ -38,8 +39,16 @@ pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
-	IgnoringMessageHandler,
+	Arc<NodeCustomMessageHandler<K, Arc<FilesystemLogger>>>,
 	Arc<KeysManager>,
+>;
+
+pub(crate) type ChainSource = EsploraSyncClient<Arc<FilesystemLogger>>;
+
+pub(crate) type LiquidityManager<K> = lightning_liquidity::LiquidityManager<
+	Arc<KeysManager>,
+	Arc<ChannelManager<K>>,
+	Arc<ChainSource>,
 >;
 
 pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
@@ -132,7 +141,7 @@ impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
 pub(crate) type Sweeper<K> = OutputSweeper<
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
-	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+	Arc<ChainSource>,
 	Arc<K>,
 	Arc<FilesystemLogger>,
 >;

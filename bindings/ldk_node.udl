@@ -28,6 +28,7 @@ interface Builder {
 	void set_esplora_server(string esplora_server_url);
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
+	void set_liquidity_source_lsps2(SocketAddress address, PublicKey node_id, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_network(Network network);
 	[Throws=BuildError]
