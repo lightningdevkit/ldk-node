@@ -23,8 +23,9 @@ use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
+use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{LockTime, OutPoint};
+use bitcoin::OutPoint;
 use rand::{thread_rng, Rng};
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -786,6 +787,7 @@ where
 			LdkEvent::HTLCIntercepted { .. } => {}
 			LdkEvent::BumpTransaction(_) => {}
 			LdkEvent::InvoiceRequestFailed { .. } => {}
+			LdkEvent::ConnectionNeeded { .. } => {}
 		}
 	}
 }

@@ -15,8 +15,10 @@ use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::persist::KVStore;
 use lightning::util::ser::Writeable;
 
+use bitcoin::blockdata::block::Header;
+use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{BlockHash, BlockHeader, LockTime, PackedLockTime, Transaction, Txid};
+use bitcoin::{BlockHash, Transaction, Txid};
 
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -40,11 +42,13 @@ pub(crate) struct SpendableOutputInfo {
 impl SpendableOutputInfo {
 	fn to_watched_output(&self) -> WatchedOutput {
 		match &self.descriptor {
-			SpendableOutputDescriptor::StaticOutput { outpoint, output } => WatchedOutput {
-				block_hash: self.first_broadcast_hash,
-				outpoint: *outpoint,
-				script_pubkey: output.script_pubkey.clone(),
-			},
+			SpendableOutputDescriptor::StaticOutput { outpoint, output, channel_keys_id: _ } => {
+				WatchedOutput {
+					block_hash: self.first_broadcast_hash,
+					outpoint: *outpoint,
+					script_pubkey: output.script_pubkey.clone(),
+				}
+			}
 			SpendableOutputDescriptor::DelayedPaymentOutput(output) => WatchedOutput {
 				block_hash: self.first_broadcast_hash,
 				outpoint: output.outpoint,
@@ -304,8 +308,7 @@ where
 			log_error!(self.logger, "Failed to get destination address from wallet: {}", e);
 		})?;
 
-		let locktime: PackedLockTime =
-			LockTime::from_height(cur_height).map_or(PackedLockTime::ZERO, |l| l.into());
+		let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
 		let output_descriptors = output_descriptors.iter().collect::<Vec<_>>();
 		self.keys_manager.spend_spendable_outputs(
@@ -351,7 +354,7 @@ where
 	L::Target: Logger,
 {
 	fn filtered_block_connected(
-		&self, header: &BlockHeader, txdata: &chain::transaction::TransactionData, height: u32,
+		&self, header: &Header, txdata: &chain::transaction::TransactionData, height: u32,
 	) {
 		{
 			let best_block = self.best_block.lock().unwrap();
@@ -365,7 +368,7 @@ where
 		self.best_block_updated(header, height);
 	}
 
-	fn block_disconnected(&self, header: &BlockHeader, height: u32) {
+	fn block_disconnected(&self, header: &Header, height: u32) {
 		let new_height = height - 1;
 		{
 			let mut best_block = self.best_block.lock().unwrap();
@@ -399,7 +402,7 @@ where
 	L::Target: Logger,
 {
 	fn transactions_confirmed(
-		&self, header: &BlockHeader, txdata: &chain::transaction::TransactionData, height: u32,
+		&self, header: &Header, txdata: &chain::transaction::TransactionData, height: u32,
 	) {
 		let mut locked_outputs = self.outputs.lock().unwrap();
 		for (_, tx) in txdata {
@@ -438,20 +441,26 @@ where
 		);
 	}
 
-	fn best_block_updated(&self, header: &BlockHeader, height: u32) {
+	fn best_block_updated(&self, header: &Header, height: u32) {
 		*self.best_block.lock().unwrap() = BestBlock::new(header.block_hash(), height);
 		self.prune_confirmed_outputs();
 		self.rebroadcast_if_necessary();
 	}
 
-	fn get_relevant_txids(&self) -> Vec<(Txid, Option<BlockHash>)> {
+	fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<BlockHash>)> {
 		let locked_outputs = self.outputs.lock().unwrap();
 		locked_outputs
 			.iter()
 			.filter_map(|o| {
 				if let Some(confirmation_hash) = o.confirmation_hash {
-					if let Some(latest_spending_tx) = o.latest_spending_tx.as_ref() {
-						return Some((latest_spending_tx.txid(), Some(confirmation_hash)));
+					if let Some(confirmation_height) = o.confirmation_height {
+						if let Some(latest_spending_tx) = o.latest_spending_tx.as_ref() {
+							return Some((
+								latest_spending_tx.txid(),
+								confirmation_height,
+								Some(confirmation_hash),
+							));
+						}
 					}
 				}
 

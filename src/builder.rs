@@ -9,8 +9,8 @@ use crate::peer_store::PeerStore;
 use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
-	OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, Network,
+	NetworkGraph, OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::LogLevel;
@@ -46,8 +46,6 @@ use bdk::bitcoin::secp256k1::Secp256k1;
 use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::database::SqliteDatabase;
 use bdk::template::Bip84;
-
-use bitcoin::Network;
 
 use bip39::Mnemonic;
 
@@ -436,7 +434,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	logger: Arc<FilesystemLogger>, kv_store: Arc<K>,
 ) -> Result<Node<K>, BuildError> {
 	// Initialize the on-chain wallet and chain access
-	let xprv = bitcoin::util::bip32::ExtendedPrivKey::new_master(config.network, &seed_bytes)
+	let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
 		.map_err(|e| {
 			log_error!(logger, "Failed to derive master secret: {}", e);
 			BuildError::InvalidSeedBytes
@@ -445,7 +443,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let wallet_name = bdk::wallet::wallet_name_from_descriptor(
 		Bip84(xprv, bdk::KeychainKind::External),
 		Some(Bip84(xprv, bdk::KeychainKind::Internal)),
-		config.network,
+		config.network.into(),
 		&Secp256k1::new(),
 	)
 	.map_err(|e| {
@@ -459,7 +457,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let bdk_wallet = bdk::Wallet::new(
 		Bip84(xprv, bdk::KeychainKind::External),
 		Some(Bip84(xprv, bdk::KeychainKind::Internal)),
-		config.network,
+		config.network.into(),
 		database,
 	)
 	.map_err(|e| {
@@ -537,7 +535,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			Ok(graph) => Arc::new(graph),
 			Err(e) => {
 				if e.kind() == std::io::ErrorKind::NotFound {
-					Arc::new(NetworkGraph::new(config.network, Arc::clone(&logger)))
+					Arc::new(NetworkGraph::new(config.network.into(), Arc::clone(&logger)))
 				} else {
 					return Err(BuildError::ReadFailed);
 				}
@@ -629,10 +627,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		} else {
 			// We're starting a fresh node.
 			let genesis_block_hash =
-				bitcoin::blockdata::constants::genesis_block(config.network).block_hash();
+				bitcoin::blockdata::constants::genesis_block(config.network.into()).block_hash();
 
 			let chain_params = ChainParameters {
-				network: config.network,
+				network: config.network.into(),
 				best_block: BestBlock::new(genesis_block_hash, 0),
 			};
 			channelmanager::ChannelManager::new(

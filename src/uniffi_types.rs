@@ -42,7 +42,7 @@ impl UniffiCustomTypeConverter for Address {
 
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
 		if let Ok(addr) = Address::from_str(&val) {
-			return Ok(addr);
+			return Ok(addr.assume_checked());
 		}
 
 		Err(Error::InvalidAddress.into())
@@ -76,7 +76,7 @@ impl UniffiCustomTypeConverter for PaymentHash {
 
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
 		if let Ok(hash) = Sha256::from_str(&val) {
-			Ok(PaymentHash(hash.into_inner()))
+			Ok(PaymentHash(hash.to_byte_array()))
 		} else {
 			Err(Error::InvalidPaymentHash.into())
 		}

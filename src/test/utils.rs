@@ -1,16 +1,16 @@
 use crate::builder::NodeBuilder;
 use crate::io::test_utils::TestSyncStore;
-use crate::{Config, Event, Node};
+use crate::{Config, Event, Network, Node};
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::logger::{Level, Logger, Record};
 use lightning::util::persist::KVStore;
 
-use bitcoin::{Address, Amount, Network, OutPoint, Txid};
+use bitcoin::{Address, Amount, OutPoint, Txid};
 
 use bitcoind::bitcoincore_rpc::RpcApi;
 use electrsd::bitcoind::bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
+use electrsd::electrum_client::ElectrumApi;
 use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
-use electrum_client::ElectrumApi;
 
 use regex;
 
@@ -119,7 +119,7 @@ impl TestLogger {
 }
 
 impl Logger for TestLogger {
-	fn log(&self, record: &Record) {
+	fn log(&self, record: Record) {
 		*self
 			.lines
 			.lock()
@@ -238,6 +238,8 @@ pub fn generate_blocks_and_wait(bitcoind: &BitcoinD, electrsd: &ElectrsD, num: u
 	let address = bitcoind
 		.client
 		.get_new_address(Some("test"), Some(AddressType::Legacy))
+		.expect("failed to get new address")
+		.require_network(bitcoin::Network::Regtest)
 		.expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.client.generate_to_address(num as u64, &address);

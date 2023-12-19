@@ -1,10 +1,10 @@
 #![cfg(cln_test)]
 
-use ldk_node::{Config, LogLevel};
+use ldk_node::{Config, LogLevel, Network};
 
 use lightning::ln::msgs::SocketAddress;
 
-use bitcoin::{Address, Amount, Network, OutPoint, Txid};
+use bitcoin::{Address, Amount, OutPoint, Txid};
 
 use bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
 use bitcoincore_rpc::Client as BitcoindClient;
@@ -125,6 +125,8 @@ pub(crate) fn generate_blocks_and_wait(
 	let cur_height = bitcoind.get_block_count().expect("failed to get current block height");
 	let address = bitcoind
 		.get_new_address(Some("test"), Some(AddressType::Legacy))
+		.expect("failed to get new address")
+		.require_network(bitcoin::Network::Regtest)
 		.expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num as u64, &address);

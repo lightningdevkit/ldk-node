@@ -2,7 +2,7 @@ use crate::builder::NodeBuilder;
 use crate::io::test_utils::TestSyncStore;
 use crate::test::utils::*;
 use crate::test::utils::{expect_channel_pending_event, expect_event, open_channel, random_config};
-use crate::{Error, Event, Node, PaymentDirection, PaymentStatus};
+use crate::{Error, Event, Network, Node, PaymentDirection, PaymentStatus};
 
 use bitcoin::Amount;
 use electrsd::bitcoind::BitcoinD;
@@ -409,7 +409,7 @@ fn multi_hop_sending() {
 #[test]
 fn connect_to_public_testnet_esplora() {
 	let mut config = random_config();
-	config.network = bitcoin::Network::Testnet;
+	config.network = Network::Testnet;
 	let mut builder = NodeBuilder::from_config(config);
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 	let node = builder.build().unwrap();
