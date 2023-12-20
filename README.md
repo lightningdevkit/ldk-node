@@ -12,7 +12,7 @@ The primary abstraction of the library is the [`Node`][api_docs_node], which can
 
 ```rust
 use ldk_node::{Builder, Network};
-use ldk_node::lightning_invoice::Invoice;
+use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use std::str::FromStr;
@@ -39,7 +39,7 @@ fn main() {
 	println!("EVENT: {:?}", event);
 	node.event_handled();
 
-	let invoice = Invoice::from_str("INVOICE_STR").unwrap();
+	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
 	node.send_payment(&invoice).unwrap();
 
 	node.stop().unwrap();
