@@ -1,4 +1,4 @@
-name: Continuous Integration Checks
+name: CI Checks - Rust Tests
 
 on: [push, pull_request]
 
@@ -46,13 +46,18 @@ jobs:
           cargo update -p proptest --precise "1.2.0" --verbose # proptest 1.3.0 requires rustc 1.64.0
           cargo update -p reqwest --precise "0.11.20" --verbose # reqwest 0.11.21 broke 1.63.0 MSRV
           cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
-          cargo update -p jobserver --precise "0.1.26" --verbose # jobserver 0.1.27 requires rustc 1.66.0
-          cargo update -p zstd-sys --precise "2.0.8+zstd.1.5.5" --verbose # zstd-sys 2.0.9+zstd.1.5.5 requires rustc 1.64.0
-          cargo update -p petgraph --precise "0.6.3" --verbose # petgraph v0.6.4, requires rustc 1.64 or newer
           cargo update -p home --precise "0.5.5" --verbose # home v0.5.9, requires rustc 1.70 or newer
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+      - name: Download bitcoind/electrs and set environment variables
+        if: "matrix.platform != 'windows-latest'"
+        run: |
+          source ./scripts/download_bitcoind_electrs.sh
+          cp "$BITCOIND_EXE" "$HOME"/bitcoind
+          cp "$ELECTRS_EXE" "$HOME"/electrs
+          echo "BITCOIND_EXE=$HOME/bitcoind" >> "$GITHUB_ENV"
+          echo "ELECTRS_EXE=$HOME/electrs" >> "$GITHUB_ENV"
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
@@ -69,10 +74,12 @@ jobs:
         run: cargo check --release --features uniffi --verbose --color always
       - name: Test on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest'"
-        run: cargo test
+        run: |
+          RUSTFLAGS="--cfg no_download" cargo test
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
-        run: cargo test --features uniffi
+        run: |
+          RUSTFLAGS="--cfg no_download" cargo test --features uniffi
       - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check

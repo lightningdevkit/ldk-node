@@ -1,4 +1,4 @@
-name: Continuous Integration Checks - Python
+name: CI Checks - Python Tests
 
 on: [push, pull_request]
 

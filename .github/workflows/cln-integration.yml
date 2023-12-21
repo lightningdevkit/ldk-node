@@ -1,4 +1,4 @@
-name: Continuous Integration Checks - CLN
+name: CI Checks - CLN Integration Tests
 
 on: [push, pull_request]
 

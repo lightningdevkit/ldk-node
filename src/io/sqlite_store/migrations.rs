@@ -69,8 +69,7 @@ pub(super) fn migrate_schema(
 #[cfg(test)]
 mod tests {
 	use crate::io::sqlite_store::SqliteStore;
-	use crate::io::test_utils::do_read_write_remove_list_persist;
-	use crate::test::utils::random_storage_path;
+	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
 
 	use lightning::util::persist::KVStore;
 

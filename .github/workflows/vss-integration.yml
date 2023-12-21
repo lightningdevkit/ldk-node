@@ -1,4 +1,4 @@
-name: VSS Integration Test
+name: CI Checks - VSS Integration Tests
 
 on: [push, pull_request]
 
@@ -74,8 +74,8 @@ jobs:
         run: |
           cd ldk-node
           export TEST_VSS_BASE_URL="http://localhost:8080/vss"
-          RUSTFLAGS="--cfg=vss_test --cfg=vss" cargo build --verbose --color always
-          RUSTFLAGS="--cfg=vss_test --cfg=vss" cargo test -- --nocapture
+          RUSTFLAGS="--cfg vss_test --cfg vss" cargo build --verbose --color always
+          RUSTFLAGS="--cfg vss_test --cfg vss" cargo test --test integration_tests_vss
 
       - name: Cleanup
         run: |
