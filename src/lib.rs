@@ -813,6 +813,15 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	/// Returns the next event in the event queue.
 	///
+	/// Will asynchronously poll the event queue until the next event is ready.
+	///
+	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	pub async fn next_event_async(&self) -> Event {
+		self.event_queue.next_event_async().await
+	}
+
+	/// Returns the next event in the event queue.
+	///
 	/// Will block the current thread until the next event is available.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].

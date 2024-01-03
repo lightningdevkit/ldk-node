@@ -26,6 +26,8 @@ use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
+use core::future::Future;
+use core::task::{Poll, Waker};
 use rand::{thread_rng, Rng};
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -125,7 +127,8 @@ pub struct EventQueue<K: KVStore + Sync + Send, L: Deref>
 where
 	L::Target: Logger,
 {
-	queue: Mutex<VecDeque<Event>>,
+	queue: Arc<Mutex<VecDeque<Event>>>,
+	waker: Arc<Mutex<Option<Waker>>>,
 	notifier: Condvar,
 	kv_store: Arc<K>,
 	logger: L,
@@ -136,9 +139,10 @@ where
 	L::Target: Logger,
 {
 	pub(crate) fn new(kv_store: Arc<K>, logger: L) -> Self {
-		let queue: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
+		let queue = Arc::new(Mutex::new(VecDeque::new()));
+		let waker = Arc::new(Mutex::new(None));
 		let notifier = Condvar::new();
-		Self { queue, notifier, kv_store, logger }
+		Self { queue, waker, notifier, kv_store, logger }
 	}
 
 	pub(crate) fn add_event(&self, event: Event) -> Result<(), Error> {
@@ -149,12 +153,20 @@ where
 		}
 
 		self.notifier.notify_one();
+
+		if let Some(waker) = self.waker.lock().unwrap().take() {
+			waker.wake();
+		}
 		Ok(())
 	}
 
 	pub(crate) fn next_event(&self) -> Option<Event> {
 		let locked_queue = self.queue.lock().unwrap();
 		locked_queue.front().map(|e| e.clone())
+	}
+
+	pub(crate) async fn next_event_async(&self) -> Event {
+		EventFuture { event_queue: Arc::clone(&self.queue), waker: Arc::clone(&self.waker) }.await
 	}
 
 	pub(crate) fn wait_next_event(&self) -> Event {
@@ -170,6 +182,10 @@ where
 			self.persist_queue(&locked_queue)?;
 		}
 		self.notifier.notify_one();
+
+		if let Some(waker) = self.waker.lock().unwrap().take() {
+			waker.wake();
+		}
 		Ok(())
 	}
 
@@ -207,9 +223,10 @@ where
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let (kv_store, logger) = args;
 		let read_queue: EventQueueDeserWrapper = Readable::read(reader)?;
-		let queue: Mutex<VecDeque<Event>> = Mutex::new(read_queue.0);
+		let queue = Arc::new(Mutex::new(read_queue.0));
+		let waker = Arc::new(Mutex::new(None));
 		let notifier = Condvar::new();
-		Ok(Self { queue, notifier, kv_store, logger })
+		Ok(Self { queue, waker, notifier, kv_store, logger })
 	}
 }
 
@@ -237,6 +254,26 @@ impl Writeable for EventQueueSerWrapper<'_> {
 			e.write(writer)?;
 		}
 		Ok(())
+	}
+}
+
+struct EventFuture {
+	event_queue: Arc<Mutex<VecDeque<Event>>>,
+	waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl Future for EventFuture {
+	type Output = Event;
+
+	fn poll(
+		self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>,
+	) -> core::task::Poll<Self::Output> {
+		if let Some(event) = self.event_queue.lock().unwrap().front() {
+			Poll::Ready(event.clone())
+		} else {
+			*self.waker.lock().unwrap() = Some(cx.waker().clone());
+			Poll::Pending
+		}
 	}
 }
 
