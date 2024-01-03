@@ -833,12 +833,14 @@ where
 mod tests {
 	use super::*;
 	use lightning::util::test_utils::{TestLogger, TestStore};
+	use std::sync::atomic::{AtomicU16, Ordering};
+	use std::time::Duration;
 
-	#[test]
-	fn event_queue_persistence() {
+	#[tokio::test]
+	async fn event_queue_persistence() {
 		let store = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
-		let event_queue = EventQueue::new(Arc::clone(&store), Arc::clone(&logger));
+		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
 
 		let expected_event = Event::ChannelReady {
@@ -851,6 +853,7 @@ mod tests {
 		// Check we get the expected event and that it is returned until we mark it handled.
 		for _ in 0..5 {
 			assert_eq!(event_queue.wait_next_event(), expected_event);
+			assert_eq!(event_queue.next_event_async().await, expected_event);
 			assert_eq!(event_queue.next_event(), Some(expected_event.clone()));
 		}
 
@@ -867,6 +870,98 @@ mod tests {
 		assert_eq!(deser_event_queue.wait_next_event(), expected_event);
 
 		event_queue.event_handled().unwrap();
+		assert_eq!(event_queue.next_event(), None);
+	}
+
+	#[tokio::test]
+	async fn event_queue_concurrency() {
+		let store = Arc::new(TestStore::new(false));
+		let logger = Arc::new(TestLogger::new());
+		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
+		assert_eq!(event_queue.next_event(), None);
+
+		let expected_event = Event::ChannelReady {
+			channel_id: ChannelId([23u8; 32]),
+			user_channel_id: UserChannelId(2323),
+			counterparty_node_id: None,
+		};
+
+		// Check `next_event_async` won't return if the queue is empty and always rather timeout.
+		tokio::select! {
+			_ = tokio::time::sleep(Duration::from_secs(1)) => {
+				// Timeout
+			}
+			_ = event_queue.next_event_async() => {
+				panic!();
+			}
+		}
+
+		assert_eq!(event_queue.next_event(), None);
+		// Check we get the expected number of events when polling/enqueuing concurrently.
+		let enqueued_events = AtomicU16::new(0);
+		let received_events = AtomicU16::new(0);
+		let mut delayed_enqueue = false;
+
+		for _ in 0..25 {
+			event_queue.add_event(expected_event.clone()).unwrap();
+			enqueued_events.fetch_add(1, Ordering::SeqCst);
+		}
+
+		loop {
+			tokio::select! {
+				_ = tokio::time::sleep(Duration::from_millis(10)), if !delayed_enqueue => {
+					event_queue.add_event(expected_event.clone()).unwrap();
+					enqueued_events.fetch_add(1, Ordering::SeqCst);
+					delayed_enqueue = true;
+				}
+				e = event_queue.next_event_async() => {
+					assert_eq!(e, expected_event);
+					event_queue.event_handled().unwrap();
+					received_events.fetch_add(1, Ordering::SeqCst);
+
+					event_queue.add_event(expected_event.clone()).unwrap();
+					enqueued_events.fetch_add(1, Ordering::SeqCst);
+				}
+				e = event_queue.next_event_async() => {
+					assert_eq!(e, expected_event);
+					event_queue.event_handled().unwrap();
+					received_events.fetch_add(1, Ordering::SeqCst);
+				}
+			}
+
+			if delayed_enqueue
+				&& received_events.load(Ordering::SeqCst) == enqueued_events.load(Ordering::SeqCst)
+			{
+				break;
+			}
+		}
+		assert_eq!(event_queue.next_event(), None);
+
+		// Check we operate correctly, even when mixing and matching blocking and async API calls.
+		let (tx, mut rx) = tokio::sync::watch::channel(());
+		let thread_queue = Arc::clone(&event_queue);
+		let thread_event = expected_event.clone();
+		std::thread::spawn(move || {
+			let e = thread_queue.wait_next_event();
+			assert_eq!(e, thread_event);
+			thread_queue.event_handled().unwrap();
+			tx.send(()).unwrap();
+		});
+
+		let thread_queue = Arc::clone(&event_queue);
+		let thread_event = expected_event.clone();
+		std::thread::spawn(move || {
+			// Sleep a bit before we enqueue the events everybody is waiting for.
+			std::thread::sleep(Duration::from_millis(20));
+			thread_queue.add_event(thread_event.clone()).unwrap();
+			thread_queue.add_event(thread_event.clone()).unwrap();
+		});
+
+		let e = event_queue.next_event_async().await;
+		assert_eq!(e, expected_event.clone());
+		event_queue.event_handled().unwrap();
+
+		rx.changed().await.unwrap();
 		assert_eq!(event_queue.next_event(), None);
 	}
 }
