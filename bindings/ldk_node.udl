@@ -67,7 +67,7 @@ interface LDKNode {
 	[Throws=NodeError]
 	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
-	void update_channel_config([ByRef]ChannelId channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
+	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
 	[Throws=NodeError]

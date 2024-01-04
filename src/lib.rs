@@ -130,7 +130,10 @@ use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 use lightning::chain::Confirm;
 use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
+use lightning::ln::{PaymentHash, PaymentPreimage};
+
+#[cfg(feature = "uniffi")]
+use lightning::ln::ChannelId;
 use lightning::sign::EntropySource;
 
 use lightning::util::persist::KVStore;
@@ -1131,16 +1134,24 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	/// Update the config for a previously opened channel.
 	pub fn update_channel_config(
-		&self, channel_id: &ChannelId, counterparty_node_id: PublicKey,
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		channel_config: Arc<ChannelConfig>,
 	) -> Result<(), Error> {
-		self.channel_manager
-			.update_channel_config(
-				&counterparty_node_id,
-				&[*channel_id],
-				&(*channel_config).clone().into(),
-			)
-			.map_err(|_| Error::ChannelConfigUpdateFailed)
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			self.channel_manager
+				.update_channel_config(
+					&counterparty_node_id,
+					&[channel_details.channel_id],
+					&(*channel_config).clone().into(),
+				)
+				.map_err(|_| Error::ChannelConfigUpdateFailed)
+		} else {
+			Err(Error::ChannelConfigUpdateFailed)
+		}
 	}
 
 	/// Send a payment given an invoice.
