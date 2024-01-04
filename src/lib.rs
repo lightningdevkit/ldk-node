@@ -969,12 +969,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
-	/// Returns a temporary channel id.
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn connect_open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
 		announce_channel: bool,
-	) -> Result<(), Error> {
+	) -> Result<UserChannelId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -1031,7 +1031,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					peer_info.node_id
 				);
 				self.peer_store.add_peer(peer_info)?;
-				Ok(())
+				Ok(UserChannelId(user_channel_id))
 			}
 			Err(e) => {
 				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
