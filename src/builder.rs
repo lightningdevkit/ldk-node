@@ -51,6 +51,8 @@ use bip39::Mnemonic;
 
 use bitcoin::BlockHash;
 
+#[cfg(any(vss, vss_test))]
+use bitcoin::bip32::ChildNumber;
 use std::convert::TryInto;
 use std::default::Default;
 use std::fmt;
@@ -285,10 +287,41 @@ impl NodeBuilder {
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store(
-		&self, url: &str, store_id: String,
+		&self, url: String, store_id: String,
 	) -> Result<Node<VssStore>, BuildError> {
-		let vss = Arc::new(VssStore::new(url, store_id));
-		self.build_with_store(vss)
+		let logger = setup_logger(&self.config)?;
+
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
+		let config = Arc::new(self.config.clone());
+
+		let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
+			.map_err(|e| {
+				log_error!(logger, "Failed to derive master secret: {}", e);
+				BuildError::InvalidSeedBytes
+			})?;
+
+		let vss_xprv = xprv
+			.ckd_priv(&Secp256k1::new(), ChildNumber::Hardened { index: 877 })
+			.map_err(|e| {
+				log_error!(logger, "Failed to derive VSS secret: {}", e);
+				BuildError::KVStoreSetupFailed
+			})?;
+
+		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
+
+		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes));
+		build_with_store_internal(
+			config,
+			self.chain_data_source_config.as_ref(),
+			self.gossip_source_config.as_ref(),
+			seed_bytes,
+			logger,
+			vss_store,
+		)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
