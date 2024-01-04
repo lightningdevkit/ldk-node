@@ -217,8 +217,8 @@ class LibraryTest {
         assert(channelReadyEvent2 is Event.ChannelReady)
         node2.eventHandled()
 
-        val channelId = when (channelReadyEvent2) {
-            is Event.ChannelReady -> channelReadyEvent2.channelId
+        val userChannelId = when (channelReadyEvent2) {
+            is Event.ChannelReady -> channelReadyEvent2.userChannelId
             else -> return
         }
 
@@ -239,7 +239,7 @@ class LibraryTest {
         assert(node1.listPayments().size == 1)
         assert(node2.listPayments().size == 1)
 
-        node2.closeChannel(channelId, nodeId1)
+        node2.closeChannel(userChannelId, nodeId1)
 
         val channelClosedEvent1 = node1.waitNextEvent()
         println("Got event: $channelClosedEvent1")

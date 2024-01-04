@@ -65,11 +65,11 @@ pub(crate) use expect_channel_pending_event;
 macro_rules! expect_channel_ready_event {
 	($node: expr, $counterparty_node_id: expr) => {{
 		match $node.wait_next_event() {
-			ref e @ Event::ChannelReady { channel_id, counterparty_node_id, .. } => {
+			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
 				$node.event_handled();
-				channel_id
+				user_channel_id
 			}
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
@@ -377,7 +377,7 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 
-	let channel_id = expect_channel_ready_event!(node_b, node_a.node_id());
+	let user_channel_id = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	println!("\nB receive_payment");
 	let invoice_amount_1_msat = 2500_000;
@@ -520,7 +520,7 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 	);
 
 	println!("\nB close_channel");
-	node_b.close_channel(&channel_id, node_a.node_id()).unwrap();
+	node_b.close_channel(&user_channel_id, node_a.node_id()).unwrap();
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 

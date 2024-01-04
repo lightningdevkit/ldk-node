@@ -1104,12 +1104,28 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	/// Close a previously opened channel.
 	pub fn close_channel(
-		&self, channel_id: &ChannelId, counterparty_node_id: PublicKey,
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.peer_store.remove_peer(&counterparty_node_id)?;
-		match self.channel_manager.close_channel(&channel_id, &counterparty_node_id) {
-			Ok(_) => Ok(()),
-			Err(_) => Err(Error::ChannelClosingFailed),
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			match self
+				.channel_manager
+				.close_channel(&channel_details.channel_id, &counterparty_node_id)
+			{
+				Ok(_) => {
+					// Check if this was the last open channel, if so, forget the peer.
+					if open_channels.len() == 1 {
+						self.peer_store.remove_peer(&counterparty_node_id)?;
+					}
+					Ok(())
+				}
+				Err(_) => Err(Error::ChannelClosingFailed),
+			}
+		} else {
+			Ok(())
 		}
 	}
 

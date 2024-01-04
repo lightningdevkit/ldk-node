@@ -88,7 +88,7 @@ fn test_cln() {
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
 	common::wait_for_tx(&electrs_client, funding_txo.txid);
 	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6);
-	let channel_id = common::expect_channel_ready_event!(node, cln_node_id);
+	let user_channel_id = common::expect_channel_ready_event!(node, cln_node_id);
 
 	// Send a payment to CLN
 	let mut rng = thread_rng();
@@ -110,7 +110,7 @@ fn test_cln() {
 	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
 	common::expect_event!(node, PaymentReceived);
 
-	node.close_channel(&channel_id, cln_node_id).unwrap();
+	node.close_channel(&user_channel_id, cln_node_id).unwrap();
 	common::expect_event!(node, ChannelClosed);
 	node.stop().unwrap();
 }
