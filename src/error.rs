@@ -21,7 +21,7 @@ pub enum Error {
 	ChannelCreationFailed,
 	/// A channel could not be closed.
 	ChannelClosingFailed,
-	/// A channel config could not be updated.
+	/// A channel configuration could not be updated.
 	ChannelConfigUpdateFailed,
 	/// Persistence failed.
 	PersistenceFailed,
@@ -47,7 +47,7 @@ pub enum Error {
 	InvalidSecretKey,
 	/// The given payment hash is invalid.
 	InvalidPaymentHash,
-	/// The given payment preimage is invalid.
+	/// The given payment pre-image is invalid.
 	InvalidPaymentPreimage,
 	/// The given payment secret is invalid.
 	InvalidPaymentSecret,
@@ -59,9 +59,9 @@ pub enum Error {
 	InvalidChannelId,
 	/// The given network is invalid.
 	InvalidNetwork,
-	/// A payment with the given hash has already been intiated.
+	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
-	/// There are insufficient funds to complete the given operation.
+	/// The available funds are insufficient to complete the given operation.
 	InsufficientFunds,
 }
 
@@ -104,7 +104,7 @@ impl fmt::Display for Error {
 				write!(f, "A payment with the given hash has already been initiated.")
 			}
 			Self::InsufficientFunds => {
-				write!(f, "There are insufficient funds to complete the given operation.")
+				write!(f, "The available funds are insufficient to complete the given operation.")
 			}
 		}
 	}
