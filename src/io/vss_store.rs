@@ -3,6 +3,7 @@ use std::io;
 use std::io::ErrorKind;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
+use std::time::Duration;
 
 use crate::io::utils::check_namespace_key_validity;
 use lightning::util::persist::KVStore;
@@ -15,11 +16,22 @@ use vss_client::types::{
 	DeleteObjectRequest, GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest,
 	Storable,
 };
+use vss_client::util::retry::{
+	ExponentialBackoffRetryPolicy, FilteredRetryPolicy, JitteredRetryPolicy,
+	MaxAttemptsRetryPolicy, MaxTotalDelayRetryPolicy, RetryPolicy,
+};
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
+
+type CustomRetryPolicy = FilteredRetryPolicy<
+	JitteredRetryPolicy<
+		MaxTotalDelayRetryPolicy<MaxAttemptsRetryPolicy<ExponentialBackoffRetryPolicy<VssError>>>,
+	>,
+	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
+>;
 
 /// A [`KVStore`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
-	client: VssClient,
+	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
 	runtime: Runtime,
 	storable_builder: StorableBuilder<RandEntropySource>,
@@ -27,9 +39,22 @@ pub struct VssStore {
 
 impl VssStore {
 	pub(crate) fn new(base_url: String, store_id: String, data_encryption_key: [u8; 32]) -> Self {
-		let client = VssClient::new(base_url.as_str());
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
+		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(100))
+			.with_max_attempts(3)
+			.with_max_total_delay(Duration::from_secs(2))
+			.with_max_jitter(Duration::from_millis(50))
+			.skip_retry_on_error(Box::new(|e: &VssError| {
+				matches!(
+					e,
+					VssError::NoSuchKeyError(..)
+						| VssError::InvalidRequestError(..)
+						| VssError::ConflictError(..)
+				)
+			}) as _);
+
+		let client = VssClient::new(&base_url, retry_policy);
 		Self { client, store_id, runtime, storable_builder }
 	}
 
