@@ -23,7 +23,7 @@ use bitcoin::bech32::u5;
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
-use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, Signing};
+use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
 use std::ops::Deref;
@@ -297,6 +297,10 @@ where
 	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
 		message_signing::sign(msg, &self.inner.get_node_secret_key())
 			.or(Err(Error::MessageSigningFailed))
+	}
+
+	pub fn get_node_secret_key(&self) -> SecretKey {
+		self.inner.get_node_secret_key()
 	}
 
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {

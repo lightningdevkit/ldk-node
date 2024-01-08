@@ -694,6 +694,12 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		// generating the events otherwise.
 		user_config.manually_accept_inbound_channels = true;
 	}
+
+	if liquidity_source_config.is_some() {
+		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
+		// check that they don't take too much before claiming.
+		user_config.channel_config.accept_underpaying_htlcs = true;
+	}
 	let channel_manager = {
 		if let Ok(res) = kv_store.read(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,

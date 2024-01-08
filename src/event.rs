@@ -395,7 +395,7 @@ where
 				via_user_channel_id: _,
 				claim_deadline: _,
 				onion_fields: _,
-				counterparty_skimmed_fee_msat: _,
+				counterparty_skimmed_fee_msat,
 			} => {
 				if let Some(info) = self.payment_store.get(&payment_hash) {
 					if info.status == PaymentStatus::Succeeded {
@@ -404,6 +404,29 @@ where
 							"Refused duplicate inbound payment from payment hash {} of {}msat",
 							hex_utils::to_string(&payment_hash.0),
 							amount_msat,
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+
+						let update = PaymentDetailsUpdate {
+							status: Some(PaymentStatus::Failed),
+							..PaymentDetailsUpdate::new(payment_hash)
+						};
+						self.payment_store.update(&update).unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to access payment store: {}", e);
+							panic!("Failed to access payment store");
+						});
+						return;
+					}
+
+					let max_total_opening_fee_msat =
+						info.lsp_fee_limits.and_then(|l| l.max_total_opening_fee_msat).unwrap_or(0);
+					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
+						log_info!(
+							self.logger,
+							"Refusing inbound payment with hash {} as the counterparty-withheld fee of {}msat exceeds our limit of {}msat",
+							hex_utils::to_string(&payment_hash.0),
+							counterparty_skimmed_fee_msat,
+							max_total_opening_fee_msat,
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
@@ -510,6 +533,7 @@ where
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
+							lsp_fee_limits: None,
 						};
 
 						match self.payment_store.insert(payment) {
