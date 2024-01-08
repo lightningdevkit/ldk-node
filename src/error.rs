@@ -63,6 +63,8 @@ pub enum Error {
 	DuplicatePayment,
 	/// The available funds are insufficient to complete the given operation.
 	InsufficientFunds,
+	/// The given operation failed due to the required liquidity source being unavailable.
+	LiquiditySourceUnavailable,
 }
 
 impl fmt::Display for Error {
@@ -105,6 +107,9 @@ impl fmt::Display for Error {
 			}
 			Self::InsufficientFunds => {
 				write!(f, "The available funds are insufficient to complete the given operation.")
+			}
+			Self::LiquiditySourceUnavailable => {
+				write!(f, "The given operation failed due to the required liquidity source being unavailable.")
 			}
 		}
 	}
