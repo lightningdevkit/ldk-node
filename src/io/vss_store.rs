@@ -6,25 +6,31 @@ use std::panic::RefUnwindSafe;
 
 use crate::io::utils::check_namespace_key_validity;
 use lightning::util::persist::KVStore;
+use prost::Message;
+use rand::RngCore;
 use tokio::runtime::Runtime;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
 use vss_client::types::{
 	DeleteObjectRequest, GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest,
+	Storable,
 };
+use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 
 /// A [`KVStore`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
 	client: VssClient,
 	store_id: String,
 	runtime: Runtime,
+	storable_builder: StorableBuilder<RandEntropySource>,
 }
 
 impl VssStore {
-	pub(crate) fn new(base_url: &str, store_id: String) -> Self {
-		let client = VssClient::new(base_url);
+	pub(crate) fn new(base_url: String, store_id: String, data_encryption_key: [u8; 32]) -> Self {
+		let client = VssClient::new(base_url.as_str());
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-		Self { client, store_id, runtime }
+		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
+		Self { client, store_id, runtime, storable_builder }
 	}
 
 	fn build_key(
@@ -99,20 +105,25 @@ impl KVStore for VssStore {
 						_ => Error::new(ErrorKind::Other, msg),
 					}
 				})?;
-		Ok(resp.value.unwrap().value)
+		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
+		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
+		let storable = Storable::decode(&resp.value.unwrap().value[..])?;
+		Ok(self.storable_builder.deconstruct(storable)?.0)
 	}
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
+		let version = -1;
+		let storable = self.storable_builder.build(buf.to_vec(), version);
 		let request = PutObjectRequest {
 			store_id: self.store_id.clone(),
 			global_version: None,
 			transaction_items: vec![KeyValue {
 				key: self.build_key(primary_namespace, secondary_namespace, key)?,
-				version: -1,
-				value: buf.to_vec(),
+				version,
+				value: storable.encode_to_vec(),
 			}],
 			delete_items: vec![],
 		};
@@ -171,6 +182,15 @@ impl KVStore for VssStore {
 	}
 }
 
+/// A source for generating entropy/randomness using [`rand`].
+pub(crate) struct RandEntropySource;
+
+impl EntropySource for RandEntropySource {
+	fn fill_bytes(&self, buffer: &mut [u8]) {
+		rand::thread_rng().fill_bytes(buffer);
+	}
+}
+
 #[cfg(test)]
 impl RefUnwindSafe for VssStore {}
 
@@ -180,14 +200,16 @@ mod tests {
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
 	use rand::distributions::Alphanumeric;
-	use rand::{thread_rng, Rng};
+	use rand::{thread_rng, Rng, RngCore};
 
 	#[test]
 	fn read_write_remove_list_persist() {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = thread_rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let vss_store = VssStore::new(&vss_base_url, rand_store_id);
+		let mut data_encryption_key = [0u8; 32];
+		rng.fill_bytes(&mut data_encryption_key);
+		let vss_store = VssStore::new(vss_base_url, rand_store_id, data_encryption_key);
 
 		do_read_write_remove_list_persist(&vss_store);
 	}
