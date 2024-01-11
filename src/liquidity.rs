@@ -249,6 +249,49 @@ where
 		Ok((invoice, min_total_fee_msat))
 	}
 
+	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
+		&self, description: &str, expiry_secs: u32,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<(Bolt11Invoice, u64), Error> {
+		let fee_response = self.lsps2_request_opening_fee_params().await?;
+
+		let (min_prop_fee_ppm_msat, min_opening_params) = fee_response
+			.opening_fee_params_menu
+			.into_iter()
+			.map(|params| (params.proportional as u64, params))
+			.min_by_key(|p| p.0)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to handle response from liquidity service",);
+				Error::LiquidityRequestFailed
+			})?;
+
+		if let Some(max_proportional_lsp_fee_limit_ppm_msat) =
+			max_proportional_lsp_fee_limit_ppm_msat
+		{
+			if min_prop_fee_ppm_msat > max_proportional_lsp_fee_limit_ppm_msat {
+				log_error!(self.logger,
+					"Failed to request inbound JIT channel as LSP's requested proportional opening fee of {} ppm msat exceeds our fee limit of {} ppm msat",
+					min_prop_fee_ppm_msat,
+					max_proportional_lsp_fee_limit_ppm_msat
+				);
+				return Err(Error::LiquidityFeeTooHigh);
+			}
+		}
+
+		log_debug!(
+			self.logger,
+			"Choosing cheapest liquidity offer, will pay {}ppm msat in proportional LSP fees",
+			min_prop_fee_ppm_msat
+		);
+
+		let buy_response = self.lsps2_send_buy_request(None, min_opening_params).await?;
+		let invoice =
+			self.lsps2_create_jit_invoice(buy_response, None, description, expiry_secs)?;
+
+		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
+		Ok((invoice, min_prop_fee_ppm_msat))
+	}
+
 	async fn lsps2_request_opening_fee_params(&self) -> Result<LSPS2FeeResponse, Error> {
 		let lsps2_service = self.lsps2_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 

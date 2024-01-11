@@ -92,10 +92,14 @@ pub struct LSPFeeLimits {
 	/// The maximal total amount we allow any configured LSP withhold from us when forwarding the
 	/// payment.
 	pub max_total_opening_fee_msat: Option<u64>,
+	/// The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+	/// LSP withhold from us when forwarding the payment.
+	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
 }
 
 impl_writeable_tlv_based!(LSPFeeLimits, {
 	(0, max_total_opening_fee_msat, option),
+	(2, max_proportional_opening_fee_ppm_msat, option),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]

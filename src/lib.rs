@@ -1623,12 +1623,38 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
+			None,
+		)
+	}
+
+	/// Returns a payable invoice that can be used to request a variable amount payment (also known
+	/// as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+	///
+	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+	/// to us, supplying just-in-time inbound liquidity.
+	///
+	/// If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
+	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
+	/// We'll use its cheapest offer otherwise.
+	///
+	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	pub fn receive_variable_amount_payment_via_jit_channel(
+		&self, description: &str, expiry_secs: u32,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<Bolt11Invoice, Error> {
+		self.receive_payment_via_jit_channel_inner(
+			None,
+			description,
+			expiry_secs,
+			None,
+			max_proportional_lsp_fee_limit_ppm_msat,
 		)
 	}
 
 	fn receive_payment_via_jit_channel_inner(
 		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
@@ -1658,29 +1684,38 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
 
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let (invoice, lsp_total_opening_fee) = tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				if let Some(amount_msat) = amount_msat {
-					liquidity_source
-						.lsps2_receive_to_jit_channel(
-							amount_msat,
-							description,
-							expiry_secs,
-							max_total_lsp_fee_limit_msat,
-						)
-						.await
-						.map(|(invoice, total_fee)| (invoice, Some(total_fee)))
-				} else {
-					// TODO: will be implemented in the next commit
-					Err(Error::LiquidityRequestFailed)
-				}
-			})
-		})?;
+		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
+			tokio::task::block_in_place(move || {
+				runtime.block_on(async move {
+					if let Some(amount_msat) = amount_msat {
+						liquidity_source
+							.lsps2_receive_to_jit_channel(
+								amount_msat,
+								description,
+								expiry_secs,
+								max_total_lsp_fee_limit_msat,
+							)
+							.await
+							.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
+					} else {
+						liquidity_source
+							.lsps2_receive_variable_amount_to_jit_channel(
+								description,
+								expiry_secs,
+								max_proportional_lsp_fee_limit_ppm_msat,
+							)
+							.await
+							.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
+					}
+				})
+			})?;
 
 		// Register payment in payment store.
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		let lsp_fee_limits =
-			Some(LSPFeeLimits { max_total_opening_fee_msat: lsp_total_opening_fee });
+		let lsp_fee_limits = Some(LSPFeeLimits {
+			max_total_opening_fee_msat: lsp_total_opening_fee,
+			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
+		});
 		let payment = PaymentDetails {
 			hash: payment_hash,
 			preimage: None,

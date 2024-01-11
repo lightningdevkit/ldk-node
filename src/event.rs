@@ -23,12 +23,16 @@ use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
+use lightning_liquidity::lsps2::utils::compute_opening_fee;
+
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
+
+use rand::{thread_rng, Rng};
+
 use core::future::Future;
 use core::task::{Poll, Waker};
-use rand::{thread_rng, Rng};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -418,8 +422,18 @@ where
 						return;
 					}
 
-					let max_total_opening_fee_msat =
-						info.lsp_fee_limits.and_then(|l| l.max_total_opening_fee_msat).unwrap_or(0);
+					let max_total_opening_fee_msat = info
+						.lsp_fee_limits
+						.and_then(|l| {
+							l.max_total_opening_fee_msat.or_else(|| {
+								l.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
+									// If it's a variable amount payment, compute the actual fee.
+									compute_opening_fee(amount_msat, 0, max_prop_fee)
+								})
+							})
+						})
+						.unwrap_or(0);
+
 					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
 						log_info!(
 							self.logger,
