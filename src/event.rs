@@ -480,7 +480,7 @@ where
 							Ok(true) => {
 								log_error!(
 									self.logger,
-									"Spontaneous payment with hash {} was previosly known",
+									"Spontaneous payment with hash {} was previously known",
 									hex_utils::to_string(&payment_hash.0)
 								);
 								debug_assert!(false);
