@@ -60,7 +60,7 @@ impl_writeable_tlv_based_enum!(PaymentDirection,
 pub enum PaymentStatus {
 	/// The payment is still pending.
 	Pending,
-	/// The payment suceeded.
+	/// The payment succeeded.
 	Succeeded,
 	/// The payment failed.
 	Failed,
