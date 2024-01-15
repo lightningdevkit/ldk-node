@@ -1024,7 +1024,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// **Note:** The wallets are regularly synced in the background, which is configurable via
 	/// [`Config::onchain_wallet_sync_interval_secs`] and [`Config::wallet_sync_interval_secs`].
-	/// Therefore, using this blocking sync method is almost always redudant and should be avoided
+	/// Therefore, using this blocking sync method is almost always redundant and should be avoided
 	/// where possible.
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
