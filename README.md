@@ -2,6 +2,8 @@
 
 [![Crate](https://img.shields.io/crates/v/ldk-node.svg?logo=rust)](https://crates.io/crates/ldk-node)
 [![Documentation](https://img.shields.io/static/v1?logo=read-the-docs&label=docs.rs&message=ldk-node&color=informational)](https://docs.rs/ldk-node)
+[![Maven Central Android](https://img.shields.io/maven-central/v/org.lightningdevkit/ldk-node-android)](https://central.sonatype.com/artifact/org.lightningdevkit/ldk-node-android)
+[![Maven Central JVM](https://img.shields.io/maven-central/v/org.lightningdevkit/ldk-node-jvm)](https://central.sonatype.com/artifact/org.lightningdevkit/ldk-node-jvm)
 
 A ready-to-go Lightning node library built using [LDK][ldk] and [BDK][bdk].
 
