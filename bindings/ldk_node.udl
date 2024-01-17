@@ -265,10 +265,16 @@ dictionary OutPoint {
 	u32 vout;
 };
 
+enum ChannelType {
+	"StaticRemoteKey",
+	"Anchors",
+};
+
 dictionary ChannelDetails {
 	ChannelId channel_id;
 	PublicKey counterparty_node_id;
 	OutPoint? funding_txo;
+	ChannelType? channel_type;
 	u64 channel_value_sats;
 	u64? unspendable_punishment_reserve;
 	UserChannelId user_channel_id;
