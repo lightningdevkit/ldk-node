@@ -43,6 +43,8 @@ interface LDKNode {
 	void stop();
 	Event? next_event();
 	Event wait_next_event();
+	[Async]
+	Event next_event_async();
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();

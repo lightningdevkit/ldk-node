@@ -43,6 +43,7 @@ android {
 dependencies {
     implementation("net.java.dev.jna:jna:5.12.0@aar")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4")
     implementation("androidx.appcompat:appcompat:1.4.0")
     implementation("androidx.core:core-ktx:1.7.0")
     api("org.slf4j:slf4j-api:1.7.30")
