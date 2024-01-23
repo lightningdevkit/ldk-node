@@ -16,7 +16,7 @@ repositories {
 }
 
 android {
-    compileSdk = 31
+    compileSdk = 33
 
     defaultConfig {
         minSdk = 21
@@ -41,7 +41,7 @@ android {
 }
 
 dependencies {
-    implementation("net.java.dev.jna:jna:5.8.0@aar")
+    implementation("net.java.dev.jna:jna:5.12.0@aar")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7")
     implementation("androidx.appcompat:appcompat:1.4.0")
     implementation("androidx.core:core-ktx:1.7.0")
@@ -50,7 +50,7 @@ dependencies {
     androidTestImplementation("com.github.tony19:logback-android:2.0.0")
     androidTestImplementation("androidx.test.ext:junit:1.1.3")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.4.0")
-    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.4.1")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4")
     androidTestImplementation("org.jetbrains.kotlin:kotlin-test-junit")
 }
 
