@@ -102,7 +102,7 @@ pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 	Arc<FilesystemLogger>,
 >;
 
-pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
+pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
@@ -113,11 +113,11 @@ pub(crate) type OnionMessenger = lightning::onion_message::OnionMessenger<
 
 pub(crate) struct FakeMessageRouter {}
 
-impl lightning::onion_message::MessageRouter for FakeMessageRouter {
+impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
 	fn find_path(
 		&self, _sender: PublicKey, _peers: Vec<PublicKey>,
-		_destination: lightning::onion_message::Destination,
-	) -> Result<lightning::onion_message::OnionMessagePath, ()> {
+		_destination: lightning::onion_message::messenger::Destination,
+	) -> Result<lightning::onion_message::messenger::OnionMessagePath, ()> {
 		unimplemented!()
 	}
 	fn create_blinded_paths<
