@@ -165,6 +165,7 @@ enum PaymentStatus {
 	"Failed",
 };
 
+[NonExhaustive]
 enum Network {
 	"Bitcoin",
 	"Testnet",

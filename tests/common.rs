@@ -3,7 +3,7 @@
 
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::{
-	Builder, Config, Event, LogLevel, Network, Node, NodeError, PaymentDirection, PaymentStatus,
+	Builder, Config, Event, LogLevel, Node, NodeError, PaymentDirection, PaymentStatus,
 };
 
 use lightning::ln::msgs::SocketAddress;
@@ -11,7 +11,7 @@ use lightning::util::persist::KVStore;
 use lightning::util::test_utils::TestStore;
 use lightning_persister::fs_store::FilesystemStore;
 
-use bitcoin::{Address, Amount, OutPoint, Txid};
+use bitcoin::{Address, Amount, Network, OutPoint, Txid};
 
 use bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
 use bitcoincore_rpc::Client as BitcoindClient;

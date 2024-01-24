@@ -9,8 +9,8 @@ use crate::peer_store::PeerStore;
 use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, Network,
-	NetworkGraph, OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
+	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::LogLevel;
@@ -49,7 +49,7 @@ use bdk::template::Bip84;
 
 use bip39::Mnemonic;
 
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, Network};
 
 #[cfg(any(vss, vss_test))]
 use bitcoin::bip32::ChildNumber;
