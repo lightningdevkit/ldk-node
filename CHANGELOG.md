@@ -1,3 +1,22 @@
+# 0.2.1 - Jan 26, 2024
+
+This is a bugfix release bumping the used LDK and BDK dependencies to the
+latest stable versions.
+
+## Bug Fixes
+- Swift bindings now can be built on macOS again.
+
+## Compatibility Notes
+- LDK has been updated to version 0.0.121 (#214, #229)
+- BDK has been updated to version 0.29.0 (#229)
+
+In total, this release features 30 files changed, 1195 insertions, 1238
+deletions in 26 commits from 3 authors, in alphabetical order:
+
+- Elias Rohrer
+- GoodDaisy
+- Gursharan Singh
+
 # 0.2.0 - Dec 13, 2023
 
 ## Feature and API updates
