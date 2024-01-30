@@ -131,7 +131,7 @@ use payment_store::PaymentStore;
 pub use payment_store::{LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
-	Broadcaster, ChainMonitor, ChannelManager, FeeEstimator, KeysManager, NetworkGraph,
+	Broadcaster, ChainMonitor, ChannelManager, DynStore, FeeEstimator, KeysManager, NetworkGraph,
 	PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
@@ -144,8 +144,6 @@ use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 
 use lightning::sign::EntropySource;
-
-use lightning::util::persist::KVStore;
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -176,7 +174,7 @@ uniffi::include_scaffolding!("ldk_node");
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
-pub struct Node<K: KVStore + Sync + Send + 'static> {
+pub struct Node {
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
@@ -184,21 +182,21 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	tx_broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<FeeEstimator>,
-	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
-	channel_manager: Arc<ChannelManager<K>>,
-	chain_monitor: Arc<ChainMonitor<K>>,
-	output_sweeper: Arc<Sweeper<K>>,
-	peer_manager: Arc<PeerManager<K>>,
+	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
+	channel_manager: Arc<ChannelManager>,
+	chain_monitor: Arc<ChainMonitor>,
+	output_sweeper: Arc<Sweeper>,
+	peer_manager: Arc<PeerManager>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
 	gossip_source: Arc<GossipSource>,
-	liquidity_source: Option<Arc<LiquiditySource<K, Arc<FilesystemLogger>>>>,
-	kv_store: Arc<K>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
+	kv_store: Arc<DynStore>,
 	logger: Arc<FilesystemLogger>,
 	_router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
-	peer_store: Arc<PeerStore<K, Arc<FilesystemLogger>>>,
-	payment_store: Arc<PaymentStore<K, Arc<FilesystemLogger>>>,
+	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
+	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
 	is_listening: Arc<AtomicBool>,
 	latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
@@ -207,7 +205,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	latest_node_announcement_broadcast_timestamp: Arc<RwLock<Option<u64>>>,
 }
 
-impl<K: KVStore + Sync + Send + 'static> Node<K> {
+impl Node {
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
@@ -1807,7 +1805,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	}
 }
 
-impl<K: KVStore + Sync + Send + 'static> Drop for Node<K> {
+impl Drop for Node {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}
@@ -1850,8 +1848,8 @@ pub struct NodeStatus {
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
 }
 
-async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
+async fn connect_peer_if_necessary(
+	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
 	if peer_manager.peer_by_node_id(&node_id).is_some() {
@@ -1861,8 +1859,8 @@ async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
 	do_connect_peer(node_id, addr, peer_manager, logger).await
 }
 
-async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
+async fn do_connect_peer(
+	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
 	log_info!(logger, "Connecting to peer: {}@{}", node_id, addr);
