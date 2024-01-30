@@ -5,7 +5,6 @@ use crate::{Config, Error};
 use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::router::{RouteHint, RouteHintHop};
-use lightning::util::persist::KVStore;
 use lightning_invoice::{Bolt11Invoice, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::Event;
 use lightning_liquidity::lsps0::ser::RequestId;
@@ -33,26 +32,26 @@ struct LSPS2Service {
 	pending_buy_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2BuyResponse>>>,
 }
 
-pub(crate) struct LiquiditySource<K: KVStore + Sync + Send + 'static, L: Deref>
+pub(crate) struct LiquiditySource<L: Deref>
 where
 	L::Target: Logger,
 {
 	lsps2_service: Option<LSPS2Service>,
-	channel_manager: Arc<ChannelManager<K>>,
+	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
-	liquidity_manager: Arc<LiquidityManager<K>>,
+	liquidity_manager: Arc<LiquidityManager>,
 	config: Arc<Config>,
 	logger: L,
 }
 
-impl<K: KVStore + Sync + Send, L: Deref> LiquiditySource<K, L>
+impl<L: Deref> LiquiditySource<L>
 where
 	L::Target: Logger,
 {
 	pub(crate) fn new_lsps2(
 		address: SocketAddress, node_id: PublicKey, token: Option<String>,
-		channel_manager: Arc<ChannelManager<K>>, keys_manager: Arc<KeysManager>,
-		liquidity_manager: Arc<LiquidityManager<K>>, config: Arc<Config>, logger: L,
+		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
+		liquidity_manager: Arc<LiquidityManager>, config: Arc<Config>, logger: L,
 	) -> Self {
 		let pending_fee_requests = Mutex::new(HashMap::new());
 		let pending_buy_requests = Mutex::new(HashMap::new());
@@ -66,12 +65,12 @@ where
 		Self { lsps2_service, channel_manager, keys_manager, liquidity_manager, config, logger }
 	}
 
-	pub(crate) fn set_peer_manager(&self, peer_manager: Arc<PeerManager<K>>) {
+	pub(crate) fn set_peer_manager(&self, peer_manager: Arc<PeerManager>) {
 		let process_msgs_callback = move || peer_manager.process_events();
 		self.liquidity_manager.set_process_msgs_callback(process_msgs_callback);
 	}
 
-	pub(crate) fn liquidity_manager(&self) -> &LiquidityManager<K> {
+	pub(crate) fn liquidity_manager(&self) -> &LiquidityManager {
 		self.liquidity_manager.as_ref()
 	}
 

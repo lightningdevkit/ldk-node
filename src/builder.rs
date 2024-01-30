@@ -14,7 +14,7 @@ use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, GossipSync, KeysManager, MessageRouter, NetworkGraph,
+	ChainMonitor, ChannelManager, DynStore, GossipSync, KeysManager, MessageRouter, NetworkGraph,
 	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
@@ -32,7 +32,7 @@ use lightning::sign::EntropySource;
 
 use lightning::util::config::UserConfig;
 use lightning::util::persist::{
-	read_channel_monitors, KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	read_channel_monitors, CHANNEL_MANAGER_PERSISTENCE_KEY,
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
@@ -115,12 +115,18 @@ pub enum BuildError {
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
 	/// We failed to read data from the [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
 	StoragePathAccessFailed,
 	/// We failed to setup our [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
@@ -299,7 +305,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Node<SqliteStore>, BuildError> {
+	pub fn build(&self) -> Result<Node, BuildError> {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
@@ -316,7 +322,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Node<FilesystemStore>, BuildError> {
+	pub fn build_with_fs_store(&self) -> Result<Node, BuildError> {
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
@@ -329,9 +335,7 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
-	pub fn build_with_vss_store(
-		&self, url: String, store_id: String,
-	) -> Result<Node<VssStore>, BuildError> {
+	pub fn build_with_vss_store(&self, url: String, store_id: String) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 
 		let seed_bytes = seed_bytes_from_config(
@@ -369,9 +373,7 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
-		&self, kv_store: Arc<K>,
-	) -> Result<Node<K>, BuildError> {
+	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -500,31 +502,29 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Arc<Node<SqliteStore>>, BuildError> {
+	pub fn build(&self) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build().map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Arc<Node<FilesystemStore>>, BuildError> {
+	pub fn build_with_fs_store(&self) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
-		&self, kv_store: Arc<K>,
-	) -> Result<Arc<Node<K>>, BuildError> {
+	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
 	}
 }
 
 /// Builds a [`Node`] instance according to the options previously configured.
-fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
+fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<K>,
-) -> Result<Node<K>, BuildError> {
+	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+) -> Result<Node, BuildError> {
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
 		.map_err(|e| {
@@ -604,7 +604,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	));
 
 	// Initialize the ChainMonitor
-	let chain_monitor: Arc<ChainMonitor<K>> = Arc::new(chainmonitor::ChainMonitor::new(
+	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
 		Some(Arc::clone(&tx_sync)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
@@ -735,7 +735,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				channel_monitor_references,
 			);
 			let (_hash, channel_manager) =
-				<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args).map_err(|e| {
+				<(BlockHash, ChannelManager)>::read(&mut reader, read_args).map_err(|e| {
 					log_error!(logger, "Failed to read channel manager from KVStore: {}", e);
 					BuildError::ReadFailed
 				})?;
@@ -779,7 +779,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let message_router = MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
 
 	// Initialize the PeerManager
-	let onion_messenger: Arc<OnionMessenger<K>> = Arc::new(OnionMessenger::new(
+	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),

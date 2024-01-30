@@ -4,7 +4,6 @@ use lightning::ln::features::{InitFeatures, NodeFeatures};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::ln::wire::CustomMessageReader;
 use lightning::util::logger::Logger;
-use lightning::util::persist::KVStore;
 
 use lightning_liquidity::lsps0::ser::RawLSPSMessage;
 
@@ -13,19 +12,19 @@ use bitcoin::secp256k1::PublicKey;
 use std::ops::Deref;
 use std::sync::Arc;
 
-pub(crate) enum NodeCustomMessageHandler<K: KVStore + Sync + Send + 'static, L: Deref>
+pub(crate) enum NodeCustomMessageHandler<L: Deref>
 where
 	L::Target: Logger,
 {
 	Ignoring,
-	Liquidity { liquidity_source: Arc<LiquiditySource<K, L>> },
+	Liquidity { liquidity_source: Arc<LiquiditySource<L>> },
 }
 
-impl<K: KVStore + Sync + Send, L: Deref> NodeCustomMessageHandler<K, L>
+impl<L: Deref> NodeCustomMessageHandler<L>
 where
 	L::Target: Logger,
 {
-	pub(crate) fn new_liquidity(liquidity_source: Arc<LiquiditySource<K, L>>) -> Self {
+	pub(crate) fn new_liquidity(liquidity_source: Arc<LiquiditySource<L>>) -> Self {
 		Self::Liquidity { liquidity_source }
 	}
 
@@ -34,8 +33,7 @@ where
 	}
 }
 
-impl<K: KVStore + Sync + Send + 'static, L: Deref> CustomMessageReader
-	for NodeCustomMessageHandler<K, L>
+impl<L: Deref> CustomMessageReader for NodeCustomMessageHandler<L>
 where
 	L::Target: Logger,
 {
@@ -53,8 +51,7 @@ where
 	}
 }
 
-impl<K: KVStore + Sync + Send + 'static, L: Deref> CustomMessageHandler
-	for NodeCustomMessageHandler<K, L>
+impl<L: Deref> CustomMessageHandler for NodeCustomMessageHandler<L>
 where
 	L::Target: Logger,
 {
