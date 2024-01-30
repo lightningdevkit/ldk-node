@@ -3,10 +3,10 @@ use crate::io::{
 	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, Logger};
+use crate::types::DynStore;
 use crate::Error;
 
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::util::persist::KVStore;
 use lightning::util::ser::Writeable;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 
@@ -127,20 +127,20 @@ impl PaymentDetailsUpdate {
 	}
 }
 
-pub(crate) struct PaymentStore<K: KVStore + Sync + Send, L: Deref>
+pub(crate) struct PaymentStore<L: Deref>
 where
 	L::Target: Logger,
 {
 	payments: Mutex<HashMap<PaymentHash, PaymentDetails>>,
-	kv_store: Arc<K>,
+	kv_store: Arc<DynStore>,
 	logger: L,
 }
 
-impl<K: KVStore + Sync + Send, L: Deref> PaymentStore<K, L>
+impl<L: Deref> PaymentStore<L>
 where
 	L::Target: Logger,
 {
-	pub(crate) fn new(payments: Vec<PaymentDetails>, kv_store: Arc<K>, logger: L) -> Self {
+	pub(crate) fn new(payments: Vec<PaymentDetails>, kv_store: Arc<DynStore>, logger: L) -> Self {
 		let payments = Mutex::new(HashMap::from_iter(
 			payments.into_iter().map(|payment| (payment.hash, payment)),
 		));
@@ -260,7 +260,7 @@ mod tests {
 
 	#[test]
 	fn payment_info_is_persisted() {
-		let store = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let payment_store = PaymentStore::new(Vec::new(), Arc::clone(&store), logger);
 
