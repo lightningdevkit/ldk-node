@@ -14,6 +14,7 @@ use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeePa
 use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
@@ -23,18 +24,20 @@ use bitcoin::OutPoint;
 
 use std::sync::{Arc, Mutex, RwLock};
 
-pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
+pub(crate) type DynStore = dyn KVStore + Sync + Send;
+
+pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
 	Arc<FilesystemLogger>,
-	Arc<K>,
+	Arc<DynStore>,
 >;
 
-pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
+pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
-	Arc<ChannelManager<K>>,
+	Arc<ChannelManager>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
@@ -42,8 +45,8 @@ pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
 	Arc<KeysManager>,
 >;
 
-pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
-	Arc<ChainMonitor<K>>,
+pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
+	Arc<ChainMonitor>,
 	Arc<Broadcaster>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
@@ -126,11 +129,11 @@ impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
 	}
 }
 
-pub(crate) type Sweeper<K> = OutputSweeper<
+pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
 	Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
-	Arc<K>,
+	Arc<DynStore>,
 	Arc<FilesystemLogger>,
 >;
 
