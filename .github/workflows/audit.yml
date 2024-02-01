@@ -15,9 +15,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
     permissions:
       issues: write
-      issues-reason: to create issues
       checks: write
-      checks-reason: to create checks
     steps:
       - uses: actions/checkout@v3
       - uses: rustsec/audit-check@v1.4.1
