@@ -1,0 +1,24 @@
+name: Security audit
+on:
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  audit:
+    strategy:
+      matrix:
+        platform: [
+          ubuntu-latest,
+          macos-latest,
+          ]
+    runs-on: ${{ matrix.platform }}
+    permissions:
+      issues: write
+      issues-reason: to create issues
+      checks: write
+      checks-reason: to create checks
+    steps:
+      - uses: actions/checkout@v3
+      - uses: rustsec/audit-check@v1.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
