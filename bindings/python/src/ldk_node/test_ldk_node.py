@@ -81,8 +81,9 @@ def send_to_address(address, amount_sats):
 
 
 def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
+    mnemonic = generate_entropy_mnemonic()
     config = default_config()
-    builder = Builder.from_config(config)
+    builder = Builder.from_entropy_bip39_mnemonic(mnemonic, None, config)
     builder.set_storage_dir_path(tmp_dir)
     builder.set_esplora_server(esplora_endpoint)
     builder.set_network(DEFAULT_TEST_NETWORK)
