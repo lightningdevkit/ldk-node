@@ -18,13 +18,12 @@ dictionary Config {
 };
 
 interface Builder {
-	constructor();
-	[Name=from_config]
-	constructor(Config config);
-	void set_entropy_seed_path(string seed_path);
-	[Throws=BuildError]
-	void set_entropy_seed_bytes(sequence<u8> seed_bytes);
-	void set_entropy_bip39_mnemonic(Mnemonic mnemonic, string? passphrase);
+	[Name=from_entropy_seed_path]
+	constructor(string seed_path, Config? config);
+	[Name=from_entropy_seed_bytes, Throws=BuildError]
+	constructor(sequence<u8> seed_bytes, Config? config);
+	[Name=from_entropy_bip39_mnemonic]
+	constructor(Mnemonic mnemonic, string? passphrase, Config? config);
 	void set_esplora_server(string esplora_server_url);
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);

@@ -137,65 +137,68 @@ impl std::error::Error for BuildError {}
 /// the getgo.
 ///
 /// ### Defaults
-/// - Wallet entropy is sourced from a `keys_seed` file located under [`Config::storage_dir_path`]
 /// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
 /// - Gossip data is sourced via the peer-to-peer network
 #[derive(Debug)]
 pub struct NodeBuilder {
 	config: Config,
-	entropy_source_config: Option<EntropySourceConfig>,
+	entropy_source_config: EntropySourceConfig,
 	chain_data_source_config: Option<ChainDataSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
 }
 
 impl NodeBuilder {
-	/// Creates a new builder instance with the default configuration.
-	pub fn new() -> Self {
-		let config = Config::default();
-		let entropy_source_config = None;
-		let chain_data_source_config = None;
-		let gossip_source_config = None;
-		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
-	}
-
-	/// Creates a new builder instance from an [`Config`].
-	pub fn from_config(config: Config) -> Self {
-		let config = config;
-		let entropy_source_config = None;
-		let chain_data_source_config = None;
-		let gossip_source_config = None;
-		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
+	/// Create a new builder instance, configuring the [`Node`] instance to source its wallet entropy from a seed file on disk.
 	///
 	/// If the given file does not exist a new random seed file will be generated and
 	/// stored at the given location.
-	pub fn set_entropy_seed_path(&mut self, seed_path: String) -> &mut Self {
-		self.entropy_source_config = Some(EntropySourceConfig::SeedFile(seed_path));
-		self
+	///
+	/// If `config` is provided, it will override the default config.
+	pub fn from_entropy_seed_path(seed_path: String, config: Option<Config>) -> Self {
+		let config = config.unwrap_or(Config::default());
+		let entropy_source_config = EntropySourceConfig::SeedFile(seed_path);
+		let chain_data_source_config = None;
+		let gossip_source_config = None;
+
+		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
-	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
-	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: Vec<u8>) -> Result<&mut Self, BuildError> {
+	/// Create a new builder instance, configuring the [`Node`] instance to source its wallet
+	/// entropy from the given 64 seed bytes.
+	///
+	/// If `config` is provided, it will override the default config.
+	pub fn from_entropy_seed_bytes(
+		seed_bytes: Vec<u8>, config: Option<Config>,
+	) -> Result<Self, BuildError> {
 		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
 			return Err(BuildError::InvalidSeedBytes);
 		}
 		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
 		bytes.copy_from_slice(&seed_bytes);
-		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(bytes));
-		Ok(self)
+
+		let config = config.unwrap_or(Config::default());
+		let entropy_source_config = EntropySourceConfig::SeedBytes(bytes);
+		let chain_data_source_config = None;
+		let gossip_source_config = None;
+
+		Ok(Self { config, entropy_source_config, chain_data_source_config, gossip_source_config })
 	}
 
-	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
+	/// Create a new builder instance, configuring the [`Node`] instance to source its wallet
+	/// entropy from a [BIP 39] mnemonic.
+	///
+	/// If `config` is provided, it will override the default config.
 	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn set_entropy_bip39_mnemonic(
-		&mut self, mnemonic: Mnemonic, passphrase: Option<String>,
-	) -> &mut Self {
-		self.entropy_source_config =
-			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
-		self
+	pub fn from_entropy_bip39_mnemonic(
+		mnemonic: Mnemonic, passphrase: Option<String>, config: Option<Config>,
+	) -> Self {
+		let config = config.unwrap_or(Config::default());
+		let entropy_source_config = EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase };
+		let chain_data_source_config = None;
+		let gossip_source_config = None;
+
+		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -291,11 +294,7 @@ impl NodeBuilder {
 	) -> Result<Node<VssStore>, BuildError> {
 		let logger = setup_logger(&self.config)?;
 
-		let seed_bytes = seed_bytes_from_config(
-			&self.config,
-			self.entropy_source_config.as_ref(),
-			Arc::clone(&logger),
-		)?;
+		let seed_bytes = seed_bytes_from_config(&self.entropy_source_config, Arc::clone(&logger))?;
 		let config = Arc::new(self.config.clone());
 
 		let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
@@ -329,11 +328,7 @@ impl NodeBuilder {
 		&self, kv_store: Arc<K>,
 	) -> Result<Node<K>, BuildError> {
 		let logger = setup_logger(&self.config)?;
-		let seed_bytes = seed_bytes_from_config(
-			&self.config,
-			self.entropy_source_config.as_ref(),
-			Arc::clone(&logger),
-		)?;
+		let seed_bytes = seed_bytes_from_config(&self.entropy_source_config, Arc::clone(&logger))?;
 		let config = Arc::new(self.config.clone());
 
 		build_with_store_internal(
@@ -351,7 +346,6 @@ impl NodeBuilder {
 /// the getgo.
 ///
 /// ### Defaults
-/// - Wallet entropy is sourced from a `keys_seed` file located under [`Config::storage_dir_path`]
 /// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
 /// - Gossip data is sourced via the peer-to-peer network
 #[derive(Debug)]
@@ -362,38 +356,40 @@ pub struct ArcedNodeBuilder {
 
 #[cfg(feature = "uniffi")]
 impl ArcedNodeBuilder {
-	/// Creates a new builder instance with the default configuration.
-	pub fn new() -> Self {
-		let inner = RwLock::new(NodeBuilder::new());
-		Self { inner }
-	}
-
-	/// Creates a new builder instance from an [`Config`].
-	pub fn from_config(config: Config) -> Self {
-		let inner = RwLock::new(NodeBuilder::from_config(config));
-		Self { inner }
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
+	/// Create a new builder instance, configuring the [`Node`] instance to source its wallet entropy from a seed file on disk.
+	///
+	/// If `config` is provided, it will override the default config.
 	///
 	/// If the given file does not exist a new random seed file will be generated and
 	/// stored at the given location.
-	pub fn set_entropy_seed_path(&self, seed_path: String) {
-		self.inner.write().unwrap().set_entropy_seed_path(seed_path);
+	pub fn from_entropy_seed_path(seed_path: String, config: Option<Config>) -> Self {
+		let inner = RwLock::new(NodeBuilder::from_entropy_seed_path(seed_path, config));
+		Self { inner }
 	}
 
-	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
+	/// Create a new builder instance, configuring the [`Node`] instance to source its wallet
+	/// entropy from the given 64 seed bytes.
 	///
-	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
-	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) -> Result<(), BuildError> {
-		self.inner.write().unwrap().set_entropy_seed_bytes(seed_bytes).map(|_| ())
+	/// If `config` is provided, it will override the default config.
+	pub fn from_entropy_seed_bytes(
+		seed_bytes: Vec<u8>, config: Option<Config>,
+	) -> Result<Self, BuildError> {
+		let inner = RwLock::new(NodeBuilder::from_entropy_seed_bytes(seed_bytes, config)?);
+		Ok(Self { inner })
 	}
 
-	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
+	/// Create a new builder instance, configuring the [`Node`] instance to source its wallet
+	/// entropy from a [BIP 39] mnemonic.
+	///
+	/// If `config` is provided, it will override the default config.
 	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn set_entropy_bip39_mnemonic(&self, mnemonic: Mnemonic, passphrase: Option<String>) {
-		self.inner.write().unwrap().set_entropy_bip39_mnemonic(mnemonic, passphrase);
+	pub fn from_entropy_bip39_mnemonic(
+		mnemonic: Mnemonic, passphrase: Option<String>, config: Option<Config>,
+	) -> Self {
+		let inner =
+			RwLock::new(NodeBuilder::from_entropy_bip39_mnemonic(mnemonic, passphrase, config));
+		Self { inner }
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -869,24 +865,17 @@ fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
 }
 
 fn seed_bytes_from_config(
-	config: &Config, entropy_source_config: Option<&EntropySourceConfig>,
-	logger: Arc<FilesystemLogger>,
+	entropy_source_config: &EntropySourceConfig, logger: Arc<FilesystemLogger>,
 ) -> Result<[u8; 64], BuildError> {
 	match entropy_source_config {
-		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
-		Some(EntropySourceConfig::SeedFile(seed_path)) => {
+		EntropySourceConfig::SeedBytes(bytes) => Ok(bytes.clone()),
+		EntropySourceConfig::SeedFile(seed_path) => {
 			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
 		}
-		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
+		EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase } => match passphrase {
 			Some(passphrase) => Ok(mnemonic.to_seed(passphrase)),
 			None => Ok(mnemonic.to_seed("")),
 		},
-		None => {
-			// Default to read or generate from the default location generate a seed file.
-			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
-				.map_err(|_| BuildError::InvalidSeedFile)?)
-		}
 	}
 }
