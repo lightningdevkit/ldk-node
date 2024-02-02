@@ -3,7 +3,8 @@
 
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::{
-	Builder, Config, Event, LogLevel, Node, NodeError, PaymentDirection, PaymentStatus,
+	generate_entropy_mnemonic, Builder, Config, Event, LogLevel, Node, NodeError, PaymentDirection,
+	PaymentStatus,
 };
 
 use lightning::ln::msgs::SocketAddress;
@@ -151,11 +152,11 @@ type TestNode<K> = Arc<Node<K>>;
 type TestNode<K> = Node<K>;
 
 macro_rules! setup_builder {
-	($builder: ident, $config: expr) => {
+	($builder: ident, $mnemonic: expr, $config: expr) => {
 		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_config($config.clone());
+		let $builder = Builder::from_entropy_bip39_mnemonic($mnemonic, None, Some($config.clone()));
 		#[cfg(not(feature = "uniffi"))]
-		let mut $builder = Builder::from_config($config.clone());
+		let mut $builder = Builder::from_entropy_bip39_mnemonic($mnemonic, None, Some($config.clone()));
 	};
 }
 
@@ -178,8 +179,9 @@ pub(crate) fn setup_two_nodes(
 }
 
 pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode<TestSyncStore> {
+	let mnemonic = generate_entropy_mnemonic();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	setup_builder!(builder, config);
+	setup_builder!(builder, mnemonic, config);
 	builder.set_esplora_server(esplora_url.clone());
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
