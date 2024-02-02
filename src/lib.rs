@@ -26,7 +26,7 @@
 //! [`send_payment`], etc.:
 //!
 //! ```no_run
-//! use ldk_node::Builder;
+//! use ldk_node::{Builder, generate_entropy_mnemonic};
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
 //! use ldk_node::bitcoin::Network;
@@ -34,7 +34,8 @@
 //! use std::str::FromStr;
 //!
 //! fn main() {
-//! 	let mut builder = Builder::new();
+//! 	let mnemonic = generate_entropy_mnemonic();
+//! 	let mut builder = Builder::from_entropy_bip39_mnemonic(mnemonic, None, None);
 //! 	builder.set_network(Network::Testnet);
 //! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 //! 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
@@ -1558,12 +1559,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
-	/// # use ldk_node::{Builder, Config, PaymentDirection};
+	/// # use ldk_node::{Builder, Config, PaymentDirection, generate_entropy_mnemonic};
 	/// # use ldk_node::bitcoin::Network;
+	/// # let mnemonic = generate_entropy_mnemonic();
 	/// # let mut config = Config::default();
 	/// # config.network = Network::Regtest;
 	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();
-	/// # let builder = Builder::from_config(config);
+	/// # let builder = Builder::from_entropy_bip39_mnemonic(mnemonic, None, Some(config));
 	/// # let node = builder.build().unwrap();
 	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
 	/// ```
