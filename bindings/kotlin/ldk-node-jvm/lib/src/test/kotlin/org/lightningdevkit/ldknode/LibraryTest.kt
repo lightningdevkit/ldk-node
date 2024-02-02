@@ -106,6 +106,9 @@ class LibraryTest {
     }
 
     @Test fun fullCycle() {
+        val mnemonic1 = generateEntropyMnemonic()
+        val mnemonic2 = generateEntropyMnemonic()
+
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
         val tmpDir2 = createTempDirectory("ldk_node").toString()
@@ -129,9 +132,10 @@ class LibraryTest {
         config2.logLevel = LogLevel.TRACE
         println("Config 2: $config2")
 
-        val builder1 = Builder.fromConfig(config1)
+        val builder1 = Builder.fromEntropyBip39Mnemonic(mnemonic1, null, config1)
+        val builder2 = Builder.fromEntropyBip39Mnemonic(mnemonic2, null, config2)
+
         builder1.setEsploraServer(esploraEndpoint)
-        val builder2 = Builder.fromConfig(config2)
         builder2.setEsploraServer(esploraEndpoint)
 
         val node1 = builder1.build()

@@ -16,6 +16,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 @RunWith(AndroidJUnit4::class)
 class AndroidLibTest {
     @Test fun node_start_stop() {
+        val mnemonic1 = generateEntropyMnemonic()
+        val mnemonic2 = generateEntropyMnemonic()
+
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
         val tmpDir2 = createTempDirectory("ldk_node").toString()
@@ -36,8 +39,8 @@ class AndroidLibTest {
         config2.network = Network.REGTEST
         config2.logLevel = LogLevel.TRACE
 
-        val builder1 = Builder.fromConfig(config1)
-        val builder2 = Builder.fromConfig(config2)
+        val builder1 = Builder.fromEntropyBip39Mnemonic(mnemonic1, null, config1)
+        val builder2 = Builder.fromEntropyBip39Mnemonic(mnemonic2, null, config2)
 
         val node1 = builder1.build()
         val node2 = builder2.build()
