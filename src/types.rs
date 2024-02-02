@@ -21,8 +21,6 @@ use lightning_transaction_sync::EsploraSyncClient;
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
 use bitcoin::OutPoint;
 
-use std::fmt;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
@@ -138,58 +136,6 @@ pub(crate) type Sweeper<K> = OutputSweeper<
 	Arc<K>,
 	Arc<FilesystemLogger>,
 >;
-
-/// The cryptocurrency network to act on.
-#[derive(Copy, PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug)]
-pub enum Network {
-	/// Mainnet Bitcoin.
-	Bitcoin,
-	/// Bitcoin's testnet network.
-	Testnet,
-	/// Bitcoin's signet network.
-	Signet,
-	/// Bitcoin's regtest network.
-	Regtest,
-}
-
-impl TryFrom<bitcoin::Network> for Network {
-	type Error = ();
-
-	fn try_from(network: bitcoin::Network) -> Result<Self, Self::Error> {
-		match network {
-			bitcoin::Network::Bitcoin => Ok(Self::Bitcoin),
-			bitcoin::Network::Testnet => Ok(Self::Testnet),
-			bitcoin::Network::Signet => Ok(Self::Signet),
-			bitcoin::Network::Regtest => Ok(Self::Regtest),
-			_ => Err(()),
-		}
-	}
-}
-
-impl From<Network> for bitcoin::Network {
-	fn from(network: Network) -> Self {
-		match network {
-			Network::Bitcoin => bitcoin::Network::Bitcoin,
-			Network::Testnet => bitcoin::Network::Testnet,
-			Network::Signet => bitcoin::Network::Signet,
-			Network::Regtest => bitcoin::Network::Regtest,
-		}
-	}
-}
-
-impl fmt::Display for Network {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		bitcoin::Network::from(*self).fmt(f)
-	}
-}
-
-impl FromStr for Network {
-	type Err = ();
-
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		bitcoin::Network::from_str(s).map_err(|_| ())?.try_into()
-	}
-}
 
 /// A local, potentially user-provided, identifier of a channel.
 ///

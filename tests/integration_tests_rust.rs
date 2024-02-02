@@ -6,9 +6,9 @@ use common::{
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
 
-use ldk_node::{Builder, Event, Network, NodeError};
+use ldk_node::{Builder, Event, NodeError};
 
-use bitcoin::Amount;
+use bitcoin::{Amount, Network};
 
 use std::sync::Arc;
 

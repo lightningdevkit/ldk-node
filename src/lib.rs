@@ -26,9 +26,10 @@
 //! [`send_payment`], etc.:
 //!
 //! ```no_run
-//! use ldk_node::{Builder, Network};
+//! use ldk_node::Builder;
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
+//! use ldk_node::bitcoin::Network;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use std::str::FromStr;
 //!
@@ -122,7 +123,7 @@ use types::{
 	Broadcaster, ChainMonitor, ChannelManager, FeeEstimator, KeysManager, NetworkGraph,
 	PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, Network, PeerDetails, UserChannelId};
+pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -148,7 +149,7 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 
-use bitcoin::{Address, Txid};
+use bitcoin::{Address, Network, Txid};
 
 use rand::Rng;
 
@@ -1494,7 +1495,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	fn receive_payment_inner(
 		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let currency = Currency::from(bitcoin::Network::from(self.config.network));
+		let currency = Currency::from(self.config.network);
 		let keys_manager = Arc::clone(&self.keys_manager);
 		let invoice = match lightning_invoice::utils::create_invoice_from_channelmanager(
 			&self.channel_manager,
@@ -1547,7 +1548,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
-	/// # use ldk_node::{Builder, Config, Network, PaymentDirection};
+	/// # use ldk_node::{Builder, Config, PaymentDirection};
+	/// # use ldk_node::bitcoin::Network;
 	/// # let mut config = Config::default();
 	/// # config.network = Network::Regtest;
 	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();
