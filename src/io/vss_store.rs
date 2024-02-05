@@ -3,6 +3,7 @@ use std::io;
 use std::io::ErrorKind;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::io::utils::check_namespace_key_validity;
@@ -10,7 +11,7 @@ use lightning::util::persist::KVStore;
 use prost::Message;
 use rand::RngCore;
 use tokio::runtime::Runtime;
-use vss_client::client::VssClient;
+use vss_client::client::{AuthMethod, VssClient};
 use vss_client::error::VssError;
 use vss_client::types::{
 	DeleteObjectRequest, GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest,
@@ -35,10 +36,14 @@ pub struct VssStore {
 	store_id: String,
 	runtime: Runtime,
 	storable_builder: StorableBuilder<RandEntropySource>,
+	auth_custom: Arc<dyn AuthMethod>,
 }
 
 impl VssStore {
-	pub(crate) fn new(base_url: String, store_id: String, data_encryption_key: [u8; 32]) -> Self {
+	pub(crate) fn new(
+		base_url: String, store_id: String, data_encryption_key: [u8; 32],
+		auth_custom: impl AuthMethod + 'static,
+	) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
 		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(100))
@@ -55,7 +60,7 @@ impl VssStore {
 			}) as _);
 
 		let client = VssClient::new(&base_url, retry_policy);
-		Self { client, store_id, runtime, storable_builder }
+		Self { client, store_id, runtime, storable_builder, auth_custom: Arc::new(auth_custom) }
 	}
 
 	fn build_key(
@@ -118,18 +123,19 @@ impl KVStore for VssStore {
 			key: self.build_key(primary_namespace, secondary_namespace, key)?,
 		};
 
-		let resp =
-			tokio::task::block_in_place(|| self.runtime.block_on(self.client.get_object(&request)))
-				.map_err(|e| {
-					let msg = format!(
-						"Failed to read from key {}/{}/{}: {}",
-						primary_namespace, secondary_namespace, key, e
-					);
-					match e {
-						VssError::NoSuchKeyError(..) => Error::new(ErrorKind::NotFound, msg),
-						_ => Error::new(ErrorKind::Other, msg),
-					}
-				})?;
+		let resp = tokio::task::block_in_place(|| {
+			self.runtime.block_on(self.client.get_object(&request, self.auth_custom.clone()))
+		})
+		.map_err(|e| {
+			let msg = format!(
+				"Failed to read from key {}/{}/{}: {}",
+				primary_namespace, secondary_namespace, key, e
+			);
+			match e {
+				VssError::NoSuchKeyError(..) => Error::new(ErrorKind::NotFound, msg),
+				_ => Error::new(ErrorKind::Other, msg),
+			}
+		})?;
 		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
 		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
 		let storable = Storable::decode(&resp.value.unwrap().value[..])?;

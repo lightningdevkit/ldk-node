@@ -52,6 +52,8 @@ use bdk::bitcoin::secp256k1::Secp256k1;
 use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::database::SqliteDatabase;
 use bdk::template::Bip84;
+#[cfg(any(vss, vss_test))]
+use vss_client::client::AuthMethod;
 
 use bip39::Mnemonic;
 
@@ -335,7 +337,9 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
-	pub fn build_with_vss_store(&self, url: String, store_id: String) -> Result<Node, BuildError> {
+	pub fn build_with_vss_store(
+		&self, url: String, store_id: String, auth_custom: impl AuthMethod + 'static,
+	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 
 		let seed_bytes = seed_bytes_from_config(
@@ -360,7 +364,7 @@ impl NodeBuilder {
 
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
-		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes));
+		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes, auth_custom));
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -515,7 +519,9 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
-	pub fn build_with_vss_store(&self, url: String, store_id: String) -> Result<Arc<Node>, BuildError> {
+	pub fn build_with_vss_store(
+		&self, url: String, store_id: String, auth_custom: impl AuthMethod + 'static,
+	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_vss_store(url, store_id).map(Arc::new)
 	}
 
