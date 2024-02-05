@@ -1,19 +1,20 @@
 namespace ldk_node {
 	Mnemonic generate_entropy_mnemonic();
+	Config default_config();
 };
 
 dictionary Config {
-	string storage_dir_path = "/tmp/ldk_node/";
-	string? log_dir_path = null;
-	Network network = "Bitcoin";
-	sequence<SocketAddress>? listening_addresses = null;
-	u32 default_cltv_expiry_delta = 144;
-	u64 onchain_wallet_sync_interval_secs = 80;
-	u64 wallet_sync_interval_secs = 30;
-	u64 fee_rate_cache_update_interval_secs = 600;
-	sequence<PublicKey> trusted_peers_0conf = [];
-	u64 probing_liquidity_limit_multiplier = 3;
-	LogLevel log_level = "Debug";
+	string storage_dir_path;
+	string? log_dir_path;
+	Network network;
+	sequence<SocketAddress>? listening_addresses;
+	u32 default_cltv_expiry_delta;
+	u64 onchain_wallet_sync_interval_secs;
+	u64 wallet_sync_interval_secs;
+	u64 fee_rate_cache_update_interval_secs;
+	sequence<PublicKey> trusted_peers_0conf;
+	u64 probing_liquidity_limit_multiplier;
+	LogLevel log_level;
 };
 
 interface Builder {

@@ -114,7 +114,7 @@ class LibraryTest {
         val listenAddress1 = "127.0.0.1:2323"
         val listenAddress2 = "127.0.0.1:2324"
 
-        val config1 = Config()
+        val config1 = defaultConfig()
         config1.storageDirPath = tmpDir1
         config1.listeningAddresses = listOf(listenAddress1)
         config1.network = Network.REGTEST
@@ -122,7 +122,7 @@ class LibraryTest {
 
         println("Config 1: $config1")
 
-        val config2 = Config()
+        val config2 = defaultConfig()
         config2.storageDirPath = tmpDir2
         config2.listeningAddresses = listOf(listenAddress2)
         config2.network = Network.REGTEST
