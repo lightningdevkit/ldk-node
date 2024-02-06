@@ -15,6 +15,12 @@ dictionary Config {
 	sequence<PublicKey> trusted_peers_0conf;
 	u64 probing_liquidity_limit_multiplier;
 	LogLevel log_level;
+	AnchorChannelsConfig? anchor_channels_config;
+};
+
+dictionary AnchorChannelsConfig {
+	sequence<PublicKey> trusted_peers_no_reserve;
+	u64 per_channel_reserve_sats;
 };
 
 interface Builder {
