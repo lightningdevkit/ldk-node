@@ -132,8 +132,8 @@ class LibraryTest {
         config2.logLevel = LogLevel.TRACE
         println("Config 2: $config2")
 
-        val builder1 = Builder.fromEntropyBip39Mnemonic(mnemonic1, null, config1)
-        val builder2 = Builder.fromEntropyBip39Mnemonic(mnemonic2, null, config2)
+        val builder1 = Builder.fromMnemonic(mnemonic1, null, config1)
+        val builder2 = Builder.fromMnemonic(mnemonic2, null, config2)
 
         builder1.setEsploraServer(esploraEndpoint)
         builder2.setEsploraServer(esploraEndpoint)

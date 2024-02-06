@@ -39,8 +39,8 @@ class AndroidLibTest {
         config2.network = Network.REGTEST
         config2.logLevel = LogLevel.TRACE
 
-        val builder1 = Builder.fromEntropyBip39Mnemonic(mnemonic1, null, config1)
-        val builder2 = Builder.fromEntropyBip39Mnemonic(mnemonic2, null, config2)
+        val builder1 = Builder.fromMnemonic(mnemonic1, null, config1)
+        val builder2 = Builder.fromMnemonic(mnemonic2, null, config2)
 
         val node1 = builder1.build()
         val node2 = builder2.build()
