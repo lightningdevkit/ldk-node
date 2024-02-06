@@ -15,6 +15,7 @@ const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
+const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
@@ -62,6 +63,9 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `trusted_peers_0conf`                  | []                 |
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
+/// | `anchor_channels_config`               | Some(..)           |
+///
+/// See [`AnchorChannelsConfig`] for more information on its respective default values.
 ///
 /// [`Node`]: crate::Node
 pub struct Config {
@@ -104,6 +108,21 @@ pub struct Config {
 	///
 	/// Any messages below this level will be excluded from the logs.
 	pub log_level: LogLevel,
+	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
+	/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
+	///
+	/// Please refer to [`AnchorChannelsConfig`] for further information on Anchor channels.
+	///
+	/// If set to `Some`, new channels will have Anchors enabled, i.e., will be negotiated with the
+	/// `option_anchors_zero_fee_htlc_tx` channel type. If set to `None`, new channels will be
+	/// negotiated with the legacy `option_static_remotekey` channel type.
+	///
+	/// **Note:** Please note that if set to `None` *after* some Anchor channels have already been
+	/// opened, no dedicated emergency on-chain reserve will be maintained for these channels,
+	/// which can be dangerous if only insufficient funds are available at the time of channel
+	/// closure. We *will* however still try to get the Anchor spending transactions confirmed
+	/// on-chain with the funds available.
+	pub anchor_channels_config: Option<AnchorChannelsConfig>,
 }
 
 impl Default for Config {
@@ -120,6 +139,66 @@ impl Default for Config {
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			log_level: DEFAULT_LOG_LEVEL,
+			anchor_channels_config: Some(AnchorChannelsConfig::default()),
+		}
+	}
+}
+
+/// Configuration options pertaining to 'Anchor' channels, i.e., channels for which the
+/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
+///
+/// Prior to the introduction of Anchor channels, the on-chain fees paying for the transactions
+/// issued on channel closure were pre-determined and locked-in at the time of the channel
+/// opening. This required to estimate what fee rate would be sufficient to still have the
+/// closing transactions be spendable on-chain (i.e., not be considered dust). This legacy
+/// design of pre-anchor channels proved inadequate in the unpredictable, often turbulent, fee
+/// markets we experience today. In contrast, Anchor channels allow to determine an adequate
+/// fee rate *at the time of channel closure*, making them much more robust in the face of fee
+/// spikes. In turn, they require to maintain a reserve of on-chain funds to be able to get the
+/// channel closure transactions confirmed on-chain, at least if the channel counterparty can't
+/// be trusted to do this for us.
+///
+/// See [BOLT 3] for more technical details on Anchor channels.
+///
+///
+/// ### Defaults
+///
+/// | Parameter                  | Value  |
+/// |----------------------------|--------|
+/// | `trusted_peers_no_reserve` | []     |
+/// | `per_channel_reserve_sats` | 25000  |
+///
+///
+/// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
+#[derive(Debug, Clone)]
+pub struct AnchorChannelsConfig {
+	/// A list of peers which we trust to get the required channel closing transactions confirmed
+	/// on-chain.
+	///
+	/// Channels with these peers won't count towards the retained on-chain reserve and we won't
+	/// take any action to get the required transactions confirmed ourselves.
+	///
+	/// **Note:** Trusting the channel counterparty to take the necessary actions to get the
+	/// required Anchor spending and HTLC transactions confirmed on-chain is potentially insecure
+	/// as the channel may not be closed if they refuse to do so, potentially leaving the user
+	/// funds stuck *or* even allow the counterparty to steal any in-flight funds after the
+	/// corresponding HTLCs time out.
+	pub trusted_peers_no_reserve: Vec<PublicKey>,
+	/// The amount of satoshis we keep as an emergency reserve in our on-chain wallet in order to
+	/// be able to get the required Anchor output spending and HTLC transactions confirmed when the
+	/// channel is closed.
+	///
+	/// **Note:** Depending on the fee market at the time of closure, this reserve amount might or
+	/// might not suffice to successfully spend the Anchor output and have the HTLC transactions
+	/// confirmed on-chain, i.e., you may want to adjust this value accordingly.
+	pub per_channel_reserve_sats: u64,
+}
+
+impl Default for AnchorChannelsConfig {
+	fn default() -> Self {
+		Self {
+			trusted_peers_no_reserve: Vec::new(),
+			per_channel_reserve_sats: DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS,
 		}
 	}
 }
