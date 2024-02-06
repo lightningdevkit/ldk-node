@@ -103,7 +103,7 @@ pub use lightning;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
-pub use config::{default_config, Config};
+pub use config::{default_config, AnchorChannelsConfig, Config};
 pub use error::Error as NodeError;
 use error::Error;
 
