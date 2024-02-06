@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 fn main() {
 	let mnemonic = generate_entropy_mnemonic();
-	let mut builder = Builder::from_entropy_bip39_mnemonic(mnemonic, None, None);
+	let mut builder = Builder::from_mnemonic(mnemonic, None, None);
 	builder.set_network(Network::Testnet);
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
