@@ -30,11 +30,11 @@ use std::sync::Arc;
 /// Generates a random [BIP 39] mnemonic.
 ///
 /// The result may be used to initialize the [`Node`] entropy, i.e., can be given to
-/// [`Builder::from_entropy_bip39_mnemonic`].
+/// [`Builder::from_mnemonic`].
 ///
 /// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
 /// [`Node`]: crate::Node
-/// [`Builder::from_entropy_bip39_mnemonic`]: crate::Builder::from_entropy_bip39_mnemonic
+/// [`Builder::from_mnemonic`]: crate::Builder::from_mnemonic
 pub fn generate_entropy_mnemonic() -> Mnemonic {
 	// bip39::Mnemonic supports 256 bit entropy max
 	let mut entropy = [0; 32];

@@ -154,7 +154,7 @@ impl NodeBuilder {
 	/// stored at the given location.
 	///
 	/// If `config` is provided, it will override the default config.
-	pub fn from_entropy_seed_path(seed_path: String, config: Option<Config>) -> Self {
+	pub fn from_seed_path(seed_path: String, config: Option<Config>) -> Self {
 		let config = config.unwrap_or(Config::default());
 		let entropy_source_config = EntropySourceConfig::SeedFile(seed_path);
 		let chain_data_source_config = None;
@@ -167,7 +167,7 @@ impl NodeBuilder {
 	/// entropy from the given 64 seed bytes.
 	///
 	/// If `config` is provided, it will override the default config.
-	pub fn from_entropy_seed_bytes(
+	pub fn from_seed_bytes(
 		seed_bytes: Vec<u8>, config: Option<Config>,
 	) -> Result<Self, BuildError> {
 		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
@@ -190,7 +190,7 @@ impl NodeBuilder {
 	/// If `config` is provided, it will override the default config.
 	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn from_entropy_bip39_mnemonic(
+	pub fn from_mnemonic(
 		mnemonic: Mnemonic, passphrase: Option<String>, config: Option<Config>,
 	) -> Self {
 		let config = config.unwrap_or(Config::default());
@@ -362,8 +362,8 @@ impl ArcedNodeBuilder {
 	///
 	/// If the given file does not exist a new random seed file will be generated and
 	/// stored at the given location.
-	pub fn from_entropy_seed_path(seed_path: String, config: Option<Config>) -> Self {
-		let inner = RwLock::new(NodeBuilder::from_entropy_seed_path(seed_path, config));
+	pub fn from_seed_path(seed_path: String, config: Option<Config>) -> Self {
+		let inner = RwLock::new(NodeBuilder::from_seed_path(seed_path, config));
 		Self { inner }
 	}
 
@@ -371,10 +371,10 @@ impl ArcedNodeBuilder {
 	/// entropy from the given 64 seed bytes.
 	///
 	/// If `config` is provided, it will override the default config.
-	pub fn from_entropy_seed_bytes(
+	pub fn from_seed_bytes(
 		seed_bytes: Vec<u8>, config: Option<Config>,
 	) -> Result<Self, BuildError> {
-		let inner = RwLock::new(NodeBuilder::from_entropy_seed_bytes(seed_bytes, config)?);
+		let inner = RwLock::new(NodeBuilder::from_seed_bytes(seed_bytes, config)?);
 		Ok(Self { inner })
 	}
 
@@ -384,11 +384,10 @@ impl ArcedNodeBuilder {
 	/// If `config` is provided, it will override the default config.
 	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn from_entropy_bip39_mnemonic(
+	pub fn from_mnemonic(
 		mnemonic: Mnemonic, passphrase: Option<String>, config: Option<Config>,
 	) -> Self {
-		let inner =
-			RwLock::new(NodeBuilder::from_entropy_bip39_mnemonic(mnemonic, passphrase, config));
+		let inner = RwLock::new(NodeBuilder::from_mnemonic(mnemonic, passphrase, config));
 		Self { inner }
 	}
 
