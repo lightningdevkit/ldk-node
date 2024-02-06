@@ -338,7 +338,7 @@ impl NodeBuilder {
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store(
-		&self, url: String, store_id: String, auth_custom: impl AuthMethod + 'static,
+		&self, url: String, store_id: String, auth_custom: Arc<dyn AuthMethod>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 
@@ -364,7 +364,7 @@ impl NodeBuilder {
 
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
-		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes, auth_custom));
+		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes, auth_custom.clone()));
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -520,7 +520,7 @@ impl ArcedNodeBuilder {
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store(
-		&self, url: String, store_id: String, auth_custom: impl AuthMethod + 'static,
+		&self, url: String, store_id: String, auth_custom: Arc<dyn AuthMethod>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_vss_store(url, store_id).map(Arc::new)
 	}

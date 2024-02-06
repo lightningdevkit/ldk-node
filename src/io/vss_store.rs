@@ -42,7 +42,7 @@ pub struct VssStore {
 impl VssStore {
 	pub(crate) fn new(
 		base_url: String, store_id: String, data_encryption_key: [u8; 32],
-		auth_custom: impl AuthMethod + 'static,
+		auth_custom: Arc<dyn AuthMethod>,
 	) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
@@ -60,7 +60,7 @@ impl VssStore {
 			}) as _);
 
 		let client = VssClient::new(&base_url, retry_policy);
-		Self { client, store_id, runtime, storable_builder, auth_custom: Arc::new(auth_custom) }
+		Self { client, store_id, runtime, storable_builder, auth_custom }
 	}
 
 	fn build_key(
