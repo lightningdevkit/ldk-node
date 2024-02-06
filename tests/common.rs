@@ -154,9 +154,9 @@ type TestNode<K> = Node<K>;
 macro_rules! setup_builder {
 	($builder: ident, $mnemonic: expr, $config: expr) => {
 		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_entropy_bip39_mnemonic($mnemonic, None, Some($config.clone()));
+		let $builder = Builder::from_mnemonic($mnemonic, None, Some($config.clone()));
 		#[cfg(not(feature = "uniffi"))]
-		let mut $builder = Builder::from_entropy_bip39_mnemonic($mnemonic, None, Some($config.clone()));
+		let mut $builder = Builder::from_mnemonic($mnemonic, None, Some($config.clone()));
 	};
 }
 
