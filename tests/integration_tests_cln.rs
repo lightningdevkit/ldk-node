@@ -38,7 +38,7 @@ fn test_cln() {
 	// Setup LDK Node
 	let mnemonic = generate_entropy_mnemonic();
 	let config = common::random_config();
-	let mut builder = Builder::from_entropy_bip39_mnemonic(mnemonic, None, Some(config));
+	let mut builder = Builder::from_mnemonic(mnemonic, None, Some(config));
 	builder.set_esplora_server("http://127.0.0.1:3002".to_string());
 
 	let node = builder.build().unwrap();
