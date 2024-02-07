@@ -717,9 +717,10 @@ where
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,
-				fee_earned_msat,
+				total_fee_earned_msat,
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
+				..
 			} => {
 				let read_only_network_graph = self.network_graph.read_only();
 				let nodes = read_only_network_graph.nodes();
@@ -752,7 +753,7 @@ where
 				let to_next_str =
 					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
-				let fee_earned = fee_earned_msat.unwrap_or(0);
+				let fee_earned = total_fee_earned_msat.unwrap_or(0);
 				let outbound_amount_forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
 				if claim_from_onchain_tx {
 					log_info!(
