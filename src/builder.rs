@@ -664,7 +664,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
-		keys_manager.get_secure_random_bytes(),
+		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
 		scoring_fee_params,
 	));
