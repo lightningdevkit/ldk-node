@@ -96,6 +96,8 @@ pub use bip39;
 pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
+#[cfg(vss)]
+pub use vss_client;
 
 pub use error::Error as NodeError;
 use error::Error;
@@ -105,6 +107,8 @@ pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
 
+#[cfg(all(vss, feature = "uniffi"))]
+pub use vss_client::client::AuthMethod;
 #[cfg(feature = "uniffi")]
 use {bip39::Mnemonic, bitcoin::OutPoint, lightning::ln::PaymentSecret};
 
