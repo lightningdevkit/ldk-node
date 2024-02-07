@@ -347,7 +347,7 @@ where
 				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
 
 				// We set nLockTime to the current height to discourage fee sniping.
-				let cur_height = self.channel_manager.current_best_block().height();
+				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
 				// Sign the final funding transaction and broadcast it.
@@ -474,7 +474,7 @@ where
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret } => {
+					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, payment_secret } => {
 						if payment_preimage.is_some() {
 							payment_preimage
 						} else {
@@ -482,6 +482,26 @@ where
 								.get_payment_preimage(payment_hash, payment_secret)
 								.ok()
 						}
+					},
+					PaymentPurpose::Bolt12OfferPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+						return;
+					},
+					PaymentPurpose::Bolt12RefundPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+						return;
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
 				};
@@ -521,7 +541,11 @@ where
 					amount_msat,
 				);
 				match purpose {
-					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
+					PaymentPurpose::Bolt11InvoicePayment {
+						payment_preimage,
+						payment_secret,
+						..
+					} => {
 						let update = PaymentDetailsUpdate {
 							preimage: Some(payment_preimage),
 							secret: Some(Some(payment_secret)),
@@ -549,6 +573,24 @@ where
 								debug_assert!(false);
 							},
 						}
+					},
+					PaymentPurpose::Bolt12OfferPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						return;
+					},
+					PaymentPurpose::Bolt12RefundPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						return;
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
 						let payment = PaymentDetails {
@@ -717,9 +759,10 @@ where
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,
-				fee_earned_msat,
+				total_fee_earned_msat,
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
+				..
 			} => {
 				let read_only_network_graph = self.network_graph.read_only();
 				let nodes = read_only_network_graph.nodes();
@@ -752,7 +795,7 @@ where
 				let to_next_str =
 					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
-				let fee_earned = fee_earned_msat.unwrap_or(0);
+				let fee_earned = total_fee_earned_msat.unwrap_or(0);
 				let outbound_amount_forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
 				if claim_from_onchain_tx {
 					log_info!(
@@ -780,6 +823,7 @@ where
 				former_temporary_channel_id,
 				counterparty_node_id,
 				funding_txo,
+				..
 			} => {
 				log_info!(
 					self.logger,

@@ -107,7 +107,7 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
-pub use types::{BestBlock, ChannelConfig};
+pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -138,7 +138,7 @@ pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
-use lightning::chain::Confirm;
+use lightning::chain::{BestBlock, Confirm};
 use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -157,7 +157,6 @@ use lightning_transaction_sync::EsploraSyncClient;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning_invoice::{payment, Bolt11Invoice, Currency};
 
-use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 
@@ -515,9 +514,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						}
 						_ = interval.tick() => {
 							let pm_peers = connect_pm
-								.get_peer_node_ids()
+								.list_peers()
 								.iter()
-								.map(|(peer, _addr)| *peer)
+								.map(|peer| peer.counterparty_node_id)
 								.collect::<Vec<_>>();
 
 							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
@@ -579,7 +578,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								continue;
 							}
 
-							if bcast_pm.get_peer_node_ids().is_empty() {
+							if bcast_pm.list_peers().is_empty() {
 								// Skip if we don't have any connected peers to gossip to.
 								continue;
 							}
@@ -1301,7 +1300,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
-		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).to_byte_array());
+		let payment_hash = PaymentHash::from(payment_preimage);
 
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
 			if payment.status == PaymentStatus::Pending
@@ -1690,11 +1689,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
-		for funding_txo in self.chain_monitor.list_monitors() {
+		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
 			match self.chain_monitor.get_monitor(funding_txo) {
 				Ok(monitor) => {
-					// TODO: Switch to `channel_id` with LDK 0.0.122: let channel_id = monitor.channel_id();
-					let channel_id = funding_txo.to_channel_id();
 					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
 					// LDK Node 0.1 depended on 0.0.115 already.
 					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
@@ -1758,12 +1755,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let mut peers = Vec::new();
 
 		// First add all connected peers, preferring to list the connected address if available.
-		let connected_peers = self.peer_manager.get_peer_node_ids();
+		let connected_peers = self.peer_manager.list_peers();
 		let connected_peers_len = connected_peers.len();
-		for (node_id, con_addr_opt) in connected_peers {
+		for connected_peer in connected_peers {
+			let node_id = connected_peer.counterparty_node_id;
 			let stored_peer = self.peer_store.get_peer(&node_id);
 			let stored_addr_opt = stored_peer.as_ref().map(|p| p.address.clone());
-			let address = match (con_addr_opt, stored_addr_opt) {
+			let address = match (connected_peer.socket_address, stored_addr_opt) {
 				(Some(con_addr), _) => con_addr,
 				(None, Some(stored_addr)) => stored_addr,
 				(None, None) => continue,
@@ -1858,10 +1856,8 @@ async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
 	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
-	for (pman_node_id, _pman_addr) in peer_manager.get_peer_node_ids() {
-		if node_id == pman_node_id {
-			return Ok(());
-		}
+	if peer_manager.peer_by_node_id(&node_id).is_some() {
+		return Ok(());
 	}
 
 	do_connect_peer(node_id, addr, peer_manager, logger).await
@@ -1896,7 +1892,7 @@ async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
 					std::task::Poll::Pending => {},
 				}
 				// Avoid blocking the tokio context by sleeping a bit
-				match peer_manager.get_peer_node_ids().iter().find(|(id, _addr)| *id == node_id) {
+				match peer_manager.peer_by_node_id(&node_id) {
 					Some(_) => return Ok(()),
 					None => tokio::time::sleep(Duration::from_millis(10)).await,
 				}

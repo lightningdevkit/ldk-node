@@ -7,8 +7,8 @@ use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget,
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
-	EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner, Recipient, SignerProvider,
-	SpendableOutputDescriptor,
+	EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner, OutputSpender, Recipient,
+	SignerProvider, SpendableOutputDescriptor,
 };
 
 use lightning::util::message_signing;
@@ -173,7 +173,7 @@ where
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, amount_msat_or_drain: Option<u64>,
 	) -> Result<Txid, Error> {
-		let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+		let confirmation_target = ConfirmationTarget::OutputSpendingFee;
 		let fee_rate = FeeRate::from_sat_per_kwu(
 			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
 		);

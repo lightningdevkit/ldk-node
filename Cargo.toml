@@ -28,14 +28,16 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.0.121", features = ["std"] }
-lightning-invoice = { version = "0.29.0" }
-lightning-net-tokio = { version = "0.0.121" }
-lightning-persister = { version = "0.0.121" }
-lightning-background-processor = { version = "0.0.121", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.121" }
-lightning-transaction-sync = { version = "0.0.121", features = ["esplora-async-https", "time"] }
-lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
+lightning = { version = "0.0.123-beta", features = ["std"] }
+lightning-invoice = { version = "0.31.0-beta" }
+lightning-net-tokio = { version = "0.0.123-beta" }
+lightning-persister = { version = "0.0.123-beta" }
+lightning-background-processor = { version = "0.0.123-beta", features = ["futures"] }
+lightning-rapid-gossip-sync = { version = "0.0.123-beta" }
+lightning-transaction-sync = { version = "0.0.123-beta", features = ["esplora-async-https", "time"] }
+#lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
+
+lightning-liquidity = { git = "https://github.com/tnull/lightning-liquidity", rev = "abf7088c0e03221c0f122e797f34802c9e99a3d4", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -78,7 +80,7 @@ prost = { version = "0.11.6", default-features = false}
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.0.121", features = ["std", "_test_utils"] }
+lightning = { version = "0.0.123-beta", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
 electrum-client = { version = "0.15.1", default-features = true }
 bitcoincore-rpc = { version = "0.17.0", default-features = false }
