@@ -11,7 +11,7 @@ use crate::UniffiCustomTypeConverter;
 
 use crate::error::Error;
 use crate::hex_utils;
-use crate::{Node, SocketAddress, UserChannelId};
+use crate::{SocketAddress, UserChannelId};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -22,10 +22,6 @@ use lightning_invoice::{Bolt11Invoice, SignedRawBolt11Invoice};
 
 use std::convert::TryInto;
 use std::str::FromStr;
-
-/// This type alias is required as Uniffi doesn't support generics, i.e., we can only expose the
-/// concretized types via this aliasing hack.
-pub type LDKNode = Node;
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;
