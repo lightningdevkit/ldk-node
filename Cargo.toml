@@ -70,7 +70,8 @@ libc = "0.2"
 uniffi = { version = "0.26.0", features = ["build"], optional = true }
 
 [target.'cfg(vss)'.dependencies]
-vss-client = "0.2"
+#vss-client = "0.2"
+vss-client = { git = "https://github.com/g8xsu/vss-rust-client", rev="ceaa00db43b10992e7e327661ffb398ca2178f6d"}
 prost = { version = "0.11.6", default-features = false}
 
 [target.'cfg(windows)'.dependencies]
