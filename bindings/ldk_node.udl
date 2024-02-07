@@ -38,7 +38,7 @@ interface Builder {
 	[Throws=BuildError]
 	Node build_with_fs_store();
 	[Throws=BuildError]
-	Node build_with_vss_store(string url, string store_id);
+	Node build_with_vss_store(string url, string store_id, AuthMethod auth_custom);
 };
 
 interface Node {
@@ -353,6 +353,11 @@ enum LogLevel {
 	"Info",
 	"Warn",
 	"Error",
+};
+
+[Trait]
+interface AuthMethod {
+	record<string, string> get([ByRef]sequence<u8> request_body);
 };
 
 [Custom]

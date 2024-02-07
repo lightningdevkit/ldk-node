@@ -101,6 +101,8 @@ pub use bip39;
 pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
+#[cfg(vss)]
+pub use vss_client;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use config::{default_config, Config};
@@ -112,6 +114,8 @@ pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
 
+#[cfg(all(vss, feature = "uniffi"))]
+pub use vss_client::client::AuthMethod;
 #[cfg(feature = "uniffi")]
 use uniffi_types::*;
 

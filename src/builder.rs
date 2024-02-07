@@ -522,7 +522,7 @@ impl ArcedNodeBuilder {
 	pub fn build_with_vss_store(
 		&self, url: String, store_id: String, auth_custom: Arc<dyn AuthMethod>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build_with_vss_store(url, store_id).map(Arc::new)
+		self.inner.read().unwrap().build_with_vss_store(url, store_id, auth_custom).map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
