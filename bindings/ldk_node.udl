@@ -35,6 +35,8 @@ interface Builder {
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
 	Node build();
+	[Throws=BuildError]
+	Node build_with_fs_store();
 };
 
 interface Node {
