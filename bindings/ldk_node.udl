@@ -34,10 +34,10 @@ interface Builder {
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
-	LDKNode build();
+	Node build();
 };
 
-interface LDKNode {
+interface Node {
 	[Throws=NodeError]
 	void start();
 	[Throws=NodeError]
