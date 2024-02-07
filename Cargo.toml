@@ -36,13 +36,13 @@ default = []
 #lightning-rapid-gossip-sync = { version = "0.0.121" }
 #lightning-transaction-sync = { version = "0.0.121", features = ["esplora-async-https", "time"] }
 
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e", features = ["std"] }
-lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e" }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e" }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e" }
-lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e", features = ["futures"] }
-lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e" }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e", features = ["esplora-async"] }
+lightning = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55", features = ["std"] }
+lightning-invoice = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55" }
+lightning-net-tokio = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55" }
+lightning-persister = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55" }
+lightning-background-processor = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55", features = ["futures"] }
+lightning-rapid-gossip-sync = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55" }
+lightning-transaction-sync = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55", features = ["esplora-async"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -85,7 +85,7 @@ winapi = { version = "0.3", features = ["winbase"] }
 [dev-dependencies]
 #lightning = { version = "0.0.121", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev="a9d73c2889d6ad33a8527778436633cb4173b63e", features = ["std", "_test_utils"] }
+lightning = { git = "https://github.com/tnull/rust-lightning", rev="bf4c7292c6783eee6d640e372f616be24468ac55", features = ["std", "_test_utils"] }
 electrum-client = { version = "0.15.1", default-features = true }
 bitcoincore-rpc = { version = "0.17.0", default-features = false }
 proptest = "1.0.0"
