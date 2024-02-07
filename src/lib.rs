@@ -278,6 +278,16 @@ impl Default for Config {
 	}
 }
 
+/// Returns a [`Config`] object populated with default values.
+///
+/// See the documentation of [`Config`] for more information on the used defaults.
+///
+/// This is mostly meant for use in bindings, in Rust this is synonymous with
+/// [`Config::default()`].
+pub fn default_config() -> Config {
+	Config::default()
+}
+
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].

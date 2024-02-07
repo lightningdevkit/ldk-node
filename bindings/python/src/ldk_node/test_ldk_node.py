@@ -81,7 +81,7 @@ def send_to_address(address, amount_sats):
 
 
 def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
-    config = Config()
+    config = default_config()
     builder = Builder.from_config(config)
     builder.set_storage_dir_path(tmp_dir)
     builder.set_esplora_server(esplora_endpoint)
