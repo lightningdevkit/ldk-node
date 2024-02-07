@@ -106,7 +106,7 @@ pub use types::ChannelConfig;
 pub use io::utils::generate_entropy_mnemonic;
 
 #[cfg(feature = "uniffi")]
-use {bip39::Mnemonic, bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
+use {bip39::Mnemonic, bitcoin::OutPoint, lightning::ln::PaymentSecret};
 
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
