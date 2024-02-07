@@ -512,6 +512,13 @@ impl ArcedNodeBuilder {
 		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
 	}
 
+	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
+	/// previously configured.
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store(&self, url: String, store_id: String) -> Result<Arc<Node>, BuildError> {
+		self.inner.read().unwrap().build_with_vss_store(url, store_id).map(Arc::new)
+	}
+
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
