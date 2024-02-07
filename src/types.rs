@@ -11,7 +11,7 @@ use lightning::ln::ChannelId;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
-use lightning::sign::{EntropySource, InMemorySigner};
+use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::ser::{Readable, Writeable, Writer};
@@ -74,6 +74,7 @@ pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
 pub(crate) type Router = DefaultRouter<
 	Arc<NetworkGraph>,
 	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
 	Arc<Mutex<Scorer>>,
 	ProbabilisticScoringFeeParameters,
 	Scorer,
@@ -118,12 +119,8 @@ impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
 	) -> Result<lightning::onion_message::messenger::OnionMessagePath, ()> {
 		unimplemented!()
 	}
-	fn create_blinded_paths<
-		ES: EntropySource + ?Sized,
-		T: secp256k1::Signing + secp256k1::Verification,
-	>(
-		&self, _recipient: PublicKey, _peers: Vec<PublicKey>, _entropy_source: &ES,
-		_secp_ctx: &Secp256k1<T>,
+	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
+		&self, _recipient: PublicKey, _peers: Vec<PublicKey>, _secp_ctx: &Secp256k1<T>,
 	) -> Result<Vec<BlindedPath>, ()> {
 		unreachable!()
 	}
