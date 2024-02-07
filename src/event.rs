@@ -781,6 +781,7 @@ where
 				former_temporary_channel_id,
 				counterparty_node_id,
 				funding_txo,
+				..
 			} => {
 				log_info!(
 					self.logger,
