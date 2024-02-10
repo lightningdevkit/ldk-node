@@ -508,8 +508,11 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				tx_sync.client().clone(),
 				Arc::clone(&logger),
 			));
-			let fee_estimator =
-				Arc::new(OnchainFeeEstimator::new(tx_sync.client().clone(), Arc::clone(&logger)));
+			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
+				tx_sync.client().clone(),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+			));
 			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
 		}
 		None => {
@@ -523,8 +526,11 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				tx_sync.client().clone(),
 				Arc::clone(&logger),
 			));
-			let fee_estimator =
-				Arc::new(OnchainFeeEstimator::new(tx_sync.client().clone(), Arc::clone(&logger)));
+			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
+				tx_sync.client().clone(),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+			));
 			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
 		}
 	};

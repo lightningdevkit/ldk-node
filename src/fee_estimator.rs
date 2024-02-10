@@ -1,5 +1,5 @@
 use crate::logger::{log_error, log_trace, Logger};
-use crate::Error;
+use crate::{Config, Error};
 
 use lightning::chain::chaininterface::{
 	ConfirmationTarget, FeeEstimator, FEERATE_FLOOR_SATS_PER_KW,
@@ -8,11 +8,12 @@ use lightning::chain::chaininterface::{
 use bdk::FeeRate;
 use esplora_client::AsyncClient as EsploraClient;
 
+use bitcoin::Network;
 use bitcoin::blockdata::weight::Weight;
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 pub(crate) struct OnchainFeeEstimator<L: Deref>
 where
@@ -20,6 +21,7 @@ where
 {
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
 	esplora_client: EsploraClient,
+	config: Arc<Config>,
 	logger: L,
 }
 
@@ -27,9 +29,9 @@ impl<L: Deref> OnchainFeeEstimator<L>
 where
 	L::Target: Logger,
 {
-	pub(crate) fn new(esplora_client: EsploraClient, logger: L) -> Self {
+	pub(crate) fn new(esplora_client: EsploraClient, config: Arc<Config>, logger: L) -> Self {
 		let fee_rate_cache = RwLock::new(HashMap::new());
-		Self { fee_rate_cache, esplora_client, logger }
+		Self { fee_rate_cache, esplora_client, config, logger }
 	}
 
 	pub(crate) async fn update_fee_estimates(&self) -> Result<(), Error> {
@@ -60,6 +62,16 @@ where
 				);
 				Error::FeerateEstimationUpdateFailed
 			})?;
+
+			if estimates.is_empty() && self.config.network == Network::Bitcoin {
+				// Ensure we fail if we didn't receive any estimates.
+				log_error!(
+					self.logger,
+					"Failed to retrieve fee rate estimates for {:?}: empty fee estimates are dissallowed on Mainnet.",
+					target,
+				);
+				return Err(Error::FeerateEstimationUpdateFailed);
+			}
 
 			let converted_estimates = esplora_client::convert_fee_rate(num_blocks, estimates)
 				.map_err(|e| {
