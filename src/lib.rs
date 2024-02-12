@@ -654,7 +654,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								continue;
 							}
 
-							if bcast_cm.list_channels().iter().any(|chan| chan.is_public) {
+							if !bcast_cm.list_channels().iter().any(|chan| chan.is_public) {
 								// Skip if we don't have any public channels.
 								continue;
 							}
