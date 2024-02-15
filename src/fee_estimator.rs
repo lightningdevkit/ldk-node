@@ -8,8 +8,8 @@ use lightning::chain::chaininterface::{
 use bdk::FeeRate;
 use esplora_client::AsyncClient as EsploraClient;
 
-use bitcoin::Network;
 use bitcoin::blockdata::weight::Weight;
+use bitcoin::Network;
 
 use std::collections::HashMap;
 use std::ops::Deref;
