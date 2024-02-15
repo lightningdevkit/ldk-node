@@ -39,14 +39,17 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
           rustup override set ${{ matrix.toolchain }}
+      - name: Check formatting on Rust ${{ matrix.toolchain }}
+        if: matrix.check-fmt
+        run: rustup component add rustfmt && cargo fmt --all -- --check
       - name: Pin packages to allow for MSRV
         if: matrix.msrv
         run: |
           cargo update -p hashlink --precise "0.8.2" --verbose # hashlink 0.8.3 requires hashbrown 0.14, requiring 1.64.0
           cargo update -p proptest --precise "1.2.0" --verbose # proptest 1.3.0 requires rustc 1.64.0
-          cargo update -p reqwest --precise "0.11.20" --verbose # reqwest 0.11.21 broke 1.63.0 MSRV
           cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
           cargo update -p home --precise "0.5.5" --verbose # home v0.5.9, requires rustc 1.70 or newer
+          cargo update -p ahash@0.8.8 --precise "0.8.6" --verbose # ahash v0.8.7 is broken and v0.8.8 requires rustc 1.72.0
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
@@ -80,6 +83,3 @@ jobs:
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
           RUSTFLAGS="--cfg no_download" cargo test --features uniffi
-      - name: Check formatting on Rust ${{ matrix.toolchain }}
-        if: matrix.check-fmt
-        run: rustup component add rustfmt && cargo fmt --all -- --check
