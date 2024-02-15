@@ -20,8 +20,8 @@ jobs:
           distribution: temurin
           java-version: 11
 
-      - name: Set default Rust version to 1.73.0
-        run: rustup default 1.73.0
+      - name: Set default Rust version to stable
+        run: rustup default stable
 
       - name: Show default version of NDK
         run: echo $ANDROID_NDK_ROOT
