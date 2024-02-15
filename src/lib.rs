@@ -882,16 +882,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		Ok(funding_address)
 	}
 
-	/// Retrieve the currently spendable on-chain balance in satoshis.
-	pub fn spendable_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_spendable())?)
-	}
-
-	/// Retrieve the current total on-chain balance in satoshis.
-	pub fn total_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_total())?)
-	}
-
 	/// Send an on-chain payment to the given address.
 	pub fn send_to_onchain_address(
 		&self, address: &bitcoin::Address, amount_sats: u64,
@@ -1748,6 +1738,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	/// Retrieves an overview of all known balances.
 	pub fn list_balances(&self) -> BalanceDetails {
+		let (total_onchain_balance_sats, spendable_onchain_balance_sats) = self
+			.wallet
+			.get_balance()
+			.map(|bal| (bal.get_total(), bal.get_spendable()))
+			.unwrap_or((0, 0));
+
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
 		for funding_txo in self.chain_monitor.list_monitors() {
@@ -1773,7 +1769,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		}
 
-		BalanceDetails { total_lightning_balance_sats, lightning_balances }
+		BalanceDetails {
+			total_onchain_balance_sats,
+			spendable_onchain_balance_sats,
+			total_lightning_balance_sats,
+			lightning_balances,
+		}
 	}
 
 	/// Retrieves all payments that match the given predicate.

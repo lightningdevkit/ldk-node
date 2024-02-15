@@ -44,8 +44,8 @@ fn channel_open_fails_when_funds_insufficient() {
 	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_a.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
-	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	println!("\nA -- connect_open_channel -> B");
 	assert_eq!(
@@ -88,7 +88,7 @@ fn multi_hop_sending() {
 
 	for n in &nodes {
 		n.sync_wallets().unwrap();
-		assert_eq!(n.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+		assert_eq!(n.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 		assert_eq!(n.next_event(), None);
 	}
 
@@ -168,7 +168,7 @@ fn start_stop_reinit() {
 
 	let funding_address = node.new_onchain_address().unwrap();
 
-	assert_eq!(node.total_onchain_balance_sats().unwrap(), 0);
+	assert_eq!(node.list_balances().total_onchain_balance_sats, 0);
 
 	let expected_amount = Amount::from_sat(100000);
 	premine_and_distribute_funds(
@@ -179,7 +179,7 @@ fn start_stop_reinit() {
 	);
 
 	node.sync_wallets().unwrap();
-	assert_eq!(node.spendable_onchain_balance_sats().unwrap(), expected_amount.to_sat());
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, expected_amount.to_sat());
 
 	let log_file_symlink = format!("{}/logs/ldk_node_latest.log", config.clone().storage_dir_path);
 	assert!(std::path::Path::new(&log_file_symlink).is_symlink());
@@ -202,13 +202,13 @@ fn start_stop_reinit() {
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
 	assert_eq!(
-		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
+		reinitialized_node.list_balances().spendable_onchain_balance_sats,
 		expected_amount.to_sat()
 	);
 
 	reinitialized_node.sync_wallets().unwrap();
 	assert_eq!(
-		reinitialized_node.spendable_onchain_balance_sats().unwrap(),
+		reinitialized_node.list_balances().spendable_onchain_balance_sats,
 		expected_amount.to_sat()
 	);
 
@@ -232,7 +232,7 @@ fn onchain_spend_receive() {
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), 100000);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, 100000);
 
 	assert_eq!(Err(NodeError::InsufficientFunds), node_a.send_to_onchain_address(&addr_b, 1000));
 
@@ -243,9 +243,9 @@ fn onchain_spend_receive() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.spendable_onchain_balance_sats().unwrap(), 1000);
-	assert!(node_b.spendable_onchain_balance_sats().unwrap() > 98000);
-	assert!(node_b.spendable_onchain_balance_sats().unwrap() < 100000);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 1000);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > 98000);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
 
 	let addr_b = node_b.new_onchain_address().unwrap();
 	let txid = node_a.send_all_to_onchain_address(&addr_b).unwrap();
@@ -255,9 +255,9 @@ fn onchain_spend_receive() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.total_onchain_balance_sats().unwrap(), 0);
-	assert!(node_b.spendable_onchain_balance_sats().unwrap() > 99000);
-	assert!(node_b.spendable_onchain_balance_sats().unwrap() < 100000);
+	assert_eq!(node_a.list_balances().total_onchain_balance_sats, 0);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > 99000);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
 }
 
 #[test]

@@ -7,6 +7,10 @@ use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
 /// [`Node::list_balances`]: crate::Node::list_balances
 #[derive(Debug, Clone)]
 pub struct BalanceDetails {
+	/// The total balance of our on-chain wallet.
+	pub total_onchain_balance_sats: u64,
+	/// The currently spendable balance of our on-chain wallet.
+	pub spendable_onchain_balance_sats: u64,
 	/// The total balance that we would be able to claim across all our Lightning channels.
 	///
 	/// Note this excludes balances that we are unsure if we are able to claim (e.g., as we are
