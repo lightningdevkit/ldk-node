@@ -9,8 +9,8 @@ use crate::peer_store::PeerStore;
 use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
-	OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, DynStore, FakeMessageRouter, GossipSync, KeysManager,
+	NetworkGraph, OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::LogLevel;
@@ -31,7 +31,7 @@ use lightning::sign::EntropySource;
 
 use lightning::util::config::UserConfig;
 use lightning::util::persist::{
-	read_channel_monitors, KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	read_channel_monitors, CHANNEL_MANAGER_PERSISTENCE_KEY,
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
@@ -46,6 +46,8 @@ use bdk::bitcoin::secp256k1::Secp256k1;
 use bdk::blockchain::esplora::EsploraBlockchain;
 use bdk::database::SqliteDatabase;
 use bdk::template::Bip84;
+#[cfg(any(vss, vss_test))]
+use vss_client::client::AuthMethod;
 
 use bip39::Mnemonic;
 
@@ -96,12 +98,18 @@ pub enum BuildError {
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
 	/// We failed to read data from the [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
 	StoragePathAccessFailed,
 	/// We failed to setup our [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
@@ -256,7 +264,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Node<SqliteStore>, BuildError> {
+	pub fn build(&self) -> Result<Node, BuildError> {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
@@ -273,7 +281,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Node<FilesystemStore>, BuildError> {
+	pub fn build_with_fs_store(&self) -> Result<Node, BuildError> {
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
@@ -287,8 +295,8 @@ impl NodeBuilder {
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store(
-		&self, url: String, store_id: String,
-	) -> Result<Node<VssStore>, BuildError> {
+		&self, url: String, store_id: String, auth_custom: Arc<dyn AuthMethod>,
+	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 
 		let seed_bytes = seed_bytes_from_config(
@@ -313,7 +321,7 @@ impl NodeBuilder {
 
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
-		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes));
+		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes, auth_custom.clone()));
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -325,9 +333,7 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
-		&self, kv_store: Arc<K>,
-	) -> Result<Node<K>, BuildError> {
+	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -442,30 +448,37 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Arc<Node<SqliteStore>>, BuildError> {
+	pub fn build(&self) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build().map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Arc<Node<FilesystemStore>>, BuildError> {
+	pub fn build_with_fs_store(&self) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
 	}
 
+	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
+	/// previously configured.
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store(
+		&self, url: String, store_id: String, auth_custom: Arc<dyn AuthMethod>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner.read().unwrap().build_with_vss_store(url, store_id, auth_custom).map(Arc::new)
+	}
+
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
-		&self, kv_store: Arc<K>,
-	) -> Result<Arc<Node<K>>, BuildError> {
+	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
 	}
 }
 
 /// Builds a [`Node`] instance according to the options previously configured.
-fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
+fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<K>,
-) -> Result<Node<K>, BuildError> {
+	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+) -> Result<Node, BuildError> {
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
 		.map_err(|e| {
@@ -545,7 +558,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	));
 
 	// Initialize the ChainMonitor
-	let chain_monitor: Arc<ChainMonitor<K>> = Arc::new(chainmonitor::ChainMonitor::new(
+	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
 		Some(Arc::clone(&tx_sync)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
@@ -605,7 +618,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
-		keys_manager.get_secure_random_bytes(),
+		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
 		scoring_fee_params,
 	));
@@ -658,7 +671,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				channel_monitor_references,
 			);
 			let (_hash, channel_manager) =
-				<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args).map_err(|e| {
+				<(BlockHash, ChannelManager)>::read(&mut reader, read_args).map_err(|e| {
 					log_error!(logger, "Failed to read channel manager from KVStore: {}", e);
 					BuildError::ReadFailed
 				})?;

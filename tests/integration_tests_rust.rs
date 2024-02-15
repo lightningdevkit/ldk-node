@@ -8,6 +8,8 @@ use common::{
 
 use ldk_node::{Builder, Event, NodeError};
 
+use lightning::util::persist::KVStore;
+
 use bitcoin::{Amount, Network};
 
 use std::sync::Arc;
@@ -155,7 +157,8 @@ fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
+	let test_sync_store: Arc<dyn KVStore + Sync + Send> =
+		Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
 
 	setup_builder!(builder, config);
 	builder.set_esplora_server(esplora_url.clone());
