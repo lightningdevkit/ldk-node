@@ -47,6 +47,7 @@ jobs:
           cargo update -p reqwest --precise "0.11.20" --verbose # reqwest 0.11.21 broke 1.63.0 MSRV
           cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
           cargo update -p home --precise "0.5.5" --verbose # home v0.5.9, requires rustc 1.70 or newer
+          cargo update -p ahash@0.8.8 --precise "0.8.6" --verbose # ahash v0.8.7 is broken and v0.8.8 requires rustc 1.72.0
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
