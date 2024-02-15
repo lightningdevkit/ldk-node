@@ -39,6 +39,9 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
           rustup override set ${{ matrix.toolchain }}
+      - name: Check formatting on Rust ${{ matrix.toolchain }}
+        if: matrix.check-fmt
+        run: rustup component add rustfmt && cargo fmt --all -- --check
       - name: Pin packages to allow for MSRV
         if: matrix.msrv
         run: |
@@ -80,6 +83,3 @@ jobs:
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
           RUSTFLAGS="--cfg no_download" cargo test --features uniffi
-      - name: Check formatting on Rust ${{ matrix.toolchain }}
-        if: matrix.check-fmt
-        run: rustup component add rustfmt && cargo fmt --all -- --check
