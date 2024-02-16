@@ -100,7 +100,7 @@ pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
 
-pub use balance::{BalanceDetails, LightningBalance};
+pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use error::Error as NodeError;
 use error::Error;
 
@@ -1769,11 +1769,19 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		}
 
+		let pending_balances_from_channel_closures = self
+			.output_sweeper
+			.tracked_spendable_outputs()
+			.into_iter()
+			.map(|o| PendingSweepBalance::from_tracked_spendable_output(o))
+			.collect();
+
 		BalanceDetails {
 			total_onchain_balance_sats,
 			spendable_onchain_balance_sats,
 			total_lightning_balance_sats,
 			lightning_balances,
+			pending_balances_from_channel_closures,
 		}
 	}
 

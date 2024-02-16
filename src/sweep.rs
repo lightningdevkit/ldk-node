@@ -29,14 +29,14 @@ const REGENERATE_SPEND_THRESHOLD: u32 = 144;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SpendableOutputInfo {
-	id: [u8; 32],
-	descriptor: SpendableOutputDescriptor,
-	channel_id: Option<ChannelId>,
-	first_broadcast_hash: Option<BlockHash>,
-	latest_broadcast_height: Option<u32>,
-	latest_spending_tx: Option<Transaction>,
-	confirmation_height: Option<u32>,
-	confirmation_hash: Option<BlockHash>,
+	pub(crate) id: [u8; 32],
+	pub(crate) descriptor: SpendableOutputDescriptor,
+	pub(crate) channel_id: Option<ChannelId>,
+	pub(crate) first_broadcast_hash: Option<BlockHash>,
+	pub(crate) latest_broadcast_height: Option<u32>,
+	pub(crate) latest_spending_tx: Option<Transaction>,
+	pub(crate) confirmation_height: Option<u32>,
+	pub(crate) confirmation_hash: Option<BlockHash>,
 }
 
 impl SpendableOutputInfo {
@@ -76,6 +76,14 @@ impl SpendableOutputInfo {
 		}
 
 		false
+	}
+
+	pub(crate) fn value_satoshis(&self) -> u64 {
+		match &self.descriptor {
+			SpendableOutputDescriptor::StaticOutput { output, .. } => output.value,
+			SpendableOutputDescriptor::DelayedPaymentOutput(output) => output.output.value,
+			SpendableOutputDescriptor::StaticPaymentOutput(output) => output.output.value,
+		}
 	}
 }
 
@@ -182,6 +190,10 @@ where
 		}
 
 		self.rebroadcast_if_necessary();
+	}
+
+	pub(crate) fn tracked_spendable_outputs(&self) -> Vec<SpendableOutputInfo> {
+		self.outputs.lock().unwrap().clone()
 	}
 
 	fn rebroadcast_if_necessary(&self) {

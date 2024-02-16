@@ -3,7 +3,7 @@ pub use lightning::ln::ChannelId;
 pub use lightning::ln::PaymentSecret;
 pub use lightning::util::string::UntrustedString;
 
-pub use bitcoin::OutPoint;
+pub use bitcoin::{BlockHash, OutPoint};
 
 pub use bip39::Mnemonic;
 
@@ -165,6 +165,17 @@ impl UniffiCustomTypeConverter for Txid {
 	type Builtin = String;
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
 		Ok(Txid::from_str(&val)?)
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for BlockHash {
+	type Builtin = String;
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(BlockHash::from_str(&val)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {

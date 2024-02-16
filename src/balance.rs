@@ -1,6 +1,10 @@
-use bitcoin::secp256k1::PublicKey;
 use lightning::chain::channelmonitor::Balance as LdkBalance;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
+
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::{BlockHash, Txid};
+
+use crate::sweep::SpendableOutputInfo;
 
 /// Details of the known available balances returned by [`Node::list_balances`].
 ///
@@ -33,6 +37,17 @@ pub struct BalanceDetails {
 	/// [`ChannelDetails::next_outbound_htlc_limit_msat`]: crate::ChannelDetails::next_outbound_htlc_limit_msat
 	/// [`Node::list_channels`]: crate::Node::list_channels
 	pub lightning_balances: Vec<LightningBalance>,
+	/// A detailed list of balances currently being swept from the Lightning to the on-chain
+	/// wallet.
+	///
+	/// These are balances resulting from channel closures that may have been encumbered by a
+	/// delay, but are now being claimed and useable once sufficiently confirmed on-chain.
+	///
+	/// Note that, depending on the sync status of the wallets, swept balances listed here might or
+	/// might not already be accounted for in [`total_onchain_balance_sats`].
+	///
+	/// [`total_onchain_balance_sats`]: Self::total_onchain_balance_sats
+	pub pending_balances_from_channel_closures: Vec<PendingSweepBalance>,
 }
 
 /// Details about the status of a known Lightning balance.
@@ -196,6 +211,93 @@ impl LightningBalance {
 					amount_satoshis,
 				}
 			},
+		}
+	}
+}
+
+/// Details about the status of a known balance currently being swept to our on-chain wallet.
+#[derive(Debug, Clone)]
+pub enum PendingSweepBalance {
+	/// The spendable output is about to be swept, but a spending transaction has yet to be generated and
+	/// broadcast.
+	PendingBroadcast {
+		/// The identifier of the channel this balance belongs to.
+		channel_id: Option<ChannelId>,
+		/// The amount, in satoshis, of the output being swept.
+		amount_satoshis: u64,
+	},
+	/// A spending transaction has been generated and broadcast and is awaiting confirmation
+	/// on-chain.
+	BroadcastAwaitingConfirmation {
+		/// The identifier of the channel this balance belongs to.
+		channel_id: Option<ChannelId>,
+		/// The best height when we last broadcast a transaction spending the output being swept.
+		latest_broadcast_height: u32,
+		/// The identifier of the transaction spending the swept output we last broadcast.
+		latest_spending_txid: Txid,
+		/// The amount, in satoshis, of the output being swept.
+		amount_satoshis: u64,
+	},
+	/// A spending transaction has been confirmed on-chain and is awaiting threshold confirmations.
+	///
+	/// It will be considered irrevocably confirmed after reaching [`ANTI_REORG_DELAY`].
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	AwaitingThresholdConfirmations {
+		/// The identifier of the channel this balance belongs to.
+		channel_id: Option<ChannelId>,
+		/// The identifier of the confirmed transaction spending the swept output.
+		latest_spending_txid: Txid,
+		/// The hash of the block in which the spending transaction was confirmed.
+		confirmation_hash: BlockHash,
+		/// The height at which the spending transaction was confirmed.
+		confirmation_height: u32,
+		/// The amount, in satoshis, of the output being swept.
+		amount_satoshis: u64,
+	},
+}
+
+impl PendingSweepBalance {
+	pub(crate) fn from_tracked_spendable_output(output_info: SpendableOutputInfo) -> Self {
+		if let Some(confirmation_hash) = output_info.confirmation_hash {
+			debug_assert!(output_info.confirmation_height.is_some());
+			debug_assert!(output_info.latest_spending_tx.is_some());
+			let channel_id = output_info.channel_id;
+			let confirmation_height = output_info
+				.confirmation_height
+				.expect("Height must be set if the output is confirmed");
+			let latest_spending_txid = output_info
+				.latest_spending_tx
+				.as_ref()
+				.expect("Spending tx must be set if the output is confirmed")
+				.txid();
+			let amount_satoshis = output_info.value_satoshis();
+			Self::AwaitingThresholdConfirmations {
+				channel_id,
+				latest_spending_txid,
+				confirmation_hash,
+				confirmation_height,
+				amount_satoshis,
+			}
+		} else if let Some(latest_broadcast_height) = output_info.latest_broadcast_height {
+			debug_assert!(output_info.latest_spending_tx.is_some());
+			let channel_id = output_info.channel_id;
+			let latest_spending_txid = output_info
+				.latest_spending_tx
+				.as_ref()
+				.expect("Spending tx must be set if the spend was broadcast")
+				.txid();
+			let amount_satoshis = output_info.value_satoshis();
+			Self::BroadcastAwaitingConfirmation {
+				channel_id,
+				latest_broadcast_height,
+				latest_spending_txid,
+				amount_satoshis,
+			}
+		} else {
+			let channel_id = output_info.channel_id;
+			let amount_satoshis = output_info.value_satoshis();
+			Self::PendingBroadcast { channel_id, amount_satoshis }
 		}
 	}
 }
