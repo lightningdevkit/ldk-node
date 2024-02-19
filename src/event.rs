@@ -733,9 +733,68 @@ where
 				temporary_channel_id,
 				counterparty_node_id,
 				funding_satoshis,
-				channel_type: _,
+				channel_type,
 				push_msat: _,
 			} => {
+				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
+
+				if anchor_channel {
+					if let Some(anchor_channels_config) =
+						self.config.anchor_channels_config.as_ref()
+					{
+						let cur_anchor_reserve_sats = crate::total_anchor_channels_reserve_sats(
+							&self.channel_manager,
+							&self.config,
+						);
+						let spendable_amount_sats = self
+							.wallet
+							.get_balances(cur_anchor_reserve_sats)
+							.map(|(_, s)| s)
+							.unwrap_or(0);
+
+						let required_amount_sats = if anchor_channels_config
+							.trusted_peers_no_reserve
+							.contains(&counterparty_node_id)
+						{
+							0
+						} else {
+							anchor_channels_config.per_channel_reserve_sats
+						};
+
+						if spendable_amount_sats < required_amount_sats {
+							log_error!(
+							self.logger,
+							"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves.",
+							counterparty_node_id,
+						);
+							self.channel_manager
+								.force_close_without_broadcasting_txn(
+									&temporary_channel_id,
+									&counterparty_node_id,
+								)
+								.unwrap_or_else(|e| {
+									log_error!(self.logger, "Failed to reject channel: {:?}", e)
+								});
+							return;
+						}
+					} else {
+						log_error!(
+							self.logger,
+							"Rejecting inbound channel from peer {} due to Anchor channels being disabled.",
+							counterparty_node_id,
+						);
+						self.channel_manager
+							.force_close_without_broadcasting_txn(
+								&temporary_channel_id,
+								&counterparty_node_id,
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to reject channel: {:?}", e)
+							});
+						return;
+					}
+				}
+
 				let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let res = if allow_0conf {
@@ -756,8 +815,9 @@ where
 					Ok(()) => {
 						log_info!(
 							self.logger,
-							"Accepting inbound{} channel of {}sats from{} peer {}",
+							"Accepting inbound{}{} channel of {}sats from{} peer {}",
 							if allow_0conf { " 0conf" } else { "" },
+							if anchor_channel { " Anchor" } else { "" },
 							funding_satoshis,
 							if allow_0conf { " trusted" } else { "" },
 							counterparty_node_id,
@@ -766,8 +826,9 @@ where
 					Err(e) => {
 						log_error!(
 							self.logger,
-							"Error while accepting inbound{} channel from{} peer {}: {:?}",
+							"Error while accepting inbound{}{} channel from{} peer {}: {:?}",
 							if allow_0conf { " 0conf" } else { "" },
+							if anchor_channel { " Anchor" } else { "" },
 							counterparty_node_id,
 							if allow_0conf { " trusted" } else { "" },
 							e,

@@ -169,8 +169,17 @@ where
 		Ok(address_info.address)
 	}
 
-	pub(crate) fn get_balance(&self) -> Result<bdk::Balance, Error> {
-		Ok(self.inner.lock().unwrap().get_balance()?)
+	pub(crate) fn get_balances(
+		&self, total_anchor_channels_reserve_sats: u64,
+	) -> Result<(u64, u64), Error> {
+		let wallet_lock = self.inner.lock().unwrap();
+		let (total, spendable) = wallet_lock.get_balance().map(|bal| {
+			(
+				bal.get_total(),
+				bal.get_spendable().saturating_sub(total_anchor_channels_reserve_sats),
+			)
+		})?;
+		Ok((total, spendable))
 	}
 
 	/// Send funds to the given address.
