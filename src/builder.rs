@@ -1,3 +1,7 @@
+use crate::config::{
+	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, DEFAULT_ESPLORA_SERVER_URL,
+	WALLET_KEYS_SEED_LEN,
+};
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
@@ -15,11 +19,7 @@ use crate::types::{
 	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
-use crate::LogLevel;
-use crate::{
-	Config, Node, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, DEFAULT_ESPLORA_SERVER_URL,
-	WALLET_KEYS_SEED_LEN,
-};
+use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
