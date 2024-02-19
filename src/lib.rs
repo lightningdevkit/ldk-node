@@ -1690,13 +1690,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
-		for funding_txo in self.chain_monitor.list_monitors() {
+		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
 			match self.chain_monitor.get_monitor(funding_txo) {
 				Ok(monitor) => {
-					// TODO: Switch to `channel_id` with LDK 0.0.122: let channel_id = monitor.channel_id();
-					let channel_id = funding_txo.to_channel_id();
-					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
-					// LDK Node 0.1 depended on 0.0.115 already.
 					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
 					for ldk_balance in monitor.get_claimable_balances() {
 						total_lightning_balance_sats += ldk_balance.claimable_amount_satoshis();
