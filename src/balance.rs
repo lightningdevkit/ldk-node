@@ -15,7 +15,15 @@ pub struct BalanceDetails {
 	/// The total balance of our on-chain wallet.
 	pub total_onchain_balance_sats: u64,
 	/// The currently spendable balance of our on-chain wallet.
+	///
+	/// This includes any sufficiently confirmed funds, minus
+	/// [`total_anchor_channels_reserve_sats`].
+	///
+	/// [`total_anchor_channels_reserve_sats`]: Self::total_anchor_channels_reserve_sats
 	pub spendable_onchain_balance_sats: u64,
+	/// The share of our total balance that we retain as an emergency reserve to (hopefully) be
+	/// able to spend the Anchor outputs when one of our channels is closed.
+	pub total_anchor_channels_reserve_sats: u64,
 	/// The total balance that we would be able to claim across all our Lightning channels.
 	///
 	/// Note this excludes balances that we are unsure if we are able to claim (e.g., as we are

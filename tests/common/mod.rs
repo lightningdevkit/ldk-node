@@ -163,8 +163,12 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 	listening_addresses
 }
 
-pub(crate) fn random_config() -> Config {
+pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let mut config = Config::default();
+
+	if !anchor_channels {
+		config.anchor_channels_config = None;
+	}
 
 	config.network = Network::Regtest;
 	println!("Setting network: {}", config.network);
@@ -198,13 +202,15 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
-pub(crate) fn setup_two_nodes(electrsd: &ElectrsD, allow_0conf: bool) -> (TestNode, TestNode) {
+pub(crate) fn setup_two_nodes(
+	electrsd: &ElectrsD, allow_0conf: bool, anchor_channels: bool,
+) -> (TestNode, TestNode) {
 	println!("== Node A ==");
-	let config_a = random_config();
+	let config_a = random_config(anchor_channels);
 	let node_a = setup_node(electrsd, config_a);
 
 	println!("\n== Node B ==");
-	let mut config_b = random_config();
+	let mut config_b = random_config(anchor_channels);
 	if allow_0conf {
 		config_b.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -355,11 +361,12 @@ pub fn open_channel(
 
 pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
+	expect_anchor_channel: bool,
 ) {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
-	let premine_amount_sat = 100_000;
+	let premine_amount_sat = if expect_anchor_channel { 125_000 } else { 100_000 };
 
 	premine_and_distribute_funds(
 		&bitcoind,
@@ -406,11 +413,16 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_b.sync_wallets().unwrap();
 
 	let onchain_fee_buffer_sat = 1500;
-	let node_a_upper_bound_sat = premine_amount_sat - funding_amount_sat;
-	let node_a_lower_bound_sat = premine_amount_sat - funding_amount_sat - onchain_fee_buffer_sat;
+	let anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
+	let node_a_upper_bound_sat = premine_amount_sat - anchor_reserve_sat - funding_amount_sat;
+	let node_a_lower_bound_sat =
+		premine_amount_sat - anchor_reserve_sat - funding_amount_sat - onchain_fee_buffer_sat;
 	assert!(node_a.list_balances().spendable_onchain_balance_sats < node_a_upper_bound_sat);
 	assert!(node_a.list_balances().spendable_onchain_balance_sats > node_a_lower_bound_sat);
-	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(
+		node_b.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat - anchor_reserve_sat
+	);
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 
