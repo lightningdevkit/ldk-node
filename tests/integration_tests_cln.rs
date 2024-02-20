@@ -5,7 +5,7 @@ mod common;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
-use ldk_node::{Builder, Event};
+use ldk_node::{Builder, ChannelType, Event};
 
 use clightningrpc::lightningrpc::LightningRPC;
 use clightningrpc::responses::NetworkAddress;
@@ -89,6 +89,7 @@ fn test_cln() {
 	common::wait_for_tx(&electrs_client, funding_txo.txid);
 	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6);
 	let user_channel_id = common::expect_channel_ready_event!(node, cln_node_id);
+	assert_eq!(node.list_channels().first().unwrap().channel_type, Some(ChannelType::Anchors));
 
 	// Send a payment to CLN
 	let mut rng = thread_rng();
