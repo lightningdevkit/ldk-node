@@ -6,7 +6,7 @@ use common::{
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
 
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{generate_entropy_mnemonic, Builder, Event, NodeError};
 
 use bitcoin::{Amount, Network};
 
@@ -69,8 +69,9 @@ fn multi_hop_sending() {
 	// Setup and fund 5 nodes
 	let mut nodes = Vec::new();
 	for _ in 0..5 {
+		let mnemonic = generate_entropy_mnemonic();
 		let config = random_config();
-		setup_builder!(builder, config);
+		setup_builder!(builder, mnemonic, config);
 		builder.set_esplora_server(esplora_url.clone());
 		let node = builder.build().unwrap();
 		node.start().unwrap();
@@ -140,8 +141,9 @@ fn multi_hop_sending() {
 #[test]
 fn connect_to_public_testnet_esplora() {
 	let mut config = random_config();
+	let mnemonic = generate_entropy_mnemonic();
 	config.network = Network::Testnet;
-	setup_builder!(builder, config);
+	setup_builder!(builder, mnemonic, config);
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 	let node = builder.build().unwrap();
 	node.start().unwrap();
@@ -151,13 +153,14 @@ fn connect_to_public_testnet_esplora() {
 #[test]
 fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let mnemonic = generate_entropy_mnemonic();
 	let config = random_config();
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
 
-	setup_builder!(builder, config);
+	setup_builder!(builder, mnemonic.clone(), config);
 	builder.set_esplora_server(esplora_url.clone());
 
 	let node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
@@ -194,7 +197,7 @@ fn start_stop_reinit() {
 	assert_eq!(node.stop(), Err(NodeError::NotRunning));
 	drop(node);
 
-	setup_builder!(builder, config);
+	setup_builder!(builder, mnemonic, config);
 	builder.set_esplora_server(esplora_url.clone());
 
 	let reinitialized_node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
