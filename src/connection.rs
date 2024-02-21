@@ -1,4 +1,4 @@
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, Logger};
 use crate::types::PeerManager;
 use crate::Error;
 
@@ -7,13 +7,16 @@ use lightning::ln::msgs::SocketAddress;
 use bitcoin::secp256k1::PublicKey;
 
 use std::net::ToSocketAddrs;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) async fn connect_peer_if_necessary(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>,
-	logger: Arc<FilesystemLogger>,
-) -> Result<(), Error> {
+pub(crate) async fn connect_peer_if_necessary<L: Deref + Clone + Sync + Send>(
+	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>, logger: L,
+) -> Result<(), Error>
+where
+	L::Target: Logger,
+{
 	if peer_manager.peer_by_node_id(&node_id).is_some() {
 		return Ok(());
 	}
@@ -21,10 +24,12 @@ pub(crate) async fn connect_peer_if_necessary(
 	do_connect_peer(node_id, addr, peer_manager, logger).await
 }
 
-pub(crate) async fn do_connect_peer(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>,
-	logger: Arc<FilesystemLogger>,
-) -> Result<(), Error> {
+pub(crate) async fn do_connect_peer<L: Deref + Clone + Sync + Send>(
+	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>, logger: L,
+) -> Result<(), Error>
+where
+	L::Target: Logger,
+{
 	log_info!(logger, "Connecting to peer: {}@{}", node_id, addr);
 
 	let socket_addr = addr
