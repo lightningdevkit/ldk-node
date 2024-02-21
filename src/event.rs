@@ -1,7 +1,10 @@
 use crate::types::{DynStore, Sweeper, Wallet};
+
 use crate::{
 	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
 };
+
+use crate::connection::ConnectionManager;
 
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
@@ -315,6 +318,7 @@ where
 	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
+	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<NetworkGraph>,
 	payment_store: Arc<PaymentStore<L>>,
@@ -330,14 +334,16 @@ where
 {
 	pub fn new(
 		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
-		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
+		connection_manager: Arc<ConnectionManager<L>>, output_sweeper: Arc<Sweeper>,
+		network_graph: Arc<NetworkGraph>, payment_store: Arc<PaymentStore<L>>,
+		peer_store: Arc<PeerStore<L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
 			channel_manager,
+			connection_manager,
 			output_sweeper,
 			network_graph,
 			payment_store,
@@ -978,7 +984,33 @@ where
 			LdkEvent::HTLCIntercepted { .. } => {},
 			LdkEvent::BumpTransaction(_) => {},
 			LdkEvent::InvoiceRequestFailed { .. } => {},
-			LdkEvent::ConnectionNeeded { .. } => {},
+			LdkEvent::ConnectionNeeded { node_id, addresses } => {
+				let runtime_lock = self.runtime.read().unwrap();
+				debug_assert!(runtime_lock.is_some());
+
+				if let Some(runtime) = runtime_lock.as_ref() {
+					let spawn_logger = self.logger.clone();
+					let spawn_cm = Arc::clone(&self.connection_manager);
+					runtime.spawn(async move {
+						for addr in &addresses {
+							match spawn_cm.connect_peer_if_necessary(node_id, addr.clone()).await {
+								Ok(()) => {
+									return;
+								},
+								Err(e) => {
+									log_error!(
+										spawn_logger,
+										"Failed to establish connection to peer {}@{}: {}",
+										node_id,
+										addr,
+										e
+									);
+								},
+							}
+						}
+					});
+				}
+			},
 		}
 	}
 }
