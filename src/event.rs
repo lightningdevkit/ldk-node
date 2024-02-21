@@ -23,12 +23,16 @@ use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
+use lightning_liquidity::lsps2::utils::compute_opening_fee;
+
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
+
+use rand::{thread_rng, Rng};
+
 use core::future::Future;
 use core::task::{Poll, Waker};
-use rand::{thread_rng, Rng};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -395,7 +399,7 @@ where
 				via_user_channel_id: _,
 				claim_deadline: _,
 				onion_fields: _,
-				counterparty_skimmed_fee_msat: _,
+				counterparty_skimmed_fee_msat,
 			} => {
 				if let Some(info) = self.payment_store.get(&payment_hash) {
 					if info.status == PaymentStatus::Succeeded {
@@ -404,6 +408,39 @@ where
 							"Refused duplicate inbound payment from payment hash {} of {}msat",
 							hex_utils::to_string(&payment_hash.0),
 							amount_msat,
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+
+						let update = PaymentDetailsUpdate {
+							status: Some(PaymentStatus::Failed),
+							..PaymentDetailsUpdate::new(payment_hash)
+						};
+						self.payment_store.update(&update).unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to access payment store: {}", e);
+							panic!("Failed to access payment store");
+						});
+						return;
+					}
+
+					let max_total_opening_fee_msat = info
+						.lsp_fee_limits
+						.and_then(|l| {
+							l.max_total_opening_fee_msat.or_else(|| {
+								l.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
+									// If it's a variable amount payment, compute the actual fee.
+									compute_opening_fee(amount_msat, 0, max_prop_fee)
+								})
+							})
+						})
+						.unwrap_or(0);
+
+					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
+						log_info!(
+							self.logger,
+							"Refusing inbound payment with hash {} as the counterparty-withheld fee of {}msat exceeds our limit of {}msat",
+							hex_utils::to_string(&payment_hash.0),
+							counterparty_skimmed_fee_msat,
+							max_total_opening_fee_msat,
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
@@ -510,6 +547,7 @@ where
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
+							lsp_fee_limits: None,
 						};
 
 						match self.payment_store.insert(payment) {

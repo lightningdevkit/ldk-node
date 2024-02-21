@@ -35,6 +35,7 @@ lightning-persister = { version = "0.0.121" }
 lightning-background-processor = { version = "0.0.121", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.121" }
 lightning-transaction-sync = { version = "0.0.121", features = ["esplora-async-https", "time"] }
+lightning-liquidity = { version = "0.1.0-alpha", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -43,6 +44,7 @@ lightning-transaction-sync = { version = "0.0.121", features = ["esplora-async-h
 #lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["futures"] }
 #lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["esplora-async"] }
+#lightning-liquidity = { git = "https://github.com/lightningdevkit/lightning-liquidity", branch="main", features = ["std"] }
 
 #lightning = { path = "../rust-lightning/lightning", features = ["std"] }
 #lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
@@ -51,6 +53,7 @@ lightning-transaction-sync = { version = "0.0.121", features = ["esplora-async-h
 #lightning-background-processor = { path = "../rust-lightning/lightning-background-processor", features = ["futures"] }
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
+#lightning-liquidity = { path = "../lightning-liquidity", features = ["std"] }
 
 bdk = { version = "0.29.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
 

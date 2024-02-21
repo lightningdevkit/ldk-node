@@ -3,7 +3,9 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io;
 use crate::io::sqlite_store::SqliteStore;
+use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, FilesystemLogger, Logger};
+use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::sweep::OutputSweeper;
@@ -40,6 +42,9 @@ use lightning_persister::fs_store::FilesystemStore;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
+use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
+use lightning_liquidity::{LiquidityClientConfig, LiquidityManager};
+
 #[cfg(any(vss, vss_test))]
 use crate::io::vss_store::VssStore;
 use bdk::bitcoin::secp256k1::Secp256k1;
@@ -49,6 +54,7 @@ use bdk::template::Bip84;
 
 use bip39::Mnemonic;
 
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 
 #[cfg(any(vss, vss_test))]
@@ -78,6 +84,18 @@ enum EntropySourceConfig {
 enum GossipSourceConfig {
 	P2PNetwork,
 	RapidGossipSync(String),
+}
+
+#[derive(Debug, Clone)]
+struct LiquiditySourceConfig {
+	// LSPS2 service's (address, node_id, token)
+	lsps2_service: Option<(SocketAddress, PublicKey, Option<String>)>,
+}
+
+impl Default for LiquiditySourceConfig {
+	fn default() -> Self {
+		Self { lsps2_service: None }
+	}
 }
 
 /// An error encountered during building a [`Node`].
@@ -146,16 +164,14 @@ pub struct NodeBuilder {
 	entropy_source_config: Option<EntropySourceConfig>,
 	chain_data_source_config: Option<ChainDataSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
+	liquidity_source_config: Option<LiquiditySourceConfig>,
 }
 
 impl NodeBuilder {
 	/// Creates a new builder instance with the default configuration.
 	pub fn new() -> Self {
 		let config = Config::default();
-		let entropy_source_config = None;
-		let chain_data_source_config = None;
-		let gossip_source_config = None;
-		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
+		Self::from_config(config)
 	}
 
 	/// Creates a new builder instance from an [`Config`].
@@ -164,7 +180,14 @@ impl NodeBuilder {
 		let entropy_source_config = None;
 		let chain_data_source_config = None;
 		let gossip_source_config = None;
-		Self { config, entropy_source_config, chain_data_source_config, gossip_source_config }
+		let liquidity_source_config = None;
+		Self {
+			config,
+			entropy_source_config,
+			chain_data_source_config,
+			gossip_source_config,
+			liquidity_source_config,
+		}
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
@@ -215,6 +238,25 @@ impl NodeBuilder {
 	/// server.
 	pub fn set_gossip_source_rgs(&mut self, rgs_server_url: String) -> &mut Self {
 		self.gossip_source_config = Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its inbound liquidity from the given
+	/// [LSPS2](https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md)
+	/// service.
+	///
+	/// Will mark the LSP as trusted for 0-confirmation channels, see [`Config::trusted_peers_0conf`].
+	///
+	/// The given `token` will be used by the LSP to authenticate the user.
+	pub fn set_liquidity_source_lsps2(
+		&mut self, address: SocketAddress, node_id: PublicKey, token: Option<String>,
+	) -> &mut Self {
+		// Mark the LSP as trusted for 0conf
+		self.config.trusted_peers_0conf.push(node_id.clone());
+
+		let liquidity_source_config =
+			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
+		liquidity_source_config.lsps2_service = Some((address, node_id, token));
 		self
 	}
 
@@ -318,6 +360,7 @@ impl NodeBuilder {
 			config,
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
+			self.liquidity_source_config.as_ref(),
 			seed_bytes,
 			logger,
 			vss_store,
@@ -340,6 +383,7 @@ impl NodeBuilder {
 			config,
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
+			self.liquidity_source_config.as_ref(),
 			seed_bytes,
 			logger,
 			kv_store,
@@ -413,6 +457,19 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_gossip_source_rgs(rgs_server_url);
 	}
 
+	/// Configures the [`Node`] instance to source its inbound liquidity from the given
+	/// [LSPS2](https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md)
+	/// service.
+	///
+	/// Will mark the LSP as trusted for 0-confirmation channels, see [`Config::trusted_peers_0conf`].
+	///
+	/// The given `token` will be used by the LSP to authenticate the user.
+	pub fn set_liquidity_source_lsps2(
+		&self, address: SocketAddress, node_id: PublicKey, token: Option<String>,
+	) {
+		self.inner.write().unwrap().set_liquidity_source_lsps2(address, node_id, token);
+	}
+
 	/// Sets the used storage directory path.
 	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
@@ -463,7 +520,8 @@ impl ArcedNodeBuilder {
 /// Builds a [`Node`] instance according to the options previously configured.
 fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
-	gossip_source_config: Option<&GossipSourceConfig>, seed_bytes: [u8; 64],
+	gossip_source_config: Option<&GossipSourceConfig>,
+	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
 	logger: Arc<FilesystemLogger>, kv_store: Arc<K>,
 ) -> Result<Node<K>, BuildError> {
 	// Initialize the on-chain wallet and chain access
@@ -636,6 +694,12 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		// generating the events otherwise.
 		user_config.manually_accept_inbound_channels = true;
 	}
+
+	if liquidity_source_config.is_some() {
+		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
+		// check that they don't take too much before claiming.
+		user_config.channel_config.accept_underpaying_htlcs = true;
+	}
 	let channel_manager = {
 		if let Ok(res) = kv_store.read(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -746,20 +810,51 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		}
 	};
 
+	let liquidity_source = liquidity_source_config.as_ref().and_then(|lsc| {
+		lsc.lsps2_service.as_ref().map(|(address, node_id, token)| {
+			let lsps2_client_config = Some(LSPS2ClientConfig {});
+			let liquidity_client_config = Some(LiquidityClientConfig { lsps2_client_config });
+			let liquidity_manager = Arc::new(LiquidityManager::new(
+				Arc::clone(&keys_manager),
+				Arc::clone(&channel_manager),
+				Some(Arc::clone(&tx_sync)),
+				None,
+				None,
+				liquidity_client_config,
+			));
+			Arc::new(LiquiditySource::new_lsps2(
+				address.clone(),
+				*node_id,
+				token.clone(),
+				Arc::clone(&channel_manager),
+				Arc::clone(&keys_manager),
+				liquidity_manager,
+				Arc::clone(&config),
+				Arc::clone(&logger),
+			))
+		})
+	});
+
+	let custom_message_handler = if let Some(liquidity_source) = liquidity_source.as_ref() {
+		Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)))
+	} else {
+		Arc::new(NodeCustomMessageHandler::new_ignoring())
+	};
+
 	let msg_handler = match gossip_source.as_gossip_sync() {
 		GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
 			chan_handler: Arc::clone(&channel_manager),
 			route_handler: Arc::clone(&p2p_gossip_sync)
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
 			onion_message_handler: onion_messenger,
-			custom_message_handler: IgnoringMessageHandler {},
+			custom_message_handler,
 		},
 		GossipSync::Rapid(_) => MessageHandler {
 			chan_handler: Arc::clone(&channel_manager),
 			route_handler: Arc::new(IgnoringMessageHandler {})
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
 			onion_message_handler: onion_messenger,
-			custom_message_handler: IgnoringMessageHandler {},
+			custom_message_handler,
 		},
 		GossipSync::None => {
 			unreachable!("We must always have a gossip sync!");
@@ -781,6 +876,8 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		Arc::clone(&logger),
 		Arc::clone(&keys_manager),
 	));
+
+	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
 	// Init payment info storage
 	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
@@ -853,6 +950,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		keys_manager,
 		network_graph,
 		gossip_source,
+		liquidity_source,
 		kv_store,
 		logger,
 		_router: router,

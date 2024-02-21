@@ -30,10 +30,20 @@ pub struct PaymentDetails {
 	pub direction: PaymentDirection,
 	/// The status of the payment.
 	pub status: PaymentStatus,
+	/// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+	///
+	/// This is only `Some` for payments received via a JIT-channel, in which case the first
+	/// inbound payment will pay for the LSP's channel opening fees.
+	///
+	/// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
+	///
+	/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
+	pub lsp_fee_limits: Option<LSPFeeLimits>,
 }
 
 impl_writeable_tlv_based!(PaymentDetails, {
 	(0, hash, required),
+	(1, lsp_fee_limits, option),
 	(2, preimage, required),
 	(4, secret, required),
 	(6, amount_msat, required),
@@ -72,6 +82,26 @@ impl_writeable_tlv_based_enum!(PaymentStatus,
 	(4, Failed) => {};
 );
 
+/// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+///
+/// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
+///
+/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LSPFeeLimits {
+	/// The maximal total amount we allow any configured LSP withhold from us when forwarding the
+	/// payment.
+	pub max_total_opening_fee_msat: Option<u64>,
+	/// The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+	/// LSP withhold from us when forwarding the payment.
+	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
+}
+
+impl_writeable_tlv_based!(LSPFeeLimits, {
+	(0, max_total_opening_fee_msat, option),
+	(2, max_proportional_opening_fee_ppm_msat, option),
+});
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaymentDetailsUpdate {
 	pub hash: PaymentHash,
@@ -80,6 +110,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub amount_msat: Option<Option<u64>>,
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
+	pub lsp_fee_limits: Option<Option<LSPFeeLimits>>,
 }
 
 impl PaymentDetailsUpdate {
@@ -91,6 +122,7 @@ impl PaymentDetailsUpdate {
 			amount_msat: None,
 			direction: None,
 			status: None,
+			lsp_fee_limits: None,
 		}
 	}
 }
@@ -171,6 +203,10 @@ where
 				payment.status = status;
 			}
 
+			if let Some(lsp_fee_limits) = update.lsp_fee_limits {
+				payment.lsp_fee_limits = lsp_fee_limits
+			}
+
 			self.persist_info(&update.hash, payment)?;
 			updated = true;
 		}
@@ -247,6 +283,7 @@ mod tests {
 			amount_msat: None,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
+			lsp_fee_limits: None,
 		};
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));

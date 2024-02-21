@@ -28,6 +28,7 @@ interface Builder {
 	void set_esplora_server(string esplora_server_url);
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
+	void set_liquidity_source_lsps2(SocketAddress address, PublicKey node_id, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_network(Network network);
 	[Throws=BuildError]
@@ -63,11 +64,11 @@ interface LDKNode {
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
 	[Throws=NodeError]
-	void connect_open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config, boolean announce_channel);
+	UserChannelId connect_open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config, boolean announce_channel);
 	[Throws=NodeError]
-	void close_channel([ByRef]ChannelId channel_id, PublicKey counterparty_node_id);
+	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
-	void update_channel_config([ByRef]ChannelId channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
+	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
 	[Throws=NodeError]
@@ -86,6 +87,10 @@ interface LDKNode {
 	Bolt11Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
 	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount_payment([ByRef]string description, u32 expiry_secs);
+	[Throws=NodeError]
+	Bolt11Invoice receive_payment_via_jit_channel(u64 amount_msat, [ByRef]string description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
+	[Throws=NodeError]
+	Bolt11Invoice receive_variable_amount_payment_via_jit_channel([ByRef]string description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentHash payment_hash);
@@ -117,6 +122,7 @@ enum NodeError {
 	"MessageSigningFailed",
 	"TxSyncFailed",
 	"GossipUpdateFailed",
+	"LiquidityRequestFailed",
 	"InvalidAddress",
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
@@ -130,6 +136,8 @@ enum NodeError {
 	"InvalidNetwork",
 	"DuplicatePayment",
 	"InsufficientFunds",
+	"LiquiditySourceUnavailable",
+	"LiquidityFeeTooHigh",
 };
 
 [Error]
@@ -168,12 +176,9 @@ enum PaymentStatus {
 	"Failed",
 };
 
-[NonExhaustive]
-enum Network {
-	"Bitcoin",
-	"Testnet",
-	"Signet",
-	"Regtest",
+dictionary LSPFeeLimits {
+	u64? max_total_opening_fee_msat;
+	u64? max_proportional_opening_fee_ppm_msat;
 };
 
 dictionary PaymentDetails {
@@ -183,6 +188,15 @@ dictionary PaymentDetails {
 	u64? amount_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
+	LSPFeeLimits? lsp_fee_limits;
+};
+
+[NonExhaustive]
+enum Network {
+	"Bitcoin",
+	"Testnet",
+	"Signet",
+	"Regtest",
 };
 
 dictionary OutPoint {
