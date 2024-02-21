@@ -78,6 +78,7 @@
 mod balance;
 mod builder;
 mod config;
+mod connection;
 mod error;
 mod event;
 mod fee_estimator;
@@ -124,6 +125,7 @@ use config::{
 	LDK_PAYMENT_RETRY_TIMEOUT, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
+use connection::{connect_peer_if_necessary, do_connect_peer};
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
@@ -1846,57 +1848,4 @@ pub struct NodeStatus {
 	///
 	/// Will be `None` if we have no public channels or we haven't broadcasted since the [`Node`] was initialized.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
-}
-
-async fn connect_peer_if_necessary(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>,
-	logger: Arc<FilesystemLogger>,
-) -> Result<(), Error> {
-	if peer_manager.peer_by_node_id(&node_id).is_some() {
-		return Ok(());
-	}
-
-	do_connect_peer(node_id, addr, peer_manager, logger).await
-}
-
-async fn do_connect_peer(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager>,
-	logger: Arc<FilesystemLogger>,
-) -> Result<(), Error> {
-	log_info!(logger, "Connecting to peer: {}@{}", node_id, addr);
-
-	let socket_addr = addr
-		.to_socket_addrs()
-		.map_err(|e| {
-			log_error!(logger, "Failed to resolve network address: {}", e);
-			Error::InvalidSocketAddress
-		})?
-		.next()
-		.ok_or(Error::ConnectionFailed)?;
-
-	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), node_id, socket_addr)
-		.await
-	{
-		Some(connection_closed_future) => {
-			let mut connection_closed_future = Box::pin(connection_closed_future);
-			loop {
-				match futures::poll!(&mut connection_closed_future) {
-					std::task::Poll::Ready(_) => {
-						log_info!(logger, "Peer connection closed: {}@{}", node_id, addr);
-						return Err(Error::ConnectionFailed);
-					},
-					std::task::Poll::Pending => {},
-				}
-				// Avoid blocking the tokio context by sleeping a bit
-				match peer_manager.peer_by_node_id(&node_id) {
-					Some(_) => return Ok(()),
-					None => tokio::time::sleep(Duration::from_millis(10)).await,
-				}
-			}
-		},
-		None => {
-			log_error!(logger, "Failed to connect to peer: {}@{}", node_id, addr);
-			Err(Error::ConnectionFailed)
-		},
-	}
 }
