@@ -621,6 +621,7 @@ impl Node {
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.payment_store),
