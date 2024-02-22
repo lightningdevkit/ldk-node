@@ -109,8 +109,13 @@ pub use io::utils::generate_entropy_mnemonic;
 
 #[cfg(feature = "uniffi")]
 use {
-	bip39::Mnemonic, bitcoin::OutPoint, lightning::events::PaymentFailureReason,
-	lightning::ln::ChannelId, lightning::ln::PaymentSecret, uniffi_types::*,
+	bip39::Mnemonic,
+	bitcoin::OutPoint,
+	lightning::events::{ClosureReason, PaymentFailureReason},
+	lightning::ln::ChannelId,
+	lightning::ln::PaymentSecret,
+	lightning::util::string::UntrustedString,
+	uniffi_types::*,
 };
 
 #[cfg(feature = "uniffi")]

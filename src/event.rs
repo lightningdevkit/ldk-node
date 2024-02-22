@@ -14,7 +14,7 @@ use crate::io::{
 use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::ConfirmationTarget;
-use lightning::events::PaymentPurpose;
+use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::{ChannelId, PaymentHash};
@@ -98,6 +98,8 @@ pub enum Event {
 		///
 		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
 		counterparty_node_id: Option<PublicKey>,
+		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
+		reason: Option<ClosureReason>,
 	},
 }
 
@@ -129,6 +131,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, channel_id, required),
 		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
+		(3, reason, upgradable_option),
 	};
 );
 
@@ -858,6 +861,7 @@ where
 						channel_id,
 						user_channel_id: UserChannelId(user_channel_id),
 						counterparty_node_id,
+						reason: Some(reason),
 					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
