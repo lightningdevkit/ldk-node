@@ -515,9 +515,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						}
 						_ = interval.tick() => {
 							let pm_peers = connect_pm
-								.get_peer_node_ids()
+								.list_peers()
 								.iter()
-								.map(|(peer, _addr)| *peer)
+								.map(|peer| peer.counterparty_node_id)
 								.collect::<Vec<_>>();
 
 							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
@@ -579,7 +579,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								continue;
 							}
 
-							if bcast_pm.get_peer_node_ids().is_empty() {
+							if bcast_pm.list_peers().is_empty() {
 								// Skip if we don't have any connected peers to gossip to.
 								continue;
 							}
@@ -1758,12 +1758,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let mut peers = Vec::new();
 
 		// First add all connected peers, preferring to list the connected address if available.
-		let connected_peers = self.peer_manager.get_peer_node_ids();
+		let connected_peers = self.peer_manager.list_peers();
 		let connected_peers_len = connected_peers.len();
-		for (node_id, con_addr_opt) in connected_peers {
+		for connected_peer in connected_peers {
+			let node_id = connected_peer.counterparty_node_id;
 			let stored_peer = self.peer_store.get_peer(&node_id);
 			let stored_addr_opt = stored_peer.as_ref().map(|p| p.address.clone());
-			let address = match (con_addr_opt, stored_addr_opt) {
+			let address = match (connected_peer.socket_address, stored_addr_opt) {
 				(Some(con_addr), _) => con_addr,
 				(None, Some(stored_addr)) => stored_addr,
 				(None, None) => continue,
@@ -1858,10 +1859,8 @@ async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
 	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<(), Error> {
-	for (pman_node_id, _pman_addr) in peer_manager.get_peer_node_ids() {
-		if node_id == pman_node_id {
-			return Ok(());
-		}
+	if peer_manager.peer_by_node_id(&node_id).is_some() {
+		return Ok(());
 	}
 
 	do_connect_peer(node_id, addr, peer_manager, logger).await
@@ -1896,7 +1895,7 @@ async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
 					std::task::Poll::Pending => {},
 				}
 				// Avoid blocking the tokio context by sleeping a bit
-				match peer_manager.get_peer_node_ids().iter().find(|(id, _addr)| *id == node_id) {
+				match peer_manager.peer_by_node_id(&node_id) {
 					Some(_) => return Ok(()),
 					None => tokio::time::sleep(Duration::from_millis(10)).await,
 				}
