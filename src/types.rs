@@ -200,12 +200,6 @@ pub struct ChannelDetails {
 	/// The currently negotiated fee rate denominated in satoshi per 1000 weight units,
 	/// which is applied to commitment and HTLC transactions.
 	pub feerate_sat_per_1000_weight: u32,
-	/// The total balance of the channel. This is the amount that will be returned to
-	/// the user if the channel is closed.
-	///
-	/// The value is not exact, due to potential in-flight and fee-rate changes. Therefore, exactly
-	/// this amount is likely irrecoverable on close.
-	pub balance_msat: u64,
 	/// The available outbound capacity for sending HTLCs to the remote peer.
 	///
 	/// The amount does not include any pending HTLCs which are not yet resolved (and, thus, whose
@@ -270,8 +264,8 @@ pub struct ChannelDetails {
 	/// the current state and per-HTLC limit(s). This is intended for use when routing, allowing us
 	/// to use a limit as close as possible to the HTLC limit we can currently send.
 	///
-	/// See also [`ChannelDetails::next_outbound_htlc_minimum_msat`],
-	/// [`ChannelDetails::balance_msat`], and [`ChannelDetails::outbound_capacity_msat`].
+	/// See also [`ChannelDetails::next_outbound_htlc_minimum_msat`] and
+	/// [`ChannelDetails::outbound_capacity_msat`].
 	pub next_outbound_htlc_limit_msat: u64,
 	/// The minimum value for sending a single HTLC to the remote peer. This is the equivalent of
 	/// [`ChannelDetails::next_outbound_htlc_limit_msat`] but represents a lower-bound, rather than
@@ -306,7 +300,6 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			// unwrap safety: This value will be `None` for objects serialized with LDK versions
 			// prior to 0.0.115.
 			feerate_sat_per_1000_weight: value.feerate_sat_per_1000_weight.unwrap(),
-			balance_msat: value.balance_msat,
 			outbound_capacity_msat: value.outbound_capacity_msat,
 			inbound_capacity_msat: value.inbound_capacity_msat,
 			confirmations_required: value.confirmations_required,
