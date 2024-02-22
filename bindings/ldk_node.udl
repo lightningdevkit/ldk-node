@@ -157,12 +157,21 @@ enum BuildError {
 
 [Enum]
 interface Event {
-	PaymentSuccessful( PaymentHash payment_hash );
-	PaymentFailed( PaymentHash payment_hash );
-	PaymentReceived( PaymentHash payment_hash, u64 amount_msat);
-	ChannelPending ( ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo );
-	ChannelReady ( ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id );
-	ChannelClosed ( ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id );
+	PaymentSuccessful(PaymentHash payment_hash);
+	PaymentFailed(PaymentHash payment_hash, PaymentFailureReason? reason);
+	PaymentReceived(PaymentHash payment_hash, u64 amount_msat);
+	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
+	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
+	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
+};
+
+enum PaymentFailureReason {
+	"RecipientRejected",
+	"UserAbandoned",
+	"RetriesExhausted",
+	"PaymentExpired",
+	"RouteNotFound",
+	"UnexpectedError",
 };
 
 enum PaymentDirection {
