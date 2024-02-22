@@ -85,7 +85,7 @@ pub enum Event {
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
 		///
-		/// This will be `None` for events serialized by LDK Node XXX TODO and prior.
+		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
 		counterparty_node_id: Option<PublicKey>,
 	},
 	/// A channel has been closed.
@@ -96,7 +96,7 @@ pub enum Event {
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
 		///
-		/// This will be `None` for events serialized by LDK Node XXX TODO and prior.
+		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
 		counterparty_node_id: Option<PublicKey>,
 	},
 }
