@@ -855,7 +855,7 @@ where
 				counterparty_node_id,
 				..
 			} => {
-				log_info!(self.logger, "Channel {} closed due to: {:?}", channel_id, reason);
+				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
 				self.event_queue
 					.add_event(Event::ChannelClosed {
 						channel_id,
