@@ -93,7 +93,7 @@ where
 					let slightly_less_than_background =
 						fee_rate.fee_wu(Weight::from_wu(1000)) - 250;
 					FeeRate::from_sat_per_kwu(slightly_less_than_background as f32)
-				}
+				},
 				_ => fee_rate,
 			};
 

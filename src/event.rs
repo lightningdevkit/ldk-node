@@ -361,27 +361,27 @@ where
 							&counterparty_node_id,
 							final_tx,
 						) {
-							Ok(()) => {}
+							Ok(()) => {},
 							Err(APIError::APIMisuseError { err }) => {
 								log_error!(self.logger, "Panicking due to APIMisuseError: {}", err);
 								panic!("APIMisuseError: {}", err);
-							}
+							},
 							Err(APIError::ChannelUnavailable { err }) => {
 								log_error!(
 									self.logger,
 									"Failed to process funding transaction as channel went away before we could fund it: {}",
 									err
 								)
-							}
+							},
 							Err(err) => {
 								log_error!(
 									self.logger,
 									"Failed to process funding transaction: {:?}",
 									err
 								)
-							}
+							},
 						}
-					}
+					},
 					Err(err) => {
 						log_error!(self.logger, "Failed to create funding transaction: {}", err);
 						self.channel_manager
@@ -395,9 +395,9 @@ where
 									"Failed to force close channel after funding generation failed"
 								);
 							});
-					}
+					},
 				}
-			}
+			},
 			LdkEvent::PaymentClaimable {
 				payment_hash,
 				purpose,
@@ -479,7 +479,7 @@ where
 								.get_payment_preimage(payment_hash, payment_secret)
 								.ok()
 						}
-					}
+					},
 					PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
 				};
 
@@ -502,7 +502,7 @@ where
 						panic!("Failed to access payment store");
 					});
 				}
-			}
+			},
 			LdkEvent::PaymentClaimed {
 				payment_hash,
 				purpose,
@@ -535,7 +535,7 @@ where
 									hex_utils::to_string(&payment_hash.0)
 								);
 								debug_assert!(false);
-							}
+							},
 							Err(e) => {
 								log_error!(
 									self.logger,
@@ -544,9 +544,9 @@ where
 									e
 								);
 								debug_assert!(false);
-							}
+							},
 						}
-					}
+					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
 						let payment = PaymentDetails {
 							preimage: Some(preimage),
@@ -567,7 +567,7 @@ where
 									hex_utils::to_string(&payment_hash.0)
 								);
 								debug_assert!(false);
-							}
+							},
 							Err(e) => {
 								log_error!(
 									self.logger,
@@ -576,9 +576,9 @@ where
 									e
 								);
 								debug_assert!(false);
-							}
+							},
 						}
-					}
+					},
 				};
 
 				self.event_queue
@@ -587,7 +587,7 @@ where
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
-			}
+			},
 			LdkEvent::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 				if let Some(mut payment) = self.payment_store.get(&payment_hash) {
 					payment.preimage = Some(payment_preimage);
@@ -616,7 +616,7 @@ where
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
-			}
+			},
 			LdkEvent::PaymentFailed { payment_hash, reason, .. } => {
 				log_info!(
 					self.logger,
@@ -639,13 +639,13 @@ where
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
-			}
+			},
 
-			LdkEvent::PaymentPathSuccessful { .. } => {}
-			LdkEvent::PaymentPathFailed { .. } => {}
-			LdkEvent::ProbeSuccessful { .. } => {}
-			LdkEvent::ProbeFailed { .. } => {}
-			LdkEvent::HTLCHandlingFailed { .. } => {}
+			LdkEvent::PaymentPathSuccessful { .. } => {},
+			LdkEvent::PaymentPathFailed { .. } => {},
+			LdkEvent::ProbeSuccessful { .. } => {},
+			LdkEvent::ProbeFailed { .. } => {},
+			LdkEvent::HTLCHandlingFailed { .. } => {},
 			LdkEvent::PendingHTLCsForwardable { time_forwardable } => {
 				let forwarding_channel_manager = self.channel_manager.clone();
 				let min = time_forwardable.as_millis() as u64;
@@ -661,10 +661,10 @@ where
 						forwarding_channel_manager.process_pending_htlc_forwards();
 					});
 				}
-			}
+			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
 				self.output_sweeper.add_outputs(outputs, channel_id)
-			}
+			},
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,
 				counterparty_node_id,
@@ -698,7 +698,7 @@ where
 							if allow_0conf { " trusted" } else { "" },
 							counterparty_node_id,
 						);
-					}
+					},
 					Err(e) => {
 						log_error!(
 							self.logger,
@@ -708,9 +708,9 @@ where
 							if allow_0conf { " trusted" } else { "" },
 							e,
 						);
-					}
+					},
 				}
-			}
+			},
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,
@@ -770,7 +770,7 @@ where
 						fee_earned,
 					);
 				}
-			}
+			},
 			LdkEvent::ChannelPending {
 				channel_id,
 				user_channel_id,
@@ -827,7 +827,7 @@ where
 						}
 					}
 				}
-			}
+			},
 			LdkEvent::ChannelReady {
 				channel_id, user_channel_id, counterparty_node_id, ..
 			} => {
@@ -847,7 +847,7 @@ where
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
-			}
+			},
 			LdkEvent::ChannelClosed {
 				channel_id,
 				reason,
@@ -867,12 +867,12 @@ where
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
-			}
-			LdkEvent::DiscardFunding { .. } => {}
-			LdkEvent::HTLCIntercepted { .. } => {}
-			LdkEvent::BumpTransaction(_) => {}
-			LdkEvent::InvoiceRequestFailed { .. } => {}
-			LdkEvent::ConnectionNeeded { .. } => {}
+			},
+			LdkEvent::DiscardFunding { .. } => {},
+			LdkEvent::HTLCIntercepted { .. } => {},
+			LdkEvent::BumpTransaction(_) => {},
+			LdkEvent::InvoiceRequestFailed { .. } => {},
+			LdkEvent::ConnectionNeeded { .. } => {},
 		}
 	}
 }

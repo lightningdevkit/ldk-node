@@ -48,7 +48,7 @@ impl SpendableOutputInfo {
 					outpoint: *outpoint,
 					script_pubkey: output.script_pubkey.clone(),
 				}
-			}
+			},
 			SpendableOutputDescriptor::DelayedPaymentOutput(output) => WatchedOutput {
 				block_hash: self.first_broadcast_hash,
 				outpoint: output.outpoint,
@@ -256,10 +256,10 @@ where
 							});
 						}
 					}
-				}
+				},
 				Err(e) => {
 					log_error!(self.logger, "Error spending outputs: {:?}", e);
-				}
+				},
 			};
 		}
 	}
@@ -290,7 +290,7 @@ where
 								e
 							);
 							return true;
-						}
+						},
 					}
 				}
 			}

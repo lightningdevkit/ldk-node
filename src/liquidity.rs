@@ -112,7 +112,7 @@ where
 									"Failed to handle response from liquidity service: {:?}",
 									e
 								);
-							}
+							},
 						}
 					} else {
 						debug_assert!(
@@ -130,7 +130,7 @@ where
 						"Received unexpected LSPS2Client::OpeningParametersReady event!"
 					);
 				}
-			}
+			},
 			Event::LSPS2Client(LSPS2ClientEvent::InvoiceParametersReady {
 				request_id,
 				counterparty_node_id,
@@ -164,7 +164,7 @@ where
 									"Failed to handle response from liquidity service: {:?}",
 									e
 								);
-							}
+							},
 						}
 					} else {
 						debug_assert!(
@@ -182,10 +182,10 @@ where
 						"Received unexpected LSPS2Client::InvoiceParametersReady event!"
 					);
 				}
-			}
+			},
 			e => {
 				log_error!(self.logger, "Received unexpected liquidity event: {:?}", e);
-			}
+			},
 		}
 	}
 

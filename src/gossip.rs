@@ -50,7 +50,7 @@ impl GossipSource {
 		match self {
 			Self::RapidGossipSync { gossip_sync, .. } => {
 				GossipSync::Rapid(Arc::clone(&gossip_sync))
-			}
+			},
 			Self::P2PNetwork { gossip_sync, .. } => GossipSync::P2P(Arc::clone(&gossip_sync)),
 		}
 	}
@@ -78,13 +78,13 @@ impl GossipSource {
 							.map_err(|_| Error::GossipUpdateFailed)?;
 						latest_sync_timestamp.store(new_latest_sync_timestamp, Ordering::Release);
 						Ok(new_latest_sync_timestamp)
-					}
+					},
 					Err(e) => {
 						log_trace!(logger, "Failed to retrieve RGS gossip update: {}", e);
 						Err(Error::GossipUpdateFailed)
-					}
+					},
 				}
-			}
+			},
 		}
 	}
 }

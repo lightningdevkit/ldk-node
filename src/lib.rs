@@ -354,11 +354,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							now.elapsed().as_millis()
 						);
 						Ok(())
-					}
+					},
 					Err(e) => {
 						log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
 						Err(e)
-					}
+					},
 				}
 			})
 		})?;
@@ -810,7 +810,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					e
 				);
 				debug_assert!(false);
-			}
+			},
 		}
 
 		// Stop disconnect peers.
@@ -971,10 +971,10 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
 		match self.peer_store.remove_peer(&counterparty_node_id) {
-			Ok(()) => {}
+			Ok(()) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
-			}
+			},
 		}
 
 		self.peer_manager.disconnect_by_node_id(counterparty_node_id);
@@ -1052,11 +1052,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				);
 				self.peer_store.add_peer(peer_info)?;
 				Ok(UserChannelId(user_channel_id))
-			}
+			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
 				Err(Error::ChannelCreationFailed)
-			}
+			},
 		}
 	}
 
@@ -1095,11 +1095,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								"Sync of on-chain wallet finished in {}ms.",
 								now.elapsed().as_millis()
 							);
-						}
+						},
 						Err(e) => {
 							log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
 							return Err(e);
-						}
+						},
 					};
 
 					let now = Instant::now();
@@ -1111,11 +1111,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								now.elapsed().as_millis()
 							);
 							Ok(())
-						}
+						},
 						Err(e) => {
 							log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
 							Err(e.into())
-						}
+						},
 					}
 				},
 			)
@@ -1141,7 +1141,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						self.peer_store.remove_peer(&counterparty_node_id)?;
 					}
 					Ok(())
-				}
+				},
 				Err(_) => Err(Error::ChannelClosingFailed),
 			}
 		} else {
@@ -1220,13 +1220,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_hash)
-			}
+			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					channelmanager::RetryableSendFailure::DuplicatePayment => {
 						Err(Error::DuplicatePayment)
-					}
+					},
 					_ => {
 						let payment = PaymentDetails {
 							preimage: None,
@@ -1240,9 +1240,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)
-					}
+					},
 				}
-			}
+			},
 		}
 	}
 
@@ -1328,14 +1328,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_hash)
-			}
+			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
 				match e {
 					channelmanager::RetryableSendFailure::DuplicatePayment => {
 						Err(Error::DuplicatePayment)
-					}
+					},
 					_ => {
 						let payment = PaymentDetails {
 							hash: payment_hash,
@@ -1349,9 +1349,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 						self.payment_store.insert(payment)?;
 
 						Err(Error::PaymentSendingFailed)
-					}
+					},
 				}
-			}
+			},
 		}
 	}
 
@@ -1404,14 +1404,14 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_hash)
-			}
+			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 
 				match e {
 					channelmanager::RetryableSendFailure::DuplicatePayment => {
 						Err(Error::DuplicatePayment)
-					}
+					},
 					_ => {
 						let payment = PaymentDetails {
 							hash: payment_hash,
@@ -1425,9 +1425,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)
-					}
+					},
 				}
-			}
+			},
 		}
 	}
 
@@ -1579,11 +1579,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			Ok(inv) => {
 				log_info!(self.logger, "Invoice created: {}", inv);
 				inv
-			}
+			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to create invoice: {}", e);
 				return Err(Error::InvoiceCreationFailed);
-			}
+			},
 		};
 
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
@@ -1870,8 +1870,8 @@ async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
 					std::task::Poll::Ready(_) => {
 						log_info!(logger, "Peer connection closed: {}@{}", node_id, addr);
 						return Err(Error::ConnectionFailed);
-					}
-					std::task::Poll::Pending => {}
+					},
+					std::task::Poll::Pending => {},
 				}
 				// Avoid blocking the tokio context by sleeping a bit
 				match peer_manager.get_peer_node_ids().iter().find(|(id, _addr)| *id == node_id) {
@@ -1879,10 +1879,10 @@ async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
 					None => tokio::time::sleep(Duration::from_millis(10)).await,
 				}
 			}
-		}
+		},
 		None => {
 			log_error!(logger, "Failed to connect to peer: {}@{}", node_id, addr);
 			Err(Error::ConnectionFailed)
-		}
+		},
 	}
 }
