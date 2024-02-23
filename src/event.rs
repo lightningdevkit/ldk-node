@@ -14,8 +14,8 @@ use crate::io::{
 use crate::logger::{log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::ConfirmationTarget;
-use lightning::events::Event as LdkEvent;
-use lightning::events::PaymentPurpose;
+use lightning::events::{ClosureReason, PaymentPurpose};
+use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::{ChannelId, PaymentHash};
 use lightning::routing::gossip::NodeId;
@@ -52,6 +52,10 @@ pub enum Event {
 	PaymentFailed {
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
+		/// The reason why the payment failed.
+		///
+		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
+		reason: Option<PaymentFailureReason>,
 	},
 	/// A payment has been received.
 	PaymentReceived {
@@ -81,7 +85,7 @@ pub enum Event {
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
 		///
-		/// This will be `None` for events serialized by LDK Node XXX TODO and prior.
+		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
 		counterparty_node_id: Option<PublicKey>,
 	},
 	/// A channel has been closed.
@@ -92,8 +96,10 @@ pub enum Event {
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
 		///
-		/// This will be `None` for events serialized by LDK Node XXX TODO and prior.
+		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
 		counterparty_node_id: Option<PublicKey>,
+		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
+		reason: Option<ClosureReason>,
 	},
 }
 
@@ -103,6 +109,7 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, required),
+		(1, reason, option),
 	},
 	(2, PaymentReceived) => {
 		(0, payment_hash, required),
@@ -124,6 +131,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, channel_id, required),
 		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
+		(3, reason, upgradable_option),
 	};
 );
 
@@ -609,11 +617,12 @@ where
 						panic!("Failed to push to event queue");
 					});
 			}
-			LdkEvent::PaymentFailed { payment_hash, .. } => {
+			LdkEvent::PaymentFailed { payment_hash, reason, .. } => {
 				log_info!(
 					self.logger,
-					"Failed to send payment to payment hash {:?}.",
-					hex_utils::to_string(&payment_hash.0)
+					"Failed to send payment to payment hash {:?} due to {:?}.",
+					hex_utils::to_string(&payment_hash.0),
+					reason
 				);
 
 				let update = PaymentDetailsUpdate {
@@ -624,12 +633,12 @@ where
 					log_error!(self.logger, "Failed to access payment store: {}", e);
 					panic!("Failed to access payment store");
 				});
-				self.event_queue.add_event(Event::PaymentFailed { payment_hash }).unwrap_or_else(
-					|e| {
+				self.event_queue
+					.add_event(Event::PaymentFailed { payment_hash, reason })
+					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
-					},
-				);
+					});
 			}
 
 			LdkEvent::PaymentPathSuccessful { .. } => {}
@@ -846,12 +855,13 @@ where
 				counterparty_node_id,
 				..
 			} => {
-				log_info!(self.logger, "Channel {} closed due to: {:?}", channel_id, reason);
+				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
 				self.event_queue
 					.add_event(Event::ChannelClosed {
 						channel_id,
 						user_channel_id: UserChannelId(user_channel_id),
 						counterparty_node_id,
+						reason: Some(reason),
 					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);

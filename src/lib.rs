@@ -108,7 +108,7 @@ pub use types::ChannelConfig;
 pub use io::utils::generate_entropy_mnemonic;
 
 #[cfg(feature = "uniffi")]
-use {bip39::Mnemonic, bitcoin::OutPoint, lightning::ln::PaymentSecret, uniffi_types::*};
+use uniffi_types::*;
 
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
@@ -135,8 +135,6 @@ use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 
-#[cfg(feature = "uniffi")]
-use lightning::ln::ChannelId;
 use lightning::sign::EntropySource;
 
 use lightning::util::persist::KVStore;
