@@ -75,6 +75,7 @@
 #![allow(ellipsis_inclusive_range_patterns)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
+mod balance;
 mod builder;
 mod error;
 mod event;
@@ -99,6 +100,7 @@ pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
 
+pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use error::Error as NodeError;
 use error::Error;
 
@@ -878,16 +880,6 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let funding_address = self.wallet.get_new_address()?;
 		log_info!(self.logger, "Generated new funding address: {}", funding_address);
 		Ok(funding_address)
-	}
-
-	/// Retrieve the currently spendable on-chain balance in satoshis.
-	pub fn spendable_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_spendable())?)
-	}
-
-	/// Retrieve the current total on-chain balance in satoshis.
-	pub fn total_onchain_balance_sats(&self) -> Result<u64, Error> {
-		Ok(self.wallet.get_balance().map(|bal| bal.get_total())?)
 	}
 
 	/// Send an on-chain payment to the given address.
@@ -1742,6 +1734,55 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// Remove the payment with the given hash from the store.
 	pub fn remove_payment(&self, payment_hash: &PaymentHash) -> Result<(), Error> {
 		self.payment_store.remove(&payment_hash)
+	}
+
+	/// Retrieves an overview of all known balances.
+	pub fn list_balances(&self) -> BalanceDetails {
+		let (total_onchain_balance_sats, spendable_onchain_balance_sats) = self
+			.wallet
+			.get_balance()
+			.map(|bal| (bal.get_total(), bal.get_spendable()))
+			.unwrap_or((0, 0));
+
+		let mut total_lightning_balance_sats = 0;
+		let mut lightning_balances = Vec::new();
+		for funding_txo in self.chain_monitor.list_monitors() {
+			match self.chain_monitor.get_monitor(funding_txo) {
+				Ok(monitor) => {
+					// TODO: Switch to `channel_id` with LDK 0.0.122: let channel_id = monitor.channel_id();
+					let channel_id = funding_txo.to_channel_id();
+					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
+					// LDK Node 0.1 depended on 0.0.115 already.
+					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
+					for ldk_balance in monitor.get_claimable_balances() {
+						total_lightning_balance_sats += ldk_balance.claimable_amount_satoshis();
+						lightning_balances.push(LightningBalance::from_ldk_balance(
+							channel_id,
+							counterparty_node_id,
+							ldk_balance,
+						));
+					}
+				},
+				Err(()) => {
+					continue;
+				},
+			}
+		}
+
+		let pending_balances_from_channel_closures = self
+			.output_sweeper
+			.tracked_spendable_outputs()
+			.into_iter()
+			.map(|o| PendingSweepBalance::from_tracked_spendable_output(o))
+			.collect();
+
+		BalanceDetails {
+			total_onchain_balance_sats,
+			spendable_onchain_balance_sats,
+			total_lightning_balance_sats,
+			lightning_balances,
+			pending_balances_from_channel_closures,
+		}
 	}
 
 	/// Retrieves all payments that match the given predicate.

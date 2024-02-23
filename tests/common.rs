@@ -333,8 +333,8 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 	);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_a.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
-	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	// Check we haven't got any events yet
 	assert_eq!(node_a.next_event(), None);
@@ -371,9 +371,9 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 	let onchain_fee_buffer_sat = 1500;
 	let node_a_upper_bound_sat = premine_amount_sat - funding_amount_sat;
 	let node_a_lower_bound_sat = premine_amount_sat - funding_amount_sat - onchain_fee_buffer_sat;
-	assert!(node_a.spendable_onchain_balance_sats().unwrap() < node_a_upper_bound_sat);
-	assert!(node_a.spendable_onchain_balance_sats().unwrap() > node_a_lower_bound_sat);
-	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), premine_amount_sat);
+	assert!(node_a.list_balances().spendable_onchain_balance_sats < node_a_upper_bound_sat);
+	assert!(node_a.list_balances().spendable_onchain_balance_sats > node_a_lower_bound_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 
@@ -539,10 +539,13 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 	let node_a_upper_bound_sat =
 		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
 	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
-	assert!(node_a.spendable_onchain_balance_sats().unwrap() > node_a_lower_bound_sat);
-	assert!(node_a.spendable_onchain_balance_sats().unwrap() < node_a_upper_bound_sat);
+	assert!(node_a.list_balances().spendable_onchain_balance_sats > node_a_lower_bound_sat);
+	assert!(node_a.list_balances().spendable_onchain_balance_sats < node_a_upper_bound_sat);
 	let expected_final_amount_node_b_sat = premine_amount_sat + sum_of_all_payments_sat;
-	assert_eq!(node_b.spendable_onchain_balance_sats().unwrap(), expected_final_amount_node_b_sat);
+	assert_eq!(
+		node_b.list_balances().spendable_onchain_balance_sats,
+		expected_final_amount_node_b_sat
+	);
 
 	// Check we handled all events
 	assert_eq!(node_a.next_event(), None);

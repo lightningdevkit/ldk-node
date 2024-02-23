@@ -56,10 +56,6 @@ interface LDKNode {
 	[Throws=NodeError]
 	Txid send_all_to_onchain_address([ByRef]Address address);
 	[Throws=NodeError]
-	u64 spendable_onchain_balance_sats();
-	[Throws=NodeError]
-	u64 total_onchain_balance_sats();
-	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
@@ -94,6 +90,7 @@ interface LDKNode {
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentHash payment_hash);
+	BalanceDetails list_balances();
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
@@ -235,7 +232,6 @@ dictionary ChannelDetails {
 	u64? unspendable_punishment_reserve;
 	UserChannelId user_channel_id;
 	u32 feerate_sat_per_1000_weight;
-	u64 balance_msat;
 	u64 outbound_capacity_msat;
 	u64 inbound_capacity_msat;
 	u32? confirmations_required;
@@ -266,6 +262,31 @@ dictionary PeerDetails {
 	boolean is_connected;
 };
 
+[Enum]
+interface LightningBalance {
+	ClaimableOnChannelClose ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis );
+	ClaimableAwaitingConfirmations ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 confirmation_height );
+	ContentiousClaimable ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 timeout_height, PaymentHash payment_hash, PaymentPreimage payment_preimage );
+	MaybeTimeoutClaimableHTLC ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 claimable_height, PaymentHash payment_hash);
+	MaybePreimageClaimableHTLC ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 expiry_height, PaymentHash payment_hash);
+	CounterpartyRevokedOutputClaimable ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis );
+};
+
+[Enum]
+interface PendingSweepBalance {
+	PendingBroadcast ( ChannelId? channel_id, u64 amount_satoshis );
+	BroadcastAwaitingConfirmation ( ChannelId? channel_id, u32 latest_broadcast_height, Txid latest_spending_txid, u64 amount_satoshis );
+	AwaitingThresholdConfirmations ( ChannelId? channel_id, Txid latest_spending_txid, BlockHash confirmation_hash, u32 confirmation_height, u64 amount_satoshis);
+};
+
+dictionary BalanceDetails {
+	u64 total_onchain_balance_sats;
+	u64 spendable_onchain_balance_sats;
+	u64 total_lightning_balance_sats;
+	sequence<LightningBalance> lightning_balances;
+	sequence<PendingSweepBalance> pending_balances_from_channel_closures;
+};
+
 interface ChannelConfig {
 	constructor();
 	u32 forwarding_fee_proportional_millionths();
@@ -293,6 +314,9 @@ enum LogLevel {
 
 [Custom]
 typedef string Txid;
+
+[Custom]
+typedef string BlockHash;
 
 [Custom]
 typedef string SocketAddress;

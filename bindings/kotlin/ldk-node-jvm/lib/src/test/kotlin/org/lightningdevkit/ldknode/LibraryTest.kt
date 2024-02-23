@@ -162,10 +162,10 @@ class LibraryTest {
         node1.syncWallets()
         node2.syncWallets()
 
-        val spendableBalance1 = node1.spendableOnchainBalanceSats()
-        val spendableBalance2 = node2.spendableOnchainBalanceSats()
-        val totalBalance1 = node1.totalOnchainBalanceSats()
-        val totalBalance2 = node2.totalOnchainBalanceSats()
+        val spendableBalance1 = node1.listBalances().spendableOnchainBalanceSats
+        val spendableBalance2 = node2.listBalances().spendableOnchainBalanceSats
+        val totalBalance1 = node1.listBalances().totalOnchainBalanceSats
+        val totalBalance2 = node2.listBalances().totalOnchainBalanceSats
         println("Spendable balance 1: $spendableBalance1")
         println("Spendable balance 2: $spendableBalance1")
         println("Total balance 1: $totalBalance1")
@@ -199,8 +199,8 @@ class LibraryTest {
         node1.syncWallets()
         node2.syncWallets()
 
-        val spendableBalance1AfterOpen = node1.spendableOnchainBalanceSats()
-        val spendableBalance2AfterOpen = node2.spendableOnchainBalanceSats()
+        val spendableBalance1AfterOpen = node1.listBalances().spendableOnchainBalanceSats
+        val spendableBalance2AfterOpen = node2.listBalances().spendableOnchainBalanceSats
         println("Spendable balance 1 after open: $spendableBalance1AfterOpen")
         println("Spendable balance 2 after open: $spendableBalance2AfterOpen")
         assert(spendableBalance1AfterOpen > 49000u)
@@ -256,8 +256,8 @@ class LibraryTest {
         node1.syncWallets()
         node2.syncWallets()
 
-        val spendableBalance1AfterClose = node1.spendableOnchainBalanceSats()
-        val spendableBalance2AfterClose = node2.spendableOnchainBalanceSats()
+        val spendableBalance1AfterClose = node1.listBalances().spendableOnchainBalanceSats
+        val spendableBalance2AfterClose = node2.listBalances().spendableOnchainBalanceSats
         println("Spendable balance 1 after close: $spendableBalance1AfterClose")
         println("Spendable balance 2 after close: $spendableBalance2AfterClose")
         assert(spendableBalance1AfterClose > 95000u)

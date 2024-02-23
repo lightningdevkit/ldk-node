@@ -138,10 +138,10 @@ class TestLdkNode(unittest.TestCase):
         node_1.sync_wallets()
         node_2.sync_wallets()
 
-        spendable_balance_1 = node_1.spendable_onchain_balance_sats()
-        spendable_balance_2 = node_2.spendable_onchain_balance_sats()
-        total_balance_1 = node_1.total_onchain_balance_sats()
-        total_balance_2 = node_2.total_onchain_balance_sats()
+        spendable_balance_1 = node_1.list_balances().spendable_onchain_balance_sats
+        spendable_balance_2 = node_2.list_balances().spendable_onchain_balance_sats
+        total_balance_1 = node_1.list_balances().total_onchain_balance_sats
+        total_balance_2 = node_2.list_balances().total_onchain_balance_sats
 
         print("SPENDABLE 1:", spendable_balance_1)
         self.assertEqual(spendable_balance_1, 100000)
@@ -215,10 +215,10 @@ class TestLdkNode(unittest.TestCase):
         node_1.sync_wallets()
         node_2.sync_wallets()
 
-        spendable_balance_after_close_1 = node_1.spendable_onchain_balance_sats()
+        spendable_balance_after_close_1 = node_1.list_balances().spendable_onchain_balance_sats
         assert spendable_balance_after_close_1 > 95000
         assert spendable_balance_after_close_1 < 100000
-        spendable_balance_after_close_2 = node_2.spendable_onchain_balance_sats()
+        spendable_balance_after_close_2 = node_2.list_balances().spendable_onchain_balance_sats
         self.assertEqual(spendable_balance_after_close_2, 102500)
 
         # Stop nodes
