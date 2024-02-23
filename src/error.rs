@@ -78,7 +78,7 @@ impl fmt::Display for Error {
 			Self::NotRunning => write!(f, "Node is not running."),
 			Self::OnchainTxCreationFailed => {
 				write!(f, "On-chain transaction could not be created.")
-			}
+			},
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
@@ -89,7 +89,7 @@ impl fmt::Display for Error {
 			Self::PersistenceFailed => write!(f, "Failed to persist data."),
 			Self::FeerateEstimationUpdateFailed => {
 				write!(f, "Failed to update fee rate estimates.")
-			}
+			},
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::MessageSigningFailed => write!(f, "Failed to sign given message."),
@@ -109,16 +109,16 @@ impl fmt::Display for Error {
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
-			}
+			},
 			Self::InsufficientFunds => {
 				write!(f, "The available funds are insufficient to complete the given operation.")
-			}
+			},
 			Self::LiquiditySourceUnavailable => {
 				write!(f, "The given operation failed due to the required liquidity source being unavailable.")
-			}
+			},
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
-			}
+			},
 		}
 	}
 }

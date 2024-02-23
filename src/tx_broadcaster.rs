@@ -41,7 +41,7 @@ where
 				match self.esplora_client.broadcast(tx).await {
 					Ok(()) => {
 						log_trace!(self.logger, "Successfully broadcast transaction {}", tx.txid());
-					}
+					},
 					Err(e) => match e {
 						esplora_client::Error::Reqwest(_) => {
 							// Wait 500 ms and retry in case we get a `Reqwest` error (typically
@@ -59,7 +59,7 @@ where
 										"Successfully broadcast transaction {}",
 										tx.txid()
 									);
-								}
+								},
 								Err(e) => {
 									log_error!(
 										self.logger,
@@ -72,9 +72,9 @@ where
 										"Failed broadcast transaction bytes: {}",
 										log_bytes!(tx.encode())
 									);
-								}
+								},
 							}
-						}
+						},
 						_ => {
 							log_error!(
 								self.logger,
@@ -87,7 +87,7 @@ where
 								"Failed broadcast transaction bytes: {}",
 								log_bytes!(tx.encode())
 							);
-						}
+						},
 					},
 				}
 			}

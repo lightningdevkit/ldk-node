@@ -61,13 +61,13 @@ fn test_cln() {
 	let cln_address: SocketAddress = match cln_info.binding.first().unwrap() {
 		NetworkAddress::Ipv4 { address, port } => {
 			std::net::SocketAddrV4::new(*address, *port).into()
-		}
+		},
 		NetworkAddress::Ipv6 { address, port } => {
 			std::net::SocketAddrV6::new(*address, *port, 0, 0).into()
-		}
+		},
 		_ => {
 			panic!()
-		}
+		},
 	};
 
 	node.sync_wallets().unwrap();

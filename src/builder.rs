@@ -134,10 +134,10 @@ impl fmt::Display for BuildError {
 			Self::InvalidSeedFile => write!(f, "Given seed file is invalid or could not be read."),
 			Self::InvalidSystemTime => {
 				write!(f, "System time is invalid. Clocks might have gone back in time.")
-			}
+			},
 			Self::InvalidChannelMonitor => {
 				write!(f, "Failed to watch a deserialized ChannelMonitor")
-			}
+			},
 			Self::InvalidListeningAddresses => write!(f, "Given listening addresses are invalid."),
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
@@ -572,7 +572,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&logger),
 			));
 			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
-		}
+		},
 		None => {
 			// Default to Esplora client.
 			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
@@ -590,7 +590,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&logger),
 			));
 			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
-		}
+		},
 	};
 
 	let runtime = Arc::new(RwLock::new(None));
@@ -636,7 +636,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				} else {
 					return Err(BuildError::ReadFailed);
 				}
-			}
+			},
 		};
 
 	let scorer = match io::utils::read_scorer(
@@ -656,7 +656,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			} else {
 				return Err(BuildError::ReadFailed);
 			}
-		}
+		},
 	};
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
@@ -682,7 +682,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
 				return Err(BuildError::ReadFailed);
 			}
-		}
+		},
 	};
 
 	// Initialize the ChannelManager
@@ -794,7 +794,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				BuildError::WriteFailed
 			})?;
 			p2p_source
-		}
+		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
 			let latest_sync_timestamp = io::utils::read_latest_rgs_sync_timestamp(
 				Arc::clone(&kv_store),
@@ -807,7 +807,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				Arc::clone(&network_graph),
 				Arc::clone(&logger),
 			))
-		}
+		},
 	};
 
 	let liquidity_source = liquidity_source_config.as_ref().and_then(|lsc| {
@@ -858,7 +858,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		},
 		GossipSync::None => {
 			unreachable!("We must always have a gossip sync!");
-		}
+		},
 	};
 
 	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
@@ -883,10 +883,10 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(payments) => {
 			Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
-		}
+		},
 		Err(_) => {
 			return Err(BuildError::ReadFailed);
-		}
+		},
 	};
 
 	let event_queue = match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger))
@@ -898,7 +898,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			} else {
 				return Err(BuildError::ReadFailed);
 			}
-		}
+		},
 	};
 
 	let peer_store = match io::utils::read_peer_info(Arc::clone(&kv_store), Arc::clone(&logger)) {
@@ -909,7 +909,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			} else {
 				return Err(BuildError::ReadFailed);
 			}
-		}
+		},
 	};
 
 	let best_block = channel_manager.current_best_block();
@@ -928,7 +928,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			)),
 			Err(_) => {
 				return Err(BuildError::ReadFailed);
-			}
+			},
 		};
 
 	let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
@@ -981,7 +981,7 @@ fn seed_bytes_from_config(
 		Some(EntropySourceConfig::SeedFile(seed_path)) => {
 			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
-		}
+		},
 		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
 			Some(passphrase) => Ok(mnemonic.to_seed(passphrase)),
 			None => Ok(mnemonic.to_seed("")),
@@ -991,6 +991,6 @@ fn seed_bytes_from_config(
 			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
 			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
-		}
+		},
 	}
 }

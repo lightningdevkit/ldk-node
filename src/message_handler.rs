@@ -48,7 +48,7 @@ where
 			Self::Ignoring => Ok(None),
 			Self::Liquidity { liquidity_source, .. } => {
 				liquidity_source.liquidity_manager().read(message_type, buffer)
-			}
+			},
 		}
 	}
 }
@@ -65,7 +65,7 @@ where
 			Self::Ignoring => Ok(()), // Should be unreachable!() as the reader will return `None`
 			Self::Liquidity { liquidity_source, .. } => {
 				liquidity_source.liquidity_manager().handle_custom_message(msg, sender_node_id)
-			}
+			},
 		}
 	}
 
@@ -74,7 +74,7 @@ where
 			Self::Ignoring => Vec::new(),
 			Self::Liquidity { liquidity_source, .. } => {
 				liquidity_source.liquidity_manager().get_and_clear_pending_msg()
-			}
+			},
 		}
 	}
 
@@ -83,7 +83,7 @@ where
 			Self::Ignoring => NodeFeatures::empty(),
 			Self::Liquidity { liquidity_source, .. } => {
 				liquidity_source.liquidity_manager().provided_node_features()
-			}
+			},
 		}
 	}
 
@@ -92,7 +92,7 @@ where
 			Self::Ignoring => InitFeatures::empty(),
 			Self::Liquidity { liquidity_source, .. } => {
 				liquidity_source.liquidity_manager().provided_init_features(their_node_id)
-			}
+			},
 		}
 	}
 }

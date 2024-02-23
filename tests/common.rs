@@ -34,10 +34,10 @@ macro_rules! expect_event {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				$node.event_handled();
-			}
+			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			}
+			},
 		}
 	}};
 }
@@ -52,10 +52,10 @@ macro_rules! expect_channel_pending_event {
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
 				$node.event_handled();
 				funding_txo
-			}
+			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			}
+			},
 		}
 	}};
 }
@@ -70,10 +70,10 @@ macro_rules! expect_channel_ready_event {
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
 				$node.event_handled();
 				user_channel_id
-			}
+			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			}
+			},
 		}
 	}};
 }
@@ -215,7 +215,7 @@ pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 			// and panic if it still fails.
 			std::thread::sleep(Duration::from_secs(3));
 			electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
-		}
+		},
 	};
 	loop {
 		if header.height >= min_height {
@@ -268,9 +268,9 @@ where
 			Some(data) => break data,
 			None if delay.as_millis() < 512 => {
 				delay = delay.mul_f32(2.0);
-			}
+			},
 
-			None => {}
+			None => {},
 		}
 		assert!(tries < 20, "Reached max tries.");
 		tries += 1;
@@ -445,10 +445,10 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled();
 			amount_msat
-		}
+		},
 		ref e => {
 			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
-		}
+		},
 	};
 	assert_eq!(received_amount, overpaid_amount_msat);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
@@ -473,10 +473,10 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled();
 			amount_msat
-		}
+		},
 		ref e => {
 			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
-		}
+		},
 	};
 	assert_eq!(received_amount, determined_amount_msat);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
@@ -497,10 +497,10 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled();
 			amount_msat
-		}
+		},
 		ref e => {
 			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
-		}
+		},
 	};
 	assert_eq!(received_keysend_amount, keysend_amount_msat);
 	assert_eq!(node_a.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
@@ -600,12 +600,12 @@ impl TestSyncStore {
 				assert_eq!(list, test_list);
 
 				Ok(list)
-			}
+			},
 			Err(e) => {
 				assert!(sqlite_res.is_err());
 				assert!(test_res.is_err());
 				Err(e)
-			}
+			},
 		}
 	}
 }
@@ -625,14 +625,14 @@ impl KVStore for TestSyncStore {
 				assert_eq!(read, sqlite_res.unwrap());
 				assert_eq!(read, test_res.unwrap());
 				Ok(read)
-			}
+			},
 			Err(e) => {
 				assert!(sqlite_res.is_err());
 				assert_eq!(e.kind(), unsafe { sqlite_res.unwrap_err_unchecked().kind() });
 				assert!(test_res.is_err());
 				assert_eq!(e.kind(), unsafe { test_res.unwrap_err_unchecked().kind() });
 				Err(e)
-			}
+			},
 		}
 	}
 
@@ -654,12 +654,12 @@ impl KVStore for TestSyncStore {
 				assert!(sqlite_res.is_ok());
 				assert!(test_res.is_ok());
 				Ok(())
-			}
+			},
 			Err(e) => {
 				assert!(sqlite_res.is_err());
 				assert!(test_res.is_err());
 				Err(e)
-			}
+			},
 		}
 	}
 
@@ -682,12 +682,12 @@ impl KVStore for TestSyncStore {
 				assert!(sqlite_res.is_ok());
 				assert!(test_res.is_ok());
 				Ok(())
-			}
+			},
 			Err(e) => {
 				assert!(sqlite_res.is_err());
 				assert!(test_res.is_err());
 				Err(e)
-			}
+			},
 		}
 	}
 

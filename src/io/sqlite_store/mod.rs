@@ -156,7 +156,7 @@ impl KVStore for SqliteStore {
 						PrintableString(key)
 					);
 					std::io::Error::new(std::io::ErrorKind::NotFound, msg)
-				}
+				},
 				e => {
 					let msg = format!(
 						"Failed to read from key {}/{}/{}: {}",
@@ -166,7 +166,7 @@ impl KVStore for SqliteStore {
 						e
 					);
 					std::io::Error::new(std::io::ErrorKind::Other, msg)
-				}
+				},
 			})?;
 		Ok(res)
 	}
@@ -292,7 +292,7 @@ mod tests {
 		fn drop(&mut self) {
 			match fs::remove_dir_all(&self.data_dir) {
 				Err(e) => println!("Failed to remove test store directory: {}", e),
-				_ => {}
+				_ => {},
 			}
 		}
 	}
