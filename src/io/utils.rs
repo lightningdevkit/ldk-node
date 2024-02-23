@@ -1,5 +1,5 @@
 use super::*;
-use crate::WALLET_KEYS_SEED_LEN;
+use crate::config::WALLET_KEYS_SEED_LEN;
 
 use crate::logger::log_error;
 use crate::peer_store::PeerStore;

@@ -3,7 +3,7 @@ pub use lightning::ln::ChannelId;
 pub use lightning::ln::PaymentSecret;
 pub use lightning::util::string::UntrustedString;
 
-pub use bitcoin::{BlockHash, OutPoint};
+pub use bitcoin::{BlockHash, Network, OutPoint};
 
 pub use bip39::Mnemonic;
 
