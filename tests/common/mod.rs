@@ -565,7 +565,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
 
 	println!("\nB close_channel");
-	node_b.close_channel(&user_channel_id, node_a.node_id()).unwrap();
+	node_b.close_channel(&user_channel_id, node_a.node_id(), false).unwrap();
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 

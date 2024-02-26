@@ -111,7 +111,7 @@ fn test_cln() {
 	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
 	common::expect_event!(node, PaymentReceived);
 
-	node.close_channel(&user_channel_id, cln_node_id).unwrap();
+	node.close_channel(&user_channel_id, cln_node_id, false).unwrap();
 	common::expect_event!(node, ChannelClosed);
 	node.stop().unwrap();
 }
