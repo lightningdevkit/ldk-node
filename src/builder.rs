@@ -685,7 +685,11 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		},
 	};
 
-	// Initialize the ChannelManager
+	// Initialize the default config values.
+	//
+	// Note that methods such as Node::connect_open_channel might override some of the values set
+	// here, e.g. the ChannelHandshakeConfig, meaning these default values will mostly be relevant
+	// for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
 
@@ -695,11 +699,19 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		user_config.manually_accept_inbound_channels = true;
 	}
 
-	if liquidity_source_config.is_some() {
+	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 		// check that they don't take too much before claiming.
 		user_config.channel_config.accept_underpaying_htlcs = true;
+
+		// FIXME: When we're an LSPS2 client, set maximum allowed inbound HTLC value in flight
+		// to 100%. We should eventually be able to set this on a per-channel basis, but for
+		// now we just bump the default for all channels.
+		user_config.channel_handshake_config.max_inbound_htlc_value_in_flight_percent_of_channel =
+			100;
 	}
+
+	// Initialize the ChannelManager
 	let channel_manager = {
 		if let Ok(res) = kv_store.read(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
