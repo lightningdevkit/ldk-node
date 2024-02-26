@@ -239,7 +239,7 @@ class LibraryTest {
         assert(node1.listPayments().size == 1)
         assert(node2.listPayments().size == 1)
 
-        node2.closeChannel(userChannelId, nodeId1)
+        node2.closeChannel(userChannelId, nodeId1, false)
 
         val channelClosedEvent1 = node1.waitNextEvent()
         println("Got event: $channelClosedEvent1")
