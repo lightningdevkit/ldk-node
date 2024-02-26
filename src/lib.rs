@@ -1146,27 +1146,66 @@ impl Node {
 	}
 
 	/// Close a previously opened channel.
+	///
+	/// If `force` is set to `true`, we will force-close the channel, potentially broadcasting our
+	/// latest state. Note that in contrast to cooperative closure, force-closing will have the
+	/// channel funds time-locked, i.e., they will only be available after the counterparty had
+	/// time to contest our claim. Force-closing channels also more costly in terms of on-chain
+	/// fees. So cooperative closure should always be preferred (and tried first).
+	///
+	/// Broadcasting the closing transactions will be omitted for Anchor channels if we trust the
+	/// counterparty to broadcast for us (see [`AnchorChannelsConfig::trusted_peers_no_reserve`]
+	/// for more information).
 	pub fn close_channel(
-		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			match self
-				.channel_manager
-				.close_channel(&channel_details.channel_id, &counterparty_node_id)
-			{
-				Ok(_) => {
-					// Check if this was the last open channel, if so, forget the peer.
-					if open_channels.len() == 1 {
-						self.peer_store.remove_peer(&counterparty_node_id)?;
-					}
-					Ok(())
-				},
-				Err(_) => Err(Error::ChannelClosingFailed),
+			if force {
+				if self.config.anchor_channels_config.as_ref().map_or(false, |acc| {
+					acc.trusted_peers_no_reserve.contains(&counterparty_node_id)
+				}) {
+					self.channel_manager
+						.force_close_without_broadcasting_txn(
+							&channel_details.channel_id,
+							&counterparty_node_id,
+						)
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to force-close channel to trusted peer: {:?}",
+								e
+							);
+							Error::ChannelClosingFailed
+						})?;
+				} else {
+					self.channel_manager
+						.force_close_broadcasting_latest_txn(
+							&channel_details.channel_id,
+							&counterparty_node_id,
+						)
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to force-close channel: {:?}", e);
+							Error::ChannelClosingFailed
+						})?;
+				}
+			} else {
+				self.channel_manager
+					.close_channel(&channel_details.channel_id, &counterparty_node_id)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to close channel: {:?}", e);
+						Error::ChannelClosingFailed
+					})?;
 			}
+
+			// Check if this was the last open channel, if so, forget the peer.
+			if open_channels.len() == 1 {
+				self.peer_store.remove_peer(&counterparty_node_id)?;
+			}
+			Ok(())
 		} else {
 			Ok(())
 		}
