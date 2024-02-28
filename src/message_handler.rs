@@ -6,7 +6,7 @@ use lightning::ln::wire::CustomMessageReader;
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStore;
 
-use lightning_liquidity::lsps0::msgs::RawLSPSMessage;
+use lightning_liquidity::lsps0::ser::RawLSPSMessage;
 
 use bitcoin::secp256k1::PublicKey;
 
