@@ -179,7 +179,6 @@ uniffi::include_scaffolding!("ldk_node");
 pub struct Node<K: KVStore + Sync + Send + 'static> {
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
-	stop_receiver: tokio::sync::watch::Receiver<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
@@ -247,7 +246,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		// Setup wallet sync
 		let wallet = Arc::clone(&self.wallet);
 		let sync_logger = Arc::clone(&self.logger);
-		let mut stop_sync = self.stop_receiver.clone();
+		let mut stop_sync = self.stop_sender.subscribe();
 		let onchain_wallet_sync_interval_secs = self
 			.config
 			.onchain_wallet_sync_interval_secs
@@ -288,7 +287,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			);
 		});
 
-		let mut stop_fee_updates = self.stop_receiver.clone();
+		let mut stop_fee_updates = self.stop_sender.subscribe();
 		let fee_update_logger = Arc::clone(&self.logger);
 		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let fee_rate_cache_update_interval_secs =
@@ -331,7 +330,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
-		let mut stop_sync = self.stop_receiver.clone();
+		let mut stop_sync = self.stop_sender.subscribe();
 		let wallet_sync_interval_secs =
 			self.config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 		runtime.spawn(async move {
@@ -369,7 +368,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			let gossip_source = Arc::clone(&self.gossip_source);
 			let gossip_sync_store = Arc::clone(&self.kv_store);
 			let gossip_sync_logger = Arc::clone(&self.logger);
-			let mut stop_gossip_sync = self.stop_receiver.clone();
+			let mut stop_gossip_sync = self.stop_sender.subscribe();
 			runtime.spawn(async move {
 				let mut interval = tokio::time::interval(RGS_SYNC_INTERVAL);
 				loop {
@@ -412,7 +411,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		if let Some(listening_addresses) = &self.config.listening_addresses {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
-			let mut stop_listen = self.stop_receiver.clone();
+			let mut stop_listen = self.stop_sender.subscribe();
 			let listening_logger = Arc::clone(&self.logger);
 
 			let mut bind_addrs = Vec::with_capacity(listening_addresses.len());
@@ -467,7 +466,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let connect_pm = Arc::clone(&self.peer_manager);
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
-		let mut stop_connect = self.stop_receiver.clone();
+		let mut stop_connect = self.stop_sender.subscribe();
 		runtime.spawn(async move {
 			let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
 			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -516,7 +515,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let bcast_config = Arc::clone(&self.config);
 		let bcast_store = Arc::clone(&self.kv_store);
 		let bcast_logger = Arc::clone(&self.logger);
-		let mut stop_bcast = self.stop_receiver.clone();
+		let mut stop_bcast = self.stop_sender.subscribe();
 		runtime.spawn(async move {
 			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 			let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -572,7 +571,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			}
 		});
 
-		let mut stop_tx_bcast = self.stop_receiver.clone();
+		let mut stop_tx_bcast = self.stop_sender.subscribe();
 		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
 		runtime.spawn(async move {
 			// Every second we try to clear our broadcasting queue.
@@ -613,7 +612,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
-		let stop_bp = self.stop_receiver.clone();
+		let stop_bp = self.stop_sender.subscribe();
 		let sleeper = move |d| {
 			let mut stop = stop_bp.clone();
 			Box::pin(async move {
@@ -650,7 +649,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		});
 
 		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-			let mut stop_liquidity_handler = self.stop_receiver.clone();
+			let mut stop_liquidity_handler = self.stop_sender.subscribe();
 			let liquidity_handler = Arc::clone(&liquidity_source);
 			runtime.spawn(async move {
 				loop {
