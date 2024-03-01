@@ -191,6 +191,7 @@ enum NodeError {
 	"InvalidRefund",
 	"InvalidChannelId",
 	"InvalidNetwork",
+	"InvalidCustomTlv",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
