@@ -61,6 +61,8 @@ pub enum Error {
 	InvalidChannelId,
 	/// The given network is invalid.
 	InvalidNetwork,
+	/// The custom TLVs are invalid.
+	InvalidCustomTlv,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
 	/// The available funds are insufficient to complete the given operation.
