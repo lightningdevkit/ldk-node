@@ -131,6 +131,7 @@ enum NodeError {
 	"InvalidInvoice",
 	"InvalidChannelId",
 	"InvalidNetwork",
+	"InvalidCustomTlv",
 	"DuplicatePayment",
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
