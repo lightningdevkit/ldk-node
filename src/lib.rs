@@ -461,8 +461,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			});
 		}
 
-		// Regularly reconnect to channel peers.
-		let connect_cm = Arc::clone(&self.channel_manager);
+		// Regularly reconnect to persisted peers.
 		let connect_pm = Arc::clone(&self.peer_manager);
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
@@ -481,29 +480,23 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								.iter()
 								.map(|(peer, _addr)| *peer)
 								.collect::<Vec<_>>();
-							for node_id in connect_cm
-								.list_channels()
-									.iter()
-									.map(|chan| chan.counterparty.node_id)
-									.filter(|id| !pm_peers.contains(id))
-									{
-										if let Some(peer_info) = connect_peer_store.get_peer(&node_id) {
-											let res = do_connect_peer(
-												peer_info.node_id,
-												peer_info.address,
-												Arc::clone(&connect_pm),
-												Arc::clone(&connect_logger),
-												).await;
-											match res {
-												Ok(_) => {
-													log_info!(connect_logger, "Successfully reconnected to peer {}", node_id);
-												},
-												Err(e) => {
-													log_error!(connect_logger, "Failed to reconnect to peer {}: {}", node_id, e);
-												}
-											}
-										}
+
+							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
+								let res = do_connect_peer(
+									peer_info.node_id,
+									peer_info.address.clone(),
+									Arc::clone(&connect_pm),
+									Arc::clone(&connect_logger),
+									).await;
+								match res {
+									Ok(_) => {
+										log_info!(connect_logger, "Successfully reconnected to peer {}", peer_info.node_id);
+									},
+									Err(e) => {
+										log_error!(connect_logger, "Failed to reconnect to peer {}: {}", peer_info.node_id, e);
 									}
+								}
+							}
 						}
 				}
 			}
