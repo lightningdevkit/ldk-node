@@ -1249,7 +1249,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			.with_custom_tlvs(custom_tlvs.into_iter().map(|tlv| (tlv.r#type, tlv.value)).collect())
 			.map_err(|_| {
 				log_error!(self.logger, "Payment error: invalid custom TLVs.");
-				Error::PaymentSendingFailed
+				Error::InvalidCustomTlv
 			})?;
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(
