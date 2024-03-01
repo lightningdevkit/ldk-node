@@ -355,6 +355,7 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 		.unwrap();
 
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
+	assert!(node_a.list_peers().first().unwrap().is_persisted);
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);

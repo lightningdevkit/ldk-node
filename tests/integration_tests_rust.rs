@@ -272,3 +272,55 @@ fn sign_verify_msg() {
 	let pkey = node.node_id();
 	assert!(node.verify_signature(msg, sig.as_str(), &pkey));
 }
+
+#[test]
+fn connection_restart_behavior() {
+	do_connection_restart_behavior(true);
+	do_connection_restart_behavior(false);
+}
+
+fn do_connection_restart_behavior(persist: bool) {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+
+	let node_id_a = node_a.node_id();
+	let node_id_b = node_b.node_id();
+
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	std::thread::sleep(std::time::Duration::from_secs(1));
+	node_a.connect(node_id_b, node_addr_b, persist).unwrap();
+
+	let peer_details_a = node_a.list_peers().first().unwrap().clone();
+	assert_eq!(peer_details_a.node_id, node_id_b);
+	assert_eq!(peer_details_a.is_persisted, persist);
+	assert!(peer_details_a.is_connected);
+
+	let peer_details_b = node_b.list_peers().first().unwrap().clone();
+	assert_eq!(peer_details_b.node_id, node_id_a);
+	assert_eq!(peer_details_b.is_persisted, false);
+	assert!(peer_details_a.is_connected);
+
+	// Restart nodes.
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+	node_b.start().unwrap();
+	node_a.start().unwrap();
+
+	// Sleep a bit to allow for the reconnect to happen.
+	std::thread::sleep(std::time::Duration::from_secs(5));
+
+	if persist {
+		let peer_details_a = node_a.list_peers().first().unwrap().clone();
+		assert_eq!(peer_details_a.node_id, node_id_b);
+		assert_eq!(peer_details_a.is_persisted, persist);
+		assert!(peer_details_a.is_connected);
+
+		let peer_details_b = node_b.list_peers().first().unwrap().clone();
+		assert_eq!(peer_details_b.node_id, node_id_a);
+		assert_eq!(peer_details_b.is_persisted, false);
+		assert!(peer_details_a.is_connected);
+	} else {
+		assert!(node_a.list_peers().is_empty());
+		assert!(node_b.list_peers().is_empty());
+	}
+}

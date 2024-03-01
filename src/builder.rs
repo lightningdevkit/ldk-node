@@ -943,12 +943,11 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			},
 		};
 
-	let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
+	let (stop_sender, _) = tokio::sync::watch::channel(());
 
 	Ok(Node {
 		runtime,
 		stop_sender,
-		stop_receiver,
 		config,
 		wallet,
 		tx_sync,
