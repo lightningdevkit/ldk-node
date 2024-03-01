@@ -8,7 +8,7 @@ use lightning::routing::router::{RouteHint, RouteHintHop};
 use lightning::util::persist::KVStore;
 use lightning_invoice::{Bolt11Invoice, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::Event;
-use lightning_liquidity::lsps0::msgs::RequestId;
+use lightning_liquidity::lsps0::ser::RequestId;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
