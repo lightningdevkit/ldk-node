@@ -2,6 +2,12 @@
 
 set -e
 
+if ! command -v cross &> /dev/null; then
+  echo "cross-rs is required to build bindings. Install it by running:"
+  echo "  cargo install cross --git https://github.com/cross-rs/cross"
+  exit 1
+fi
+
 uniffi-bindgen-go bindings/ldk_node.udl -o ffi/golang -c ./uniffi.toml
 
 build_lib() {
