@@ -39,6 +39,8 @@ pub struct PaymentDetails {
 	///
 	/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 	pub lsp_fee_limits: Option<LSPFeeLimits>,
+	/// The invoice that was paid.
+	pub bolt11_invoice: Option<String>,
 }
 
 impl_writeable_tlv_based!(PaymentDetails, {
@@ -48,7 +50,8 @@ impl_writeable_tlv_based!(PaymentDetails, {
 	(4, secret, required),
 	(6, amount_msat, required),
 	(8, direction, required),
-	(10, status, required)
+	(10, status, required),
+	(131072, bolt11_invoice, option),
 });
 
 /// Represents the direction of a payment.
@@ -284,6 +287,7 @@ mod tests {
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
 			lsp_fee_limits: None,
+			bolt11_invoice: None,
 		};
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));

@@ -1089,6 +1089,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
 					lsp_fee_limits: None,
+					bolt11_invoice: Some(invoice.to_string()),
 				};
 				self.payment_store.insert(payment)?;
 
@@ -1109,6 +1110,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
 							lsp_fee_limits: None,
+							bolt11_invoice: Some(invoice.to_string()),
 						};
 
 						self.payment_store.insert(payment)?;
@@ -1197,6 +1199,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
 					lsp_fee_limits: None,
+					bolt11_invoice: Some(invoice.to_string()),
 				};
 				self.payment_store.insert(payment)?;
 
@@ -1218,6 +1221,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
 							lsp_fee_limits: None,
+							bolt11_invoice: Some(invoice.to_string()),
 						};
 						self.payment_store.insert(payment)?;
 
@@ -1273,6 +1277,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					direction: PaymentDirection::Outbound,
 					amount_msat: Some(amount_msat),
 					lsp_fee_limits: None,
+					bolt11_invoice: None,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -1294,6 +1299,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							direction: PaymentDirection::Outbound,
 							amount_msat: Some(amount_msat),
 							lsp_fee_limits: None,
+							bolt11_invoice: None,
 						};
 
 						self.payment_store.insert(payment)?;
@@ -1468,6 +1474,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
 			lsp_fee_limits: None,
+			bolt11_invoice: Some(invoice.to_string()),
 		};
 
 		self.payment_store.insert(payment)?;
@@ -1595,6 +1602,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
 			lsp_fee_limits,
+			bolt11_invoice: Some(invoice.to_string()),
 		};
 
 		self.payment_store.insert(payment)?;
