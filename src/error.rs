@@ -109,6 +109,7 @@ impl fmt::Display for Error {
 			Self::InvalidInvoice => write!(f, "The given invoice is invalid."),
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
+			Self::InvalidCustomTlv => write!(f, "The given custom TLVs are invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
 			},
