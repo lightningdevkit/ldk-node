@@ -215,3 +215,14 @@ impl UniffiCustomTypeConverter for UntrustedString {
 		obj.to_string()
 	}
 }
+
+impl UniffiCustomTypeConverter for Network {
+	type Builtin = String;
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(Network::from_str(&val).map_err(|_| Error::InvalidNetwork)?)
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}

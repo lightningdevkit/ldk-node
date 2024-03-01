@@ -44,8 +44,8 @@ interface LDKNode {
 	void stop();
 	Event? next_event();
 	Event wait_next_event();
-	[Async]
-	Event next_event_async();
+	// [Async]
+	// Event next_event_async();
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
@@ -211,13 +211,16 @@ dictionary PaymentDetails {
 	LSPFeeLimits? lsp_fee_limits;
 };
 
-[NonExhaustive]
-enum Network {
-	"Bitcoin",
-	"Testnet",
-	"Signet",
-	"Regtest",
-};
+// [NonExhaustive]
+// enum Network {
+// 	"Bitcoin",
+// 	"Testnet",
+// 	"Signet",
+// 	"Regtest",
+// };
+
+[Custom]
+typedef string Network;
 
 dictionary OutPoint {
 	Txid txid;
