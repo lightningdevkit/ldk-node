@@ -24,3 +24,5 @@ swift.swiftdoc
 /bindings/swift/LDKNodeFFI.xcframework
 /bindings/kotlin/ldk-node-android/lib/src/main/jniLibs
 /bindings/kotlin/ldk-node-android/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
+
+/ffi/
