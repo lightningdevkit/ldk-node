@@ -66,6 +66,7 @@ jobs:
         if: matrix.build-uniffi
         run: cargo build --features uniffi --verbose --color always
       - name: Build documentation on Rust ${{ matrix.toolchain }}
+        if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.63.0'"
         run: |
           cargo doc --release --verbose --color always
           cargo doc --document-private-items --verbose --color always
