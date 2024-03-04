@@ -47,17 +47,17 @@ where
 		Some(connection_closed_future) => {
 			let mut connection_closed_future = Box::pin(connection_closed_future);
 			loop {
-				match futures::poll!(&mut connection_closed_future) {
-					std::task::Poll::Ready(_) => {
+				tokio::select! {
+					_ = &mut connection_closed_future => {
 						log_info!(logger, "Peer connection closed: {}@{}", node_id, addr);
 						return Err(Error::ConnectionFailed);
 					},
-					std::task::Poll::Pending => {},
-				}
-				// Avoid blocking the tokio context by sleeping a bit
+					_ = tokio::time::sleep(Duration::from_millis(10)) => {},
+				};
+
 				match peer_manager.peer_by_node_id(&node_id) {
 					Some(_) => return Ok(()),
-					None => tokio::time::sleep(Duration::from_millis(10)).await,
+					None => continue,
 				}
 			}
 		},
