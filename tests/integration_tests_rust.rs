@@ -333,3 +333,33 @@ fn do_connection_restart_behavior(persist: bool) {
 		assert!(node_b.list_peers().is_empty());
 	}
 }
+
+#[test]
+fn concurrent_connections_succeed() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+
+	let node_a = Arc::new(node_a);
+	let node_b = Arc::new(node_b);
+
+	let node_id_b = node_b.node_id();
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+
+	while !node_b.status().is_listening {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
+	let mut handles = Vec::new();
+	for _ in 0..10 {
+		let thread_node = Arc::clone(&node_a);
+		let thread_addr = node_addr_b.clone();
+		let handle = std::thread::spawn(move || {
+			thread_node.connect(node_id_b, thread_addr, false).unwrap();
+		});
+		handles.push(handle);
+	}
+
+	for h in handles {
+		h.join().unwrap();
+	}
+}
