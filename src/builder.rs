@@ -2,6 +2,7 @@ use crate::config::{
 	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, DEFAULT_ESPLORA_SERVER_URL,
 	WALLET_KEYS_SEED_LEN,
 };
+use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
@@ -895,6 +896,9 @@ fn build_with_store_internal(
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
+	let connection_manager =
+		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
+
 	let output_sweeper = match io::utils::read_output_sweeper(
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
@@ -991,6 +995,7 @@ fn build_with_store_internal(
 		chain_monitor,
 		output_sweeper,
 		peer_manager,
+		connection_manager,
 		keys_manager,
 		network_graph,
 		gossip_source,
