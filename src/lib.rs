@@ -125,7 +125,7 @@ use config::{
 	LDK_PAYMENT_RETRY_TIMEOUT, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
-use connection::{connect_peer_if_necessary, do_connect_peer};
+use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
@@ -189,6 +189,7 @@ pub struct Node {
 	chain_monitor: Arc<ChainMonitor>,
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
+	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
 	gossip_source: Arc<GossipSource>,
@@ -500,6 +501,7 @@ impl Node {
 		}
 
 		// Regularly reconnect to persisted peers.
+		let connect_cm = Arc::clone(&self.connection_manager);
 		let connect_pm = Arc::clone(&self.peer_manager);
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
@@ -520,11 +522,9 @@ impl Node {
 								.collect::<Vec<_>>();
 
 							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let res = do_connect_peer(
+								let res = connect_cm.do_connect_peer(
 									peer_info.node_id,
 									peer_info.address.clone(),
-									Arc::clone(&connect_pm),
-									Arc::clone(&connect_logger),
 									).await;
 								match res {
 									Ok(_) => {
@@ -873,14 +873,13 @@ impl Node {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_logger = Arc::clone(&self.logger);
-		let con_pm = Arc::clone(&self.peer_manager);
+		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 			})
 		})?;
 
@@ -946,14 +945,13 @@ impl Node {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_logger = Arc::clone(&self.logger);
-		let con_pm = Arc::clone(&self.peer_manager);
+		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 			})
 		})?;
 
@@ -1603,14 +1601,13 @@ impl Node {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_logger = Arc::clone(&self.logger);
-		let con_pm = Arc::clone(&self.peer_manager);
+		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 			})
 		})?;
 
