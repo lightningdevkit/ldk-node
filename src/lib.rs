@@ -89,6 +89,7 @@ mod logger;
 mod message_handler;
 mod payment_store;
 mod peer_store;
+mod pj_new_crate;
 mod sweep;
 mod tx_broadcaster;
 mod types;
@@ -96,7 +97,8 @@ mod types;
 mod uniffi_types;
 mod wallet;
 
-pub use bip39;
+use crate::pj_new_crate::ScheduledChannel;
+use crate::pjoin::LDKPayjoin;
 pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
@@ -107,6 +109,8 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
+use payjoin::Uri;
+mod pjoin;
 pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
@@ -157,18 +161,18 @@ use lightning_transaction_sync::EsploraSyncClient;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning_invoice::{payment, Bolt11Invoice, Currency};
 
-use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::{hashes::sha256::Hash as Sha256, Amount};
 
 use bitcoin::{Address, Txid};
 
 use rand::Rng;
 
-use std::default::Default;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
+use std::{default::Default, str::FromStr};
 
 #[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
@@ -188,6 +192,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	channel_manager: Arc<ChannelManager<K>>,
 	chain_monitor: Arc<ChainMonitor<K>>,
 	output_sweeper: Arc<Sweeper<K>>,
+	payjoin: Arc<LDKPayjoin<K>>,
 	peer_manager: Arc<PeerManager<K>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
@@ -461,7 +466,30 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			});
 		}
 
-		// Regularly reconnect to persisted peers.
+		let payjoin_handler = Arc::clone(&self.payjoin);
+		let mut stop_payjoin_server = self.stop_sender.subscribe();
+		let pj_port = self.config.payjoin_server_port;
+		runtime.spawn(async move {
+			let addr = SocketAddr::from(([127, 0, 0, 1], pj_port));
+			let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+			loop {
+				let (stream, _) = match listener.accept().await {
+					Ok(res) => res,
+					Err(e) => {
+						println!("Failed to accept incoming payjoin connection: {}", e);
+						continue;
+					},
+				};
+				tokio::select! {
+					_ = stop_payjoin_server.changed() => {
+						return;
+					}
+					_ = payjoin_handler.serve(stream) => {}
+				}
+			}
+		});
+
+		// Regularly reconnect to channel peers.
 		let connect_pm = Arc::clone(&self.peer_manager);
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
@@ -665,6 +693,33 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// Returns whether the [`Node`] is running.
 	pub fn is_running(&self) -> bool {
 		self.runtime.read().unwrap().is_some()
+	}
+
+	/// Request a new channel to be opened with a remote peer.
+	pub async fn schedule_payjoin_channel(
+		&self, channel_amount_sats: u64, push_msat: Option<u64>, announce_channel: bool,
+		node_id: PublicKey,
+	) -> Result<String, Error> {
+		let channel =
+			ScheduledChannel::new(channel_amount_sats, push_msat, announce_channel, node_id);
+		self.payjoin.schedule(channel).await;
+		let bip21 = self.payjoin_bip21(channel_amount_sats);
+		bip21
+	}
+
+	/// Generate a BIP21 URI for a payjoin request.
+	pub fn payjoin_bip21(&self, amount_sats: u64) -> Result<String, Error> {
+		let address = self.wallet.get_new_address()?;
+		let amount = Amount::from_sat(amount_sats);
+		let pj = format!("https://0.0.0.0:{}/payjoin", self.config.payjoin_server_port);
+		let pj_uri_string = format!("{}?amount={}&pj={}", address.to_qr_uri(), amount.to_btc(), pj);
+		assert!(Uri::from_str(&pj_uri_string).is_ok());
+		Ok(pj_uri_string)
+	}
+
+	/// List all scheduled payjoin channels.
+	pub async fn list_scheduled_channels(&self) -> Result<Vec<ScheduledChannel>, Error> {
+		Ok(self.payjoin.list_scheduled_channels().await)
 	}
 
 	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].

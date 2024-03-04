@@ -15,6 +15,7 @@ dictionary Config {
 	sequence<PublicKey> trusted_peers_0conf;
 	u64 probing_liquidity_limit_multiplier;
 	LogLevel log_level;
+	u16 payjoin_server_port;
 };
 
 interface Builder {

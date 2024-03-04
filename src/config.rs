@@ -44,6 +44,9 @@ pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
 // The length in bytes of our wallets' keys seed.
 pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 
+// Port used by the Payjoin HTTP server.
+pub(crate) const DEFAULT_PAYJOIN_HTTP_SERVER_PORT: u16 = 3227;
+
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
 ///
@@ -104,6 +107,8 @@ pub struct Config {
 	///
 	/// Any messages below this level will be excluded from the logs.
 	pub log_level: LogLevel,
+	/// Payjoin server port
+	pub payjoin_server_port: u16,
 }
 
 impl Default for Config {
@@ -120,6 +125,7 @@ impl Default for Config {
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			log_level: DEFAULT_LOG_LEVEL,
+			payjoin_server_port: DEFAULT_PAYJOIN_HTTP_SERVER_PORT,
 		}
 	}
 }

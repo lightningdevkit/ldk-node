@@ -12,6 +12,7 @@ use crate::logger::{log_error, FilesystemLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
+use crate::pjoin::LDKPayjoinExecuter;
 use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -19,6 +20,7 @@ use crate::types::{
 	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
+use crate::LDKPayjoin;
 use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
@@ -944,6 +946,13 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		};
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
+	let payjoin_executer = LDKPayjoinExecuter::new(
+		Arc::clone(&wallet),
+		Arc::clone(&logger),
+		Arc::clone(&peer_manager),
+		Arc::clone(&channel_manager),
+	);
+	let payjoin = Arc::new(LDKPayjoin::new(payjoin_executer));
 
 	Ok(Node {
 		runtime,
@@ -957,6 +966,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		channel_manager,
 		chain_monitor,
 		output_sweeper,
+		payjoin,
 		peer_manager,
 		keys_manager,
 		network_graph,

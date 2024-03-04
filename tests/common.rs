@@ -141,6 +141,7 @@ pub(crate) fn random_config() -> Config {
 	config.listening_addresses = Some(rand_listening_addresses);
 
 	config.log_level = LogLevel::Gossip;
+	config.payjoin_server_port = random_port();
 
 	config
 }

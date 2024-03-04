@@ -2,6 +2,7 @@ use crate::logger::{log_error, log_info, log_trace, Logger};
 
 use crate::Error;
 
+use bitcoin::psbt::Psbt;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
@@ -164,6 +165,17 @@ where
 
 	pub(crate) fn get_balance(&self) -> Result<bdk::Balance, Error> {
 		Ok(self.inner.lock().unwrap().get_balance()?)
+	}
+
+	pub(crate) fn _list_unspent(&self) -> Result<Vec<bdk::LocalUtxo>, Error> {
+		Ok(self.inner.lock().unwrap().list_unspent()?)
+	}
+
+	pub(crate) fn _wallet_process_psbt(&self, psbt: &Psbt) -> Result<Psbt, Error> {
+		let wallet = self.inner.lock().unwrap();
+		let mut psbt = psbt.clone();
+		wallet.sign(&mut psbt, SignOptions::default())?;
+		Ok(psbt)
 	}
 
 	/// Send funds to the given address.

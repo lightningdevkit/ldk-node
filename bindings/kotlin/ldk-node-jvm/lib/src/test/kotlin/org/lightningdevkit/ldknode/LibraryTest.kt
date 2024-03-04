@@ -119,6 +119,7 @@ class LibraryTest {
         config1.listeningAddresses = listOf(listenAddress1)
         config1.network = Network.REGTEST
         config1.logLevel = LogLevel.TRACE
+        config1.payjoin_server_port = 1345
 
         println("Config 1: $config1")
 
@@ -127,6 +128,7 @@ class LibraryTest {
         config2.listeningAddresses = listOf(listenAddress2)
         config2.network = Network.REGTEST
         config2.logLevel = LogLevel.TRACE
+        config2.payjoin_server_port = 1346
         println("Config 2: $config2")
 
         val builder1 = Builder.fromConfig(config1)
