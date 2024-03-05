@@ -13,6 +13,8 @@ pub enum Error {
 	ConnectionFailed,
 	/// Invoice creation failed.
 	InvoiceCreationFailed,
+	/// Offer creation failed.
+	OfferCreationFailed,
 	/// Sending a payment has failed.
 	PaymentSendingFailed,
 	/// Sending a payment probe has failed.
@@ -59,12 +61,16 @@ pub enum Error {
 	InvalidAmount,
 	/// The given invoice is invalid.
 	InvalidInvoice,
+	/// The given offer is invalid.
+	InvalidOffer,
 	/// The given channel ID is invalid.
 	InvalidChannelId,
 	/// The given network is invalid.
 	InvalidNetwork,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
+	/// The provided offer was denonminated in an unsupported currency.
+	UnsupportedCurrency,
 	/// The available funds are insufficient to complete the given operation.
 	InsufficientFunds,
 	/// The given operation failed due to the required liquidity source being unavailable.
@@ -83,6 +89,7 @@ impl fmt::Display for Error {
 			},
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
+			Self::OfferCreationFailed => write!(f, "Failed to create offer."),
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
 			Self::ProbeSendingFailed => write!(f, "Failed to send the given payment probe."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
@@ -108,6 +115,7 @@ impl fmt::Display for Error {
 			Self::InvalidPaymentSecret => write!(f, "The given payment secret is invalid."),
 			Self::InvalidAmount => write!(f, "The given amount is invalid."),
 			Self::InvalidInvoice => write!(f, "The given invoice is invalid."),
+			Self::InvalidOffer => write!(f, "The given offer is invalid."),
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
 			Self::DuplicatePayment => {
@@ -115,6 +123,9 @@ impl fmt::Display for Error {
 			},
 			Self::InsufficientFunds => {
 				write!(f, "The available funds are insufficient to complete the given operation.")
+			},
+			Self::UnsupportedCurrency => {
+				write!(f, "The provided offer was denonminated in an unsupported currency.")
 			},
 			Self::LiquiditySourceUnavailable => {
 				write!(f, "The given operation failed due to the required liquidity source being unavailable.")
