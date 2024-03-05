@@ -210,6 +210,7 @@ dictionary PaymentDetails {
 	PaymentDirection direction;
 	PaymentStatus status;
 	LSPFeeLimits? lsp_fee_limits;
+	string? bolt11_invoice;
 };
 
 // [NonExhaustive]

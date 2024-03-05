@@ -556,6 +556,7 @@ where
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
 							lsp_fee_limits: None,
+							bolt11_invoice: None,
 						};
 
 						match self.payment_store.insert(payment) {
