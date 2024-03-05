@@ -43,7 +43,7 @@
 //!
 //! 	node.start().unwrap();
 //!
-//! 	let funding_address = node.new_onchain_address();
+//! 	let funding_address = node.onchain_payment().new_address();
 //!
 //! 	// .. fund address ..
 //!
@@ -130,7 +130,7 @@ use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
-use payment::{Bolt11Payment, SpontaneousPayment};
+use payment::{Bolt11Payment, OnchainPayment, SpontaneousPayment};
 use payment_store::PaymentStore;
 pub use payment_store::{LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
@@ -154,7 +154,6 @@ use lightning_background_processor::process_events_async;
 use lightning_transaction_sync::EsploraSyncClient;
 
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Txid};
 
 use rand::Rng;
 
@@ -874,38 +873,24 @@ impl Node {
 		))
 	}
 
-	/// Retrieve a new on-chain/funding address.
-	pub fn new_onchain_address(&self) -> Result<Address, Error> {
-		let funding_address = self.wallet.get_new_address()?;
-		log_info!(self.logger, "Generated new funding address: {}", funding_address);
-		Ok(funding_address)
+	/// Returns a payment handler allowing to send and receive on-chain payments.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn onchain_payment(&self) -> OnchainPayment {
+		OnchainPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.logger),
+		)
 	}
 
-	/// Send an on-chain payment to the given address.
-	pub fn send_to_onchain_address(
-		&self, address: &bitcoin::Address, amount_sats: u64,
-	) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let cur_balance = self.wallet.get_balance()?;
-		if cur_balance.get_spendable() < amount_sats {
-			log_error!(self.logger, "Unable to send payment due to insufficient funds.");
-			return Err(Error::InsufficientFunds);
-		}
-		self.wallet.send_to_address(address, Some(amount_sats))
-	}
-
-	/// Send an on-chain payment to the given address, draining all the available funds.
-	pub fn send_all_to_onchain_address(&self, address: &bitcoin::Address) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		self.wallet.send_to_address(address, None)
+	/// Returns a payment handler allowing to send and receive on-chain payments.
+	#[cfg(feature = "uniffi")]
+	pub fn onchain_payment(&self) -> Arc<OnchainPayment> {
+		Arc::new(OnchainPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.logger),
+		))
 	}
 
 	/// Retrieve a list of known channels.

@@ -125,9 +125,9 @@ class TestLdkNode(unittest.TestCase):
         node_id_2 = node_2.node_id()
         print("Node ID 2:", node_id_2)
 
-        address_1 = node_1.new_onchain_address()
+        address_1 = node_1.onchain_payment().new_address()
         txid_1 = send_to_address(address_1, 100000)
-        address_2 = node_2.new_onchain_address()
+        address_2 = node_2.onchain_payment().new_address()
         txid_2 = send_to_address(address_2, 100000)
 
         wait_for_tx(esplora_endpoint, txid_1)

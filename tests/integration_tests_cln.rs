@@ -44,7 +44,7 @@ fn test_cln() {
 	node.start().unwrap();
 
 	// Premine some funds and distribute
-	let address = node.new_onchain_address().unwrap();
+	let address = node.onchain_payment().new_address().unwrap();
 	let premine_amount = Amount::from_sat(5_000_000);
 	common::premine_and_distribute_funds(
 		&bitcoind_client,

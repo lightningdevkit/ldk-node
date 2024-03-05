@@ -31,7 +31,7 @@ fn main() {
 
 	node.start().unwrap();
 
-	let funding_address = node.new_onchain_address();
+	let funding_address = node.onchain_payment().new_address();
 
 	// .. fund address ..
 
