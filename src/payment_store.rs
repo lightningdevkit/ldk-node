@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +42,8 @@ pub struct PaymentDetails {
 	pub lsp_fee_limits: Option<LSPFeeLimits>,
 	/// The invoice that was paid.
 	pub bolt11_invoice: Option<String>,
+	/// Last update timestamp, as seconds since Unix epoch.
+	pub last_update: u64,
 }
 
 impl_writeable_tlv_based!(PaymentDetails, {
@@ -52,6 +55,7 @@ impl_writeable_tlv_based!(PaymentDetails, {
 	(8, direction, required),
 	(10, status, required),
 	(131072, bolt11_invoice, option),
+	(131074, last_update, required),
 });
 
 /// Represents the direction of a payment.
@@ -153,6 +157,14 @@ where
 	pub(crate) fn insert(&self, payment: PaymentDetails) -> Result<bool, Error> {
 		let mut locked_payments = self.payments.lock().unwrap();
 
+		let payment = PaymentDetails {
+			last_update: time::SystemTime::now()
+				.duration_since(time::UNIX_EPOCH)
+				.unwrap_or(time::Duration::ZERO)
+				.as_secs(),
+			..payment
+		};
+
 		let hash = payment.hash.clone();
 		let updated = locked_payments.insert(hash.clone(), payment.clone()).is_some();
 		self.persist_info(&hash, &payment)?;
@@ -209,6 +221,11 @@ where
 			if let Some(lsp_fee_limits) = update.lsp_fee_limits {
 				payment.lsp_fee_limits = lsp_fee_limits
 			}
+
+			payment.last_update = time::SystemTime::now()
+				.duration_since(time::UNIX_EPOCH)
+				.unwrap_or(time::Duration::ZERO)
+				.as_secs();
 
 			self.persist_info(&update.hash, payment)?;
 			updated = true;
@@ -288,6 +305,7 @@ mod tests {
 			status: PaymentStatus::Pending,
 			lsp_fee_limits: None,
 			bolt11_invoice: None,
+			last_update: 0,
 		};
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
@@ -302,6 +320,7 @@ mod tests {
 
 		assert_eq!(Ok(true), payment_store.insert(payment));
 		assert!(payment_store.get(&hash).is_some());
+		assert_ne!(0, payment_store.get(&hash).unwrap().last_update);
 
 		let mut update = PaymentDetailsUpdate::new(hash);
 		update.status = Some(PaymentStatus::Succeeded);
@@ -309,5 +328,6 @@ mod tests {
 		assert!(payment_store.get(&hash).is_some());
 
 		assert_eq!(PaymentStatus::Succeeded, payment_store.get(&hash).unwrap().status);
+		assert_ne!(0, payment_store.get(&hash).unwrap().last_update);
 	}
 }

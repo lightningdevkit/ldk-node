@@ -211,6 +211,7 @@ dictionary PaymentDetails {
 	PaymentStatus status;
 	LSPFeeLimits? lsp_fee_limits;
 	string? bolt11_invoice;
+	u64 last_update;
 };
 
 // [NonExhaustive]
