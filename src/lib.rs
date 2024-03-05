@@ -123,14 +123,14 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	LDK_PAYMENT_RETRY_TIMEOUT, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
-use payment::Bolt11Payment;
+use payment::{Bolt11Payment, SpontaneousPayment};
 use payment_store::PaymentStore;
 pub use payment_store::{LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
@@ -143,11 +143,8 @@ pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::{BestBlock, Confirm};
-use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::{PaymentHash, PaymentPreimage};
-
-use lightning::sign::EntropySource;
+use lightning::ln::PaymentHash;
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -155,8 +152,6 @@ pub use lightning::util::logger::Level as LogLevel;
 use lightning_background_processor::process_events_async;
 
 use lightning_transaction_sync::EsploraSyncClient;
-
-use lightning::routing::router::{PaymentParameters, RouteParameters};
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Txid};
@@ -853,6 +848,32 @@ impl Node {
 		))
 	}
 
+	/// Returns a payment handler allowing to send spontaneous ("keysend") payments.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn spontaneous_payment(&self) -> SpontaneousPayment {
+		SpontaneousPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		)
+	}
+
+	/// Returns a payment handler allowing to send spontaneous ("keysend") payments.
+	#[cfg(feature = "uniffi")]
+	pub fn spontaneous_payment(&self) -> Arc<SpontaneousPayment> {
+		Arc::new(SpontaneousPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		))
+	}
+
 	/// Retrieve a new on-chain/funding address.
 	pub fn new_onchain_address(&self) -> Result<Address, Error> {
 		let funding_address = self.wallet.get_new_address()?;
@@ -1137,112 +1158,6 @@ impl Node {
 		} else {
 			Err(Error::ChannelConfigUpdateFailed)
 		}
-	}
-
-	/// Send a spontaneous, aka. "keysend", payment
-	pub fn send_spontaneous_payment(
-		&self, amount_msat: u64, node_id: PublicKey,
-	) -> Result<PaymentHash, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
-		let payment_hash = PaymentHash::from(payment_preimage);
-
-		if let Some(payment) = self.payment_store.get(&payment_hash) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: must not send duplicate payments.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
-
-		let route_params = RouteParameters::from_payment_params_and_value(
-			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
-			amount_msat,
-		);
-		let recipient_fields = RecipientOnionFields::spontaneous_empty();
-
-		match self.channel_manager.send_spontaneous_payment_with_retry(
-			Some(payment_preimage),
-			recipient_fields,
-			PaymentId(payment_hash.0),
-			route_params,
-			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
-		) {
-			Ok(_payment_id) => {
-				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
-
-				let payment = PaymentDetails {
-					hash: payment_hash,
-					preimage: Some(payment_preimage),
-					secret: None,
-					status: PaymentStatus::Pending,
-					direction: PaymentDirection::Outbound,
-					amount_msat: Some(amount_msat),
-					lsp_fee_limits: None,
-				};
-				self.payment_store.insert(payment)?;
-
-				Ok(payment_hash)
-			},
-			Err(e) => {
-				log_error!(self.logger, "Failed to send payment: {:?}", e);
-
-				match e {
-					channelmanager::RetryableSendFailure::DuplicatePayment => {
-						Err(Error::DuplicatePayment)
-					},
-					_ => {
-						let payment = PaymentDetails {
-							hash: payment_hash,
-							preimage: Some(payment_preimage),
-							secret: None,
-							status: PaymentStatus::Failed,
-							direction: PaymentDirection::Outbound,
-							amount_msat: Some(amount_msat),
-							lsp_fee_limits: None,
-						};
-
-						self.payment_store.insert(payment)?;
-						Err(Error::PaymentSendingFailed)
-					},
-				}
-			},
-		}
-	}
-
-	/// Sends payment probes over all paths of a route that would be used to pay the given
-	/// amount to the given `node_id`.
-	///
-	/// See [`Bolt11Payment::send_probes`] for more information.
-	pub fn send_spontaneous_payment_probes(
-		&self, amount_msat: u64, node_id: PublicKey,
-	) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
-		let cltv_expiry_delta = self.config.default_cltv_expiry_delta;
-
-		self.channel_manager
-			.send_spontaneous_preflight_probes(
-				node_id,
-				amount_msat,
-				cltv_expiry_delta,
-				liquidity_limit_multiplier,
-			)
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to send payment probes: {:?}", e);
-				Error::ProbeSendingFailed
-			})?;
-
-		Ok(())
 	}
 
 	/// Retrieve the details of a specific payment with the given hash.
