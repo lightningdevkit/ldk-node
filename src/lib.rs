@@ -134,7 +134,7 @@ use types::{
 	Broadcaster, ChainMonitor, ChannelManager, FeeEstimator, KeysManager, NetworkGraph,
 	PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, PeerDetails, UserChannelId};
+pub use types::{ChannelDetails, PeerDetails, TlvEntry, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -1234,7 +1234,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 	/// Send a spontaneous, aka. "keysend", payment
 	pub fn send_spontaneous_payment(
-		&self, amount_msat: u64, node_id: PublicKey,
+		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<TlvEntry>,
 	) -> Result<PaymentHash, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1257,7 +1257,12 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
 			amount_msat,
 		);
-		let recipient_fields = RecipientOnionFields::spontaneous_empty();
+		let recipient_fields = RecipientOnionFields::spontaneous_empty()
+			.with_custom_tlvs(custom_tlvs.into_iter().map(|tlv| (tlv.r#type, tlv.value)).collect())
+			.map_err(|_| {
+				log_error!(self.logger, "Payment error: invalid custom TLVs.");
+				Error::InvalidCustomTlv
+			})?;
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(
 			Some(payment_preimage),

@@ -99,6 +99,8 @@ uniffi = { version = "0.25.3", features = ["build"], optional = true }
 
 [profile.release]
 panic = "abort"
+lto = true
+rpath = true
 
 [profile.dev]
 panic = "abort"

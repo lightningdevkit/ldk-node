@@ -72,7 +72,7 @@ interface LDKNode {
 	[Throws=NodeError]
 	PaymentHash send_payment_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
 	[Throws=NodeError]
-	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id);
+	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id, sequence<TlvEntry> custom_tlvs);
 	[Throws=NodeError]
 	void send_payment_probes([ByRef]Bolt11Invoice invoice);
 	[Throws=NodeError]
@@ -131,6 +131,7 @@ enum NodeError {
 	"InvalidInvoice",
 	"InvalidChannelId",
 	"InvalidNetwork",
+	"InvalidCustomTlv",
 	"DuplicatePayment",
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
@@ -314,6 +315,11 @@ enum LogLevel {
 	"Info",
 	"Warn",
 	"Error",
+};
+
+dictionary TlvEntry {
+	u64 type;
+	sequence<u8> value;
 };
 
 [Custom]
