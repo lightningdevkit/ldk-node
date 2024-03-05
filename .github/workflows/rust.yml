@@ -17,8 +17,6 @@ jobs:
           ]
         toolchain: [
           stable,
-          #beta,
-          #1.63.0, # Our MSRV
           ]
         include:
           - toolchain: stable
@@ -65,10 +63,6 @@ jobs:
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
         if: matrix.build-uniffi
         run: cargo build --features uniffi --verbose --color always
-      #- name: Build documentation on Rust ${{ matrix.toolchain }}
-      #  run: |
-      #    cargo doc --release --verbose --color always
-      #    cargo doc --document-private-items --verbose --color always
       - name: Check release build on Rust ${{ matrix.toolchain }}
         run: cargo check --release --verbose --color always
       - name: Check release build with UniFFI support on Rust ${{ matrix.toolchain }}
