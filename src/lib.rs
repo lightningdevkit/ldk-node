@@ -130,7 +130,7 @@ use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
-use payment::{Bolt11Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
+use payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, ChainMonitor, ChannelManager, DynStore, FeeEstimator, KeysManager, NetworkGraph,
@@ -842,6 +842,32 @@ impl Node {
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a payment handler allowing to create and pay [BOLT 12] offers and refunds.
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	#[cfg(not(feature = "uniffi"))]
+	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
+		Arc::new(Bolt12Payment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a payment handler allowing to create and pay [BOLT 12] offers and refunds.
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	#[cfg(feature = "uniffi")]
+	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
+		Arc::new(Bolt12Payment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.payment_store),
 			Arc::clone(&self.logger),
 		))
 	}
