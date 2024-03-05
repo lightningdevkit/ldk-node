@@ -355,8 +355,8 @@ pub fn open_channel(
 pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 ) {
-	let addr_a = node_a.new_onchain_address().unwrap();
-	let addr_b = node_b.new_onchain_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
 	let premine_amount_sat = 100_000;
 

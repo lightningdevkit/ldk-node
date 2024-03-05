@@ -4,7 +4,7 @@ pub use lightning::util::string::UntrustedString;
 
 pub use lightning_invoice::Bolt11Invoice;
 
-pub use bitcoin::{BlockHash, Network, OutPoint};
+pub use bitcoin::{Address, BlockHash, Network, OutPoint, Txid};
 
 pub use bip39::Mnemonic;
 
@@ -17,7 +17,6 @@ use crate::{SocketAddress, UserChannelId};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Txid};
 use lightning_invoice::SignedRawBolt11Invoice;
 
 use std::convert::TryInto;

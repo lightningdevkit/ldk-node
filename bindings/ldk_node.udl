@@ -55,12 +55,7 @@ interface Node {
 	sequence<SocketAddress>? listening_addresses();
 	Bolt11Payment bolt11_payment();
 	SpontaneousPayment spontaneous_payment();
-	[Throws=NodeError]
-	Address new_onchain_address();
-	[Throws=NodeError]
-	Txid send_to_onchain_address([ByRef]Address address, u64 amount_msat);
-	[Throws=NodeError]
-	Txid send_all_to_onchain_address([ByRef]Address address);
+	OnchainPayment onchain_payment();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
@@ -109,6 +104,15 @@ interface SpontaneousPayment {
 	PaymentHash send(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
+};
+
+interface OnchainPayment {
+	[Throws=NodeError]
+	Address new_address();
+	[Throws=NodeError]
+	Txid send_to_address([ByRef]Address address, u64 amount_msat);
+	[Throws=NodeError]
+	Txid send_all_to_address([ByRef]Address address);
 };
 
 [Error]
