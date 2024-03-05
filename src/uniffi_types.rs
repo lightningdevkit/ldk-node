@@ -1,6 +1,5 @@
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
-pub use lightning::ln::ChannelId;
-pub use lightning::ln::PaymentSecret;
+pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning::util::string::UntrustedString;
 
 pub use lightning_invoice::Bolt11Invoice;
@@ -19,7 +18,6 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Txid};
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning_invoice::SignedRawBolt11Invoice;
 
 use std::convert::TryInto;

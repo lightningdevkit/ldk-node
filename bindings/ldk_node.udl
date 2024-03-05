@@ -54,6 +54,7 @@ interface Node {
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
 	Bolt11Payment bolt11_payment();
+	SpontaneousPayment spontaneous_payment();
 	[Throws=NodeError]
 	Address new_onchain_address();
 	[Throws=NodeError]
@@ -72,10 +73,6 @@ interface Node {
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
-	[Throws=NodeError]
-	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id);
-	[Throws=NodeError]
-	void send_spontaneous_payment_probes(u64 amount_msat, PublicKey node_id);
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentHash payment_hash);
@@ -105,6 +102,13 @@ interface Bolt11Payment {
 	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]string description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
 	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]string description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
+};
+
+interface SpontaneousPayment {
+	[Throws=NodeError]
+	PaymentHash send(u64 amount_msat, PublicKey node_id);
+	[Throws=NodeError]
+	void send_probes(u64 amount_msat, PublicKey node_id);
 };
 
 [Error]
