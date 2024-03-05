@@ -415,13 +415,13 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	let user_channel_id = expect_channel_ready_event!(node_b, node_a.node_id());
 
-	println!("\nB receive_payment");
+	println!("\nB receive");
 	let invoice_amount_1_msat = 2500_000;
-	let invoice = node_b.receive_payment(invoice_amount_1_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b.bolt11_payment().receive(invoice_amount_1_msat, &"asdf", 9217).unwrap();
 
-	println!("\nA send_payment");
-	let payment_hash = node_a.send_payment(&invoice).unwrap();
-	assert_eq!(node_a.send_payment(&invoice), Err(NodeError::DuplicatePayment));
+	println!("\nA send");
+	let payment_hash = node_a.bolt11_payment().send(&invoice).unwrap();
+	assert_eq!(node_a.bolt11_payment().send(&invoice), Err(NodeError::DuplicatePayment));
 
 	assert_eq!(node_a.list_payments().first().unwrap().hash, payment_hash);
 
@@ -451,7 +451,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
-	assert_eq!(Err(NodeError::DuplicatePayment), node_a.send_payment(&invoice));
+	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice));
 	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
@@ -461,20 +461,21 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 2500_000;
-	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 
 	let underpaid_amount = invoice_amount_2_msat - 1;
 	assert_eq!(
 		Err(NodeError::InvalidAmount),
-		node_a.send_payment_using_amount(&invoice, underpaid_amount)
+		node_a.bolt11_payment().send_using_amount(&invoice, underpaid_amount)
 	);
 
-	println!("\nB overpaid receive_payment");
-	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	println!("\nB overpaid receive");
+	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
 
-	println!("\nA overpaid send_payment");
-	let payment_hash = node_a.send_payment_using_amount(&invoice, overpaid_amount_msat).unwrap();
+	println!("\nA overpaid send");
+	let payment_hash =
+		node_a.bolt11_payment().send_using_amount(&invoice, overpaid_amount_msat).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
@@ -496,12 +497,18 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Test "zero-amount" invoice payment
 	println!("\nB receive_variable_amount_payment");
-	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
+	let variable_amount_invoice =
+		node_b.bolt11_payment().receive_variable_amount(&"asdf", 9217).unwrap();
 	let determined_amount_msat = 2345_678;
-	assert_eq!(Err(NodeError::InvalidInvoice), node_a.send_payment(&variable_amount_invoice));
-	println!("\nA send_payment_using_amount");
-	let payment_hash =
-		node_a.send_payment_using_amount(&variable_amount_invoice, determined_amount_msat).unwrap();
+	assert_eq!(
+		Err(NodeError::InvalidInvoice),
+		node_a.bolt11_payment().send(&variable_amount_invoice)
+	);
+	println!("\nA send_using_amount");
+	let payment_hash = node_a
+		.bolt11_payment()
+		.send_using_amount(&variable_amount_invoice, determined_amount_msat)
+		.unwrap();
 
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {

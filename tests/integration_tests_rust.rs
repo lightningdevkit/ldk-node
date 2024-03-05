@@ -133,8 +133,8 @@ fn multi_hop_sending() {
 	// Sleep a bit for gossip to propagate.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
-	let invoice = nodes[4].receive_payment(2_500_000, &"asdf", 9217).unwrap();
-	nodes[0].send_payment(&invoice).unwrap();
+	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
+	nodes[0].bolt11_payment().send(&invoice).unwrap();
 
 	let payment_hash = expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);

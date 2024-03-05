@@ -3,6 +3,8 @@ pub use lightning::ln::ChannelId;
 pub use lightning::ln::PaymentSecret;
 pub use lightning::util::string::UntrustedString;
 
+pub use lightning_invoice::Bolt11Invoice;
+
 pub use bitcoin::{BlockHash, Network, OutPoint};
 
 pub use bip39::Mnemonic;
@@ -18,7 +20,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Txid};
 use lightning::ln::{PaymentHash, PaymentPreimage};
-use lightning_invoice::{Bolt11Invoice, SignedRawBolt11Invoice};
+use lightning_invoice::SignedRawBolt11Invoice;
 
 use std::convert::TryInto;
 use std::str::FromStr;

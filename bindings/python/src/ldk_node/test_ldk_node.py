@@ -185,8 +185,8 @@ class TestLdkNode(unittest.TestCase):
         print("EVENT:", channel_ready_event_2)
         node_2.event_handled()
 
-        invoice = node_2.receive_payment(2500000, "asdf", 9217)
-        node_1.send_payment(invoice)
+        invoice = node_2.bolt11_payment().receive(2500000, "asdf", 9217)
+        node_1.bolt11_payment().send(invoice)
 
         payment_successful_event_1 = node_1.wait_next_event()
         assert isinstance(payment_successful_event_1, Event.PAYMENT_SUCCESSFUL)
