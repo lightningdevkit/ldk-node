@@ -53,6 +53,7 @@ interface Node {
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
+	Bolt11Payment bolt11_payment();
 	[Throws=NodeError]
 	Address new_onchain_address();
 	[Throws=NodeError]
@@ -72,25 +73,9 @@ interface Node {
 	[Throws=NodeError]
 	void sync_wallets();
 	[Throws=NodeError]
-	PaymentHash send_payment([ByRef]Bolt11Invoice invoice);
-	[Throws=NodeError]
-	PaymentHash send_payment_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
-	[Throws=NodeError]
 	PaymentHash send_spontaneous_payment(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
-	void send_payment_probes([ByRef]Bolt11Invoice invoice);
-	[Throws=NodeError]
 	void send_spontaneous_payment_probes(u64 amount_msat, PublicKey node_id);
-	[Throws=NodeError]
-	void send_payment_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
-	[Throws=NodeError]
-	Bolt11Invoice receive_payment(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
-	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_payment([ByRef]string description, u32 expiry_secs);
-	[Throws=NodeError]
-	Bolt11Invoice receive_payment_via_jit_channel(u64 amount_msat, [ByRef]string description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
-	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_payment_via_jit_channel([ByRef]string description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
 	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentHash payment_hash);
@@ -101,6 +86,25 @@ interface Node {
 	[Throws=NodeError]
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
+};
+
+interface Bolt11Payment {
+	[Throws=NodeError]
+	PaymentHash send([ByRef]Bolt11Invoice invoice);
+	[Throws=NodeError]
+	PaymentHash send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
+	[Throws=NodeError]
+	void send_probes([ByRef]Bolt11Invoice invoice);
+	[Throws=NodeError]
+	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
+	[Throws=NodeError]
+	Bolt11Invoice receive(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
+	[Throws=NodeError]
+	Bolt11Invoice receive_variable_amount([ByRef]string description, u32 expiry_secs);
+	[Throws=NodeError]
+	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]string description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
+	[Throws=NodeError]
+	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]string description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
 };
 
 [Error]

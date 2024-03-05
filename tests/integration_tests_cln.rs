@@ -97,7 +97,7 @@ fn test_cln() {
 		cln_client.invoice(Some(2_500_000), &rand_label, &rand_label, None, None, None).unwrap();
 	let parsed_invoice = Bolt11Invoice::from_str(&cln_invoice.bolt11).unwrap();
 
-	node.send_payment(&parsed_invoice).unwrap();
+	node.bolt11_payment().send(&parsed_invoice).unwrap();
 	common::expect_event!(node, PaymentSuccessful);
 	let cln_listed_invoices =
 		cln_client.listinvoices(Some(&rand_label), None, None, None).unwrap().invoices;
@@ -106,7 +106,7 @@ fn test_cln() {
 
 	// Send a payment to LDK
 	let rand_label: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-	let ldk_invoice = node.receive_payment(2_500_000, &rand_label, 3600).unwrap();
+	let ldk_invoice = node.bolt11_payment().receive(2_500_000, &rand_label, 3600).unwrap();
 	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
 	common::expect_event!(node, PaymentReceived);
 
