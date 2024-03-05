@@ -2,9 +2,8 @@
 #![allow(dead_code)]
 
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::{
-	Builder, Config, Event, LogLevel, Node, NodeError, PaymentDirection, PaymentStatus,
-};
+use ldk_node::payment::{PaymentDirection, PaymentStatus};
+use ldk_node::{Builder, Config, Event, LogLevel, Node, NodeError};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::persist::KVStore;

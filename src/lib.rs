@@ -89,7 +89,6 @@ mod liquidity;
 mod logger;
 mod message_handler;
 pub mod payment;
-mod payment_store;
 mod peer_store;
 mod sweep;
 mod tx_broadcaster;
@@ -130,9 +129,8 @@ use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
-use payment::{Bolt11Payment, OnchainPayment, SpontaneousPayment};
-use payment_store::PaymentStore;
-pub use payment_store::{LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus};
+use payment::payment_store::PaymentStore;
+use payment::{Bolt11Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, ChainMonitor, ChannelManager, DynStore, FeeEstimator, KeysManager, NetworkGraph,
@@ -1206,7 +1204,8 @@ impl Node {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
-	/// # use ldk_node::{Builder, Config, PaymentDirection};
+	/// # use ldk_node::{Builder, Config};
+	/// # use ldk_node::payment::PaymentDirection;
 	/// # use ldk_node::bitcoin::Network;
 	/// # let mut config = Config::default();
 	/// # config.network = Network::Regtest;
