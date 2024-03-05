@@ -1,3 +1,5 @@
+pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentStatus};
+
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning::util::string::UntrustedString;

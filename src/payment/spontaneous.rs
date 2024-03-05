@@ -3,7 +3,7 @@
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
-use crate::payment_store::{PaymentDetails, PaymentDirection, PaymentStatus, PaymentStore};
+use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentStatus, PaymentStore};
 use crate::types::{ChannelManager, KeysManager};
 
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};

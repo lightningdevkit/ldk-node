@@ -3,7 +3,7 @@ use crate::{
 	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
 };
 
-use crate::payment_store::{
+use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentStatus, PaymentStore,
 };
 
