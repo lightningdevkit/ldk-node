@@ -11,6 +11,10 @@ readme = "README.md"
 keywords = ["bitcoin", "lightning", "ldk", "bdk"]
 categories = ["cryptography::cryptocurrencies"]
 
+[profile.release]
+lto = true
+rpath = true
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
