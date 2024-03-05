@@ -157,7 +157,6 @@ use lightning_transaction_sync::EsploraSyncClient;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning_invoice::{payment, Bolt11Invoice, Currency};
 
-use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 
@@ -1301,7 +1300,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
-		let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).to_byte_array());
+		let payment_hash = PaymentHash::from(payment_preimage);
 
 		if let Some(payment) = self.payment_store.get(&payment_hash) {
 			if payment.status == PaymentStatus::Pending
