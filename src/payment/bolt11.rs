@@ -7,7 +7,7 @@ use crate::connection::ConnectionManager;
 use crate::error::Error;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
-use crate::payment_store::{
+use crate::payment::payment_store::{
 	LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus, PaymentStore,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
