@@ -1,7 +1,8 @@
 mod common;
 
 use common::{
-	do_channel_full_cycle, expect_event, generate_blocks_and_wait, open_channel,
+	do_channel_full_cycle, expect_event, expect_payment_received_event,
+	expect_payment_successful_event, generate_blocks_and_wait, open_channel,
 	premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd, setup_builder,
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
@@ -9,6 +10,7 @@ use common::{
 use ldk_node::{Builder, Event, NodeError};
 
 use bitcoin::{Amount, Network};
+use lightning::ln::PaymentHash;
 
 use std::sync::Arc;
 
@@ -133,8 +135,10 @@ fn multi_hop_sending() {
 	let invoice = nodes[4].receive_payment(2_500_000, &"asdf", 9217).unwrap();
 	nodes[0].send_payment(&invoice).unwrap();
 
-	expect_event!(nodes[4], PaymentReceived);
-	expect_event!(nodes[0], PaymentSuccessful);
+	let payment_hash: Result<PaymentHash, ()> =
+		expect_payment_received_event!(&nodes[4], 2_500_000);
+	let fee_paid_msat = Some(2000);
+	expect_payment_successful_event!(nodes[0], payment_hash.unwrap(), fee_paid_msat);
 }
 
 #[test]
