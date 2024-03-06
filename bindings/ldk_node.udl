@@ -42,6 +42,7 @@ interface LDKNode {
 	void start();
 	[Throws=NodeError]
 	void stop();
+	NodeStatus status();
 	Event? next_event();
 	Event wait_next_event();
 	[Async]
@@ -97,7 +98,6 @@ interface LDKNode {
 	[Throws=NodeError]
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
-	boolean is_running();
 };
 
 [Error]
@@ -135,6 +135,22 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+};
+
+dictionary NodeStatus {
+	boolean is_running;
+	boolean is_listening;
+	BestBlock current_best_block;
+	u64? latest_wallet_sync_timestamp;
+	u64? latest_onchain_wallet_sync_timestamp;
+	u64? latest_fee_rate_cache_update_timestamp;
+	u64? latest_rgs_snapshot_timestamp;
+	u64? latest_node_announcement_broadcast_timestamp;
+};
+
+dictionary BestBlock {
+	BlockHash block_hash;
+	u32 height;
 };
 
 [Error]

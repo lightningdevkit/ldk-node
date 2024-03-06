@@ -220,6 +220,8 @@ pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode<TestSy
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
+	assert!(node.status().is_running);
+	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
 	node
 }
 
