@@ -763,6 +763,11 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 	}
 
+	/// Returns the config with which the [`Node`] was initialized.
+	pub fn config(&self) -> Config {
+		self.config.as_ref().clone()
+	}
+
 	/// Returns the next event in the event queue, if currently available.
 	///
 	/// Will return `Some(..)` if an event is available and `None` otherwise.

@@ -43,6 +43,7 @@ interface LDKNode {
 	[Throws=NodeError]
 	void stop();
 	NodeStatus status();
+	Config config();
 	Event? next_event();
 	Event wait_next_event();
 	[Async]
