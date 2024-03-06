@@ -289,7 +289,11 @@ fn do_connection_restart_behavior(persist: bool) {
 	let node_id_b = node_b.node_id();
 
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	while !node_b.status().is_listening {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
 	node_a.connect(node_id_b, node_addr_b, persist).unwrap();
 
 	let peer_details_a = node_a.list_peers().first().unwrap().clone();
