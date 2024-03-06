@@ -456,3 +456,12 @@ impl Default for ChannelConfig {
 		LdkChannelConfig::default().into()
 	}
 }
+
+/// Custom TLV entry.
+pub struct TlvEntry {
+	/// Type number.
+	pub r#type: u64,
+
+	/// Serialized value.
+	pub value: Vec<u8>,
+}
