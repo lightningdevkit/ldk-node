@@ -20,15 +20,13 @@ build_lib() {
   cp "target/$TARGET/release/$OUTPUT_FILE" "ffi/golang/ldk_node/$TARGET/" || exit 1
 }
 
-is_target_installed() {
-  local TARGET=$1
-  rustup target list --installed | grep -q $TARGET
-}
-
 # If we're running on macOS, build the macOS library using the host compiler.
 # Cross compilation is not supported (needs more complex setup).
 if [[ "$OSTYPE" == "darwin"* ]]; then
   build_lib "cargo" "aarch64-apple-darwin" "libldk_node.dylib"
+  build_lib "cargo" "x86_64-apple-darwin" "libldk_node.dylib"
+  mkdir -p ffi/golang/ldk_node/universal-macos || exit 1
+  lipo -create -output "ffi/golang/ldk_node/universal-macos/libldk_node.dylib" "ffi/golang/ldk_node/aarch64-apple-darwin/libldk_node.dylib" "ffi/golang/ldk_node/x86_64-apple-darwin/libldk_node.dylib" || exit 1
 fi
 
 build_lib "cross" "x86_64-unknown-linux-gnu" "libldk_node.so"
