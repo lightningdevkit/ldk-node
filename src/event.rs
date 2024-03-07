@@ -557,6 +557,7 @@ where
 							status: PaymentStatus::Succeeded,
 							lsp_fee_limits: None,
 							bolt11_invoice: None,
+							last_update: 0,
 						};
 
 						match self.payment_store.insert(payment) {

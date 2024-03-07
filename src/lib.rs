@@ -1090,6 +1090,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					status: PaymentStatus::Pending,
 					lsp_fee_limits: None,
 					bolt11_invoice: Some(invoice.to_string()),
+					last_update: 0,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -1111,6 +1112,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							status: PaymentStatus::Failed,
 							lsp_fee_limits: None,
 							bolt11_invoice: Some(invoice.to_string()),
+							last_update: 0,
 						};
 
 						self.payment_store.insert(payment)?;
@@ -1200,6 +1202,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					status: PaymentStatus::Pending,
 					lsp_fee_limits: None,
 					bolt11_invoice: Some(invoice.to_string()),
+					last_update: 0,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -1222,6 +1225,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							status: PaymentStatus::Failed,
 							lsp_fee_limits: None,
 							bolt11_invoice: Some(invoice.to_string()),
+							last_update: 0,
 						};
 						self.payment_store.insert(payment)?;
 
@@ -1283,6 +1287,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 					amount_msat: Some(amount_msat),
 					lsp_fee_limits: None,
 					bolt11_invoice: None,
+					last_update: 0,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -1305,6 +1310,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 							amount_msat: Some(amount_msat),
 							lsp_fee_limits: None,
 							bolt11_invoice: None,
+							last_update: 0,
 						};
 
 						self.payment_store.insert(payment)?;
@@ -1480,6 +1486,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			status: PaymentStatus::Pending,
 			lsp_fee_limits: None,
 			bolt11_invoice: Some(invoice.to_string()),
+			last_update: 0,
 		};
 
 		self.payment_store.insert(payment)?;
@@ -1608,6 +1615,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 			status: PaymentStatus::Pending,
 			lsp_fee_limits,
 			bolt11_invoice: Some(invoice.to_string()),
+			last_update: 0,
 		};
 
 		self.payment_store.insert(payment)?;
