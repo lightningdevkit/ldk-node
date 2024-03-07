@@ -47,6 +47,8 @@ pub enum Event {
 	PaymentSuccessful {
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
+		/// The total fee which was spent at intermediate hops in this payment.
+		fee_paid_msat: Option<u64>,
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
@@ -106,6 +108,7 @@ pub enum Event {
 impl_writeable_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
+		(1, fee_paid_msat, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, required),
@@ -611,7 +614,7 @@ where
 					);
 				}
 				self.event_queue
-					.add_event(Event::PaymentSuccessful { payment_hash })
+					.add_event(Event::PaymentSuccessful { payment_hash, fee_paid_msat })
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
