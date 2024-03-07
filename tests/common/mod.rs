@@ -87,8 +87,7 @@ macro_rules! expect_payment_received_event {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
 				$node.event_handled();
-				let result = Ok(payment_hash);
-				result
+				payment_hash
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
