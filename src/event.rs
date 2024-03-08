@@ -347,7 +347,7 @@ where
 				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
 
 				// We set nLockTime to the current height to discourage fee sniping.
-				let cur_height = self.channel_manager.current_best_block().height();
+				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
 				// Sign the final funding transaction and broadcast it.

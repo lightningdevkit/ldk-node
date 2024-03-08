@@ -107,7 +107,7 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
-pub use types::{BestBlock, ChannelConfig};
+pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -138,7 +138,7 @@ pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
-use lightning::chain::Confirm;
+use lightning::chain::{BestBlock, Confirm};
 use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};

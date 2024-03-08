@@ -4,7 +4,6 @@ use crate::sweep::OutputSweeper;
 
 use lightning::blinded_path::BlindedPath;
 use lightning::chain::chainmonitor;
-use lightning::chain::BestBlock as LdkBestBlock;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::msgs::SocketAddress;
@@ -21,7 +20,7 @@ use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
 
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
-use bitcoin::{BlockHash, OutPoint};
+use bitcoin::OutPoint;
 
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -452,22 +451,5 @@ impl From<ChannelConfig> for LdkChannelConfig {
 impl Default for ChannelConfig {
 	fn default() -> Self {
 		LdkChannelConfig::default().into()
-	}
-}
-
-/// The best known block as identified by its hash and height.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BestBlock {
-	/// The block's hash
-	pub block_hash: BlockHash,
-	/// The height at which the block was confirmed.
-	pub height: u32,
-}
-
-impl From<LdkBestBlock> for BestBlock {
-	fn from(value: LdkBestBlock) -> Self {
-		let block_hash = value.block_hash();
-		let height = value.height();
-		Self { block_hash, height }
 	}
 }
