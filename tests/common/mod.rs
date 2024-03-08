@@ -419,10 +419,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let invoice = node_b.bolt11_payment().receive(invoice_amount_1_msat, &"asdf", 9217).unwrap();
 
 	println!("\nA send");
-	let payment_hash = node_a.bolt11_payment().send(&invoice).unwrap();
+	let payment_id = node_a.bolt11_payment().send(&invoice).unwrap();
 	assert_eq!(node_a.bolt11_payment().send(&invoice), Err(NodeError::DuplicatePayment));
 
-	assert_eq!(node_a.list_payments().first().unwrap().hash, payment_hash);
+	assert_eq!(node_a.list_payments().first().unwrap().id, payment_id);
 
 	let outbound_payments_a =
 		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
@@ -442,21 +442,21 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	expect_event!(node_a, PaymentSuccessful);
 	expect_event!(node_b, PaymentReceived);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
 	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice));
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 2500_000;
@@ -473,7 +473,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
 
 	println!("\nA overpaid send");
-	let payment_hash =
+	let payment_id =
 		node_a.bolt11_payment().send_using_amount(&invoice, overpaid_amount_msat).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {
@@ -487,12 +487,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, overpaid_amount_msat);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
 
 	// Test "zero-amount" invoice payment
 	println!("\nB receive_variable_amount_payment");
@@ -504,7 +504,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.bolt11_payment().send(&variable_amount_invoice)
 	);
 	println!("\nA send_using_amount");
-	let payment_hash = node_a
+	let payment_id = node_a
 		.bolt11_payment()
 		.send_using_amount(&variable_amount_invoice, determined_amount_msat)
 		.unwrap();
@@ -521,17 +521,17 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, determined_amount_msat);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
 
 	// Test spontaneous/keysend payments
 	println!("\nA send_spontaneous_payment");
 	let keysend_amount_msat = 2500_000;
-	let keysend_payment_hash =
+	let keysend_payment_id =
 		node_a.spontaneous_payment().send(keysend_amount_msat, node_b.node_id()).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_keysend_amount = match node_b.wait_next_event() {
@@ -545,21 +545,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_keysend_amount, keysend_amount_msat);
-	assert_eq!(node_a.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(
-		node_a.payment(&keysend_payment_hash).unwrap().direction,
-		PaymentDirection::Outbound
-	);
-	assert_eq!(
-		node_a.payment(&keysend_payment_hash).unwrap().amount_msat,
-		Some(keysend_amount_msat)
-	);
-	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(
-		node_b.payment(&keysend_payment_hash).unwrap().amount_msat,
-		Some(keysend_amount_msat)
-	);
+	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
+	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
 
 	println!("\nB close_channel");
 	node_b.close_channel(&user_channel_id, node_a.node_id()).unwrap();
