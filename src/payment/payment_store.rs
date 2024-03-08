@@ -176,6 +176,18 @@ pub enum PaymentKind {
 		/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 		lsp_fee_limits: LSPFeeLimits,
 	},
+	/// A [BOLT 12] payment.
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	// TODO: Bolt12 { offer: Option<Offer>, refund: Option<Refund> },
+	Bolt12 {
+		/// The payment hash, i.e., the hash of the `preimage`.
+		hash: Option<PaymentHash>,
+		/// The pre-image used by the payment.
+		preimage: Option<PaymentPreimage>,
+		/// The secret used by the payment.
+		secret: Option<PaymentSecret>,
+	},
 	/// A spontaneous ("keysend") payment.
 	Spontaneous {
 		/// The payment hash, i.e., the hash of the `preimage`.
@@ -197,6 +209,11 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(4, secret, option),
 		(6, lsp_fee_limits, required),
+	},
+	(6, Bolt12) => {
+		(0, hash, option),
+		(2, preimage, option),
+		(4, secret, option),
 	},
 	(8, Spontaneous) => {
 		(0, hash, required),
@@ -227,6 +244,7 @@ impl_writeable_tlv_based!(LSPFeeLimits, {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaymentDetailsUpdate {
 	pub id: PaymentId,
+	pub hash: Option<Option<PaymentHash>>,
 	pub preimage: Option<Option<PaymentPreimage>>,
 	pub secret: Option<Option<PaymentSecret>>,
 	pub amount_msat: Option<Option<u64>>,
@@ -236,7 +254,15 @@ pub(crate) struct PaymentDetailsUpdate {
 
 impl PaymentDetailsUpdate {
 	pub fn new(id: PaymentId) -> Self {
-		Self { id, preimage: None, secret: None, amount_msat: None, direction: None, status: None }
+		Self {
+			id,
+			hash: None,
+			preimage: None,
+			secret: None,
+			amount_msat: None,
+			direction: None,
+			status: None,
+		}
 	}
 }
 
@@ -300,10 +326,17 @@ where
 		let mut locked_payments = self.payments.lock().unwrap();
 
 		if let Some(payment) = locked_payments.get_mut(&update.id) {
+			if let Some(hash_opt) = update.hash {
+				match payment.kind {
+					PaymentKind::Bolt12 { ref mut hash, .. } => *hash = hash_opt,
+					_ => {},
+				}
+			}
 			if let Some(preimage_opt) = update.preimage {
 				match payment.kind {
 					PaymentKind::Bolt11 { ref mut preimage, .. } => *preimage = preimage_opt,
 					PaymentKind::Bolt11Jit { ref mut preimage, .. } => *preimage = preimage_opt,
+					PaymentKind::Bolt12 { ref mut preimage, .. } => *preimage = preimage_opt,
 					PaymentKind::Spontaneous { ref mut preimage, .. } => *preimage = preimage_opt,
 					_ => {},
 				}
@@ -313,6 +346,7 @@ where
 				match payment.kind {
 					PaymentKind::Bolt11 { ref mut secret, .. } => *secret = secret_opt,
 					PaymentKind::Bolt11Jit { ref mut secret, .. } => *secret = secret_opt,
+					PaymentKind::Bolt12 { ref mut secret, .. } => *secret = secret_opt,
 					_ => {},
 				}
 			}

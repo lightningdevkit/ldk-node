@@ -224,6 +224,7 @@ interface PaymentKind {
 	Onchain();
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
+	Bolt12(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
 };
 
