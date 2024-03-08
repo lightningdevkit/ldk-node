@@ -4,7 +4,8 @@ use crate::{
 };
 
 use crate::payment::store::{
-	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentStatus, PaymentStore,
+	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+	PaymentStore,
 };
 
 use crate::io::{
@@ -17,6 +18,7 @@ use lightning::chain::chaininterface::ConfirmationTarget;
 use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::{ChannelId, PaymentHash};
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
@@ -410,7 +412,8 @@ where
 				onion_fields: _,
 				counterparty_skimmed_fee_msat,
 			} => {
-				if let Some(info) = self.payment_store.get(&payment_hash) {
+				let payment_id = PaymentId(payment_hash.0);
+				if let Some(info) = self.payment_store.get(&payment_id) {
 					if info.status == PaymentStatus::Succeeded {
 						log_info!(
 							self.logger,
@@ -422,7 +425,7 @@ where
 
 						let update = PaymentDetailsUpdate {
 							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_hash)
+							..PaymentDetailsUpdate::new(payment_id)
 						};
 						self.payment_store.update(&update).unwrap_or_else(|e| {
 							log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -431,17 +434,22 @@ where
 						return;
 					}
 
-					let max_total_opening_fee_msat = info
-						.lsp_fee_limits
-						.and_then(|l| {
-							l.max_total_opening_fee_msat.or_else(|| {
-								l.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
-									// If it's a variable amount payment, compute the actual fee.
-									compute_opening_fee(amount_msat, 0, max_prop_fee)
+					let max_total_opening_fee_msat = match info.kind {
+						PaymentKind::Bolt11Jit { lsp_fee_limits, .. } => {
+							lsp_fee_limits
+								.max_total_opening_fee_msat
+								.or_else(|| {
+									lsp_fee_limits.max_proportional_opening_fee_ppm_msat.and_then(
+										|max_prop_fee| {
+											// If it's a variable amount payment, compute the actual fee.
+											compute_opening_fee(amount_msat, 0, max_prop_fee)
+										},
+									)
 								})
-							})
-						})
-						.unwrap_or(0);
+								.unwrap_or(0)
+						},
+						_ => 0,
+					};
 
 					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
 						log_info!(
@@ -455,7 +463,7 @@ where
 
 						let update = PaymentDetailsUpdate {
 							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_hash)
+							..PaymentDetailsUpdate::new(payment_id)
 						};
 						self.payment_store.update(&update).unwrap_or_else(|e| {
 							log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -516,7 +524,7 @@ where
 
 					let update = PaymentDetailsUpdate {
 						status: Some(PaymentStatus::Failed),
-						..PaymentDetailsUpdate::new(payment_hash)
+						..PaymentDetailsUpdate::new(payment_id)
 					};
 					self.payment_store.update(&update).unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -538,6 +546,7 @@ where
 					hex_utils::to_string(&payment_hash.0),
 					amount_msat,
 				);
+				let payment_id = PaymentId(payment_hash.0);
 				match purpose {
 					PaymentPurpose::Bolt11InvoicePayment {
 						payment_preimage,
@@ -549,7 +558,7 @@ where
 							secret: Some(Some(payment_secret)),
 							amount_msat: Some(Some(amount_msat)),
 							status: Some(PaymentStatus::Succeeded),
-							..PaymentDetailsUpdate::new(payment_hash)
+							..PaymentDetailsUpdate::new(payment_id)
 						};
 						match self.payment_store.update(&update) {
 							Ok(true) => (),
@@ -592,13 +601,14 @@ where
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
 						let payment = PaymentDetails {
-							preimage: Some(preimage),
-							hash: payment_hash,
-							secret: None,
+							id: payment_id,
+							kind: PaymentKind::Spontaneous {
+								hash: payment_hash,
+								preimage: Some(preimage),
+							},
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
-							lsp_fee_limits: None,
 						};
 
 						match self.payment_store.insert(payment) {
@@ -631,14 +641,32 @@ where
 						panic!("Failed to push to event queue");
 					});
 			},
-			LdkEvent::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
-				if let Some(mut payment) = self.payment_store.get(&payment_hash) {
-					payment.preimage = Some(payment_preimage);
-					payment.status = PaymentStatus::Succeeded;
-					self.payment_store.insert(payment.clone()).unwrap_or_else(|e| {
-						log_error!(self.logger, "Failed to access payment store: {}", e);
-						panic!("Failed to access payment store");
-					});
+			LdkEvent::PaymentSent {
+				payment_id,
+				payment_preimage,
+				payment_hash,
+				fee_paid_msat,
+				..
+			} => {
+				let payment_id = if let Some(id) = payment_id {
+					id
+				} else {
+					debug_assert!(false, "payment_id should always be set.");
+					return;
+				};
+
+				let update = PaymentDetailsUpdate {
+					preimage: Some(Some(payment_preimage)),
+					status: Some(PaymentStatus::Succeeded),
+					..PaymentDetailsUpdate::new(payment_id)
+				};
+
+				self.payment_store.update(&update).unwrap_or_else(|e| {
+					log_error!(self.logger, "Failed to access payment store: {}", e);
+					panic!("Failed to access payment store");
+				});
+
+				self.payment_store.get(&payment_id).map(|payment| {
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
@@ -652,7 +680,8 @@ where
 						hex_utils::to_string(&payment_hash.0),
 						hex_utils::to_string(&payment_preimage.0)
 					);
-				}
+				});
+
 				self.event_queue
 					.add_event(Event::PaymentSuccessful { payment_hash, fee_paid_msat })
 					.unwrap_or_else(|e| {
@@ -660,7 +689,7 @@ where
 						panic!("Failed to push to event queue");
 					});
 			},
-			LdkEvent::PaymentFailed { payment_hash, reason, .. } => {
+			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
 				log_info!(
 					self.logger,
 					"Failed to send payment to payment hash {:?} due to {:?}.",
@@ -670,7 +699,7 @@ where
 
 				let update = PaymentDetailsUpdate {
 					status: Some(PaymentStatus::Failed),
-					..PaymentDetailsUpdate::new(payment_hash)
+					..PaymentDetailsUpdate::new(payment_id)
 				};
 				self.payment_store.update(&update).unwrap_or_else(|e| {
 					log_error!(self.logger, "Failed to access payment store: {}", e);

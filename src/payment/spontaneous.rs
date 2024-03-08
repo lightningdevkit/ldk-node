@@ -3,7 +3,9 @@
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
-use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentStatus, PaymentStore};
+use crate::payment::store::{
+	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
+};
 use crate::types::{ChannelManager, KeysManager};
 
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
@@ -40,7 +42,7 @@ impl SpontaneousPayment {
 	}
 
 	/// Send a spontaneous, aka. "keysend", payment
-	pub fn send(&self, amount_msat: u64, node_id: PublicKey) -> Result<PaymentHash, Error> {
+	pub fn send(&self, amount_msat: u64, node_id: PublicKey) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -48,8 +50,9 @@ impl SpontaneousPayment {
 
 		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
 		let payment_hash = PaymentHash::from(payment_preimage);
+		let payment_id = PaymentId(payment_hash.0);
 
-		if let Some(payment) = self.payment_store.get(&payment_hash) {
+		if let Some(payment) = self.payment_store.get(&payment_id) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
@@ -71,21 +74,22 @@ impl SpontaneousPayment {
 			route_params,
 			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
 		) {
-			Ok(_payment_id) => {
+			Ok(_hash) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
 
 				let payment = PaymentDetails {
-					hash: payment_hash,
-					preimage: Some(payment_preimage),
-					secret: None,
+					id: payment_id,
+					kind: PaymentKind::Spontaneous {
+						hash: payment_hash,
+						preimage: Some(payment_preimage),
+					},
 					status: PaymentStatus::Pending,
 					direction: PaymentDirection::Outbound,
 					amount_msat: Some(amount_msat),
-					lsp_fee_limits: None,
 				};
 				self.payment_store.insert(payment)?;
 
-				Ok(payment_hash)
+				Ok(payment_id)
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
@@ -94,13 +98,15 @@ impl SpontaneousPayment {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
 						let payment = PaymentDetails {
-							hash: payment_hash,
-							preimage: Some(payment_preimage),
-							secret: None,
+							id: payment_id,
+							kind: PaymentKind::Spontaneous {
+								hash: payment_hash,
+								preimage: Some(payment_preimage),
+							},
+
 							status: PaymentStatus::Failed,
 							direction: PaymentDirection::Outbound,
 							amount_msat: Some(amount_msat),
-							lsp_fee_limits: None,
 						};
 
 						self.payment_store.insert(payment)?;
