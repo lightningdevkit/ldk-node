@@ -139,6 +139,7 @@ enum NodeError {
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
 	"InvalidSecretKey",
+	"InvalidOfferId",
 	"InvalidPaymentId",
 	"InvalidPaymentHash",
 	"InvalidPaymentPreimage",
@@ -225,6 +226,8 @@ interface PaymentKind {
 	Onchain();
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
+	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id);
+	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
 };
 
@@ -370,6 +373,9 @@ typedef string Address;
 
 [Custom]
 typedef string Bolt11Invoice;
+
+[Custom]
+typedef string OfferId;
 
 [Custom]
 typedef string PaymentId;

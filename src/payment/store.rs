@@ -9,6 +9,7 @@ use crate::Error;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::offers::offer::OfferId;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
 	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
@@ -145,7 +146,6 @@ pub enum PaymentKind {
 	/// A [BOLT 11] payment.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
-	// TODO: Bolt11 { invoice: Option<Bolt11Invoice> },
 	Bolt11 {
 		/// The payment hash, i.e., the hash of the `preimage`.
 		hash: PaymentHash,
@@ -158,7 +158,6 @@ pub enum PaymentKind {
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [LSPS 2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	// TODO: Bolt11Jit { invoice: Option<Bolt11Invoice> },
 	Bolt11Jit {
 		/// The payment hash, i.e., the hash of the `preimage`.
 		hash: PaymentHash,
@@ -175,6 +174,32 @@ pub enum PaymentKind {
 		///
 		/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 		lsp_fee_limits: LSPFeeLimits,
+	},
+	/// A [BOLT 12] 'offer' payment, i.e., a payment for an [`Offer`].
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	/// [`Offer`]: crate::lightning::offers::offer::Offer
+	Bolt12Offer {
+		/// The payment hash, i.e., the hash of the `preimage`.
+		hash: Option<PaymentHash>,
+		/// The pre-image used by the payment.
+		preimage: Option<PaymentPreimage>,
+		/// The secret used by the payment.
+		secret: Option<PaymentSecret>,
+		/// The ID of the offer this payment is for.
+		offer_id: OfferId,
+	},
+	/// A [BOLT 12] 'refund' payment, i.e., a payment for a [`Refund`].
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	/// [`Refund`]: lightning::offers::refund::Refund
+	Bolt12Refund {
+		/// The payment hash, i.e., the hash of the `preimage`.
+		hash: Option<PaymentHash>,
+		/// The pre-image used by the payment.
+		preimage: Option<PaymentPreimage>,
+		/// The secret used by the payment.
+		secret: Option<PaymentSecret>,
 	},
 	/// A spontaneous ("keysend") payment.
 	Spontaneous {
@@ -198,9 +223,20 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(4, secret, option),
 		(6, lsp_fee_limits, required),
 	},
+	(6, Bolt12Offer) => {
+		(0, hash, option),
+		(2, preimage, option),
+		(4, secret, option),
+		(6, offer_id, required),
+	},
 	(8, Spontaneous) => {
 		(0, hash, required),
 		(2, preimage, option),
+	},
+	(10, Bolt12Refund) => {
+		(0, hash, option),
+		(2, preimage, option),
+		(4, secret, option),
 	};
 );
 
@@ -227,6 +263,7 @@ impl_writeable_tlv_based!(LSPFeeLimits, {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaymentDetailsUpdate {
 	pub id: PaymentId,
+	pub hash: Option<Option<PaymentHash>>,
 	pub preimage: Option<Option<PaymentPreimage>>,
 	pub secret: Option<Option<PaymentSecret>>,
 	pub amount_msat: Option<Option<u64>>,
@@ -236,7 +273,15 @@ pub(crate) struct PaymentDetailsUpdate {
 
 impl PaymentDetailsUpdate {
 	pub fn new(id: PaymentId) -> Self {
-		Self { id, preimage: None, secret: None, amount_msat: None, direction: None, status: None }
+		Self {
+			id,
+			hash: None,
+			preimage: None,
+			secret: None,
+			amount_msat: None,
+			direction: None,
+			status: None,
+		}
 	}
 }
 
@@ -299,10 +344,29 @@ where
 		let mut locked_payments = self.payments.lock().unwrap();
 
 		if let Some(payment) = locked_payments.get_mut(&update.id) {
+			if let Some(hash_opt) = update.hash {
+				match payment.kind {
+					PaymentKind::Bolt12Offer { ref mut hash, .. } => {
+						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
+							"We should only ever override payment hash for outbound BOLT 12 payments");
+						*hash = hash_opt
+					},
+					PaymentKind::Bolt12Refund { ref mut hash, .. } => {
+						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
+							"We should only ever override payment hash for outbound BOLT 12 payments");
+						*hash = hash_opt
+					},
+					_ => {
+						// We can omit updating the hash for BOLT11 payments as the payment has will always be known from the beginning.
+					},
+				}
+			}
 			if let Some(preimage_opt) = update.preimage {
 				match payment.kind {
 					PaymentKind::Bolt11 { ref mut preimage, .. } => *preimage = preimage_opt,
 					PaymentKind::Bolt11Jit { ref mut preimage, .. } => *preimage = preimage_opt,
+					PaymentKind::Bolt12Offer { ref mut preimage, .. } => *preimage = preimage_opt,
+					PaymentKind::Bolt12Refund { ref mut preimage, .. } => *preimage = preimage_opt,
 					PaymentKind::Spontaneous { ref mut preimage, .. } => *preimage = preimage_opt,
 					_ => {},
 				}
@@ -312,6 +376,8 @@ where
 				match payment.kind {
 					PaymentKind::Bolt11 { ref mut secret, .. } => *secret = secret_opt,
 					PaymentKind::Bolt11Jit { ref mut secret, .. } => *secret = secret_opt,
+					PaymentKind::Bolt12Offer { ref mut secret, .. } => *secret = secret_opt,
+					PaymentKind::Bolt12Refund { ref mut secret, .. } => *secret = secret_opt,
 					_ => {},
 				}
 			}
@@ -327,7 +393,6 @@ where
 			self.persist_info(&update.id, payment)?;
 			updated = true;
 		}
-
 		Ok(updated)
 	}
 

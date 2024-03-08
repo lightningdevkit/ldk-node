@@ -2,6 +2,7 @@ pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, Pay
 
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
+pub use lightning::offers::offer::OfferId;
 pub use lightning::util::string::UntrustedString;
 
 pub use lightning_invoice::Bolt11Invoice;
@@ -72,6 +73,24 @@ impl UniffiCustomTypeConverter for Bolt11Invoice {
 
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for OfferId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
+			let bytes_res = bytes_vec.try_into();
+			if let Ok(bytes) = bytes_res {
+				return Ok(OfferId(bytes));
+			}
+		}
+		Err(Error::InvalidOfferId.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&obj.0)
 	}
 }
 
