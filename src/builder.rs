@@ -65,6 +65,7 @@ use std::fmt;
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -945,6 +946,13 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 
+	let is_listening = Arc::new(AtomicBool::new(false));
+	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
+	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
+	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -968,6 +976,12 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		scorer,
 		peer_store,
 		payment_store,
+		is_listening,
+		latest_wallet_sync_timestamp,
+		latest_onchain_wallet_sync_timestamp,
+		latest_fee_rate_cache_update_timestamp,
+		latest_rgs_snapshot_timestamp,
+		latest_node_announcement_broadcast_timestamp,
 	})
 }
 
