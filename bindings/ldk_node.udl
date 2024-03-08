@@ -68,9 +68,9 @@ interface Node {
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
-	PaymentDetails? payment([ByRef]PaymentHash payment_hash);
+	PaymentDetails? payment([ByRef]PaymentId payment_id);
 	[Throws=NodeError]
-	void remove_payment([ByRef]PaymentHash payment_hash);
+	void remove_payment([ByRef]PaymentId payment_id);
 	BalanceDetails list_balances();
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
@@ -82,9 +82,9 @@ interface Node {
 
 interface Bolt11Payment {
 	[Throws=NodeError]
-	PaymentHash send([ByRef]Bolt11Invoice invoice);
+	PaymentId send([ByRef]Bolt11Invoice invoice);
 	[Throws=NodeError]
-	PaymentHash send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
+	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
 	[Throws=NodeError]
 	void send_probes([ByRef]Bolt11Invoice invoice);
 	[Throws=NodeError]
@@ -101,7 +101,7 @@ interface Bolt11Payment {
 
 interface SpontaneousPayment {
 	[Throws=NodeError]
-	PaymentHash send(u64 amount_msat, PublicKey node_id);
+	PaymentId send(u64 amount_msat, PublicKey node_id);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
 };
@@ -139,6 +139,7 @@ enum NodeError {
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
 	"InvalidSecretKey",
+	"InvalidPaymentId",
 	"InvalidPaymentHash",
 	"InvalidPaymentPreimage",
 	"InvalidPaymentSecret",
@@ -219,6 +220,14 @@ interface ClosureReason {
 	HTLCsTimedOut();
 };
 
+[Enum]
+interface PaymentKind {
+	Onchain();
+	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
+	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
+	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
+};
+
 enum PaymentDirection {
 	"Inbound",
 	"Outbound",
@@ -236,13 +245,11 @@ dictionary LSPFeeLimits {
 };
 
 dictionary PaymentDetails {
-	PaymentHash hash;
-	PaymentPreimage? preimage;
-	PaymentSecret? secret;
+	PaymentId id;
+	PaymentKind kind;
 	u64? amount_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
-	LSPFeeLimits? lsp_fee_limits;
 };
 
 [NonExhaustive]
@@ -363,6 +370,9 @@ typedef string Address;
 
 [Custom]
 typedef string Bolt11Invoice;
+
+[Custom]
+typedef string PaymentId;
 
 [Custom]
 typedef string PaymentHash;

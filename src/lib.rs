@@ -141,8 +141,8 @@ pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::{BestBlock, Confirm};
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::PaymentHash;
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -1143,16 +1143,16 @@ impl Node {
 		}
 	}
 
-	/// Retrieve the details of a specific payment with the given hash.
+	/// Retrieve the details of a specific payment with the given id.
 	///
 	/// Returns `Some` if the payment was known and `None` otherwise.
-	pub fn payment(&self, payment_hash: &PaymentHash) -> Option<PaymentDetails> {
-		self.payment_store.get(payment_hash)
+	pub fn payment(&self, payment_id: &PaymentId) -> Option<PaymentDetails> {
+		self.payment_store.get(payment_id)
 	}
 
-	/// Remove the payment with the given hash from the store.
-	pub fn remove_payment(&self, payment_hash: &PaymentHash) -> Result<(), Error> {
-		self.payment_store.remove(&payment_hash)
+	/// Remove the payment with the given id from the store.
+	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
+		self.payment_store.remove(&payment_id)
 	}
 
 	/// Retrieves an overview of all known balances.

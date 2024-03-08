@@ -8,7 +8,7 @@ use crate::error::Error;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::payment::payment_store::{
-	LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus, PaymentStore,
+	LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::types::{ChannelManager, KeysManager};
@@ -66,7 +66,7 @@ impl Bolt11Payment {
 	}
 
 	/// Send a payment given an invoice.
-	pub fn send(&self, invoice: &Bolt11Invoice) -> Result<PaymentHash, Error> {
+	pub fn send(&self, invoice: &Bolt11Invoice) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -77,7 +77,8 @@ impl Bolt11Payment {
 			Error::InvalidInvoice
 		})?;
 
-		if let Some(payment) = self.payment_store.get(&payment_hash) {
+		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
+		if let Some(payment) = self.payment_store.get(&payment_id) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
@@ -87,7 +88,6 @@ impl Bolt11Payment {
 		}
 
 		let payment_secret = Some(*invoice.payment_secret());
-		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 
 		match self.channel_manager.send_payment(
@@ -102,32 +102,39 @@ impl Bolt11Payment {
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
 
-				let payment = PaymentDetails {
-					preimage: None,
+				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
+					preimage: None,
 					secret: payment_secret,
+				};
+
+				let payment = PaymentDetails {
+					id: payment_id,
+					kind,
 					amount_msat: invoice.amount_milli_satoshis(),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
-					lsp_fee_limits: None,
 				};
 				self.payment_store.insert(payment)?;
 
-				Ok(payment_hash)
+				Ok(payment_id)
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let payment = PaymentDetails {
-							preimage: None,
+						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
+							preimage: None,
 							secret: payment_secret,
+						};
+						let payment = PaymentDetails {
+							id: payment_id,
+							kind,
 							amount_msat: invoice.amount_milli_satoshis(),
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
-							lsp_fee_limits: None,
 						};
 
 						self.payment_store.insert(payment)?;
@@ -146,7 +153,7 @@ impl Bolt11Payment {
 	/// amount paid to be determined by the user.
 	pub fn send_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
-	) -> Result<PaymentHash, Error> {
+	) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -162,7 +169,8 @@ impl Bolt11Payment {
 		}
 
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		if let Some(payment) = self.payment_store.get(&payment_hash) {
+		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
+		if let Some(payment) = self.payment_store.get(&payment_id) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
@@ -171,7 +179,6 @@ impl Bolt11Payment {
 			}
 		}
 
-		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
 		let payment_secret = invoice.payment_secret();
 		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
 		let mut payment_params = PaymentParameters::from_node_id(
@@ -199,7 +206,7 @@ impl Bolt11Payment {
 			route_params,
 			retry_strategy,
 		) {
-			Ok(_payment_id) => {
+			Ok(()) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
 				log_info!(
 					self.logger,
@@ -208,18 +215,22 @@ impl Bolt11Payment {
 					payee_pubkey
 				);
 
-				let payment = PaymentDetails {
+				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
 					preimage: None,
 					secret: Some(*payment_secret),
+				};
+
+				let payment = PaymentDetails {
+					id: payment_id,
+					kind,
 					amount_msat: Some(amount_msat),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
-					lsp_fee_limits: None,
 				};
 				self.payment_store.insert(payment)?;
 
-				Ok(payment_hash)
+				Ok(payment_id)
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
@@ -227,14 +238,18 @@ impl Bolt11Payment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let payment = PaymentDetails {
+						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
 							preimage: None,
 							secret: Some(*payment_secret),
+						};
+
+						let payment = PaymentDetails {
+							id: payment_id,
+							kind,
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
-							lsp_fee_limits: None,
 						};
 						self.payment_store.insert(payment)?;
 
@@ -287,14 +302,19 @@ impl Bolt11Payment {
 		};
 
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		let payment = PaymentDetails {
+		let id = PaymentId(payment_hash.0);
+		let kind = PaymentKind::Bolt11 {
 			hash: payment_hash,
 			preimage: None,
 			secret: Some(invoice.payment_secret().clone()),
+		};
+
+		let payment = PaymentDetails {
+			id,
+			kind,
 			amount_msat,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
-			lsp_fee_limits: None,
 		};
 
 		self.payment_store.insert(payment)?;
@@ -409,18 +429,23 @@ impl Bolt11Payment {
 
 		// Register payment in payment store.
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		let lsp_fee_limits = Some(LSPFeeLimits {
+		let lsp_fee_limits = LSPFeeLimits {
 			max_total_opening_fee_msat: lsp_total_opening_fee,
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
-		});
-		let payment = PaymentDetails {
+		};
+		let id = PaymentId(payment_hash.0);
+		let kind = PaymentKind::Bolt11Jit {
 			hash: payment_hash,
 			preimage: None,
 			secret: Some(invoice.payment_secret().clone()),
+			lsp_fee_limits,
+		};
+		let payment = PaymentDetails {
+			id,
+			kind,
 			amount_msat,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
-			lsp_fee_limits,
 		};
 
 		self.payment_store.insert(payment)?;
