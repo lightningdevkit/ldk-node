@@ -82,11 +82,11 @@ pub(crate) use expect_channel_ready_event;
 macro_rules! expect_payment_received_event {
 	($node: expr, $amount_msat: expr) => {{
 		match $node.wait_next_event() {
-			ref e @ Event::PaymentReceived { payment_hash, amount_msat } => {
+			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
 				$node.event_handled();
-				payment_hash
+				payment_id
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
@@ -98,12 +98,12 @@ macro_rules! expect_payment_received_event {
 pub(crate) use expect_payment_received_event;
 
 macro_rules! expect_payment_successful_event {
-	($node: expr, $payment_hash: expr, $fee_paid_msat: expr) => {{
+	($node: expr, $payment_id: expr, $fee_paid_msat: expr) => {{
 		match $node.wait_next_event() {
-			ref e @ Event::PaymentSuccessful { payment_hash, fee_paid_msat } => {
+			ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(fee_paid_msat, $fee_paid_msat);
-				assert_eq!(payment_hash, $payment_hash);
+				assert_eq!(payment_id, $payment_id);
 				$node.event_handled();
 			},
 			ref e => {
