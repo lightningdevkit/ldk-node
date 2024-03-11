@@ -46,6 +46,10 @@ use std::time::Duration;
 pub enum Event {
 	/// A sent payment was successful.
 	PaymentSuccessful {
+		/// A local identifier used to track the payment.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The total fee which was spent at intermediate hops in this payment.
@@ -53,6 +57,10 @@ pub enum Event {
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
+		/// A local identifier used to track the payment.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The reason why the payment failed.
@@ -62,6 +70,10 @@ pub enum Event {
 	},
 	/// A payment has been received.
 	PaymentReceived {
+		/// A local identifier used to track the payment.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The value, in thousandths of a satoshi, that has been received.
@@ -110,13 +122,16 @@ impl_writeable_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
+		(3, payment_id, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, required),
 		(1, reason, option),
+		(3, payment_id, option),
 	},
 	(2, PaymentReceived) => {
 		(0, payment_hash, required),
+		(1, payment_id, option),
 		(2, amount_msat, required),
 	},
 	(3, ChannelReady) => {
@@ -636,7 +651,11 @@ where
 				};
 
 				self.event_queue
-					.add_event(Event::PaymentReceived { payment_hash, amount_msat })
+					.add_event(Event::PaymentReceived {
+						payment_id: Some(payment_id),
+						payment_hash,
+						amount_msat,
+					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
@@ -684,7 +703,11 @@ where
 				});
 
 				self.event_queue
-					.add_event(Event::PaymentSuccessful { payment_hash, fee_paid_msat })
+					.add_event(Event::PaymentSuccessful {
+						payment_id: Some(payment_id),
+						payment_hash,
+						fee_paid_msat,
+					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
@@ -707,7 +730,11 @@ where
 					panic!("Failed to access payment store");
 				});
 				self.event_queue
-					.add_event(Event::PaymentFailed { payment_hash, reason })
+					.add_event(Event::PaymentFailed {
+						payment_id: Some(payment_id),
+						payment_hash,
+						reason,
+					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
