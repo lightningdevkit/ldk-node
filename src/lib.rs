@@ -145,7 +145,11 @@ use lightning::ln::{PaymentHash, PaymentPreimage};
 
 use lightning::sign::EntropySource;
 
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{
+	KVStore, NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -165,6 +169,10 @@ use bitcoin::{Address, Txid};
 
 use rand::Rng;
 
+use crate::io::{
+	LATEST_RGS_SYNC_TIMESTAMP_KEY, LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
+	LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
+};
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
@@ -1766,6 +1774,35 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	/// secret key corresponding to the given public key.
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		self.keys_manager.verify_signature(msg, sig, pkey)
+	}
+
+	pub fn reset_scorer_state(&self) -> Result<(), Error> {
+		self.kv_store
+			.remove(
+				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
+				LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
+				LATEST_RGS_SYNC_TIMESTAMP_KEY,
+				false,
+			)
+			.map_err(|_| Error::PersistenceFailed)?;
+		self.kv_store
+			.remove(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				SCORER_PERSISTENCE_KEY,
+				false,
+			)
+			.map_err(|_| Error::PersistenceFailed)?;
+		self.kv_store
+			.remove(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+				false,
+			)
+			.map_err(|_| Error::PersistenceFailed)?;
+
+		Ok(())
 	}
 }
 

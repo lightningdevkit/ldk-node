@@ -98,6 +98,8 @@ interface LDKNode {
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	boolean is_running();
+	[Throws=NodeError]
+	void reset_scorer_state();
 };
 
 [Error]
