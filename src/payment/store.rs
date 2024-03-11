@@ -372,8 +372,35 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use lightning::util::test_utils::{TestLogger, TestStore};
+	use lightning::util::{
+		ser::Readable,
+		test_utils::{TestLogger, TestStore},
+	};
+	use std::io::Cursor;
 	use std::sync::Arc;
+
+	/// We refactored `PaymentDetails` to hold a payment id and moved some required fields into
+	/// `PaymentKind`. Here, we keep the old layout available in order test de/ser compatibility.
+	#[derive(Clone, Debug, PartialEq, Eq)]
+	struct OldPaymentDetails {
+		pub hash: PaymentHash,
+		pub preimage: Option<PaymentPreimage>,
+		pub secret: Option<PaymentSecret>,
+		pub amount_msat: Option<u64>,
+		pub direction: PaymentDirection,
+		pub status: PaymentStatus,
+		pub lsp_fee_limits: Option<LSPFeeLimits>,
+	}
+
+	impl_writeable_tlv_based!(OldPaymentDetails, {
+		(0, hash, required),
+		(1, lsp_fee_limits, option),
+		(2, preimage, required),
+		(4, secret, required),
+		(6, amount_msat, required),
+		(8, direction, required),
+		(10, status, required)
+	});
 
 	#[test]
 	fn payment_info_is_persisted() {
@@ -421,5 +448,134 @@ mod tests {
 		assert!(payment_store.get(&id).is_some());
 
 		assert_eq!(PaymentStatus::Succeeded, payment_store.get(&id).unwrap().status);
+	}
+
+	#[test]
+	fn old_payment_details_deser_compat() {
+		// We refactored `PaymentDetails` to hold a payment id and moved some required fields into
+		// `PaymentKind`. Here, we test compatibility with the old layout.
+		let hash = PaymentHash([42u8; 32]);
+		let preimage = Some(PaymentPreimage([43u8; 32]));
+		let secret = Some(PaymentSecret([44u8; 32]));
+		let amount_msat = Some(45_000_000);
+
+		// Test `Bolt11` de/ser
+		{
+			let old_bolt11_payment = OldPaymentDetails {
+				hash,
+				preimage,
+				secret,
+				amount_msat,
+				direction: PaymentDirection::Inbound,
+				status: PaymentStatus::Pending,
+				lsp_fee_limits: None,
+			};
+
+			let old_bolt11_encoded = old_bolt11_payment.encode();
+			assert_eq!(
+				old_bolt11_payment,
+				OldPaymentDetails::read(&mut Cursor::new(old_bolt11_encoded.clone())).unwrap()
+			);
+
+			let bolt11_decoded =
+				PaymentDetails::read(&mut Cursor::new(old_bolt11_encoded)).unwrap();
+			let bolt11_reencoded = bolt11_decoded.encode();
+			assert_eq!(
+				bolt11_decoded,
+				PaymentDetails::read(&mut Cursor::new(bolt11_reencoded)).unwrap()
+			);
+
+			match bolt11_decoded.kind {
+				PaymentKind::Bolt11 { hash: h, preimage: p, secret: s } => {
+					assert_eq!(hash, h);
+					assert_eq!(preimage, p);
+					assert_eq!(secret, s);
+				},
+				_ => {
+					panic!("Unexpected kind!");
+				},
+			}
+		}
+
+		// Test `Bolt11Jit` de/ser
+		{
+			let lsp_fee_limits = Some(LSPFeeLimits {
+				max_total_opening_fee_msat: Some(46_000),
+				max_proportional_opening_fee_ppm_msat: Some(47_000),
+			});
+
+			let old_bolt11_jit_payment = OldPaymentDetails {
+				hash,
+				preimage,
+				secret,
+				amount_msat,
+				direction: PaymentDirection::Inbound,
+				status: PaymentStatus::Pending,
+				lsp_fee_limits,
+			};
+
+			let old_bolt11_jit_encoded = old_bolt11_jit_payment.encode();
+			assert_eq!(
+				old_bolt11_jit_payment,
+				OldPaymentDetails::read(&mut Cursor::new(old_bolt11_jit_encoded.clone())).unwrap()
+			);
+
+			let bolt11_jit_decoded =
+				PaymentDetails::read(&mut Cursor::new(old_bolt11_jit_encoded)).unwrap();
+			let bolt11_jit_reencoded = bolt11_jit_decoded.encode();
+			assert_eq!(
+				bolt11_jit_decoded,
+				PaymentDetails::read(&mut Cursor::new(bolt11_jit_reencoded)).unwrap()
+			);
+
+			match bolt11_jit_decoded.kind {
+				PaymentKind::Bolt11Jit { hash: h, preimage: p, secret: s, lsp_fee_limits: l } => {
+					assert_eq!(hash, h);
+					assert_eq!(preimage, p);
+					assert_eq!(secret, s);
+					assert_eq!(lsp_fee_limits, Some(l));
+				},
+				_ => {
+					panic!("Unexpected kind!");
+				},
+			}
+		}
+
+		// Test `Spontaneous` de/ser
+		{
+			let old_spontaneous_payment = OldPaymentDetails {
+				hash,
+				preimage,
+				secret: None,
+				amount_msat,
+				direction: PaymentDirection::Inbound,
+				status: PaymentStatus::Pending,
+				lsp_fee_limits: None,
+			};
+
+			let old_spontaneous_encoded = old_spontaneous_payment.encode();
+			assert_eq!(
+				old_spontaneous_payment,
+				OldPaymentDetails::read(&mut Cursor::new(old_spontaneous_encoded.clone())).unwrap()
+			);
+
+			let spontaneous_decoded =
+				PaymentDetails::read(&mut Cursor::new(old_spontaneous_encoded)).unwrap();
+			let spontaneous_reencoded = spontaneous_decoded.encode();
+			assert_eq!(
+				spontaneous_decoded,
+				PaymentDetails::read(&mut Cursor::new(spontaneous_reencoded)).unwrap()
+			);
+
+			match spontaneous_decoded.kind {
+				PaymentKind::Spontaneous { hash: h, preimage: p } => {
+					assert_eq!(hash, h);
+					assert_eq!(preimage, p);
+				},
+				_ => {
+					panic!("Unexpected kind!");
+				},
+			}
+		}
 	}
 }
