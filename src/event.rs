@@ -445,6 +445,7 @@ where
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
 						let update = PaymentDetailsUpdate {
+							hash: Some(Some(payment_hash)),
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
@@ -483,6 +484,7 @@ where
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
 						let update = PaymentDetailsUpdate {
+							hash: Some(Some(payment_hash)),
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
@@ -524,6 +526,7 @@ where
 					self.channel_manager.fail_htlc_backwards(&payment_hash);
 
 					let update = PaymentDetailsUpdate {
+						hash: Some(Some(payment_hash)),
 						status: Some(PaymentStatus::Failed),
 						..PaymentDetailsUpdate::new(payment_id)
 					};
@@ -551,6 +554,7 @@ where
 				match purpose {
 					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
 						let update = PaymentDetailsUpdate {
+							hash: Some(Some(payment_hash)),
 							preimage: Some(payment_preimage),
 							secret: Some(Some(payment_secret)),
 							amount_msat: Some(Some(amount_msat)),
@@ -640,6 +644,7 @@ where
 				};
 
 				let update = PaymentDetailsUpdate {
+					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
 					status: Some(PaymentStatus::Succeeded),
 					..PaymentDetailsUpdate::new(payment_id)
@@ -686,6 +691,7 @@ where
 				);
 
 				let update = PaymentDetailsUpdate {
+					hash: Some(Some(payment_hash)),
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
