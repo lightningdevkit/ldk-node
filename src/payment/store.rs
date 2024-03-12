@@ -357,7 +357,8 @@ where
 						*hash = hash_opt
 					},
 					_ => {
-						// We can omit updating the hash for BOLT11 payments as the payment has will always be known from the beginning.
+						// We can omit updating the hash for BOLT11 payments as the payment hash
+						// will always be known from the beginning.
 					},
 				}
 			}
