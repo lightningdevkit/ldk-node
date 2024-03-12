@@ -15,7 +15,7 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, log_info, Logger};
+use crate::logger::{log_debug, log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::ConfirmationTarget;
 use lightning::events::{ClosureReason, PaymentPurpose};
@@ -23,6 +23,7 @@ use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::{ChannelId, PaymentHash};
+use lightning::offers::offer::Amount;
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
@@ -959,7 +960,45 @@ where
 				});
 				return;
 			},
-			LdkEvent::InvoiceGenerated { .. } => {},
+			LdkEvent::InvoiceGenerated { invoice } => {
+				// TODO: For now we only insert a new pending payment with id derived from the
+				// payment hash to the store. We should eventually associate this with the original
+				// offer. Issue is that generating a suitable payment id isn't trivial as
+				// `metadata` is the same across payments for a single offer and `payer_id` *could*
+				// be transient but isn't guaranteed to be unique. So we probably can't lean on
+				// either currently.
+				log_debug!(self.logger, "Issued invoice for payer with id {}", invoice.payer_id());
+
+				let payment_id = PaymentId(invoice.payment_hash().0);
+
+				let amount_msat =
+					match invoice.amount() {
+						Some(Amount::Bitcoin { amount_msats }) => Some(*amount_msats),
+						Some(_) => {
+							debug_assert!(false, "Generated invoice for unsupported currency. This should never happen!");
+							None
+						},
+						None => None,
+					};
+
+				let kind = PaymentKind::Bolt12 {
+					hash: Some(invoice.payment_hash()),
+					preimage: None,
+					secret: None,
+				};
+				let payment = PaymentDetails {
+					id: payment_id,
+					kind,
+					amount_msat,
+					direction: PaymentDirection::Inbound,
+					status: PaymentStatus::Pending,
+				};
+
+				self.payment_store.insert(payment).unwrap_or_else(|e| {
+					log_error!(self.logger, "Failed to access payment store: {}", e);
+					panic!("Failed to access payment store");
+				});
+			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
 				let runtime_lock = self.runtime.read().unwrap();
 				debug_assert!(runtime_lock.is_some());
