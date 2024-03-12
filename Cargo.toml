@@ -37,14 +37,14 @@ default = []
 #lightning-transaction-sync = { version = "0.0.121", features = ["esplora-async-https", "time"] }
 #lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
 
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60", features = ["std"] }
-lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60" }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60" }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60" }
-lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60", features = ["futures"] }
-lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60" }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60", features = ["esplora-async"] }
-lightning-liquidity = { git = "https://github.com/tnull/lightning-liquidity", rev = "6aaf6e5acbac69694d5b9cf80c44916e73ae1e07", features = ["std"] }
+lightning = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event", features = ["std"] }
+lightning-invoice = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event" }
+lightning-net-tokio = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event" }
+lightning-persister = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event" }
+lightning-background-processor = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event", features = ["futures"] }
+lightning-rapid-gossip-sync = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event" }
+lightning-transaction-sync = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event", features = ["esplora-async"] }
+lightning-liquidity = { git = "https://github.com/tnull/lightning-liquidity", branch = "2024-03-invoice-generated-event", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -89,7 +89,7 @@ winapi = { version = "0.3", features = ["winbase"] }
 [dev-dependencies]
 #lightning = { version = "0.0.121", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "aa3dbe8686ad018619827c76e4b40aa2f2580d60", features = ["std", "_test_utils"] }
+lightning = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event", features = ["std", "_test_utils"] }
 electrum-client = { version = "0.15.1", default-features = true }
 bitcoincore-rpc = { version = "0.17.0", default-features = false }
 proptest = "1.0.0"
