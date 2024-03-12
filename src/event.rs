@@ -983,7 +983,22 @@ where
 			LdkEvent::DiscardFunding { .. } => {},
 			LdkEvent::HTLCIntercepted { .. } => {},
 			LdkEvent::BumpTransaction(_) => {},
-			LdkEvent::InvoiceRequestFailed { .. } => {},
+			LdkEvent::InvoiceRequestFailed { payment_id } => {
+				log_error!(
+					self.logger,
+					"Failed to request invoice for outbound BOLT12 payment {}",
+					payment_id
+				);
+				let update = PaymentDetailsUpdate {
+					status: Some(PaymentStatus::Failed),
+					..PaymentDetailsUpdate::new(payment_id)
+				};
+				self.payment_store.update(&update).unwrap_or_else(|e| {
+					log_error!(self.logger, "Failed to access payment store: {}", e);
+					panic!("Failed to access payment store");
+				});
+				return;
+			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
 				let runtime_lock = self.runtime.read().unwrap();
 				debug_assert!(runtime_lock.is_some());
