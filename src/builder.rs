@@ -785,7 +785,7 @@ fn build_with_store_internal(
 		Arc::clone(&logger),
 		Arc::clone(&channel_manager),
 		Arc::new(message_router),
-		IgnoringMessageHandler {},
+		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
 	));
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
