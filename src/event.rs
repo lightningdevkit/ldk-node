@@ -877,6 +877,7 @@ where
 			LdkEvent::HTLCIntercepted { .. } => {},
 			LdkEvent::BumpTransaction(_) => {},
 			LdkEvent::InvoiceRequestFailed { .. } => {},
+			LdkEvent::InvoiceGenerated { .. } => {},
 			LdkEvent::ConnectionNeeded { .. } => {},
 		}
 	}
