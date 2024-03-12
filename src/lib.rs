@@ -1776,7 +1776,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		self.keys_manager.verify_signature(msg, sig, pkey)
 	}
 
-	pub fn reset_scorer_state(&self) -> Result<(), Error> {
+	pub fn reset_router(&self) -> Result<(), Error> {
 		self.kv_store
 			.remove(
 				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
