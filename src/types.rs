@@ -2,7 +2,6 @@ use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::sweep::OutputSweeper;
 
-use lightning::blinded_path::BlindedPath;
 use lightning::chain::chainmonitor;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
@@ -20,7 +19,7 @@ use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
 
-use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
 
 use std::sync::{Arc, Mutex, RwLock};
@@ -114,26 +113,16 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
-	Arc<FakeMessageRouter>,
-	IgnoringMessageHandler,
+	Arc<MessageRouter>,
+	Arc<ChannelManager>,
 	IgnoringMessageHandler,
 >;
 
-pub(crate) struct FakeMessageRouter {}
-
-impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
-	fn find_path(
-		&self, _sender: PublicKey, _peers: Vec<PublicKey>,
-		_destination: lightning::onion_message::messenger::Destination,
-	) -> Result<lightning::onion_message::messenger::OnionMessagePath, ()> {
-		unimplemented!()
-	}
-	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-		&self, _recipient: PublicKey, _peers: Vec<PublicKey>, _secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedPath>, ()> {
-		unreachable!()
-	}
-}
+pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
+	Arc<NetworkGraph>,
+	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
+>;
 
 pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,

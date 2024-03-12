@@ -16,8 +16,8 @@ use crate::peer_store::PeerStore;
 use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, FakeMessageRouter, GossipSync, KeysManager,
-	NetworkGraph, OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, DynStore, GossipSync, KeysManager, MessageRouter, NetworkGraph,
+	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::{LogLevel, Node};
@@ -777,13 +777,15 @@ fn build_with_store_internal(
 		})?;
 	}
 
+	let message_router = MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
+
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
-		Arc::new(FakeMessageRouter {}),
-		IgnoringMessageHandler {},
+		Arc::new(message_router),
+		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
 	));
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
