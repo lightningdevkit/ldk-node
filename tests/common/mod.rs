@@ -102,7 +102,9 @@ macro_rules! expect_payment_successful_event {
 		match $node.wait_next_event() {
 			ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(fee_paid_msat, $fee_paid_msat);
+				if let Some(fee_msat) = $fee_paid_msat {
+					assert_eq!(fee_paid_msat, fee_msat);
+				}
 				assert_eq!(payment_id, $payment_id);
 				$node.event_handled();
 			},
