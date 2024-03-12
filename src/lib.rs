@@ -541,7 +541,10 @@ impl Node {
 		let mut stop_bcast = self.stop_sender.subscribe();
 		runtime.spawn(async move {
 			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
+			#[cfg(not(test))]
 			let mut interval = tokio::time::interval(Duration::from_secs(30));
+			#[cfg(test)]
+			let mut interval = tokio::time::interval(Duration::from_secs(5));
 			loop {
 				tokio::select! {
 						_ = stop_bcast.changed() => {
