@@ -94,7 +94,13 @@ impl Readable for PaymentDetails {
 
 			if secret.is_some() {
 				if let Some(lsp_fee_limits) = lsp_fee_limits {
-					PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits, bolt11_invoice }
+					PaymentKind::Bolt11Jit {
+						hash,
+						preimage,
+						secret,
+						lsp_fee_limits,
+						bolt11_invoice,
+					}
 				} else {
 					PaymentKind::Bolt11 { hash, preimage, secret, bolt11_invoice }
 				}
@@ -431,7 +437,7 @@ mod tests {
 			)
 			.is_err());
 
-		let kind = PaymentKind::Bolt11 { hash, preimage: None, secret: None, bolt11_invoice: None};
+		let kind = PaymentKind::Bolt11 { hash, preimage: None, secret: None, bolt11_invoice: None };
 		let payment = PaymentDetails {
 			id,
 			kind,
@@ -544,7 +550,13 @@ mod tests {
 			);
 
 			match bolt11_jit_decoded.kind {
-				PaymentKind::Bolt11Jit { hash: h, preimage: p, secret: s, lsp_fee_limits: l, bolt11_invoice: i } => {
+				PaymentKind::Bolt11Jit {
+					hash: h,
+					preimage: p,
+					secret: s,
+					lsp_fee_limits: l,
+					bolt11_invoice: i,
+				} => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
