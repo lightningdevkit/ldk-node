@@ -24,6 +24,7 @@ use std::fmt::Display;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
+use lightning::routing::gossip::NodeAnnouncementInfo;
 
 pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -265,6 +266,9 @@ pub struct PeerDetails {
 	pub is_persisted: bool,
 	/// Indicates whether we currently have an active connection with the peer.
 	pub is_connected: bool,
+	/// Peer's announcement info if we have it.
+	/// Not available for peers synced over RGS.
+	pub announcement_info: Option<NodeAnnouncementInfo>
 }
 
 /// The network address of a Lightning node.
