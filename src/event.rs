@@ -1,4 +1,4 @@
-use crate::types::{Sweeper, Wallet};
+use crate::types::{DynStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
 };
@@ -20,7 +20,6 @@ use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::{ChannelId, PaymentHash};
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
-use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
@@ -138,22 +137,22 @@ impl_writeable_tlv_based_enum!(Event,
 	};
 );
 
-pub struct EventQueue<K: KVStore + Sync + Send, L: Deref>
+pub struct EventQueue<L: Deref>
 where
 	L::Target: Logger,
 {
 	queue: Arc<Mutex<VecDeque<Event>>>,
 	waker: Arc<Mutex<Option<Waker>>>,
 	notifier: Condvar,
-	kv_store: Arc<K>,
+	kv_store: Arc<DynStore>,
 	logger: L,
 }
 
-impl<K: KVStore + Sync + Send, L: Deref> EventQueue<K, L>
+impl<L: Deref> EventQueue<L>
 where
 	L::Target: Logger,
 {
-	pub(crate) fn new(kv_store: Arc<K>, logger: L) -> Self {
+	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let queue = Arc::new(Mutex::new(VecDeque::new()));
 		let waker = Arc::new(Mutex::new(None));
 		let notifier = Condvar::new();
@@ -228,13 +227,13 @@ where
 	}
 }
 
-impl<K: KVStore + Sync + Send, L: Deref> ReadableArgs<(Arc<K>, L)> for EventQueue<K, L>
+impl<L: Deref> ReadableArgs<(Arc<DynStore>, L)> for EventQueue<L>
 where
 	L::Target: Logger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
-		reader: &mut R, args: (Arc<K>, L),
+		reader: &mut R, args: (Arc<DynStore>, L),
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let (kv_store, logger) = args;
 		let read_queue: EventQueueDeserWrapper = Readable::read(reader)?;
@@ -292,32 +291,31 @@ impl Future for EventFuture {
 	}
 }
 
-pub(crate) struct EventHandler<K: KVStore + Sync + Send, L: Deref>
+pub(crate) struct EventHandler<L: Deref + Clone + Sync + Send + 'static>
 where
 	L::Target: Logger,
 {
-	event_queue: Arc<EventQueue<K, L>>,
+	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
-	channel_manager: Arc<ChannelManager<K>>,
-	output_sweeper: Arc<Sweeper<K>>,
+	channel_manager: Arc<ChannelManager>,
+	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<NetworkGraph>,
-	payment_store: Arc<PaymentStore<K, L>>,
-	peer_store: Arc<PeerStore<K, L>>,
+	payment_store: Arc<PaymentStore<L>>,
+	peer_store: Arc<PeerStore<L>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
 }
 
-impl<K: KVStore + Sync + Send + 'static, L: Deref> EventHandler<K, L>
+impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
 where
 	L::Target: Logger,
 {
 	pub fn new(
-		event_queue: Arc<EventQueue<K, L>>, wallet: Arc<Wallet>,
-		channel_manager: Arc<ChannelManager<K>>, output_sweeper: Arc<Sweeper<K>>,
-		network_graph: Arc<NetworkGraph>, payment_store: Arc<PaymentStore<K, L>>,
-		peer_store: Arc<PeerStore<K, L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
-		logger: L, config: Arc<Config>,
+		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
+		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -347,7 +345,7 @@ where
 				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
 
 				// We set nLockTime to the current height to discourage fee sniping.
-				let cur_height = self.channel_manager.current_best_block().height();
+				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
 				// Sign the final funding transaction and broadcast it.
@@ -717,9 +715,10 @@ where
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,
-				fee_earned_msat,
+				total_fee_earned_msat,
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
+				..
 			} => {
 				let read_only_network_graph = self.network_graph.read_only();
 				let nodes = read_only_network_graph.nodes();
@@ -752,7 +751,7 @@ where
 				let to_next_str =
 					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
-				let fee_earned = fee_earned_msat.unwrap_or(0);
+				let fee_earned = total_fee_earned_msat.unwrap_or(0);
 				let outbound_amount_forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
 				if claim_from_onchain_tx {
 					log_info!(
@@ -780,6 +779,7 @@ where
 				former_temporary_channel_id,
 				counterparty_node_id,
 				funding_txo,
+				..
 			} => {
 				log_info!(
 					self.logger,
@@ -875,6 +875,7 @@ where
 			LdkEvent::HTLCIntercepted { .. } => {},
 			LdkEvent::BumpTransaction(_) => {},
 			LdkEvent::InvoiceRequestFailed { .. } => {},
+			LdkEvent::InvoiceGenerated { .. } => {},
 			LdkEvent::ConnectionNeeded { .. } => {},
 		}
 	}
@@ -889,7 +890,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn event_queue_persistence() {
-		let store = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
@@ -926,7 +927,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn event_queue_concurrency() {
-		let store = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);

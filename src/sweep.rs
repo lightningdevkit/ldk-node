@@ -199,7 +199,7 @@ where
 	fn rebroadcast_if_necessary(&self) {
 		let (cur_height, cur_hash) = {
 			let best_block = self.best_block.lock().unwrap();
-			(best_block.height(), best_block.block_hash())
+			(best_block.height, best_block.block_hash)
 		};
 
 		let mut respend_descriptors = Vec::new();
@@ -277,7 +277,7 @@ where
 	}
 
 	fn prune_confirmed_outputs(&self) {
-		let cur_height = self.best_block.lock().unwrap().height();
+		let cur_height = self.best_block.lock().unwrap().height;
 		let mut locked_outputs = self.outputs.lock().unwrap();
 
 		// Prune all outputs that have sufficient depth by now.
@@ -370,9 +370,9 @@ where
 	) {
 		{
 			let best_block = self.best_block.lock().unwrap();
-			assert_eq!(best_block.block_hash(), header.prev_blockhash,
+			assert_eq!(best_block.block_hash, header.prev_blockhash,
 			"Blocks must be connected in chain-order - the connected header must build on the last connected header");
-			assert_eq!(best_block.height(), height - 1,
+			assert_eq!(best_block.height, height - 1,
 			"Blocks must be connected in chain-order - the connected block height must be one greater than the previous height");
 		}
 
@@ -384,9 +384,9 @@ where
 		let new_height = height - 1;
 		{
 			let mut best_block = self.best_block.lock().unwrap();
-			assert_eq!(best_block.block_hash(), header.block_hash(),
+			assert_eq!(best_block.block_hash, header.block_hash(),
 				"Blocks must be disconnected in chain-order - the disconnected header must be the last connected header");
-			assert_eq!(best_block.height(), height,
+			assert_eq!(best_block.height, height,
 				"Blocks must be disconnected in chain-order - the disconnected block must have the correct height");
 			*best_block = BestBlock::new(header.prev_blockhash, new_height)
 		}

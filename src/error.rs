@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// An error that possibly needs to be handled by the user.
 pub enum Error {
 	/// Returned when trying to start [`crate::Node`] while it is already running.
