@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// An error that possibly needs to be handled by the user.
 pub enum Error {
 	/// Returned when trying to start [`crate::Node`] while it is already running.
@@ -13,6 +13,8 @@ pub enum Error {
 	ConnectionFailed,
 	/// Invoice creation failed.
 	InvoiceCreationFailed,
+	/// Offer creation failed.
+	OfferCreationFailed,
 	/// Sending a payment has failed.
 	PaymentSendingFailed,
 	/// Sending a payment probe has failed.
@@ -47,6 +49,8 @@ pub enum Error {
 	InvalidPublicKey,
 	/// The given secret key is invalid.
 	InvalidSecretKey,
+	/// The given payment id is invalid.
+	InvalidPaymentId,
 	/// The given payment hash is invalid.
 	InvalidPaymentHash,
 	/// The given payment pre-image is invalid.
@@ -57,12 +61,16 @@ pub enum Error {
 	InvalidAmount,
 	/// The given invoice is invalid.
 	InvalidInvoice,
+	/// The given offer is invalid.
+	InvalidOffer,
 	/// The given channel ID is invalid.
 	InvalidChannelId,
 	/// The given network is invalid.
 	InvalidNetwork,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
+	/// The provided offer was denonminated in an unsupported currency.
+	UnsupportedCurrency,
 	/// The available funds are insufficient to complete the given operation.
 	InsufficientFunds,
 	/// The given operation failed due to the required liquidity source being unavailable.
@@ -81,6 +89,7 @@ impl fmt::Display for Error {
 			},
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
+			Self::OfferCreationFailed => write!(f, "Failed to create offer."),
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
 			Self::ProbeSendingFailed => write!(f, "Failed to send the given payment probe."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
@@ -100,11 +109,13 @@ impl fmt::Display for Error {
 			Self::InvalidSocketAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
 			Self::InvalidSecretKey => write!(f, "The given secret key is invalid."),
+			Self::InvalidPaymentId => write!(f, "The given payment id is invalid."),
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
 			Self::InvalidPaymentPreimage => write!(f, "The given payment preimage is invalid."),
 			Self::InvalidPaymentSecret => write!(f, "The given payment secret is invalid."),
 			Self::InvalidAmount => write!(f, "The given amount is invalid."),
 			Self::InvalidInvoice => write!(f, "The given invoice is invalid."),
+			Self::InvalidOffer => write!(f, "The given offer is invalid."),
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
 			Self::DuplicatePayment => {
@@ -112,6 +123,9 @@ impl fmt::Display for Error {
 			},
 			Self::InsufficientFunds => {
 				write!(f, "The available funds are insufficient to complete the given operation.")
+			},
+			Self::UnsupportedCurrency => {
+				write!(f, "The provided offer was denonminated in an unsupported currency.")
 			},
 			Self::LiquiditySourceUnavailable => {
 				write!(f, "The given operation failed due to the required liquidity source being unavailable.")

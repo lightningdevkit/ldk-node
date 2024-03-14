@@ -7,11 +7,16 @@ use common::{
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
 
+use ldk_node::payment::PaymentKind;
 use ldk_node::{Builder, Event, NodeError};
+
+use lightning::util::persist::KVStore;
 
 use bitcoin::{Amount, Network};
 
 use std::sync::Arc;
+
+use crate::common::expect_channel_ready_event;
 
 #[test]
 fn channel_full_cycle() {
@@ -32,8 +37,8 @@ fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
 
-	let addr_a = node_a.new_onchain_address().unwrap();
-	let addr_b = node_b.new_onchain_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
 	let premine_amount_sat = 100_000;
 
@@ -78,7 +83,7 @@ fn multi_hop_sending() {
 		nodes.push(node);
 	}
 
-	let addresses = nodes.iter().map(|n| n.new_onchain_address().unwrap()).collect();
+	let addresses = nodes.iter().map(|n| n.onchain_payment().new_address().unwrap()).collect();
 	let premine_amount_sat = 5_000_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -131,12 +136,12 @@ fn multi_hop_sending() {
 	// Sleep a bit for gossip to propagate.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
-	let invoice = nodes[4].receive_payment(2_500_000, &"asdf", 9217).unwrap();
-	nodes[0].send_payment(&invoice).unwrap();
+	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
+	nodes[0].bolt11_payment().send(&invoice).unwrap();
 
-	let payment_hash = expect_payment_received_event!(&nodes[4], 2_500_000);
+	let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);
-	expect_payment_successful_event!(nodes[0], payment_hash, fee_paid_msat);
+	expect_payment_successful_event!(nodes[0], payment_id, Some(fee_paid_msat));
 }
 
 #[test]
@@ -157,7 +162,8 @@ fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
+	let test_sync_store: Arc<dyn KVStore + Sync + Send> =
+		Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
 
 	setup_builder!(builder, config);
 	builder.set_esplora_server(esplora_url.clone());
@@ -168,7 +174,7 @@ fn start_stop_reinit() {
 	let expected_node_id = node.node_id();
 	assert_eq!(node.start(), Err(NodeError::AlreadyRunning));
 
-	let funding_address = node.new_onchain_address().unwrap();
+	let funding_address = node.onchain_payment().new_address().unwrap();
 
 	assert_eq!(node.list_balances().total_onchain_balance_sats, 0);
 
@@ -222,8 +228,8 @@ fn onchain_spend_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
 
-	let addr_a = node_a.new_onchain_address().unwrap();
-	let addr_b = node_b.new_onchain_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -236,9 +242,12 @@ fn onchain_spend_receive() {
 	node_b.sync_wallets().unwrap();
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, 100000);
 
-	assert_eq!(Err(NodeError::InsufficientFunds), node_a.send_to_onchain_address(&addr_b, 1000));
+	assert_eq!(
+		Err(NodeError::InsufficientFunds),
+		node_a.onchain_payment().send_to_address(&addr_b, 1000)
+	);
 
-	let txid = node_b.send_to_onchain_address(&addr_a, 1000).unwrap();
+	let txid = node_b.onchain_payment().send_to_address(&addr_a, 1000).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
@@ -249,8 +258,8 @@ fn onchain_spend_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats > 98000);
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
 
-	let addr_b = node_b.new_onchain_address().unwrap();
-	let txid = node_a.send_all_to_onchain_address(&addr_b).unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
@@ -328,5 +337,102 @@ fn do_connection_restart_behavior(persist: bool) {
 	} else {
 		assert!(node_a.list_peers().is_empty());
 		assert!(node_b.list_peers().is_empty());
+	}
+}
+
+#[test]
+fn concurrent_connections_succeed() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+
+	let node_a = Arc::new(node_a);
+	let node_b = Arc::new(node_b);
+
+	let node_id_b = node_b.node_id();
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+
+	while !node_b.status().is_listening {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
+	let mut handles = Vec::new();
+	for _ in 0..10 {
+		let thread_node = Arc::clone(&node_a);
+		let thread_addr = node_addr_b.clone();
+		let handle = std::thread::spawn(move || {
+			thread_node.connect(node_id_b, thread_addr, false).unwrap();
+		});
+		handles.push(handle);
+	}
+
+	for h in handles {
+		h.join().unwrap();
+	}
+}
+
+#[test]
+fn simple_bolt12_send_receive() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 1_000_000, true, &electrsd);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Sleep until we broadcasted a node announcement.
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
+	// Sleep one more sec to make sure the node announcement propagates.
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	let expected_amount_msat = 100_000_000;
+	let offer = node_b.bolt12_payment().receive(expected_amount_msat, "asdf").unwrap();
+	let payment_id = node_a.bolt12_payment().send(&offer, None).unwrap();
+
+	expect_payment_successful_event!(node_a, Some(payment_id), None);
+	let node_a_payments = node_a.list_payments();
+	assert_eq!(node_a_payments.len(), 1);
+	match node_a_payments.first().unwrap().kind {
+		PaymentKind::Bolt12 { hash, preimage, secret: _ } => {
+			assert!(hash.is_some());
+			assert!(preimage.is_some());
+			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+			//API currently doesn't allow to do that.
+		},
+		_ => {
+			panic!("Unexpected payment kind");
+		},
+	}
+
+	expect_payment_received_event!(node_b, expected_amount_msat);
+	let node_b_payments = node_b.list_payments();
+	assert_eq!(node_b_payments.len(), 1);
+	match node_b_payments.first().unwrap().kind {
+		PaymentKind::Bolt12 { hash, preimage, secret } => {
+			assert!(hash.is_some());
+			assert!(preimage.is_some());
+			assert!(secret.is_some());
+		},
+		_ => {
+			panic!("Unexpected payment kind");
+		},
 	}
 }

@@ -11,7 +11,7 @@ A ready-to-go Lightning node library built using [LDK][ldk] and [BDK][bdk].
 LDK Node is a self-custodial Lightning node in library form. Its central goal is to provide a small, simple, and straightforward interface that enables users to easily set up and run a Lightning node with an integrated on-chain wallet. While minimalism is at its core, LDK Node aims to be sufficiently modular and configurable to be useful for a variety of use cases.
 
 ## Getting Started
-The primary abstraction of the library is the [`Node`][api_docs_node], which can be retrieved by setting up and configuring a [`Builder`][api_docs_builder] to your liking and calling one of the `build` methods. `Node` can then be controlled via commands such as `start`, `stop`, `connect_open_channel`, `send_payment`, etc.
+The primary abstraction of the library is the [`Node`][api_docs_node], which can be retrieved by setting up and configuring a [`Builder`][api_docs_builder] to your liking and calling one of the `build` methods. `Node` can then be controlled via commands such as `start`, `stop`, `connect_open_channel`, `send`, etc.
 
 ```rust
 use ldk_node::Builder;
@@ -31,7 +31,7 @@ fn main() {
 
 	node.start().unwrap();
 
-	let funding_address = node.new_onchain_address();
+	let funding_address = node.onchain_payment().new_address();
 
 	// .. fund address ..
 
@@ -44,7 +44,7 @@ fn main() {
 	node.event_handled();
 
 	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
-	node.send_payment(&invoice).unwrap();
+	node.bolt11_payment().send(&invoice).unwrap();
 
 	node.stop().unwrap();
 }
