@@ -2,6 +2,7 @@ use crate::config::{
 	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, DEFAULT_ESPLORA_SERVER_URL,
 	WALLET_KEYS_SEED_LEN,
 };
+use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
@@ -10,13 +11,13 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, FilesystemLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment_store::PaymentStore;
+use crate::payment::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, FakeMessageRouter, GossipSync, KeysManager, NetworkGraph,
-	OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, DynStore, FakeMessageRouter, GossipSync, KeysManager,
+	NetworkGraph, OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::{LogLevel, Node};
@@ -33,7 +34,7 @@ use lightning::sign::EntropySource;
 
 use lightning::util::config::UserConfig;
 use lightning::util::persist::{
-	read_channel_monitors, KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	read_channel_monitors, CHANNEL_MANAGER_PERSISTENCE_KEY,
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
@@ -65,6 +66,7 @@ use std::fmt;
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -114,12 +116,18 @@ pub enum BuildError {
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
 	/// We failed to read data from the [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
 	StoragePathAccessFailed,
 	/// We failed to setup our [`KVStore`].
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
@@ -298,7 +306,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Node<SqliteStore>, BuildError> {
+	pub fn build(&self) -> Result<Node, BuildError> {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
@@ -315,7 +323,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Node<FilesystemStore>, BuildError> {
+	pub fn build_with_fs_store(&self) -> Result<Node, BuildError> {
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
@@ -328,9 +336,7 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
 	/// previously configured.
 	#[cfg(any(vss, vss_test))]
-	pub fn build_with_vss_store(
-		&self, url: String, store_id: String,
-	) -> Result<Node<VssStore>, BuildError> {
+	pub fn build_with_vss_store(&self, url: String, store_id: String) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 
 		let seed_bytes = seed_bytes_from_config(
@@ -368,9 +374,7 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
-		&self, kv_store: Arc<K>,
-	) -> Result<Node<K>, BuildError> {
+	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.config)?;
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -499,31 +503,29 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Arc<Node<SqliteStore>>, BuildError> {
+	pub fn build(&self) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build().map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Arc<Node<FilesystemStore>>, BuildError> {
+	pub fn build_with_fs_store(&self) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<K: KVStore + Sync + Send + 'static>(
-		&self, kv_store: Arc<K>,
-	) -> Result<Arc<Node<K>>, BuildError> {
+	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
 	}
 }
 
 /// Builds a [`Node`] instance according to the options previously configured.
-fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
+fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<K>,
-) -> Result<Node<K>, BuildError> {
+	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+) -> Result<Node, BuildError> {
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
 		.map_err(|e| {
@@ -603,7 +605,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	));
 
 	// Initialize the ChainMonitor
-	let chain_monitor: Arc<ChainMonitor<K>> = Arc::new(chainmonitor::ChainMonitor::new(
+	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
 		Some(Arc::clone(&tx_sync)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
@@ -663,7 +665,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
-		keys_manager.get_secure_random_bytes(),
+		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
 		scoring_fee_params,
 	));
@@ -692,12 +694,11 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 	// for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
-
-	if !config.trusted_peers_0conf.is_empty() {
-		// Manually accept inbound channels if we expect 0conf channel requests, avoid
-		// generating the events otherwise.
-		user_config.manually_accept_inbound_channels = true;
-	}
+	user_config.manually_accept_inbound_channels = true;
+	// Note the channel_handshake_config will be overwritten in `connect_open_channel`, but we
+	// still set a default here.
+	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
+		config.anchor_channels_config.is_some();
 
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
@@ -734,7 +735,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 				channel_monitor_references,
 			);
 			let (_hash, channel_manager) =
-				<(BlockHash, ChannelManager<K>)>::read(&mut reader, read_args).map_err(|e| {
+				<(BlockHash, ChannelManager)>::read(&mut reader, read_args).map_err(|e| {
 					log_error!(logger, "Failed to read channel manager from KVStore: {}", e);
 					BuildError::ReadFailed
 				})?;
@@ -891,6 +892,9 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
+	let connection_manager =
+		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
+
 	// Init payment info storage
 	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(payments) => {
@@ -943,12 +947,18 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			},
 		};
 
-	let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
+	let (stop_sender, _) = tokio::sync::watch::channel(());
+
+	let is_listening = Arc::new(AtomicBool::new(false));
+	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
+	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
+	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
 
 	Ok(Node {
 		runtime,
 		stop_sender,
-		stop_receiver,
 		config,
 		wallet,
 		tx_sync,
@@ -959,6 +969,7 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		chain_monitor,
 		output_sweeper,
 		peer_manager,
+		connection_manager,
 		keys_manager,
 		network_graph,
 		gossip_source,
@@ -969,6 +980,12 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 		scorer,
 		peer_store,
 		payment_store,
+		is_listening,
+		latest_wallet_sync_timestamp,
+		latest_onchain_wallet_sync_timestamp,
+		latest_fee_rate_cache_update_timestamp,
+		latest_rgs_snapshot_timestamp,
+		latest_node_announcement_broadcast_timestamp,
 	})
 }
 
