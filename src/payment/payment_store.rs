@@ -52,7 +52,8 @@ impl Writeable for PaymentDetails {
 			(4, None::<Option<PaymentSecret>>, required),
 			(6, self.amount_msat, required),
 			(8, self.direction, required),
-			(10, self.status, required)
+			(10, self.status, required),
+			(131074, self.last_update, required)
 		});
 		Ok(())
 	}
@@ -69,7 +70,6 @@ impl Readable for PaymentDetails {
 			(6, amount_msat, required),
 			(8, direction, required),
 			(10, status, required),
-			(131072, bolt11_invoice, option),
 			(131074, last_update, required),
 		});
 
@@ -106,7 +106,7 @@ impl Readable for PaymentDetails {
 						lsp_fee_limits,
 					}
 				} else {
-					PaymentKind::Bolt11 { hash, preimage, secret, bolt11_invoice }
+					PaymentKind::Bolt11 { hash, preimage, secret, bolt11_invoice: None }
 				}
 			} else {
 				PaymentKind::Spontaneous { hash, preimage }
@@ -410,7 +410,6 @@ mod tests {
 		pub direction: PaymentDirection,
 		pub status: PaymentStatus,
 		pub lsp_fee_limits: Option<LSPFeeLimits>,
-		pub bolt11_invoice: Option<String>,
 	}
 
 	impl_writeable_tlv_based!(OldPaymentDetails, {
@@ -421,7 +420,6 @@ mod tests {
 		(6, amount_msat, required),
 		(8, direction, required),
 		(10, status, required),
-		(131072, bolt11_invoice, option),
 	});
 
 	#[test]
@@ -494,7 +492,6 @@ mod tests {
 				direction: PaymentDirection::Inbound,
 				status: PaymentStatus::Pending,
 				lsp_fee_limits: None,
-				bolt11_invoice: Some(bolt11_invoice.to_string()),
 			};
 
 			let old_bolt11_encoded = old_bolt11_payment.encode();
@@ -539,7 +536,6 @@ mod tests {
 				direction: PaymentDirection::Inbound,
 				status: PaymentStatus::Pending,
 				lsp_fee_limits,
-				bolt11_invoice: Some(bolt11_invoice.to_string()),
 			};
 
 			let old_bolt11_jit_encoded = old_bolt11_jit_payment.encode();
@@ -584,7 +580,6 @@ mod tests {
 				direction: PaymentDirection::Inbound,
 				status: PaymentStatus::Pending,
 				lsp_fee_limits: None,
-				bolt11_invoice: None,
 			};
 
 			let old_spontaneous_encoded = old_spontaneous_payment.encode();
