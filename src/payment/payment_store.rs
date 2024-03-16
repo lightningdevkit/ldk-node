@@ -99,7 +99,6 @@ impl Readable for PaymentDetails {
 						preimage,
 						secret,
 						lsp_fee_limits,
-						bolt11_invoice,
 					}
 				} else {
 					PaymentKind::Bolt11 { hash, preimage, secret, bolt11_invoice }
@@ -184,8 +183,6 @@ pub enum PaymentKind {
 		///
 		/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 		lsp_fee_limits: LSPFeeLimits,
-		/// The invoice that was paid.
-		bolt11_invoice: Option<String>,
 	},
 	/// A spontaneous ("keysend") payment.
 	Spontaneous {
@@ -209,7 +206,6 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(4, secret, option),
 		(6, lsp_fee_limits, required),
-		(131072, bolt11_invoice, option),
 	},
 	(8, Spontaneous) => {
 		(0, hash, required),
@@ -555,13 +551,11 @@ mod tests {
 					preimage: p,
 					secret: s,
 					lsp_fee_limits: l,
-					bolt11_invoice: i,
 				} => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
 					assert_eq!(lsp_fee_limits, Some(l));
-					assert_eq!(Some(bolt11_invoice.to_string()), i);
 				},
 				_ => {
 					panic!("Unexpected kind!");

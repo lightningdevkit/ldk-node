@@ -444,7 +444,6 @@ impl Bolt11Payment {
 			preimage: None,
 			secret: Some(invoice.payment_secret().clone()),
 			lsp_fee_limits,
-			bolt11_invoice: Some(invoice.to_string()),
 		};
 		let payment = PaymentDetails {
 			id,

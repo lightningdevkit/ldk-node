@@ -232,7 +232,7 @@ interface ClosureReason {
 interface PaymentKind {
 	Onchain();
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, string? bolt11_invoice);
-	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits, string? bolt11_invoice);
+	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
 };
 
