@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// An error that possibly needs to be handled by the user.
 pub enum Error {
 	/// Returned when trying to start [`crate::Node`] while it is already running.
@@ -47,6 +47,8 @@ pub enum Error {
 	InvalidPublicKey,
 	/// The given secret key is invalid.
 	InvalidSecretKey,
+	/// The given payment id is invalid.
+	InvalidPaymentId,
 	/// The given payment hash is invalid.
 	InvalidPaymentHash,
 	/// The given payment pre-image is invalid.
@@ -102,6 +104,7 @@ impl fmt::Display for Error {
 			Self::InvalidSocketAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
 			Self::InvalidSecretKey => write!(f, "The given secret key is invalid."),
+			Self::InvalidPaymentId => write!(f, "The given payment id is invalid."),
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
 			Self::InvalidPaymentPreimage => write!(f, "The given payment preimage is invalid."),
 			Self::InvalidPaymentSecret => write!(f, "The given payment secret is invalid."),

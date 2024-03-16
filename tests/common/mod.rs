@@ -2,9 +2,8 @@
 #![allow(dead_code)]
 
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::{
-	Builder, Config, Event, LogLevel, Node, NodeError, PaymentDirection, PaymentStatus, TlvEntry,
-};
+use ldk_node::payment::{PaymentDirection, PaymentStatus};
+use ldk_node::{Builder, Config, Event, LogLevel, Node, NodeError, TlvEntry};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::persist::KVStore;
@@ -80,6 +79,42 @@ macro_rules! expect_channel_ready_event {
 
 pub(crate) use expect_channel_ready_event;
 
+macro_rules! expect_payment_received_event {
+	($node: expr, $amount_msat: expr) => {{
+		match $node.wait_next_event() {
+			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
+				println!("{} got event {:?}", $node.node_id(), e);
+				assert_eq!(amount_msat, $amount_msat);
+				$node.event_handled();
+				payment_id
+			},
+			ref e => {
+				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+			},
+		}
+	}};
+}
+
+pub(crate) use expect_payment_received_event;
+
+macro_rules! expect_payment_successful_event {
+	($node: expr, $payment_id: expr, $fee_paid_msat: expr) => {{
+		match $node.wait_next_event() {
+			ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
+				println!("{} got event {:?}", $node.node_id(), e);
+				assert_eq!(fee_paid_msat, $fee_paid_msat);
+				assert_eq!(payment_id, $payment_id);
+				$node.event_handled();
+			},
+			ref e => {
+				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+			},
+		}
+	}};
+}
+
+pub(crate) use expect_payment_successful_event;
+
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe =
 		env::var("BITCOIND_EXE").ok().or_else(|| bitcoind::downloaded_exe_path().ok()).expect(
@@ -126,8 +161,12 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 	listening_addresses
 }
 
-pub(crate) fn random_config() -> Config {
+pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let mut config = Config::default();
+
+	if !anchor_channels {
+		config.anchor_channels_config = None;
+	}
 
 	config.network = Network::Regtest;
 	println!("Setting network: {}", config.network);
@@ -146,9 +185,9 @@ pub(crate) fn random_config() -> Config {
 }
 
 #[cfg(feature = "uniffi")]
-type TestNode<K> = Arc<Node<K>>;
+type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
-type TestNode<K> = Node<K>;
+type TestNode = Node;
 
 macro_rules! setup_builder {
 	($builder: ident, $config: expr) => {
@@ -162,14 +201,14 @@ macro_rules! setup_builder {
 pub(crate) use setup_builder;
 
 pub(crate) fn setup_two_nodes(
-	electrsd: &ElectrsD, allow_0conf: bool,
-) -> (TestNode<TestSyncStore>, TestNode<TestSyncStore>) {
+	electrsd: &ElectrsD, allow_0conf: bool, anchor_channels: bool,
+) -> (TestNode, TestNode) {
 	println!("== Node A ==");
-	let config_a = random_config();
+	let config_a = random_config(anchor_channels);
 	let node_a = setup_node(electrsd, config_a);
 
 	println!("\n== Node B ==");
-	let mut config_b = random_config();
+	let mut config_b = random_config(anchor_channels);
 	if allow_0conf {
 		config_b.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -177,13 +216,15 @@ pub(crate) fn setup_two_nodes(
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode<TestSyncStore> {
+pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	setup_builder!(builder, config);
 	builder.set_esplora_server(esplora_url.clone());
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
+	assert!(node.status().is_running);
+	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
 	node
 }
 
@@ -294,8 +335,8 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	generate_blocks_and_wait(bitcoind, electrs, 1);
 }
 
-pub fn open_channel<K: KVStore + Sync + Send>(
-	node_a: &TestNode<K>, node_b: &TestNode<K>, funding_amount_sat: u64, announce: bool,
+pub fn open_channel(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, announce: bool,
 	electrsd: &ElectrsD,
 ) {
 	node_a
@@ -316,14 +357,14 @@ pub fn open_channel<K: KVStore + Sync + Send>(
 	wait_for_tx(&electrsd.client, funding_txo_a.txid);
 }
 
-pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
-	node_a: TestNode<K>, node_b: TestNode<K>, bitcoind: &BitcoindClient, electrsd: &E,
-	allow_0conf: bool,
+pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
+	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
+	expect_anchor_channel: bool,
 ) {
-	let addr_a = node_a.new_onchain_address().unwrap();
-	let addr_b = node_b.new_onchain_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
-	let premine_amount_sat = 100_000;
+	let premine_amount_sat = if expect_anchor_channel { 125_000 } else { 100_000 };
 
 	premine_and_distribute_funds(
 		&bitcoind,
@@ -355,6 +396,7 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 		.unwrap();
 
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
+	assert!(node_a.list_peers().first().unwrap().is_persisted);
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
@@ -369,25 +411,30 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 	node_b.sync_wallets().unwrap();
 
 	let onchain_fee_buffer_sat = 1500;
-	let node_a_upper_bound_sat = premine_amount_sat - funding_amount_sat;
-	let node_a_lower_bound_sat = premine_amount_sat - funding_amount_sat - onchain_fee_buffer_sat;
+	let anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
+	let node_a_upper_bound_sat = premine_amount_sat - anchor_reserve_sat - funding_amount_sat;
+	let node_a_lower_bound_sat =
+		premine_amount_sat - anchor_reserve_sat - funding_amount_sat - onchain_fee_buffer_sat;
 	assert!(node_a.list_balances().spendable_onchain_balance_sats < node_a_upper_bound_sat);
 	assert!(node_a.list_balances().spendable_onchain_balance_sats > node_a_lower_bound_sat);
-	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(
+		node_b.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat - anchor_reserve_sat
+	);
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 
 	let user_channel_id = expect_channel_ready_event!(node_b, node_a.node_id());
 
-	println!("\nB receive_payment");
+	println!("\nB receive");
 	let invoice_amount_1_msat = 2500_000;
-	let invoice = node_b.receive_payment(invoice_amount_1_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b.bolt11_payment().receive(invoice_amount_1_msat, &"asdf", 9217).unwrap();
 
-	println!("\nA send_payment");
-	let payment_hash = node_a.send_payment(&invoice).unwrap();
-	assert_eq!(node_a.send_payment(&invoice), Err(NodeError::DuplicatePayment));
+	println!("\nA send");
+	let payment_id = node_a.bolt11_payment().send(&invoice).unwrap();
+	assert_eq!(node_a.bolt11_payment().send(&invoice), Err(NodeError::DuplicatePayment));
 
-	assert_eq!(node_a.list_payments().first().unwrap().hash, payment_hash);
+	assert_eq!(node_a.list_payments().first().unwrap().id, payment_id);
 
 	let outbound_payments_a =
 		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
@@ -407,38 +454,39 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 
 	expect_event!(node_a, PaymentSuccessful);
 	expect_event!(node_b, PaymentReceived);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
-	assert_eq!(Err(NodeError::DuplicatePayment), node_a.send_payment(&invoice));
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 2500_000;
-	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 
 	let underpaid_amount = invoice_amount_2_msat - 1;
 	assert_eq!(
 		Err(NodeError::InvalidAmount),
-		node_a.send_payment_using_amount(&invoice, underpaid_amount)
+		node_a.bolt11_payment().send_using_amount(&invoice, underpaid_amount)
 	);
 
-	println!("\nB overpaid receive_payment");
-	let invoice = node_b.receive_payment(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	println!("\nB overpaid receive");
+	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
 
-	println!("\nA overpaid send_payment");
-	let payment_hash = node_a.send_payment_using_amount(&invoice, overpaid_amount_msat).unwrap();
+	println!("\nA overpaid send");
+	let payment_id =
+		node_a.bolt11_payment().send_using_amount(&invoice, overpaid_amount_msat).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
@@ -451,21 +499,27 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, overpaid_amount_msat);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(overpaid_amount_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
 
 	// Test "zero-amount" invoice payment
 	println!("\nB receive_variable_amount_payment");
-	let variable_amount_invoice = node_b.receive_variable_amount_payment(&"asdf", 9217).unwrap();
+	let variable_amount_invoice =
+		node_b.bolt11_payment().receive_variable_amount(&"asdf", 9217).unwrap();
 	let determined_amount_msat = 2345_678;
-	assert_eq!(Err(NodeError::InvalidInvoice), node_a.send_payment(&variable_amount_invoice));
-	println!("\nA send_payment_using_amount");
-	let payment_hash =
-		node_a.send_payment_using_amount(&variable_amount_invoice, determined_amount_msat).unwrap();
+	assert_eq!(
+		Err(NodeError::InvalidInvoice),
+		node_a.bolt11_payment().send(&variable_amount_invoice)
+	);
+	println!("\nA send_using_amount");
+	let payment_id = node_a
+		.bolt11_payment()
+		.send_using_amount(&variable_amount_invoice, determined_amount_msat)
+		.unwrap();
 
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {
@@ -479,20 +533,21 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, determined_amount_msat);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
-	assert_eq!(node_b.payment(&payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_hash).unwrap().amount_msat, Some(determined_amount_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
 
 	// Test spontaneous/keysend payments
 	println!("\nA send_spontaneous_payment");
 	let keysend_amount_msat = 2500_000;
 	let tlv1 = TlvEntry { r#type: 131073, value: vec![0x00, 0x11, 0x22, 0x33] };
 	let tlv2 = TlvEntry { r#type: 131075, value: vec![0xaa, 0xbb] };
-	let keysend_payment_hash = node_a
-		.send_spontaneous_payment(keysend_amount_msat, node_b.node_id(), vec![tlv1, tlv2])
+	let keysend_payment_id = node_a
+		.spontaneous_payment()
+		.send(keysend_amount_msat, node_b.node_id(), vec![tlv1, tlv2])
 		.unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_keysend_amount = match node_b.wait_next_event() {
@@ -506,24 +561,15 @@ pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_keysend_amount, keysend_amount_msat);
-	assert_eq!(node_a.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(
-		node_a.payment(&keysend_payment_hash).unwrap().direction,
-		PaymentDirection::Outbound
-	);
-	assert_eq!(
-		node_a.payment(&keysend_payment_hash).unwrap().amount_msat,
-		Some(keysend_amount_msat)
-	);
-	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&keysend_payment_hash).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(
-		node_b.payment(&keysend_payment_hash).unwrap().amount_msat,
-		Some(keysend_amount_msat)
-	);
+	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
+	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
 
 	println!("\nB close_channel");
-	node_b.close_channel(&user_channel_id, node_a.node_id()).unwrap();
+	node_b.close_channel(&user_channel_id, node_a.node_id(), false).unwrap();
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
