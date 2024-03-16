@@ -99,12 +99,7 @@ impl Readable for PaymentDetails {
 
 			if secret.is_some() {
 				if let Some(lsp_fee_limits) = lsp_fee_limits {
-					PaymentKind::Bolt11Jit {
-						hash,
-						preimage,
-						secret,
-						lsp_fee_limits,
-					}
+					PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits }
 				} else {
 					PaymentKind::Bolt11 { hash, preimage, secret, bolt11_invoice: None }
 				}
@@ -340,9 +335,9 @@ where
 			}
 
 			payment.last_update = time::SystemTime::now()
-			.duration_since(time::UNIX_EPOCH)
-			.unwrap_or(time::Duration::ZERO)
-			.as_secs();
+				.duration_since(time::UNIX_EPOCH)
+				.unwrap_or(time::Duration::ZERO)
+				.as_secs();
 
 			self.persist_info(&update.id, payment)?;
 			updated = true;
@@ -553,12 +548,7 @@ mod tests {
 			);
 
 			match bolt11_jit_decoded.kind {
-				PaymentKind::Bolt11Jit {
-					hash: h,
-					preimage: p,
-					secret: s,
-					lsp_fee_limits: l,
-				} => {
+				PaymentKind::Bolt11Jit { hash: h, preimage: p, secret: s, lsp_fee_limits: l } => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
@@ -608,4 +598,3 @@ mod tests {
 		}
 	}
 }
-
