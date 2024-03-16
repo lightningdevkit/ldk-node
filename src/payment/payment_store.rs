@@ -475,7 +475,6 @@ mod tests {
 		let preimage = Some(PaymentPreimage([43u8; 32]));
 		let secret = Some(PaymentSecret([44u8; 32]));
 		let amount_msat = Some(45_000_000);
-		let bolt11_invoice = "bolt11_invoice";
 
 		// Test `Bolt11` de/ser
 		{
@@ -504,11 +503,10 @@ mod tests {
 			);
 
 			match bolt11_decoded.kind {
-				PaymentKind::Bolt11 { hash: h, preimage: p, secret: s, bolt11_invoice: i } => {
+				PaymentKind::Bolt11 { hash: h, preimage: p, secret: s, bolt11_invoice: None } => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
-					assert_eq!(Some(bolt11_invoice.to_string()), i);
 				},
 				_ => {
 					panic!("Unexpected kind!");
