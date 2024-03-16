@@ -258,6 +258,7 @@ dictionary PaymentDetails {
 	u64? amount_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
+	u64 last_update;
 };
 
 // [NonExhaustive]
