@@ -589,6 +589,7 @@ where
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
+							last_update: 0,
 						};
 
 						match self.payment_store.insert(payment) {

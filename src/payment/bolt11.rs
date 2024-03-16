@@ -115,6 +115,7 @@ impl Bolt11Payment {
 					amount_msat: invoice.amount_milli_satoshis(),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
+					last_update: 0,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -137,6 +138,7 @@ impl Bolt11Payment {
 							amount_msat: invoice.amount_milli_satoshis(),
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
+							last_update: 0,
 						};
 
 						self.payment_store.insert(payment)?;
@@ -230,6 +232,7 @@ impl Bolt11Payment {
 					amount_msat: Some(amount_msat),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
+					last_update: 0,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -254,6 +257,7 @@ impl Bolt11Payment {
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
+							last_update: 0,
 						};
 						self.payment_store.insert(payment)?;
 
@@ -320,6 +324,7 @@ impl Bolt11Payment {
 			amount_msat,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
+			last_update: 0,
 		};
 
 		self.payment_store.insert(payment)?;
@@ -451,6 +456,7 @@ impl Bolt11Payment {
 			amount_msat,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
+			last_update: 0,
 		};
 
 		self.payment_store.insert(payment)?;

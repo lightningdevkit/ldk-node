@@ -95,6 +95,7 @@ impl SpontaneousPayment {
 					status: PaymentStatus::Pending,
 					direction: PaymentDirection::Outbound,
 					amount_msat: Some(amount_msat),
+					last_update: 0,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -117,6 +118,7 @@ impl SpontaneousPayment {
 							status: PaymentStatus::Failed,
 							direction: PaymentDirection::Outbound,
 							amount_msat: Some(amount_msat),
+							last_update: 0,
 						};
 
 						self.payment_store.insert(payment)?;

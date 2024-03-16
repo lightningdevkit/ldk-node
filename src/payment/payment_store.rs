@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +34,8 @@ pub struct PaymentDetails {
 	pub direction: PaymentDirection,
 	/// The status of the payment.
 	pub status: PaymentStatus,
+	/// Last update timestamp, as seconds since Unix epoch.
+	pub last_update: u64,
 }
 
 impl Writeable for PaymentDetails {
@@ -67,6 +70,7 @@ impl Readable for PaymentDetails {
 			(8, direction, required),
 			(10, status, required),
 			(131072, bolt11_invoice, option),
+			(131074, last_update, required),
 		});
 
 		let id: PaymentId = id.0.ok_or(DecodeError::InvalidValue)?;
@@ -75,6 +79,7 @@ impl Readable for PaymentDetails {
 		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
+		let last_update: u64 = last_update.0.ok_or(DecodeError::InvalidValue)?;
 
 		let kind = if let Some(kind) = kind_opt {
 			// If we serialized the payment kind, use it.
@@ -108,7 +113,7 @@ impl Readable for PaymentDetails {
 			}
 		};
 
-		Ok(PaymentDetails { id, kind, amount_msat, direction, status })
+		Ok(PaymentDetails { id, kind, amount_msat, direction, status, last_update })
 	}
 }
 
@@ -334,6 +339,11 @@ where
 				payment.status = status;
 			}
 
+			payment.last_update = time::SystemTime::now()
+			.duration_since(time::UNIX_EPOCH)
+			.unwrap_or(time::Duration::ZERO)
+			.as_secs();
+
 			self.persist_info(&update.id, payment)?;
 			updated = true;
 		}
@@ -440,6 +450,7 @@ mod tests {
 			amount_msat: None,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
+			last_update: 0,
 		};
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
@@ -602,3 +613,4 @@ mod tests {
 		}
 	}
 }
+
