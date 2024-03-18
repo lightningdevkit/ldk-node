@@ -146,10 +146,10 @@ class LibraryTest {
         val nodeId2 = node2.nodeId()
         println("Node Id 2: $nodeId2")
 
-        val address1 = node1.newOnchainAddress()
+        val address1 = node1.onchainPayment().newAddress()
         println("Funding address 1: $address1")
 
-        val address2 = node2.newOnchainAddress()
+        val address2 = node2.onchainPayment().newAddress()
         println("Funding address 2: $address2")
 
         val txid1 = sendToAddress(address1, 100000u)
@@ -203,9 +203,9 @@ class LibraryTest {
         val spendableBalance2AfterOpen = node2.listBalances().spendableOnchainBalanceSats
         println("Spendable balance 1 after open: $spendableBalance1AfterOpen")
         println("Spendable balance 2 after open: $spendableBalance2AfterOpen")
-        assert(spendableBalance1AfterOpen > 49000u)
-        assert(spendableBalance1AfterOpen < 50000u)
-        assertEquals(100000uL, spendableBalance2AfterOpen)
+        assert(spendableBalance1AfterOpen > 24000u)
+        assert(spendableBalance1AfterOpen < 25000u)
+        assertEquals(75000uL, spendableBalance2AfterOpen)
 
         val channelReadyEvent1 = node1.waitNextEvent()
         println("Got event: $channelReadyEvent1")
@@ -222,9 +222,9 @@ class LibraryTest {
             else -> return
         }
 
-        val invoice = node2.receivePayment(2500000u, "asdf", 9217u)
+        val invoice = node2.bolt11Payment().receive(2500000u, "asdf", 9217u)
 
-        node1.sendPayment(invoice)
+        node1.bolt11Payment().send(invoice)
 
         val paymentSuccessfulEvent = node1.waitNextEvent()
         println("Got event: $paymentSuccessfulEvent")
@@ -239,7 +239,7 @@ class LibraryTest {
         assert(node1.listPayments().size == 1)
         assert(node2.listPayments().size == 1)
 
-        node2.closeChannel(userChannelId, nodeId1)
+        node2.closeChannel(userChannelId, nodeId1, false)
 
         val channelClosedEvent1 = node1.waitNextEvent()
         println("Got event: $channelClosedEvent1")

@@ -4,6 +4,7 @@ use crate::Error;
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
+use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
@@ -16,18 +17,24 @@ use lightning::util::message_signing;
 use bdk::blockchain::EsploraBlockchain;
 use bdk::database::BatchDatabase;
 use bdk::wallet::AddressIndex;
-use bdk::FeeRate;
+use bdk::{Balance, FeeRate};
 use bdk::{SignOptions, SyncOptions};
 
+use bitcoin::address::{Payload, WitnessVersion};
 use bitcoin::bech32::u5;
+use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
+use bitcoin::hash_types::WPubkeyHash;
+use bitcoin::hashes::Hash;
+use bitcoin::key::XOnlyPublicKey;
+use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 pub struct Wallet<D, B: Deref, E: Deref, L: Deref>
@@ -45,6 +52,8 @@ where
 	broadcaster: B,
 	fee_estimator: E,
 	sync_lock: (Mutex<()>, Condvar),
+	// TODO: Drop this workaround after BDK 1.0 upgrade.
+	balance_cache: RwLock<Balance>,
 	logger: L,
 }
 
@@ -59,9 +68,17 @@ where
 		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>, broadcaster: B, fee_estimator: E,
 		logger: L,
 	) -> Self {
+		let start_balance = wallet.get_balance().unwrap_or(Balance {
+			immature: 0,
+			trusted_pending: 0,
+			untrusted_pending: 0,
+			confirmed: 0,
+		});
+
 		let inner = Mutex::new(wallet);
 		let sync_lock = (Mutex::new(()), Condvar::new());
-		Self { blockchain, inner, broadcaster, fee_estimator, sync_lock, logger }
+		let balance_cache = RwLock::new(start_balance);
+		Self { blockchain, inner, broadcaster, fee_estimator, sync_lock, balance_cache, logger }
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
@@ -81,10 +98,19 @@ where
 		let sync_options = SyncOptions { progress: None };
 		let wallet_lock = self.inner.lock().unwrap();
 		let res = match wallet_lock.sync(&self.blockchain, sync_options).await {
-			Ok(()) => Ok(()),
+			Ok(()) => {
+				// TODO: Drop this workaround after BDK 1.0 upgrade.
+				// Update balance cache after syncing.
+				if let Ok(balance) = wallet_lock.get_balance() {
+					*self.balance_cache.write().unwrap() = balance;
+				}
+				Ok(())
+			},
 			Err(e) => match e {
 				bdk::Error::Esplora(ref be) => match **be {
 					bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
+						// Drop lock, sleep for a second, retry.
+						drop(wallet_lock);
 						tokio::time::sleep(Duration::from_secs(1)).await;
 						log_error!(
 							self.logger,
@@ -92,7 +118,9 @@ where
 							e
 						);
 						let sync_options = SyncOptions { progress: None };
-						wallet_lock
+						self.inner
+							.lock()
+							.unwrap()
 							.sync(&self.blockchain, sync_options)
 							.await
 							.map_err(|e| From::from(e))
@@ -162,8 +190,28 @@ where
 		Ok(address_info.address)
 	}
 
-	pub(crate) fn get_balance(&self) -> Result<bdk::Balance, Error> {
-		Ok(self.inner.lock().unwrap().get_balance()?)
+	pub(crate) fn get_balances(
+		&self, total_anchor_channels_reserve_sats: u64,
+	) -> Result<(u64, u64), Error> {
+		// TODO: Drop this workaround after BDK 1.0 upgrade.
+		// We get the balance and update our cache if we can do so without blocking on the wallet
+		// Mutex. Otherwise, we return a cached value.
+		let balance = match self.inner.try_lock() {
+			Ok(wallet_lock) => {
+				// Update balance cache if we can.
+				let balance = wallet_lock.get_balance()?;
+				*self.balance_cache.write().unwrap() = balance.clone();
+				balance
+			},
+			Err(_) => self.balance_cache.read().unwrap().clone(),
+		};
+
+		let (total, spendable) = (
+			balance.get_total(),
+			balance.get_spendable().saturating_sub(total_anchor_channels_reserve_sats),
+		);
+
+		Ok((total, spendable))
 	}
 
 	/// Send funds to the given address.
@@ -242,6 +290,118 @@ where
 		}
 
 		Ok(txid)
+	}
+}
+
+impl<D, B: Deref, E: Deref, L: Deref> WalletSource for Wallet<D, B, E, L>
+where
+	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut utxos = Vec::new();
+		let confirmed_txs: Vec<bdk::TransactionDetails> = locked_wallet
+			.list_transactions(false)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve transactions from wallet: {}", e);
+			})?
+			.into_iter()
+			.filter(|t| t.confirmation_time.is_some())
+			.collect();
+		let unspent_confirmed_utxos = locked_wallet
+			.list_unspent()
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to retrieve unspent transactions from wallet: {}",
+					e
+				);
+			})?
+			.into_iter()
+			.filter(|u| confirmed_txs.iter().find(|t| t.txid == u.outpoint.txid).is_some());
+
+		for u in unspent_confirmed_utxos {
+			let payload = Payload::from_script(&u.txout.script_pubkey).map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+			})?;
+
+			match payload {
+				Payload::WitnessProgram(program) => match program.version() {
+					WitnessVersion::V0 if program.program().len() == 20 => {
+						let wpkh =
+							WPubkeyHash::from_slice(program.program().as_bytes()).map_err(|e| {
+								log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							})?;
+						let utxo = Utxo::new_v0_p2wpkh(u.outpoint, u.txout.value, &wpkh);
+						utxos.push(utxo);
+					},
+					WitnessVersion::V1 => {
+						XOnlyPublicKey::from_slice(program.program().as_bytes()).map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+						})?;
+
+						let utxo = Utxo {
+							outpoint: u.outpoint,
+							output: TxOut {
+								value: u.txout.value,
+								script_pubkey: ScriptBuf::new_witness_program(&program),
+							},
+							satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
+								1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
+						};
+						utxos.push(utxo);
+					},
+					_ => {
+						log_error!(
+							self.logger,
+							"Unexpected witness version or length. Version: {}, Length: {}",
+							program.version(),
+							program.program().len()
+						);
+					},
+				},
+				_ => {
+					log_error!(
+						self.logger,
+						"Tried to use a non-witness script. This must never happen."
+					);
+					panic!("Tried to use a non-witness script. This must never happen.");
+				},
+			}
+		}
+
+		Ok(utxos)
+	}
+
+	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let address_info = locked_wallet.get_address(AddressIndex::New).map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+		})?;
+
+		Ok(address_info.address.script_pubkey())
+	}
+
+	fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					log_error!(self.logger, "Failed to finalize PSBT.");
+					return Err(());
+				}
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to sign transaction: {}", err);
+				return Err(());
+			},
+		}
+
+		Ok(psbt.extract_tx())
 	}
 }
 
@@ -402,11 +562,10 @@ where
 		})?;
 
 		match address.payload {
-			bitcoin::address::Payload::WitnessProgram(program) => {
-				ShutdownScript::new_witness_program(&program).map_err(|e| {
+			Payload::WitnessProgram(program) => ShutdownScript::new_witness_program(&program)
+				.map_err(|e| {
 					log_error!(self.logger, "Invalid shutdown script: {:?}", e);
-				})
-			},
+				}),
 			_ => {
 				log_error!(
 					self.logger,

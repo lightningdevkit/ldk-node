@@ -51,10 +51,10 @@ class AndroidLibTest {
         val nodeId2 = node2.nodeId()
         println("Node Id 2: $nodeId2")
 
-        val address1 = node1.newOnchainAddress()
+        val address1 = node1.onchain_payment().newOnchainAddress()
         println("Funding address 1: $address1")
 
-        val address2 = node2.newOnchainAddress()
+        val address2 = node2.onchain_payment().newOnchainAddress()
         println("Funding address 2: $address2")
 
         node1.stop()

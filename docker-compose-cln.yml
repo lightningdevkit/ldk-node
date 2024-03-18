@@ -63,6 +63,7 @@ services:
         "--bitcoin-rpcuser=user",
         "--bitcoin-rpcpassword=pass",
         "--regtest",
+        "--experimental-anchors",
       ]
     ports:
       - "19846:19846"

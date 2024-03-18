@@ -4,16 +4,17 @@ use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::logger::log_error;
 use crate::peer_store::PeerStore;
 use crate::sweep::SpendableOutputInfo;
+use crate::types::DynStore;
 use crate::{Error, EventQueue, PaymentDetails};
 
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::util::logger::Logger;
 use lightning::util::persist::{
-	KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
-	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::string::PrintableString;
@@ -93,8 +94,8 @@ where
 }
 
 /// Read a previously persisted [`NetworkGraph`] from the store.
-pub(crate) fn read_network_graph<K: KVStore + Sync + Send, L: Deref + Clone>(
-	kv_store: Arc<K>, logger: L,
+pub(crate) fn read_network_graph<L: Deref + Clone>(
+	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<NetworkGraph<L>, std::io::Error>
 where
 	L::Target: Logger,
@@ -111,12 +112,8 @@ where
 }
 
 /// Read a previously persisted [`ProbabilisticScorer`] from the store.
-pub(crate) fn read_scorer<
-	K: KVStore + Send + Sync,
-	G: Deref<Target = NetworkGraph<L>>,
-	L: Deref + Clone,
->(
-	kv_store: Arc<K>, network_graph: G, logger: L,
+pub(crate) fn read_scorer<G: Deref<Target = NetworkGraph<L>>, L: Deref + Clone>(
+	kv_store: Arc<DynStore>, network_graph: G, logger: L,
 ) -> Result<ProbabilisticScorer<G, L>, std::io::Error>
 where
 	L::Target: Logger,
@@ -135,9 +132,9 @@ where
 }
 
 /// Read previously persisted events from the store.
-pub(crate) fn read_event_queue<K: KVStore + Sync + Send, L: Deref + Clone>(
-	kv_store: Arc<K>, logger: L,
-) -> Result<EventQueue<K, L>, std::io::Error>
+pub(crate) fn read_event_queue<L: Deref + Clone>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<EventQueue<L>, std::io::Error>
 where
 	L::Target: Logger,
 {
@@ -153,9 +150,9 @@ where
 }
 
 /// Read previously persisted peer info from the store.
-pub(crate) fn read_peer_info<K: KVStore + Sync + Send, L: Deref + Clone>(
-	kv_store: Arc<K>, logger: L,
-) -> Result<PeerStore<K, L>, std::io::Error>
+pub(crate) fn read_peer_info<L: Deref + Clone>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<PeerStore<L>, std::io::Error>
 where
 	L::Target: Logger,
 {
@@ -171,8 +168,8 @@ where
 }
 
 /// Read previously persisted payments information from the store.
-pub(crate) fn read_payments<K: KVStore + Sync + Send, L: Deref>(
-	kv_store: Arc<K>, logger: L,
+pub(crate) fn read_payments<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<Vec<PaymentDetails>, std::io::Error>
 where
 	L::Target: Logger,
@@ -201,8 +198,8 @@ where
 }
 
 /// Read previously persisted spendable output information from the store.
-pub(crate) fn read_spendable_outputs<K: KVStore + Sync + Send, L: Deref>(
-	kv_store: Arc<K>, logger: L,
+pub(crate) fn read_spendable_outputs<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<Vec<SpendableOutputInfo>, std::io::Error>
 where
 	L::Target: Logger,
@@ -230,8 +227,8 @@ where
 	Ok(res)
 }
 
-pub(crate) fn read_latest_rgs_sync_timestamp<K: KVStore + Sync + Send, L: Deref>(
-	kv_store: Arc<K>, logger: L,
+pub(crate) fn read_latest_rgs_sync_timestamp<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<u32, std::io::Error>
 where
 	L::Target: Logger,
@@ -250,8 +247,8 @@ where
 	})
 }
 
-pub(crate) fn write_latest_rgs_sync_timestamp<K: KVStore + Sync + Send, L: Deref>(
-	updated_timestamp: u32, kv_store: Arc<K>, logger: L,
+pub(crate) fn write_latest_rgs_sync_timestamp<L: Deref>(
+	updated_timestamp: u32, kv_store: Arc<DynStore>, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: Logger,
@@ -277,8 +274,8 @@ where
 		})
 }
 
-pub(crate) fn read_latest_node_ann_bcast_timestamp<K: KVStore + Sync + Send, L: Deref>(
-	kv_store: Arc<K>, logger: L,
+pub(crate) fn read_latest_node_ann_bcast_timestamp<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<u64, std::io::Error>
 where
 	L::Target: Logger,
@@ -301,8 +298,8 @@ where
 	})
 }
 
-pub(crate) fn write_latest_node_ann_bcast_timestamp<K: KVStore + Sync + Send, L: Deref>(
-	updated_timestamp: u64, kv_store: Arc<K>, logger: L,
+pub(crate) fn write_latest_node_ann_bcast_timestamp<L: Deref>(
+	updated_timestamp: u64, kv_store: Arc<DynStore>, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: Logger,
