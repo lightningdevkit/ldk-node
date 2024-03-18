@@ -68,14 +68,16 @@ where
 		blockchain: EsploraBlockchain, wallet: bdk::Wallet<D>, broadcaster: B, fee_estimator: E,
 		logger: L,
 	) -> Self {
-		let inner = Mutex::new(wallet);
-		let sync_lock = (Mutex::new(()), Condvar::new());
-		let balance_cache = RwLock::new(Balance {
+		let start_balance = wallet.get_balance().unwrap_or(Balance {
 			immature: 0,
 			trusted_pending: 0,
 			untrusted_pending: 0,
 			confirmed: 0,
 		});
+
+		let inner = Mutex::new(wallet);
+		let sync_lock = (Mutex::new(()), Condvar::new());
+		let balance_cache = RwLock::new(start_balance);
 		Self { blockchain, inner, broadcaster, fee_estimator, sync_lock, balance_cache, logger }
 	}
 
@@ -107,6 +109,8 @@ where
 			Err(e) => match e {
 				bdk::Error::Esplora(ref be) => match **be {
 					bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
+						// Drop lock, sleep for a second, retry.
+						drop(wallet_lock);
 						tokio::time::sleep(Duration::from_secs(1)).await;
 						log_error!(
 							self.logger,
@@ -114,7 +118,9 @@ where
 							e
 						);
 						let sync_options = SyncOptions { progress: None };
-						wallet_lock
+						self.inner
+							.lock()
+							.unwrap()
 							.sync(&self.blockchain, sync_options)
 							.await
 							.map_err(|e| From::from(e))

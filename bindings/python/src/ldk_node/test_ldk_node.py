@@ -198,7 +198,7 @@ class TestLdkNode(unittest.TestCase):
         print("EVENT:", payment_received_event_2)
         node_2.event_handled()
 
-        node_2.close_channel(channel_ready_event_2.user_channel_id, node_id_1, false)
+        node_2.close_channel(channel_ready_event_2.user_channel_id, node_id_1, False)
 
         channel_closed_event_1 = node_1.wait_next_event()
         assert isinstance(channel_closed_event_1, Event.CHANNEL_CLOSED)
