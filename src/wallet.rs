@@ -109,6 +109,8 @@ where
 			Err(e) => match e {
 				bdk::Error::Esplora(ref be) => match **be {
 					bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
+						// Drop lock, sleep for a second, retry.
+						drop(wallet_lock);
 						tokio::time::sleep(Duration::from_secs(1)).await;
 						log_error!(
 							self.logger,
@@ -116,7 +118,12 @@ where
 							e
 						);
 						let sync_options = SyncOptions { progress: None };
-						wallet_lock.sync(&self.blockchain, sync_options).await.map_err(From::from)
+						self.inner
+							.lock()
+							.unwrap()
+							.sync(&self.blockchain, sync_options)
+							.await
+							.map_err(From::from)
 					},
 					_ => {
 						log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
