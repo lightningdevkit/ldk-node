@@ -4,7 +4,6 @@ use crate::sweep::OutputSweeper;
 
 use lightning::blinded_path::BlindedPath;
 use lightning::chain::chainmonitor;
-use lightning::chain::BestBlock as LdkBestBlock;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::msgs::SocketAddress;
@@ -13,47 +12,47 @@ use lightning::ln::ChannelId;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
-use lightning::sign::{EntropySource, InMemorySigner};
+use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
 
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
-use bitcoin::{BlockHash, OutPoint};
+use bitcoin::OutPoint;
 
 use std::sync::{Arc, Mutex, RwLock};
 
-pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
+pub(crate) type DynStore = dyn KVStore + Sync + Send;
+
+pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<ChainSource>,
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
 	Arc<FilesystemLogger>,
-	Arc<K>,
+	Arc<DynStore>,
 >;
 
-pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
+pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
-	Arc<ChannelManager<K>>,
+	Arc<ChannelManager>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
-	Arc<NodeCustomMessageHandler<K, Arc<FilesystemLogger>>>,
+	Arc<NodeCustomMessageHandler<Arc<FilesystemLogger>>>,
 	Arc<KeysManager>,
 >;
 
 pub(crate) type ChainSource = EsploraSyncClient<Arc<FilesystemLogger>>;
 
-pub(crate) type LiquidityManager<K> = lightning_liquidity::LiquidityManager<
-	Arc<KeysManager>,
-	Arc<ChannelManager<K>>,
-	Arc<ChainSource>,
->;
+pub(crate) type LiquidityManager =
+	lightning_liquidity::LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<ChainSource>>;
 
-pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
-	Arc<ChainMonitor<K>>,
+pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
+	Arc<ChainMonitor>,
 	Arc<Broadcaster>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
@@ -84,6 +83,7 @@ pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
 pub(crate) type Router = DefaultRouter<
 	Arc<NetworkGraph>,
 	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
 	Arc<Mutex<Scorer>>,
 	ProbabilisticScoringFeeParameters,
 	Scorer,
@@ -128,22 +128,18 @@ impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
 	) -> Result<lightning::onion_message::messenger::OnionMessagePath, ()> {
 		unimplemented!()
 	}
-	fn create_blinded_paths<
-		ES: EntropySource + ?Sized,
-		T: secp256k1::Signing + secp256k1::Verification,
-	>(
-		&self, _recipient: PublicKey, _peers: Vec<PublicKey>, _entropy_source: &ES,
-		_secp_ctx: &Secp256k1<T>,
+	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
+		&self, _recipient: PublicKey, _peers: Vec<PublicKey>, _secp_ctx: &Secp256k1<T>,
 	) -> Result<Vec<BlindedPath>, ()> {
 		unreachable!()
 	}
 }
 
-pub(crate) type Sweeper<K> = OutputSweeper<
+pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
 	Arc<ChainSource>,
-	Arc<K>,
+	Arc<DynStore>,
 	Arc<FilesystemLogger>,
 >;
 
@@ -455,22 +451,5 @@ impl From<ChannelConfig> for LdkChannelConfig {
 impl Default for ChannelConfig {
 	fn default() -> Self {
 		LdkChannelConfig::default().into()
-	}
-}
-
-/// The best known block as identified by its hash and height.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BestBlock {
-	/// The block's hash
-	pub block_hash: BlockHash,
-	/// The height at which the block was confirmed.
-	pub height: u32,
-}
-
-impl From<LdkBestBlock> for BestBlock {
-	fn from(value: LdkBestBlock) -> Self {
-		let block_hash = value.block_hash();
-		let height = value.height();
-		Self { block_hash, height }
 	}
 }

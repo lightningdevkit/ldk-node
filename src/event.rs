@@ -1,10 +1,11 @@
-use crate::types::{Sweeper, Wallet};
+use crate::types::{DynStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
 };
 
-use crate::payment_store::{
-	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentStatus, PaymentStore,
+use crate::payment::payment_store::{
+	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+	PaymentStore,
 };
 
 use crate::io::{
@@ -17,10 +18,10 @@ use lightning::chain::chaininterface::ConfirmationTarget;
 use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::{ChannelId, PaymentHash};
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
-use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
@@ -45,6 +46,10 @@ use std::time::Duration;
 pub enum Event {
 	/// A sent payment was successful.
 	PaymentSuccessful {
+		/// A local identifier used to track the payment.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The total fee which was spent at intermediate hops in this payment.
@@ -52,6 +57,10 @@ pub enum Event {
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
+		/// A local identifier used to track the payment.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The reason why the payment failed.
@@ -61,6 +70,10 @@ pub enum Event {
 	},
 	/// A payment has been received.
 	PaymentReceived {
+		/// A local identifier used to track the payment.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The value, in thousandths of a satoshi, that has been received.
@@ -109,13 +122,16 @@ impl_writeable_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
+		(3, payment_id, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, required),
 		(1, reason, option),
+		(3, payment_id, option),
 	},
 	(2, PaymentReceived) => {
 		(0, payment_hash, required),
+		(1, payment_id, option),
 		(2, amount_msat, required),
 	},
 	(3, ChannelReady) => {
@@ -138,22 +154,22 @@ impl_writeable_tlv_based_enum!(Event,
 	};
 );
 
-pub struct EventQueue<K: KVStore + Sync + Send, L: Deref>
+pub struct EventQueue<L: Deref>
 where
 	L::Target: Logger,
 {
 	queue: Arc<Mutex<VecDeque<Event>>>,
 	waker: Arc<Mutex<Option<Waker>>>,
 	notifier: Condvar,
-	kv_store: Arc<K>,
+	kv_store: Arc<DynStore>,
 	logger: L,
 }
 
-impl<K: KVStore + Sync + Send, L: Deref> EventQueue<K, L>
+impl<L: Deref> EventQueue<L>
 where
 	L::Target: Logger,
 {
-	pub(crate) fn new(kv_store: Arc<K>, logger: L) -> Self {
+	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let queue = Arc::new(Mutex::new(VecDeque::new()));
 		let waker = Arc::new(Mutex::new(None));
 		let notifier = Condvar::new();
@@ -228,13 +244,13 @@ where
 	}
 }
 
-impl<K: KVStore + Sync + Send, L: Deref> ReadableArgs<(Arc<K>, L)> for EventQueue<K, L>
+impl<L: Deref> ReadableArgs<(Arc<DynStore>, L)> for EventQueue<L>
 where
 	L::Target: Logger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
-		reader: &mut R, args: (Arc<K>, L),
+		reader: &mut R, args: (Arc<DynStore>, L),
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		let (kv_store, logger) = args;
 		let read_queue: EventQueueDeserWrapper = Readable::read(reader)?;
@@ -292,32 +308,31 @@ impl Future for EventFuture {
 	}
 }
 
-pub(crate) struct EventHandler<K: KVStore + Sync + Send, L: Deref>
+pub(crate) struct EventHandler<L: Deref + Clone + Sync + Send + 'static>
 where
 	L::Target: Logger,
 {
-	event_queue: Arc<EventQueue<K, L>>,
+	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
-	channel_manager: Arc<ChannelManager<K>>,
-	output_sweeper: Arc<Sweeper<K>>,
+	channel_manager: Arc<ChannelManager>,
+	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<NetworkGraph>,
-	payment_store: Arc<PaymentStore<K, L>>,
-	peer_store: Arc<PeerStore<K, L>>,
+	payment_store: Arc<PaymentStore<L>>,
+	peer_store: Arc<PeerStore<L>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
 }
 
-impl<K: KVStore + Sync + Send + 'static, L: Deref> EventHandler<K, L>
+impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
 where
 	L::Target: Logger,
 {
 	pub fn new(
-		event_queue: Arc<EventQueue<K, L>>, wallet: Arc<Wallet>,
-		channel_manager: Arc<ChannelManager<K>>, output_sweeper: Arc<Sweeper<K>>,
-		network_graph: Arc<NetworkGraph>, payment_store: Arc<PaymentStore<K, L>>,
-		peer_store: Arc<PeerStore<K, L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
-		logger: L, config: Arc<Config>,
+		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
+		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -347,7 +362,7 @@ where
 				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
 
 				// We set nLockTime to the current height to discourage fee sniping.
-				let cur_height = self.channel_manager.current_best_block().height();
+				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
 				// Sign the final funding transaction and broadcast it.
@@ -412,7 +427,8 @@ where
 				onion_fields: _,
 				counterparty_skimmed_fee_msat,
 			} => {
-				if let Some(info) = self.payment_store.get(&payment_hash) {
+				let payment_id = PaymentId(payment_hash.0);
+				if let Some(info) = self.payment_store.get(&payment_id) {
 					if info.status == PaymentStatus::Succeeded {
 						log_info!(
 							self.logger,
@@ -424,7 +440,7 @@ where
 
 						let update = PaymentDetailsUpdate {
 							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_hash)
+							..PaymentDetailsUpdate::new(payment_id)
 						};
 						self.payment_store.update(&update).unwrap_or_else(|e| {
 							log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -433,17 +449,22 @@ where
 						return;
 					}
 
-					let max_total_opening_fee_msat = info
-						.lsp_fee_limits
-						.and_then(|l| {
-							l.max_total_opening_fee_msat.or_else(|| {
-								l.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
-									// If it's a variable amount payment, compute the actual fee.
-									compute_opening_fee(amount_msat, 0, max_prop_fee)
+					let max_total_opening_fee_msat = match info.kind {
+						PaymentKind::Bolt11Jit { lsp_fee_limits, .. } => {
+							lsp_fee_limits
+								.max_total_opening_fee_msat
+								.or_else(|| {
+									lsp_fee_limits.max_proportional_opening_fee_ppm_msat.and_then(
+										|max_prop_fee| {
+											// If it's a variable amount payment, compute the actual fee.
+											compute_opening_fee(amount_msat, 0, max_prop_fee)
+										},
+									)
 								})
-							})
-						})
-						.unwrap_or(0);
+								.unwrap_or(0)
+						},
+						_ => 0,
+					};
 
 					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
 						log_info!(
@@ -457,7 +478,7 @@ where
 
 						let update = PaymentDetailsUpdate {
 							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_hash)
+							..PaymentDetailsUpdate::new(payment_id)
 						};
 						self.payment_store.update(&update).unwrap_or_else(|e| {
 							log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -498,7 +519,7 @@ where
 
 					let update = PaymentDetailsUpdate {
 						status: Some(PaymentStatus::Failed),
-						..PaymentDetailsUpdate::new(payment_hash)
+						..PaymentDetailsUpdate::new(payment_id)
 					};
 					self.payment_store.update(&update).unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -520,6 +541,7 @@ where
 					hex_utils::to_string(&payment_hash.0),
 					amount_msat,
 				);
+				let payment_id = PaymentId(payment_hash.0);
 				match purpose {
 					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
 						let update = PaymentDetailsUpdate {
@@ -527,7 +549,7 @@ where
 							secret: Some(Some(payment_secret)),
 							amount_msat: Some(Some(amount_msat)),
 							status: Some(PaymentStatus::Succeeded),
-							..PaymentDetailsUpdate::new(payment_hash)
+							..PaymentDetailsUpdate::new(payment_id)
 						};
 						match self.payment_store.update(&update) {
 							Ok(true) => (),
@@ -551,14 +573,16 @@ where
 						}
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
-						let payment = PaymentDetails {
-							preimage: Some(preimage),
+						let kind = PaymentKind::Spontaneous {
 							hash: payment_hash,
-							secret: None,
+							preimage: Some(preimage),
+						};
+						let payment = PaymentDetails {
+							id: payment_id,
+							kind,
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
-							lsp_fee_limits: None,
 						};
 
 						match self.payment_store.insert(payment) {
@@ -585,20 +609,42 @@ where
 				};
 
 				self.event_queue
-					.add_event(Event::PaymentReceived { payment_hash, amount_msat })
+					.add_event(Event::PaymentReceived {
+						payment_id: Some(payment_id),
+						payment_hash,
+						amount_msat,
+					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
 			},
-			LdkEvent::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
-				if let Some(mut payment) = self.payment_store.get(&payment_hash) {
-					payment.preimage = Some(payment_preimage);
-					payment.status = PaymentStatus::Succeeded;
-					self.payment_store.insert(payment.clone()).unwrap_or_else(|e| {
-						log_error!(self.logger, "Failed to access payment store: {}", e);
-						panic!("Failed to access payment store");
-					});
+			LdkEvent::PaymentSent {
+				payment_id,
+				payment_preimage,
+				payment_hash,
+				fee_paid_msat,
+				..
+			} => {
+				let payment_id = if let Some(id) = payment_id {
+					id
+				} else {
+					debug_assert!(false, "payment_id should always be set.");
+					return;
+				};
+
+				let update = PaymentDetailsUpdate {
+					preimage: Some(Some(payment_preimage)),
+					status: Some(PaymentStatus::Succeeded),
+					..PaymentDetailsUpdate::new(payment_id)
+				};
+
+				self.payment_store.update(&update).unwrap_or_else(|e| {
+					log_error!(self.logger, "Failed to access payment store: {}", e);
+					panic!("Failed to access payment store");
+				});
+
+				self.payment_store.get(&payment_id).map(|payment| {
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
@@ -612,15 +658,20 @@ where
 						hex_utils::to_string(&payment_hash.0),
 						hex_utils::to_string(&payment_preimage.0)
 					);
-				}
+				});
+
 				self.event_queue
-					.add_event(Event::PaymentSuccessful { payment_hash, fee_paid_msat })
+					.add_event(Event::PaymentSuccessful {
+						payment_id: Some(payment_id),
+						payment_hash,
+						fee_paid_msat,
+					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
 			},
-			LdkEvent::PaymentFailed { payment_hash, reason, .. } => {
+			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
 				log_info!(
 					self.logger,
 					"Failed to send payment to payment hash {:?} due to {:?}.",
@@ -630,14 +681,18 @@ where
 
 				let update = PaymentDetailsUpdate {
 					status: Some(PaymentStatus::Failed),
-					..PaymentDetailsUpdate::new(payment_hash)
+					..PaymentDetailsUpdate::new(payment_id)
 				};
 				self.payment_store.update(&update).unwrap_or_else(|e| {
 					log_error!(self.logger, "Failed to access payment store: {}", e);
 					panic!("Failed to access payment store");
 				});
 				self.event_queue
-					.add_event(Event::PaymentFailed { payment_hash, reason })
+					.add_event(Event::PaymentFailed {
+						payment_id: Some(payment_id),
+						payment_hash,
+						reason,
+					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
@@ -717,9 +772,10 @@ where
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,
-				fee_earned_msat,
+				total_fee_earned_msat,
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
+				..
 			} => {
 				let read_only_network_graph = self.network_graph.read_only();
 				let nodes = read_only_network_graph.nodes();
@@ -752,7 +808,7 @@ where
 				let to_next_str =
 					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
-				let fee_earned = fee_earned_msat.unwrap_or(0);
+				let fee_earned = total_fee_earned_msat.unwrap_or(0);
 				let outbound_amount_forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
 				if claim_from_onchain_tx {
 					log_info!(
@@ -780,6 +836,7 @@ where
 				former_temporary_channel_id,
 				counterparty_node_id,
 				funding_txo,
+				..
 			} => {
 				log_info!(
 					self.logger,
@@ -875,6 +932,7 @@ where
 			LdkEvent::HTLCIntercepted { .. } => {},
 			LdkEvent::BumpTransaction(_) => {},
 			LdkEvent::InvoiceRequestFailed { .. } => {},
+			LdkEvent::InvoiceGenerated { .. } => {},
 			LdkEvent::ConnectionNeeded { .. } => {},
 		}
 	}
@@ -889,7 +947,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn event_queue_persistence() {
-		let store = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
@@ -926,7 +984,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn event_queue_concurrency() {
-		let store = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
