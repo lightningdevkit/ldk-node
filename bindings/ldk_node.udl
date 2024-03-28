@@ -34,10 +34,12 @@ interface Builder {
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
-	LDKNode build();
+	Node build();
+	[Throws=BuildError]
+	Node build_with_fs_store();
 };
 
-interface LDKNode {
+interface Node {
 	[Throws=NodeError]
 	void start();
 	[Throws=NodeError]
@@ -190,16 +192,18 @@ enum PaymentFailureReason {
 
 [Enum]
 interface ClosureReason {
-	CounterpartyForceClosed ( UntrustedString peer_msg );
-	HolderForceClosed ();
-	CooperativeClosure ();
-	CommitmentTxConfirmed ();
-	FundingTimedOut ();
-	ProcessingError ( string err );
-	DisconnectedPeer ();
-	OutdatedChannelManager ();
-	CounterpartyCoopClosedUnfundedChannel ();
-	FundingBatchClosure ();
+	CounterpartyForceClosed(UntrustedString peer_msg);
+	HolderForceClosed();
+	LegacyCooperativeClosure();
+	CounterpartyInitiatedCooperativeClosure();
+	LocallyInitiatedCooperativeClosure();
+	CommitmentTxConfirmed();
+	FundingTimedOut();
+	ProcessingError(string err);
+	DisconnectedPeer();
+	OutdatedChannelManager();
+	CounterpartyCoopClosedUnfundedChannel();
+	FundingBatchClosure();
 };
 
 enum PaymentDirection {
