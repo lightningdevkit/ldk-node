@@ -31,3 +31,4 @@ fi
 
 build_lib "cross" "x86_64-unknown-linux-gnu" "libldk_node.so"
 build_lib "cross" "x86_64-pc-windows-gnu" "ldk_node.dll"
+build_lib "cross" "arm-unknown-linux-gnueabi" "libldk_node.so"
