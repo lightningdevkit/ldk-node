@@ -33,9 +33,15 @@ use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
-use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::mem;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+
+enum WalletSyncStatus {
+	Completed,
+	InProgress { subscribers: Vec<tokio::sync::oneshot::Sender<Result<(), Error>>> },
+}
 
 pub struct Wallet<D, B: Deref, E: Deref, L: Deref>
 where
@@ -51,7 +57,8 @@ where
 	// A cache storing the most recently retrieved fee rate estimations.
 	broadcaster: B,
 	fee_estimator: E,
-	sync_lock: (Mutex<()>, Condvar),
+	// A Mutex holding the current sync status.
+	sync_status: Mutex<WalletSyncStatus>,
 	// TODO: Drop this workaround after BDK 1.0 upgrade.
 	balance_cache: RwLock<Balance>,
 	logger: L,
@@ -76,69 +83,67 @@ where
 		});
 
 		let inner = Mutex::new(wallet);
-		let sync_lock = (Mutex::new(()), Condvar::new());
+		let sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let balance_cache = RwLock::new(start_balance);
-		Self { blockchain, inner, broadcaster, fee_estimator, sync_lock, balance_cache, logger }
+		Self { blockchain, inner, broadcaster, fee_estimator, sync_status, balance_cache, logger }
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
-		let (lock, cvar) = &self.sync_lock;
+		if let Some(sync_receiver) = self.register_or_subscribe_pending_sync() {
+			log_info!(self.logger, "Sync in progress, skipping.");
+			return sync_receiver.await.map_err(|e| {
+				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
+				Error::WalletOperationFailed
+			})?;
+		}
 
-		let guard = match lock.try_lock() {
-			Ok(guard) => guard,
-			Err(_) => {
-				log_info!(self.logger, "Sync in progress, skipping.");
-				let guard = cvar.wait(lock.lock().unwrap());
-				drop(guard);
-				cvar.notify_all();
-				return Ok(());
-			},
-		};
-
-		let sync_options = SyncOptions { progress: None };
-		let wallet_lock = self.inner.lock().unwrap();
-		let res = match wallet_lock.sync(&self.blockchain, sync_options).await {
-			Ok(()) => {
-				// TODO: Drop this workaround after BDK 1.0 upgrade.
-				// Update balance cache after syncing.
-				if let Ok(balance) = wallet_lock.get_balance() {
-					*self.balance_cache.write().unwrap() = balance;
-				}
-				Ok(())
-			},
-			Err(e) => match e {
-				bdk::Error::Esplora(ref be) => match **be {
-					bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
-						// Drop lock, sleep for a second, retry.
-						drop(wallet_lock);
-						tokio::time::sleep(Duration::from_secs(1)).await;
-						log_error!(
-							self.logger,
-							"Sync failed due to HTTP connection error, retrying: {}",
-							e
-						);
-						let sync_options = SyncOptions { progress: None };
-						self.inner
-							.lock()
-							.unwrap()
-							.sync(&self.blockchain, sync_options)
-							.await
-							.map_err(From::from)
+		let res = {
+			let sync_options = SyncOptions { progress: None };
+			let wallet_lock = self.inner.lock().unwrap();
+			match wallet_lock.sync(&self.blockchain, sync_options).await {
+				Ok(()) => {
+					// TODO: Drop this workaround after BDK 1.0 upgrade.
+					// Update balance cache after syncing.
+					if let Ok(balance) = wallet_lock.get_balance() {
+						*self.balance_cache.write().unwrap() = balance;
+					}
+					Ok(())
+				},
+				Err(e) => match e {
+					bdk::Error::Esplora(ref be) => match **be {
+						bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
+							// Drop lock, sleep for a second, retry.
+							drop(wallet_lock);
+							tokio::time::sleep(Duration::from_secs(1)).await;
+							log_error!(
+								self.logger,
+								"Sync failed due to HTTP connection error, retrying: {}",
+								e
+							);
+							let sync_options = SyncOptions { progress: None };
+							self.inner
+								.lock()
+								.unwrap()
+								.sync(&self.blockchain, sync_options)
+								.await
+								.map_err(From::from)
+						},
+						_ => {
+							log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
+							Err(From::from(e))
+						},
 					},
 					_ => {
-						log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
+						log_error!(self.logger, "Wallet sync error: {}", e);
 						Err(From::from(e))
 					},
 				},
-				_ => {
-					log_error!(self.logger, "Wallet sync error: {}", e);
-					Err(From::from(e))
-				},
-			},
+			}
 		};
 
-		drop(guard);
-		cvar.notify_all();
+		self.propagate_result_to_subscribers(res);
+
 		res
 	}
 
@@ -296,6 +301,55 @@ where
 		}
 
 		Ok(txid)
+	}
+
+	fn register_or_subscribe_pending_sync(
+		&self,
+	) -> Option<tokio::sync::oneshot::Receiver<Result<(), Error>>> {
+		let mut sync_status_lock = self.sync_status.lock().unwrap();
+		match sync_status_lock.deref_mut() {
+			WalletSyncStatus::Completed => {
+				// We're first to register for a sync.
+				*sync_status_lock = WalletSyncStatus::InProgress { subscribers: Vec::new() };
+				None
+			},
+			WalletSyncStatus::InProgress { subscribers } => {
+				// A sync is in-progress, we subscribe.
+				let (tx, rx) = tokio::sync::oneshot::channel();
+				subscribers.push(tx);
+				Some(rx)
+			},
+		}
+	}
+
+	fn propagate_result_to_subscribers(&self, res: Result<(), Error>) {
+		// Send the notification to any other tasks that might be waiting on it by now.
+		let mut waiting_subscribers = Vec::new();
+		{
+			let mut sync_status_lock = self.sync_status.lock().unwrap();
+			match sync_status_lock.deref_mut() {
+				WalletSyncStatus::Completed => {
+					// No sync in-progress, do nothing.
+					return;
+				},
+				WalletSyncStatus::InProgress { subscribers } => {
+					// A sync is in-progress, we notify subscribers.
+					mem::swap(&mut waiting_subscribers, subscribers);
+					*sync_status_lock = WalletSyncStatus::Completed;
+				},
+			}
+		}
+
+		for sender in waiting_subscribers {
+			sender.send(res).unwrap_or_else(|e| {
+				debug_assert!(false, "Failed to send wallet sync result to subscribers: {:?}", e);
+				log_error!(
+					self.logger,
+					"Failed to send wallet sync result to subscribers: {:?}",
+					e
+				);
+			});
+		}
 	}
 }
 
