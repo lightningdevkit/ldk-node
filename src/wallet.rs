@@ -35,7 +35,6 @@ use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
 
 enum WalletSyncStatus {
 	Completed,
@@ -111,21 +110,12 @@ where
 				Err(e) => match e {
 					bdk::Error::Esplora(ref be) => match **be {
 						bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
-							// Drop lock, sleep for a second, retry.
-							drop(wallet_lock);
-							tokio::time::sleep(Duration::from_secs(1)).await;
 							log_error!(
 								self.logger,
-								"Sync failed due to HTTP connection error, retrying: {}",
+								"Sync failed due to HTTP connection error: {}",
 								e
 							);
-							let sync_options = SyncOptions { progress: None };
-							self.inner
-								.lock()
-								.unwrap()
-								.sync(&self.blockchain, sync_options)
-								.await
-								.map_err(From::from)
+							Err(From::from(e))
 						},
 						_ => {
 							log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
