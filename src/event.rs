@@ -1,3 +1,4 @@
+use crate::payjoin_handler::PayjoinReceiver;
 use crate::types::{DynStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
@@ -322,6 +323,7 @@ where
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
+	payjoin_receiver: Option<Arc<PayjoinReceiver<L>>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -333,6 +335,7 @@ where
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
 		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
 		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
+		payjoin_receiver: Option<Arc<PayjoinReceiver<L>>>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -341,6 +344,7 @@ where
 			output_sweeper,
 			network_graph,
 			payment_store,
+			payjoin_receiver,
 			peer_store,
 			logger,
 			runtime,
@@ -355,6 +359,7 @@ where
 				counterparty_node_id,
 				channel_value_satoshis,
 				output_script,
+				user_channel_id,
 				..
 			} => {
 				// Construct the raw transaction with the output that is paid the amount of the
@@ -364,6 +369,19 @@ where
 				// We set nLockTime to the current height to discourage fee sniping.
 				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
+
+				if let Some(payjoin_receiver) = self.payjoin_receiver.clone() {
+					if payjoin_receiver
+						.set_channel_accepted(
+							user_channel_id,
+							&output_script,
+							temporary_channel_id.0,
+						)
+						.await
+					{
+						return;
+					}
+				}
 
 				// Sign the final funding transaction and broadcast it.
 				match self.wallet.create_funding_transaction(

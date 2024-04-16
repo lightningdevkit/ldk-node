@@ -71,6 +71,20 @@ pub enum Error {
 	LiquiditySourceUnavailable,
 	/// The given operation failed due to the LSP's required opening fee being too high.
 	LiquidityFeeTooHigh,
+	/// Payjoin errors
+	PayjoinReqwest,
+	/// Payjoin errors
+	PayjoinValidation,
+	/// Payjoin errors
+	PayjoinEnrollment,
+	/// Payjoin errors
+	PayjoinUri,
+	/// Payjoin errors
+	PayjoinReceiver,
+	/// Payjoin errors
+	PayjoinSender,
+	/// Payjoin errors
+	BitcoinConsensusFailed,
 }
 
 impl fmt::Display for Error {
@@ -122,7 +136,20 @@ impl fmt::Display for Error {
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
 			},
+			Self::PayjoinReqwest => write!(f, "PayjoinLightning: http error"),
+			Self::PayjoinValidation => write!(f, "PayjoinLightning: payjoin request validation failed."),
+			Self::PayjoinEnrollment => write!(f, "PayjoinLightning: payjoin enrollment failed. Maybe the configured payjoin directory or payjoin relay are not valid?"),
+			Self::PayjoinUri => write!(f, "PayjoinLightning: Failed to construct payjoin URI."),
+			Self::PayjoinSender => write!(f, "Failed to send payjoin."),
+			Self::PayjoinReceiver => write!(f, "Failed to receive payjoin."),
+			Self::BitcoinConsensusFailed => write!(f, "Bitcoin consensus failed."),
 		}
+	}
+}
+
+impl From<payjoin::Error> for Error {
+	fn from(_e: payjoin::Error) -> Self {
+		return Self::PayjoinValidation;
 	}
 }
 

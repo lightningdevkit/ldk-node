@@ -27,7 +27,6 @@ use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{bitcoinconsensus, ScriptBuf, Transaction, TxOut, Txid};
 
-use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -113,39 +112,121 @@ where
 		res
 	}
 
-	pub(crate) fn is_mine(&self, script: &ScriptBuf) -> Result<bool, Error> {
-		Ok(self.inner.lock().unwrap().is_mine(script)?)
+	/// Returns the total value of all outputs in the given PSBT that
+	/// are directed to us in satoshis.
+	pub(crate) fn funds_directed_to_us(&self, tx: &Transaction) -> Result<bitcoin::Amount, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let total_value = tx.output.iter().fold(0, |acc, output| {
+			match locked_wallet.is_mine(&output.script_pubkey) {
+				Ok(true) => acc + output.value,
+				_ => acc,
+			}
+		});
+		Ok(bitcoin::Amount::from_sat(total_value))
 	}
 
-	pub async fn verify_tx(&self, tx: Transaction) -> Result<(), Error> {
+	pub(crate) fn broadcast_transaction(&self, transaction: &Transaction) {
+		self.broadcaster.broadcast_transactions(&[transaction]);
+	}
+
+	pub(crate) fn build_transaction(
+		&self, output_script: ScriptBuf, value_sats: u64, sign_options: SignOptions,
+	) -> Result<Psbt, Error> {
+		let fee_rate = FeeRate::from_sat_per_kwu(1000 as f32);
+
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut tx_builder = locked_wallet.build_tx();
+
+		tx_builder.add_recipient(output_script, value_sats).fee_rate(fee_rate).enable_rbf();
+
+		let mut psbt = match tx_builder.finish() {
+			Ok((psbt, _)) => {
+				log_trace!(self.logger, "Created PSBT: {:?}", psbt);
+				psbt
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create PSBT: {}", err);
+				return Err(err.into());
+			},
+		};
+
+		locked_wallet.sign(&mut psbt, sign_options)?;
+
+		Ok(psbt)
+	}
+
+	pub(crate) fn is_mine(&self, script: &ScriptBuf) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		Ok(locked_wallet.is_mine(script)?)
+	}
+
+	/// Verifies that the given transaction meets the bitcoin consensus rules.
+	pub async fn verify_tx(&self, tx: &Transaction) -> Result<(), Error> {
 		let serialized_tx = bitcoin::consensus::serialize(&tx);
+		// Loop through all the inputs
 		for (index, input) in tx.input.iter().enumerate() {
 			let input = input.clone();
 			let txid = input.previous_output.txid;
-			let prev_tx = if let Ok(prev_tx) = self.blockchain.get_tx(&txid).await {
-				prev_tx.unwrap()
-			} else {
-				dbg!("maybe conibase?");
-				continue;
+			let prev_tx = match self.blockchain.get_tx(&txid).await {
+				Ok(prev_tx) => prev_tx,
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to verify transaction: blockchain error {} for txid {}",
+						e,
+						&txid
+					);
+					return Err(Error::BitcoinConsensusFailed);
+				},
 			};
-			let spent_output = prev_tx.output.get(input.previous_output.vout as usize).unwrap();
-			bitcoinconsensus::verify(
-				&spent_output.script_pubkey.to_bytes(),
-				spent_output.value,
-				&serialized_tx,
-				index,
-			)
-			.unwrap();
+			if let Some(prev_tx) = prev_tx {
+				let spent_output = match prev_tx.output.get(input.previous_output.vout as usize) {
+					Some(output) => output,
+					None => {
+						log_error!(
+							self.logger,
+							"Failed to verify transaction: missing output {} in tx {}",
+							input.previous_output.vout,
+							txid
+						);
+						return Err(Error::BitcoinConsensusFailed);
+					},
+				};
+				match bitcoinconsensus::verify(
+					&spent_output.script_pubkey.to_bytes(),
+					spent_output.value,
+					&serialized_tx,
+					index,
+				) {
+					Ok(()) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to verify transaction: {}", e);
+						return Err(Error::BitcoinConsensusFailed);
+					},
+				}
+			} else {
+				if tx.is_coin_base() {
+					continue;
+				} else {
+					log_error!(
+						self.logger,
+						"Failed to verify transaction: missing previous transaction {}",
+						txid
+					);
+					return Err(Error::BitcoinConsensusFailed);
+				}
+			}
 		}
 		Ok(())
 	}
 
-	pub(crate) fn sign_tx(&self, psbt: &Psbt, options: Option<SignOptions>) -> Result<Psbt, Error> {
+	pub(crate) fn sign_transaction(
+		&self, psbt: &Psbt, options: SignOptions,
+	) -> Result<(bool, Psbt), Error> {
 		let wallet = self.inner.lock().unwrap();
 		let mut psbt = psbt.clone();
-		let options = options.unwrap_or_default();
-		wallet.sign(&mut psbt, options)?;
-		Ok(psbt)
+		let is_signed = wallet.sign(&mut psbt, options)?;
+		Ok((is_signed, psbt))
 	}
 
 	pub(crate) fn create_funding_transaction(

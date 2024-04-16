@@ -151,6 +151,13 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+	"PayjoinReqwest",
+	"PayjoinValidation",
+	"PayjoinEnrollment",
+	"PayjoinUri",
+	"PayjoinReceiver",
+	"PayjoinSender",
+	"BitcoinConsensusFailed",
 };
 
 dictionary NodeStatus {

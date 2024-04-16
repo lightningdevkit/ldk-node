@@ -28,15 +28,28 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.0.123", features = ["std"] }
-lightning-invoice = { version = "0.31.0" }
-lightning-net-tokio = { version = "0.0.123" }
-lightning-persister = { version = "0.0.123" }
-lightning-background-processor = { version = "0.0.123", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.123" }
-lightning-transaction-sync = { version = "0.0.123", features = ["esplora-async-https", "time"] }
-lightning-liquidity = { version = "0.1.0-alpha.4", features = ["std"] }
+# lightning = { version = "0.0.123", features = ["std"] }
+# lightning-invoice = { version = "0.31.0" }
+# lightning-net-tokio = { version = "0.0.123" }
+# lightning-persister = { version = "0.0.123" }
+# lightning-background-processor = { version = "0.0.123", features = ["futures"] }
+# lightning-rapid-gossip-sync = { version = "0.0.123" }
+# lightning-transaction-sync = { version = "0.0.123", features = ["esplora-async-https", "time"] }
+# lightning-liquidity = { version = "0.1.0-alpha.4", features = ["std"] }
+lightning = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated", features = ["std"] }
+lightning-invoice = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated" }
+lightning-net-tokio = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated" }
+lightning-persister = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated" }
+lightning-background-processor = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated", features = ["futures"] }
+lightning-rapid-gossip-sync = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated" }
+lightning-transaction-sync = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated", features = ["esplora-async-https", "time"] }
+#lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
 
+# lightning-liquidity = {path = "../../lightning-liquidity" git = "https://github.com/jbesraa/lightning-liquidity", rev = "b6ac60d", features = ["std"] }
+lightning-liquidity = { git = "https://github.com/jbesraa/lightning-liquidity", branch = "pj-fixes", features = ["std"] }
+# lightning-liquidity = { git = "https://github.com/tnull/lightning-liquidity", rev = "abf7088c0e03221c0f122e797f34802c9e99a3d4", features = ["std"] }
+
+# payjoin = { git = "https://github.com/jbesraa/rust-payjoin.git", rev = "9e4f454", features = ["v2", "receive", "send"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
 #lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -57,7 +70,7 @@ lightning-liquidity = { version = "0.1.0-alpha.4", features = ["std"] }
 
 bdk = { version = "0.29.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
 
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 rusqlite = { version = "0.28.0", features = ["bundled"] }
 bitcoin = { version = "0.30.2", features = ["bitcoinconsensus"] }
 bip39 = "2.0.0"
@@ -68,6 +81,7 @@ tokio = { version = "1", default-features = false, features = [ "rt-multi-thread
 esplora-client = { version = "0.6", default-features = false }
 libc = "0.2"
 uniffi = { version = "0.26.0", features = ["build"], optional = true }
+payjoin = { version = "0.15.0", features = ["v2", "send", "receive"] }
 
 [target.'cfg(vss)'.dependencies]
 vss-client = "0.2"
@@ -77,12 +91,14 @@ prost = { version = "0.11.6", default-features = false}
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.0.123", features = ["std", "_test_utils"] }
+# lightning = { version = "0.0.123", features = ["std", "_test_utils"] }
+lightning = { git = "https://github.com/jbesraa/rust-lightning", branch = "danger-funding-generated", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
 electrum-client = { version = "0.15.1", default-features = true }
 bitcoincore-rpc = { version = "0.17.0", default-features = false }
 proptest = "1.0.0"
 regex = "1.5.6"
+reqwest = { version = "0.11", default-features = false, features = ["blocking"] }
 
 [target.'cfg(not(no_download))'.dev-dependencies]
 electrsd = { version = "0.26.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_25_0"] }
