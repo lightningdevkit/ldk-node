@@ -980,20 +980,6 @@ impl Node {
 			return Err(Error::InsufficientFunds);
 		}
 
-		let peer_info = PeerInfo { node_id, address };
-
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
-		})?;
-
 		let channel_config = (*(channel_config.unwrap_or_default())).clone().into();
 		let user_config = UserConfig {
 			channel_handshake_limits: Default::default(),
@@ -1007,6 +993,33 @@ impl Node {
 
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
 		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
+		self.internal_connect_open_channel(
+			node_id,
+			channel_amount_sats,
+			push_msat,
+			user_channel_id,
+			address,
+			Some(user_config),
+			runtime,
+		)
+	}
+
+	fn internal_connect_open_channel(
+		&self, node_id: PublicKey, channel_amount_sats: u64, push_msat: u64, user_channel_id: u128,
+		address: SocketAddress, user_config: Option<UserConfig>, runtime: &tokio::runtime::Runtime,
+	) -> Result<UserChannelId, Error> {
+		let peer_info = PeerInfo { node_id, address };
+		let con_node_id = peer_info.node_id;
+		let con_addr = peer_info.address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		tokio::task::block_in_place(move || {
+			runtime.block_on(async move {
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+			})
+		})?;
 
 		match self.channel_manager.create_channel(
 			peer_info.node_id,
@@ -1014,7 +1027,7 @@ impl Node {
 			push_msat,
 			user_channel_id,
 			None,
-			Some(user_config),
+			user_config,
 		) {
 			Ok(_) => {
 				log_info!(
