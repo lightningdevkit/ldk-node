@@ -1,6 +1,5 @@
 use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::sweep::OutputSweeper;
 
 use lightning::chain::chainmonitor;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
@@ -15,6 +14,7 @@ use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::util::sweep::OutputSweeper;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
 
@@ -127,10 +127,12 @@ pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMess
 
 pub(crate) type Sweeper<K> = OutputSweeper<
 	Arc<Broadcaster>,
+	Arc<KeysManager>,
 	Arc<FeeEstimator>,
 	Arc<ChainSource>,
 	Arc<K>,
 	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
 >;
 
 /// A local, potentially user-provided, identifier of a channel.

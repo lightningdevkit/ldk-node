@@ -8,11 +8,10 @@ use crate::gossip::GossipSource;
 use crate::io;
 use crate::io::sqlite_store::SqliteStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
-use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	ChainMonitor, ChannelManager, GossipSync, KeysManager, MessageRouter, NetworkGraph,
@@ -37,6 +36,7 @@ use lightning::util::persist::{
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
+use lightning::util::sweep::OutputSweeper;
 
 use lightning_persister::fs_store::FilesystemStore;
 
@@ -895,6 +895,47 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
+	let output_sweeper = match io::utils::read_output_sweeper(
+		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
+		Arc::clone(&tx_sync),
+		Arc::clone(&keys_manager),
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+	) {
+		Ok(output_sweeper) => Arc::new(output_sweeper),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(OutputSweeper::new(
+					channel_manager.current_best_block(),
+					Arc::clone(&tx_broadcaster),
+					Arc::clone(&fee_estimator),
+					Some(Arc::clone(&tx_sync)),
+					Arc::clone(&keys_manager),
+					Arc::clone(&keys_manager),
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				))
+			} else {
+				return Err(BuildError::ReadFailed);
+			}
+		},
+	};
+
+	match io::utils::migrate_deprecated_spendable_outputs(
+		Arc::clone(&output_sweeper),
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+	) {
+		Ok(()) => {
+			log_info!(logger, "Successfully migrated OutputSweeper data.");
+		},
+		Err(e) => {
+			log_error!(logger, "Failed to migrate OutputSweeper data: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	}
+
 	// Init payment info storage
 	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(payments) => {
@@ -927,25 +968,6 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			}
 		},
 	};
-
-	let best_block = channel_manager.current_best_block();
-	let output_sweeper =
-		match io::utils::read_spendable_outputs(Arc::clone(&kv_store), Arc::clone(&logger)) {
-			Ok(outputs) => Arc::new(OutputSweeper::new(
-				outputs,
-				Arc::clone(&wallet),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&fee_estimator),
-				Arc::clone(&keys_manager),
-				Arc::clone(&kv_store),
-				best_block,
-				Some(Arc::clone(&tx_sync)),
-				Arc::clone(&logger),
-			)),
-			Err(_) => {
-				return Err(BuildError::ReadFailed);
-			},
-		};
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 
