@@ -111,6 +111,10 @@ where
 		res
 	}
 
+	pub(crate) fn is_mine(&self, script: &ScriptBuf) -> Result<bool, Error> {
+		Ok(self.inner.lock().unwrap().is_mine(script)?)
+	}
+
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: ScriptBuf, value_sats: u64, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,
