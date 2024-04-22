@@ -2,6 +2,7 @@ use crate::logger::{log_error, log_info, log_trace, Logger};
 
 use crate::Error;
 
+use bitcoin::psbt::Psbt;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
@@ -113,6 +114,14 @@ where
 
 	pub(crate) fn is_mine(&self, script: &ScriptBuf) -> Result<bool, Error> {
 		Ok(self.inner.lock().unwrap().is_mine(script)?)
+	}
+
+	pub(crate) fn sign_tx(&self, psbt: &Psbt, options: Option<SignOptions>) -> Result<Psbt, Error> {
+		let wallet = self.inner.lock().unwrap();
+		let mut psbt = psbt.clone();
+		let options = options.unwrap_or_default();
+		wallet.sign(&mut psbt, options)?;
+		Ok(psbt)
 	}
 
 	pub(crate) fn create_funding_transaction(
