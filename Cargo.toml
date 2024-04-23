@@ -80,7 +80,7 @@ winapi = { version = "0.3", features = ["winbase"] }
 [dev-dependencies]
 lightning = { version = "0.0.121", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
-electrum-client = { version = "0.15.1", default-features = true }
+electrum-client = { version = "0.15.1", default-features = false }
 bitcoincore-rpc = { version = "0.17.0", default-features = false }
 proptest = "1.0.0"
 regex = "1.5.6"
