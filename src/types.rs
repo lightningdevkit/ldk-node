@@ -13,6 +13,7 @@ use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeePa
 use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_net_tokio::SocketDescriptor;
@@ -23,35 +24,34 @@ use bitcoin::OutPoint;
 
 use std::sync::{Arc, Mutex, RwLock};
 
-pub(crate) type ChainMonitor<K> = chainmonitor::ChainMonitor<
+pub(crate) type DynStore = dyn KVStore + Sync + Send;
+
+pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<ChainSource>,
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
 	Arc<FilesystemLogger>,
-	Arc<K>,
+	Arc<DynStore>,
 >;
 
-pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
+pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
-	Arc<ChannelManager<K>>,
+	Arc<ChannelManager>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
-	Arc<OnionMessenger<K>>,
+	Arc<OnionMessenger>,
 	Arc<FilesystemLogger>,
-	Arc<NodeCustomMessageHandler<K, Arc<FilesystemLogger>>>,
+	Arc<NodeCustomMessageHandler<Arc<FilesystemLogger>>>,
 	Arc<KeysManager>,
 >;
 
 pub(crate) type ChainSource = EsploraSyncClient<Arc<FilesystemLogger>>;
 
-pub(crate) type LiquidityManager<K> = lightning_liquidity::LiquidityManager<
-	Arc<KeysManager>,
-	Arc<ChannelManager<K>>,
-	Arc<ChainSource>,
->;
+pub(crate) type LiquidityManager =
+	lightning_liquidity::LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<ChainSource>>;
 
-pub(crate) type ChannelManager<K> = lightning::ln::channelmanager::ChannelManager<
-	Arc<ChainMonitor<K>>,
+pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
+	Arc<ChainMonitor>,
 	Arc<Broadcaster>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
@@ -109,11 +109,11 @@ pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 	Arc<FilesystemLogger>,
 >;
 
-pub(crate) type OnionMessenger<K> = lightning::onion_message::messenger::OnionMessenger<
+pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
-	Arc<ChannelManager<K>>,
+	Arc<ChannelManager>,
 	Arc<MessageRouter>,
 	IgnoringMessageHandler,
 	IgnoringMessageHandler,
@@ -125,12 +125,12 @@ pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMess
 	Arc<KeysManager>,
 >;
 
-pub(crate) type Sweeper<K> = OutputSweeper<
+pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,
 	Arc<KeysManager>,
 	Arc<FeeEstimator>,
 	Arc<ChainSource>,
-	Arc<K>,
+	Arc<DynStore>,
 	Arc<FilesystemLogger>,
 	Arc<KeysManager>,
 >;

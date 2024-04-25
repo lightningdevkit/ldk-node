@@ -182,9 +182,9 @@ pub(crate) fn random_config() -> Config {
 }
 
 #[cfg(feature = "uniffi")]
-type TestNode<K> = Arc<Node<K>>;
+type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
-type TestNode<K> = Node<K>;
+type TestNode = Node;
 
 macro_rules! setup_builder {
 	($builder: ident, $config: expr) => {
@@ -197,9 +197,7 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
-pub(crate) fn setup_two_nodes(
-	electrsd: &ElectrsD, allow_0conf: bool,
-) -> (TestNode<TestSyncStore>, TestNode<TestSyncStore>) {
+pub(crate) fn setup_two_nodes(electrsd: &ElectrsD, allow_0conf: bool) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config();
 	let node_a = setup_node(electrsd, config_a);
@@ -213,7 +211,7 @@ pub(crate) fn setup_two_nodes(
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode<TestSyncStore> {
+pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	setup_builder!(builder, config);
 	builder.set_esplora_server(esplora_url.clone());
@@ -332,8 +330,8 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	generate_blocks_and_wait(bitcoind, electrs, 1);
 }
 
-pub fn open_channel<K: KVStore + Sync + Send>(
-	node_a: &TestNode<K>, node_b: &TestNode<K>, funding_amount_sat: u64, announce: bool,
+pub fn open_channel(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, announce: bool,
 	electrsd: &ElectrsD,
 ) {
 	node_a
@@ -354,9 +352,8 @@ pub fn open_channel<K: KVStore + Sync + Send>(
 	wait_for_tx(&electrsd.client, funding_txo_a.txid);
 }
 
-pub(crate) fn do_channel_full_cycle<K: KVStore + Sync + Send, E: ElectrumApi>(
-	node_a: TestNode<K>, node_b: TestNode<K>, bitcoind: &BitcoindClient, electrsd: &E,
-	allow_0conf: bool,
+pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
+	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 ) {
 	let addr_a = node_a.new_onchain_address().unwrap();
 	let addr_b = node_b.new_onchain_address().unwrap();
