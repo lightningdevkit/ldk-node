@@ -42,6 +42,7 @@ where
 			ConfirmationTarget::AnchorChannelFee,
 			ConfirmationTarget::NonAnchorChannelFee,
 			ConfirmationTarget::ChannelCloseMinimum,
+			ConfirmationTarget::OutputSpendingFee,
 		];
 		for target in confirmation_targets {
 			let num_blocks = match target {
@@ -51,6 +52,7 @@ where
 				ConfirmationTarget::AnchorChannelFee => 1008,
 				ConfirmationTarget::NonAnchorChannelFee => 12,
 				ConfirmationTarget::ChannelCloseMinimum => 144,
+				ConfirmationTarget::OutputSpendingFee => 12,
 			};
 
 			let estimates = self.esplora_client.get_fee_estimates().await.map_err(|e| {
@@ -119,6 +121,7 @@ where
 			ConfirmationTarget::AnchorChannelFee => 500,
 			ConfirmationTarget::NonAnchorChannelFee => 1000,
 			ConfirmationTarget::ChannelCloseMinimum => 500,
+			ConfirmationTarget::OutputSpendingFee => 1000,
 		};
 
 		// We'll fall back on this, if we really don't have any other information.

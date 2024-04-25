@@ -190,16 +190,19 @@ enum PaymentFailureReason {
 
 [Enum]
 interface ClosureReason {
-	CounterpartyForceClosed ( UntrustedString peer_msg );
-	HolderForceClosed ();
-	CooperativeClosure ();
-	CommitmentTxConfirmed ();
-	FundingTimedOut ();
-	ProcessingError ( string err );
-	DisconnectedPeer ();
-	OutdatedChannelManager ();
-	CounterpartyCoopClosedUnfundedChannel ();
-	FundingBatchClosure ();
+	CounterpartyForceClosed(UntrustedString peer_msg);
+	HolderForceClosed();
+	LegacyCooperativeClosure();
+	CounterpartyInitiatedCooperativeClosure();
+	LocallyInitiatedCooperativeClosure();
+	CommitmentTxConfirmed();
+	FundingTimedOut();
+	ProcessingError(string err);
+	DisconnectedPeer();
+	OutdatedChannelManager();
+	CounterpartyCoopClosedUnfundedChannel();
+	FundingBatchClosure();
+	HTLCsTimedOut();
 };
 
 enum PaymentDirection {

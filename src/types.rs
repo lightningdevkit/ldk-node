@@ -1,10 +1,7 @@
 use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::sweep::OutputSweeper;
 
-use lightning::blinded_path::BlindedPath;
 use lightning::chain::chainmonitor;
-use lightning::chain::BestBlock as LdkBestBlock;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::msgs::SocketAddress;
@@ -13,15 +10,16 @@ use lightning::ln::ChannelId;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
-use lightning::sign::{EntropySource, InMemorySigner};
+use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::util::sweep::OutputSweeper;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
 
-use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
-use bitcoin::{BlockHash, OutPoint};
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::OutPoint;
 
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -38,7 +36,7 @@ pub(crate) type PeerManager<K> = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
 	Arc<ChannelManager<K>>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
-	Arc<OnionMessenger>,
+	Arc<OnionMessenger<K>>,
 	Arc<FilesystemLogger>,
 	Arc<NodeCustomMessageHandler<K, Arc<FilesystemLogger>>>,
 	Arc<KeysManager>,
@@ -84,6 +82,7 @@ pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
 pub(crate) type Router = DefaultRouter<
 	Arc<NetworkGraph>,
 	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
 	Arc<Mutex<Scorer>>,
 	ProbabilisticScoringFeeParameters,
 	Scorer,
@@ -110,41 +109,30 @@ pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 	Arc<FilesystemLogger>,
 >;
 
-pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
+pub(crate) type OnionMessenger<K> = lightning::onion_message::messenger::OnionMessenger<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
-	Arc<FakeMessageRouter>,
+	Arc<ChannelManager<K>>,
+	Arc<MessageRouter>,
 	IgnoringMessageHandler,
 	IgnoringMessageHandler,
 >;
 
-pub(crate) struct FakeMessageRouter {}
-
-impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
-	fn find_path(
-		&self, _sender: PublicKey, _peers: Vec<PublicKey>,
-		_destination: lightning::onion_message::messenger::Destination,
-	) -> Result<lightning::onion_message::messenger::OnionMessagePath, ()> {
-		unimplemented!()
-	}
-	fn create_blinded_paths<
-		ES: EntropySource + ?Sized,
-		T: secp256k1::Signing + secp256k1::Verification,
-	>(
-		&self, _recipient: PublicKey, _peers: Vec<PublicKey>, _entropy_source: &ES,
-		_secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedPath>, ()> {
-		unreachable!()
-	}
-}
+pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
+	Arc<NetworkGraph>,
+	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
+>;
 
 pub(crate) type Sweeper<K> = OutputSweeper<
 	Arc<Broadcaster>,
+	Arc<KeysManager>,
 	Arc<FeeEstimator>,
 	Arc<ChainSource>,
 	Arc<K>,
 	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
 >;
 
 /// A local, potentially user-provided, identifier of a channel.
@@ -455,22 +443,5 @@ impl From<ChannelConfig> for LdkChannelConfig {
 impl Default for ChannelConfig {
 	fn default() -> Self {
 		LdkChannelConfig::default().into()
-	}
-}
-
-/// The best known block as identified by its hash and height.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BestBlock {
-	/// The block's hash
-	pub block_hash: BlockHash,
-	/// The height at which the block was confirmed.
-	pub height: u32,
-}
-
-impl From<LdkBestBlock> for BestBlock {
-	fn from(value: LdkBestBlock) -> Self {
-		let block_hash = value.block_hash();
-		let height = value.height();
-		Self { block_hash, height }
 	}
 }
