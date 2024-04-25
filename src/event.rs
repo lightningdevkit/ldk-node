@@ -291,7 +291,7 @@ impl Future for EventFuture {
 	}
 }
 
-pub(crate) struct EventHandler<L: Deref>
+pub(crate) struct EventHandler<L: Deref + Clone + Sync + Send + 'static>
 where
 	L::Target: Logger,
 {
@@ -307,7 +307,7 @@ where
 	config: Arc<Config>,
 }
 
-impl<L: Deref> EventHandler<L>
+impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
 where
 	L::Target: Logger,
 {
