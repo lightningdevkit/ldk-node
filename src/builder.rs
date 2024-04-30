@@ -184,7 +184,6 @@ impl NodeBuilder {
 
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
-		let config = config;
 		let entropy_source_config = None;
 		let chain_data_source_config = None;
 		let gossip_source_config = None;
@@ -1034,7 +1033,7 @@ fn seed_bytes_from_config(
 	match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
 		Some(EntropySourceConfig::SeedFile(seed_path)) => {
-			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
+			Ok(io::utils::read_or_generate_seed_file(seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
 		},
 		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {

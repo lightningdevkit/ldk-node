@@ -39,19 +39,13 @@ impl GossipSource {
 	}
 
 	pub fn is_rgs(&self) -> bool {
-		if let Self::RapidGossipSync { .. } = self {
-			true
-		} else {
-			false
-		}
+		matches!(self, Self::RapidGossipSync { .. })
 	}
 
 	pub fn as_gossip_sync(&self) -> GossipSync {
 		match self {
-			Self::RapidGossipSync { gossip_sync, .. } => {
-				GossipSync::Rapid(Arc::clone(&gossip_sync))
-			},
-			Self::P2PNetwork { gossip_sync, .. } => GossipSync::P2P(Arc::clone(&gossip_sync)),
+			Self::RapidGossipSync { gossip_sync, .. } => GossipSync::Rapid(Arc::clone(gossip_sync)),
+			Self::P2PNetwork { gossip_sync, .. } => GossipSync::P2P(Arc::clone(gossip_sync)),
 		}
 	}
 

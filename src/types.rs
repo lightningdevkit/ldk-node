@@ -282,7 +282,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 		ChannelDetails {
 			channel_id: value.channel_id,
 			counterparty_node_id: value.counterparty.node_id,
-			funding_txo: value.funding_txo.and_then(|o| Some(o.into_bitcoin_outpoint())),
+			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
 			channel_value_sats: value.channel_value_satoshis,
 			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
 			user_channel_id: UserChannelId(value.user_channel_id),
