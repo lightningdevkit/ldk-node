@@ -116,6 +116,7 @@ impl Bolt11Payment {
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
 					last_update: 0,
+					fee_msat: None,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -139,6 +140,7 @@ impl Bolt11Payment {
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
 							last_update: 0,
+							fee_msat: None,
 						};
 
 						self.payment_store.insert(payment)?;
@@ -233,6 +235,7 @@ impl Bolt11Payment {
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
 					last_update: 0,
+					fee_msat: None,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -258,6 +261,7 @@ impl Bolt11Payment {
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
 							last_update: 0,
+							fee_msat: None,
 						};
 						self.payment_store.insert(payment)?;
 
@@ -325,6 +329,7 @@ impl Bolt11Payment {
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
 			last_update: 0,
+			fee_msat: None,
 		};
 
 		self.payment_store.insert(payment)?;
@@ -457,6 +462,7 @@ impl Bolt11Payment {
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
 			last_update: 0,
+			fee_msat: None,
 		};
 
 		self.payment_store.insert(payment)?;
