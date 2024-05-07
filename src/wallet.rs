@@ -25,8 +25,9 @@ use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
-use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
+use bitcoin::{bitcoinconsensus, ScriptBuf, Transaction, TxOut, Txid};
 
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -114,6 +115,29 @@ where
 
 	pub(crate) fn is_mine(&self, script: &ScriptBuf) -> Result<bool, Error> {
 		Ok(self.inner.lock().unwrap().is_mine(script)?)
+	}
+
+	pub async fn verify_tx(&self, tx: Transaction) -> Result<(), Error> {
+		let serialized_tx = bitcoin::consensus::serialize(&tx);
+		for (index, input) in tx.input.iter().enumerate() {
+			let input = input.clone();
+			let txid = input.previous_output.txid;
+			let prev_tx = if let Ok(prev_tx) = self.blockchain.get_tx(&txid).await {
+				prev_tx.unwrap()
+			} else {
+				dbg!("maybe conibase?");
+				continue;
+			};
+			let spent_output = prev_tx.output.get(input.previous_output.vout as usize).unwrap();
+			bitcoinconsensus::verify(
+				&spent_output.script_pubkey.to_bytes(),
+				spent_output.value,
+				&serialized_tx,
+				index,
+			)
+			.unwrap();
+		}
+		Ok(())
 	}
 
 	pub(crate) fn sign_tx(&self, psbt: &Psbt, options: Option<SignOptions>) -> Result<Psbt, Error> {
