@@ -250,7 +250,15 @@ pub(crate) struct PaymentDetailsUpdate {
 
 impl PaymentDetailsUpdate {
 	pub fn new(id: PaymentId) -> Self {
-		Self { id, preimage: None, secret: None, amount_msat: None, direction: None, status: None, fee_msat: None }
+		Self {
+			id,
+			preimage: None,
+			secret: None,
+			amount_msat: None,
+			direction: None,
+			status: None,
+			fee_msat: None,
+		}
 	}
 }
 
