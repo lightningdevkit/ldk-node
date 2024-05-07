@@ -55,8 +55,8 @@ impl Writeable for PaymentDetails {
 			(6, self.amount_msat, required),
 			(8, self.direction, required),
 			(10, self.status, required),
-			(131074, self.last_update, required),
-			(131076, self.fee_msat, required),
+			(131074, Some(self.last_update), option),
+			(131076, self.fee_msat, option),
 		});
 		Ok(())
 	}
@@ -83,7 +83,7 @@ impl Readable for PaymentDetails {
 		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
-		let last_update: u64 = last_update.or(Some(0)).ok_or(DecodeError::InvalidValue)?;
+		let last_update: u64 = last_update.unwrap_or(0);
 
 		let kind = if let Some(kind) = kind_opt {
 			// If we serialized the payment kind, use it.
