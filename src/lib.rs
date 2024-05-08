@@ -136,7 +136,9 @@ use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
 	KeysManager, NetworkGraph, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, ChannelType, PeerDetails, TlvEntry, UserChannelId};
+pub use types::{
+	ChannelDetails, ChannelType, PeerDetails, PersistentRecordKey, TlvEntry, UserChannelId,
+};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -144,12 +146,6 @@ use lightning::chain::{BestBlock, Confirm};
 use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
 use lightning::ln::msgs::SocketAddress;
-
-use lightning::util::persist::{
-	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-};
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -162,10 +158,6 @@ use bitcoin::secp256k1::PublicKey;
 
 use rand::Rng;
 
-use crate::io::{
-	LATEST_RGS_SYNC_TIMESTAMP_KEY, LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-	LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-};
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1386,34 +1378,19 @@ impl Node {
 		self.keys_manager.verify_signature(msg, sig, pkey)
 	}
 
-	/// Resets router state.
+	/// Resets all supported router state entries.
 	pub fn reset_router(&self) -> Result<(), Error> {
-		self.kv_store
-			.remove(
-				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-				LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-				LATEST_RGS_SYNC_TIMESTAMP_KEY,
-				false,
-			)
-			.map_err(|_| Error::PersistenceFailed)?;
-		self.kv_store
-			.remove(
-				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-				SCORER_PERSISTENCE_KEY,
-				false,
-			)
-			.map_err(|_| Error::PersistenceFailed)?;
-		self.kv_store
-			.remove(
-				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-				NETWORK_GRAPH_PERSISTENCE_KEY,
-				false,
-			)
-			.map_err(|_| Error::PersistenceFailed)?;
-
+		self.reset_router_record(PersistentRecordKey::LatestRgsSyncTimestamp)?;
+		self.reset_router_record(PersistentRecordKey::Scorer)?;
+		self.reset_router_record(PersistentRecordKey::NetworkGraph)?;
 		Ok(())
+	}
+
+	/// Resets router state record.
+	pub fn reset_router_record(&self, key: PersistentRecordKey) -> Result<(), Error> {
+		self.kv_store
+			.remove(key.get_pri_ns(), key.get_sec_ns(), key.get_key(), false)
+			.map_err(|_| Error::PersistenceFailed)
 	}
 }
 

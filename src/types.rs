@@ -15,7 +15,11 @@ use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeePa
 use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{
+	KVStore, NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
@@ -23,6 +27,10 @@ use lightning_transaction_sync::EsploraSyncClient;
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
 use bitcoin::OutPoint;
 
+use crate::io::{
+	LATEST_RGS_SYNC_TIMESTAMP_KEY, LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
+	LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
+};
 use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) type DynStore = dyn KVStore + Sync + Send;
@@ -495,4 +503,46 @@ pub struct TlvEntry {
 
 	/// Serialized value.
 	pub value: Vec<u8>,
+}
+
+/// Persistent record key.
+pub enum PersistentRecordKey {
+	// Latest RGS sync timestamp (LATEST_RGS_SYNC_TIMESTAMP_KEY).
+	LatestRgsSyncTimestamp,
+
+	/// Scorer data (SCORER_PERSISTENCE_KEY).
+	Scorer,
+
+	/// Network graph data (NETWORK_GRAPH_PERSISTENCE_KEY).
+	NetworkGraph,
+}
+
+impl PersistentRecordKey {
+	pub(crate) fn get_pri_ns(&self) -> &'static str {
+		match self {
+			PersistentRecordKey::LatestRgsSyncTimestamp => {
+				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE
+			},
+			PersistentRecordKey::Scorer => SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+			PersistentRecordKey::NetworkGraph => NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		}
+	}
+
+	pub(crate) fn get_sec_ns(&self) -> &'static str {
+		match self {
+			PersistentRecordKey::LatestRgsSyncTimestamp => {
+				LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE
+			},
+			PersistentRecordKey::Scorer => SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+			PersistentRecordKey::NetworkGraph => NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		}
+	}
+
+	pub(crate) fn get_key(&self) -> &'static str {
+		match self {
+			PersistentRecordKey::LatestRgsSyncTimestamp => LATEST_RGS_SYNC_TIMESTAMP_KEY,
+			PersistentRecordKey::Scorer => SCORER_PERSISTENCE_KEY,
+			PersistentRecordKey::NetworkGraph => NETWORK_GRAPH_PERSISTENCE_KEY,
+		}
+	}
 }
