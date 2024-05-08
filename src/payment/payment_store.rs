@@ -347,6 +347,10 @@ where
 				payment.status = status;
 			}
 
+			if let Some(fee_msat) = update.fee_msat {
+				payment.fee_msat = fee_msat;
+			}
+
 			payment.last_update = time::SystemTime::now()
 				.duration_since(time::UNIX_EPOCH)
 				.unwrap_or(time::Duration::ZERO)
