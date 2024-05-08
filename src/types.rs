@@ -507,7 +507,7 @@ pub struct TlvEntry {
 
 /// Persistent record key.
 pub enum PersistentRecordKey {
-	// Latest RGS sync timestamp (LATEST_RGS_SYNC_TIMESTAMP_KEY).
+	/// Latest RGS sync timestamp (LATEST_RGS_SYNC_TIMESTAMP_KEY).
 	LatestRgsSyncTimestamp,
 
 	/// Scorer data (SCORER_PERSISTENCE_KEY).
