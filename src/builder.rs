@@ -661,7 +661,16 @@ fn build_with_store_internal(
 		},
 	};
 
-	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let scoring_fee_params = ProbabilisticScoringFeeParameters {
+		// Alby: Penalize longer routes https://blog.mutinywallet.com/fixing-payment-reliability/
+		// * 4 recommended by BlueMatt // https://github.com/lightningdevkit/rust-lightning/issues/3040
+		base_penalty_amount_multiplier_msat: ProbabilisticScoringFeeParameters::default()
+			.base_penalty_amount_multiplier_msat
+			* 4,
+		base_penalty_msat: ProbabilisticScoringFeeParameters::default().base_penalty_msat * 4,
+		..Default::default()
+	};
+
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
