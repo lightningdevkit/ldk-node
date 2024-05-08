@@ -96,6 +96,7 @@ impl SpontaneousPayment {
 					direction: PaymentDirection::Outbound,
 					amount_msat: Some(amount_msat),
 					last_update: 0,
+					fee_msat: None,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -119,6 +120,7 @@ impl SpontaneousPayment {
 							direction: PaymentDirection::Outbound,
 							amount_msat: Some(amount_msat),
 							last_update: 0,
+							fee_msat: None,
 						};
 
 						self.payment_store.insert(payment)?;

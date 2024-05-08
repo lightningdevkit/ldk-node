@@ -590,6 +590,7 @@ where
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
 							last_update: 0,
+							fee_msat: None,
 						};
 
 						match self.payment_store.insert(payment) {
@@ -643,6 +644,7 @@ where
 				let update = PaymentDetailsUpdate {
 					preimage: Some(Some(payment_preimage)),
 					status: Some(PaymentStatus::Succeeded),
+					fee_msat: Some(fee_paid_msat),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 

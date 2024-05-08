@@ -666,8 +666,8 @@ fn build_with_store_internal(
 		// * 4 recommended by BlueMatt // https://github.com/lightningdevkit/rust-lightning/issues/3040
 		base_penalty_amount_multiplier_msat: ProbabilisticScoringFeeParameters::default()
 			.base_penalty_amount_multiplier_msat
-			* 4,
-		base_penalty_msat: ProbabilisticScoringFeeParameters::default().base_penalty_msat * 4,
+			* 100,
+		base_penalty_msat: ProbabilisticScoringFeeParameters::default().base_penalty_msat * 100,
 		..Default::default()
 	};
 

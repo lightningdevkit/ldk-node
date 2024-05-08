@@ -36,6 +36,8 @@ pub struct PaymentDetails {
 	pub status: PaymentStatus,
 	/// Last update timestamp, as seconds since Unix epoch.
 	pub last_update: u64,
+	/// Fee paid.
+	pub fee_msat: Option<u64>,
 }
 
 impl Writeable for PaymentDetails {
@@ -53,7 +55,8 @@ impl Writeable for PaymentDetails {
 			(6, self.amount_msat, required),
 			(8, self.direction, required),
 			(10, self.status, required),
-			(131074, self.last_update, required)
+			(131074, Some(self.last_update), option),
+			(131076, self.fee_msat, option),
 		});
 		Ok(())
 	}
@@ -71,6 +74,7 @@ impl Readable for PaymentDetails {
 			(8, direction, required),
 			(10, status, required),
 			(131074, last_update, option),
+			(131076, fee_msat, option),
 		});
 
 		let id: PaymentId = id.0.ok_or(DecodeError::InvalidValue)?;
@@ -79,7 +83,7 @@ impl Readable for PaymentDetails {
 		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
-		let last_update: u64 = last_update.or(Some(0)).ok_or(DecodeError::InvalidValue)?;
+		let last_update: u64 = last_update.unwrap_or(0);
 
 		let kind = if let Some(kind) = kind_opt {
 			// If we serialized the payment kind, use it.
@@ -108,7 +112,7 @@ impl Readable for PaymentDetails {
 			}
 		};
 
-		Ok(PaymentDetails { id, kind, amount_msat, direction, status, last_update })
+		Ok(PaymentDetails { id, kind, amount_msat, direction, status, last_update, fee_msat })
 	}
 }
 
@@ -241,11 +245,20 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub amount_msat: Option<Option<u64>>,
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
+	pub fee_msat: Option<Option<u64>>,
 }
 
 impl PaymentDetailsUpdate {
 	pub fn new(id: PaymentId) -> Self {
-		Self { id, preimage: None, secret: None, amount_msat: None, direction: None, status: None }
+		Self {
+			id,
+			preimage: None,
+			secret: None,
+			amount_msat: None,
+			direction: None,
+			status: None,
+			fee_msat: None,
+		}
 	}
 }
 
@@ -332,6 +345,10 @@ where
 
 			if let Some(status) = update.status {
 				payment.status = status;
+			}
+
+			if let Some(fee_msat) = update.fee_msat {
+				payment.fee_msat = fee_msat;
 			}
 
 			payment.last_update = time::SystemTime::now()
@@ -444,6 +461,7 @@ mod tests {
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
 			last_update: 0,
+			fee_msat: None,
 		};
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
