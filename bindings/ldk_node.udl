@@ -86,6 +86,8 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
 	void reset_router();
+	[Throws=NodeError]
+	void reset_router_record(PersistentRecordKey key);
 };
 
 interface Bolt11Payment {
@@ -419,3 +421,9 @@ typedef string Mnemonic;
 
 [Custom]
 typedef string UntrustedString;
+
+enum PersistentRecordKey {
+	"LatestRgsSyncTimestamp",
+	"Scorer",
+	"NetworkGraph",
+};
