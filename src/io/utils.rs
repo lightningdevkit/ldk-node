@@ -263,7 +263,7 @@ where
 		})?;
 		let descriptors = vec![output.descriptor.clone()];
 		let spend_delay = Some(best_block.height + 2);
-		sweeper.track_spendable_outputs(descriptors, output.channel_id, true, spend_delay);
+		let _ = sweeper.track_spendable_outputs(descriptors, output.channel_id, true, spend_delay);
 		if let Some(tracked_spendable_output) =
 			sweeper.tracked_spendable_outputs().iter().find(|o| o.descriptor == output.descriptor)
 		{
