@@ -176,7 +176,7 @@ where
 
 	pub(crate) fn next_event(&self) -> Option<Event> {
 		let locked_queue = self.queue.lock().unwrap();
-		locked_queue.front().map(|e| e.clone())
+		locked_queue.front().cloned()
 	}
 
 	pub(crate) async fn next_event_async(&self) -> Event {

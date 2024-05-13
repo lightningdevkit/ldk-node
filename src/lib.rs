@@ -1711,7 +1711,7 @@ impl Node {
 			.output_sweeper
 			.tracked_spendable_outputs()
 			.into_iter()
-			.map(|o| PendingSweepBalance::from_tracked_spendable_output(o))
+			.map(PendingSweepBalance::from_tracked_spendable_output)
 			.collect();
 
 		BalanceDetails {
@@ -1772,7 +1772,7 @@ impl Node {
 
 		// Now add all known-but-offline peers, too.
 		for p in self.peer_store.list_peers() {
-			if peers.iter().take(connected_peers_len).find(|d| d.node_id == p.node_id).is_some() {
+			if peers.iter().take(connected_peers_len).any(|d| d.node_id == p.node_id) {
 				continue;
 			}
 

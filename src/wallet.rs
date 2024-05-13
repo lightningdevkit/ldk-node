@@ -92,10 +92,7 @@ where
 							e
 						);
 						let sync_options = SyncOptions { progress: None };
-						wallet_lock
-							.sync(&self.blockchain, sync_options)
-							.await
-							.map_err(|e| From::from(e))
+						wallet_lock.sync(&self.blockchain, sync_options).await.map_err(From::from)
 					},
 					_ => {
 						log_error!(self.logger, "Sync failed due to Esplora error: {}", e);

@@ -265,7 +265,7 @@ mod tests {
 		let payment_store = PaymentStore::new(Vec::new(), Arc::clone(&store), logger);
 
 		let hash = PaymentHash([42u8; 32]);
-		assert!(!payment_store.get(&hash).is_some());
+		assert!(payment_store.get(&hash).is_none());
 
 		let store_key = hex_utils::to_string(&hash.0);
 		assert!(store
