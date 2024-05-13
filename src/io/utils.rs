@@ -263,7 +263,16 @@ where
 		})?;
 		let descriptors = vec![output.descriptor.clone()];
 		let spend_delay = Some(best_block.height + 2);
-		sweeper.track_spendable_outputs(descriptors, output.channel_id, true, spend_delay);
+		sweeper
+			.track_spendable_outputs(descriptors, output.channel_id, true, spend_delay)
+			.map_err(|_| {
+				log_error!(logger, "Failed to track spendable outputs. Aborting migration, will retry in the future.");
+				std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					"Failed to track spendable outputs. Aborting migration, will retry in the future.",
+				)
+			})?;
+
 		if let Some(tracked_spendable_output) =
 			sweeper.tracked_spendable_outputs().iter().find(|o| o.descriptor == output.descriptor)
 		{
