@@ -1,9 +1,12 @@
+pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus};
+
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
-pub use lightning::ln::ChannelId;
-pub use lightning::ln::PaymentSecret;
+pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning::util::string::UntrustedString;
 
-pub use bitcoin::{BlockHash, Network, OutPoint};
+pub use lightning_invoice::Bolt11Invoice;
+
+pub use bitcoin::{Address, BlockHash, Network, OutPoint, Txid};
 
 pub use bip39::Mnemonic;
 
@@ -16,9 +19,8 @@ use crate::{SocketAddress, UserChannelId};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Txid};
-use lightning::ln::{PaymentHash, PaymentPreimage};
-use lightning_invoice::{Bolt11Invoice, SignedRawBolt11Invoice};
+use lightning::ln::channelmanager::PaymentId;
+use lightning_invoice::SignedRawBolt11Invoice;
 
 use std::convert::TryInto;
 use std::str::FromStr;
@@ -70,6 +72,24 @@ impl UniffiCustomTypeConverter for Bolt11Invoice {
 
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for PaymentId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
+			let bytes_res = bytes_vec.try_into();
+			if let Ok(bytes) = bytes_res {
+				return Ok(PaymentId(bytes));
+			}
+		}
+		Err(Error::InvalidPaymentId.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&obj.0)
 	}
 }
 

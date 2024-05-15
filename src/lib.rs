@@ -23,7 +23,7 @@
 //! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
 //! and configuring a [`Builder`] to your liking and calling [`build`]. `Node` can then be
 //! controlled via commands such as [`start`], [`stop`], [`connect_open_channel`],
-//! [`send_payment`], etc.:
+//! [`send`], etc.:
 //!
 //! ```no_run
 //! use ldk_node::Builder;
@@ -43,7 +43,7 @@
 //!
 //! 	node.start().unwrap();
 //!
-//! 	let funding_address = node.new_onchain_address();
+//! 	let funding_address = node.onchain_payment().new_address();
 //!
 //! 	// .. fund address ..
 //!
@@ -56,7 +56,7 @@
 //! 	node.event_handled();
 //!
 //! 	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
-//! 	node.send_payment(&invoice).unwrap();
+//! 	node.bolt11_payment().send(&invoice).unwrap();
 //!
 //! 	node.stop().unwrap();
 //! }
@@ -66,7 +66,7 @@
 //! [`start`]: Node::start
 //! [`stop`]: Node::stop
 //! [`connect_open_channel`]: Node::connect_open_channel
-//! [`send_payment`]: Node::send_payment
+//! [`send`]: Bolt11Payment::send
 //!
 #![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -88,7 +88,7 @@ pub mod io;
 mod liquidity;
 mod logger;
 mod message_handler;
-mod payment_store;
+pub mod payment;
 mod peer_store;
 mod sweep;
 mod tx_broadcaster;
@@ -122,15 +122,15 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	LDK_PAYMENT_RETRY_TIMEOUT, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
-use payment_store::PaymentStore;
-pub use payment_store::{LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus};
+use payment::store::PaymentStore;
+use payment::{Bolt11Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, ChainMonitor, ChannelManager, DynStore, FeeEstimator, KeysManager, NetworkGraph,
@@ -141,11 +141,8 @@ pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::{BestBlock, Confirm};
-use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::{PaymentHash, PaymentPreimage};
-
-use lightning::sign::EntropySource;
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -154,13 +151,7 @@ use lightning_background_processor::process_events_async;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
-use lightning::routing::router::{PaymentParameters, RouteParameters};
-use lightning_invoice::{payment, Bolt11Invoice, Currency};
-
-use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-
-use bitcoin::{Address, Txid};
 
 use rand::Rng;
 
@@ -818,38 +809,86 @@ impl Node {
 		self.config.listening_addresses.clone()
 	}
 
-	/// Retrieve a new on-chain/funding address.
-	pub fn new_onchain_address(&self) -> Result<Address, Error> {
-		let funding_address = self.wallet.get_new_address()?;
-		log_info!(self.logger, "Generated new funding address: {}", funding_address);
-		Ok(funding_address)
+	/// Returns a payment handler allowing to create and pay [BOLT 11] invoices.
+	///
+	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	#[cfg(not(feature = "uniffi"))]
+	pub fn bolt11_payment(&self) -> Bolt11Payment {
+		Bolt11Payment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.connection_manager),
+			Arc::clone(&self.keys_manager),
+			self.liquidity_source.clone(),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.peer_store),
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		)
 	}
 
-	/// Send an on-chain payment to the given address.
-	pub fn send_to_onchain_address(
-		&self, address: &bitcoin::Address, amount_sats: u64,
-	) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let cur_balance = self.wallet.get_balance()?;
-		if cur_balance.get_spendable() < amount_sats {
-			log_error!(self.logger, "Unable to send payment due to insufficient funds.");
-			return Err(Error::InsufficientFunds);
-		}
-		self.wallet.send_to_address(address, Some(amount_sats))
+	/// Returns a payment handler allowing to create and pay [BOLT 11] invoices.
+	///
+	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	#[cfg(feature = "uniffi")]
+	pub fn bolt11_payment(&self) -> Arc<Bolt11Payment> {
+		Arc::new(Bolt11Payment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.connection_manager),
+			Arc::clone(&self.keys_manager),
+			self.liquidity_source.clone(),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.peer_store),
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		))
 	}
 
-	/// Send an on-chain payment to the given address, draining all the available funds.
-	pub fn send_all_to_onchain_address(&self, address: &bitcoin::Address) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
+	/// Returns a payment handler allowing to send spontaneous ("keysend") payments.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn spontaneous_payment(&self) -> SpontaneousPayment {
+		SpontaneousPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		)
+	}
 
-		self.wallet.send_to_address(address, None)
+	/// Returns a payment handler allowing to send spontaneous ("keysend") payments.
+	#[cfg(feature = "uniffi")]
+	pub fn spontaneous_payment(&self) -> Arc<SpontaneousPayment> {
+		Arc::new(SpontaneousPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a payment handler allowing to send and receive on-chain payments.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn onchain_payment(&self) -> OnchainPayment {
+		OnchainPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.logger),
+		)
+	}
+
+	/// Returns a payment handler allowing to send and receive on-chain payments.
+	#[cfg(feature = "uniffi")]
+	pub fn onchain_payment(&self) -> Arc<OnchainPayment> {
+		Arc::new(OnchainPayment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.logger),
+		))
 	}
 
 	/// Retrieve a list of known channels.
@@ -1104,576 +1143,16 @@ impl Node {
 		}
 	}
 
-	/// Send a payment given an invoice.
-	pub fn send_payment(&self, invoice: &Bolt11Invoice) -> Result<PaymentHash, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let (payment_hash, recipient_onion, route_params) = payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
-			log_error!(self.logger, "Failed to send payment due to the given invoice being \"zero-amount\". Please use send_payment_using_amount instead.");
-			Error::InvalidInvoice
-		})?;
-
-		if let Some(payment) = self.payment_store.get(&payment_hash) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
-
-		let payment_secret = Some(*invoice.payment_secret());
-		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-
-		match self.channel_manager.send_payment(
-			payment_hash,
-			recipient_onion,
-			payment_id,
-			route_params,
-			retry_strategy,
-		) {
-			Ok(()) => {
-				let payee_pubkey = invoice.recover_payee_pub_key();
-				let amt_msat = invoice.amount_milli_satoshis().unwrap();
-				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
-
-				let payment = PaymentDetails {
-					preimage: None,
-					hash: payment_hash,
-					secret: payment_secret,
-					amount_msat: invoice.amount_milli_satoshis(),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Pending,
-					lsp_fee_limits: None,
-				};
-				self.payment_store.insert(payment)?;
-
-				Ok(payment_hash)
-			},
-			Err(e) => {
-				log_error!(self.logger, "Failed to send payment: {:?}", e);
-				match e {
-					channelmanager::RetryableSendFailure::DuplicatePayment => {
-						Err(Error::DuplicatePayment)
-					},
-					_ => {
-						let payment = PaymentDetails {
-							preimage: None,
-							hash: payment_hash,
-							secret: payment_secret,
-							amount_msat: invoice.amount_milli_satoshis(),
-							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::Failed,
-							lsp_fee_limits: None,
-						};
-
-						self.payment_store.insert(payment)?;
-						Err(Error::PaymentSendingFailed)
-					},
-				}
-			},
-		}
-	}
-
-	/// Send a payment given an invoice and an amount in millisatoshi.
-	///
-	/// This will fail if the amount given is less than the value required by the given invoice.
-	///
-	/// This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
-	/// amount paid to be determined by the user.
-	pub fn send_payment_using_amount(
-		&self, invoice: &Bolt11Invoice, amount_msat: u64,
-	) -> Result<PaymentHash, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
-			if amount_msat < invoice_amount_msat {
-				log_error!(
-					self.logger,
-					"Failed to pay as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.", invoice_amount_msat, amount_msat);
-				return Err(Error::InvalidAmount);
-			}
-		}
-
-		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		if let Some(payment) = self.payment_store.get(&payment_hash) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
-
-		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
-		let payment_secret = invoice.payment_secret();
-		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
-		let mut payment_params = PaymentParameters::from_node_id(
-			invoice.recover_payee_pub_key(),
-			invoice.min_final_cltv_expiry_delta() as u32,
-		)
-		.with_expiry_time(expiry_time.as_secs())
-		.with_route_hints(invoice.route_hints())
-		.map_err(|_| Error::InvalidInvoice)?;
-		if let Some(features) = invoice.features() {
-			payment_params = payment_params
-				.with_bolt11_features(features.clone())
-				.map_err(|_| Error::InvalidInvoice)?;
-		}
-		let route_params =
-			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
-
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let recipient_fields = RecipientOnionFields::secret_only(*payment_secret);
-
-		match self.channel_manager.send_payment(
-			payment_hash,
-			recipient_fields,
-			payment_id,
-			route_params,
-			retry_strategy,
-		) {
-			Ok(_payment_id) => {
-				let payee_pubkey = invoice.recover_payee_pub_key();
-				log_info!(
-					self.logger,
-					"Initiated sending {} msat to {}",
-					amount_msat,
-					payee_pubkey
-				);
-
-				let payment = PaymentDetails {
-					hash: payment_hash,
-					preimage: None,
-					secret: Some(*payment_secret),
-					amount_msat: Some(amount_msat),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Pending,
-					lsp_fee_limits: None,
-				};
-				self.payment_store.insert(payment)?;
-
-				Ok(payment_hash)
-			},
-			Err(e) => {
-				log_error!(self.logger, "Failed to send payment: {:?}", e);
-
-				match e {
-					channelmanager::RetryableSendFailure::DuplicatePayment => {
-						Err(Error::DuplicatePayment)
-					},
-					_ => {
-						let payment = PaymentDetails {
-							hash: payment_hash,
-							preimage: None,
-							secret: Some(*payment_secret),
-							amount_msat: Some(amount_msat),
-							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::Failed,
-							lsp_fee_limits: None,
-						};
-						self.payment_store.insert(payment)?;
-
-						Err(Error::PaymentSendingFailed)
-					},
-				}
-			},
-		}
-	}
-
-	/// Send a spontaneous, aka. "keysend", payment
-	pub fn send_spontaneous_payment(
-		&self, amount_msat: u64, node_id: PublicKey,
-	) -> Result<PaymentHash, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
-		let payment_hash = PaymentHash::from(payment_preimage);
-
-		if let Some(payment) = self.payment_store.get(&payment_hash) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: must not send duplicate payments.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
-
-		let route_params = RouteParameters::from_payment_params_and_value(
-			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
-			amount_msat,
-		);
-		let recipient_fields = RecipientOnionFields::spontaneous_empty();
-
-		match self.channel_manager.send_spontaneous_payment_with_retry(
-			Some(payment_preimage),
-			recipient_fields,
-			PaymentId(payment_hash.0),
-			route_params,
-			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
-		) {
-			Ok(_payment_id) => {
-				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
-
-				let payment = PaymentDetails {
-					hash: payment_hash,
-					preimage: Some(payment_preimage),
-					secret: None,
-					status: PaymentStatus::Pending,
-					direction: PaymentDirection::Outbound,
-					amount_msat: Some(amount_msat),
-					lsp_fee_limits: None,
-				};
-				self.payment_store.insert(payment)?;
-
-				Ok(payment_hash)
-			},
-			Err(e) => {
-				log_error!(self.logger, "Failed to send payment: {:?}", e);
-
-				match e {
-					channelmanager::RetryableSendFailure::DuplicatePayment => {
-						Err(Error::DuplicatePayment)
-					},
-					_ => {
-						let payment = PaymentDetails {
-							hash: payment_hash,
-							preimage: Some(payment_preimage),
-							secret: None,
-							status: PaymentStatus::Failed,
-							direction: PaymentDirection::Outbound,
-							amount_msat: Some(amount_msat),
-							lsp_fee_limits: None,
-						};
-
-						self.payment_store.insert(payment)?;
-						Err(Error::PaymentSendingFailed)
-					},
-				}
-			},
-		}
-	}
-
-	/// Sends payment probes over all paths of a route that would be used to pay the given invoice.
-	///
-	/// This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
-	/// the actual payment. Note this is only useful if there likely is sufficient time for the
-	/// probe to settle before sending out the actual payment, e.g., when waiting for user
-	/// confirmation in a wallet UI.
-	///
-	/// Otherwise, there is a chance the probe could take up some liquidity needed to complete the
-	/// actual payment. Users should therefore be cautious and might avoid sending probes if
-	/// liquidity is scarce and/or they don't expect the probe to return before they send the
-	/// payment. To mitigate this issue, channels with available liquidity less than the required
-	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
-	/// pre-flight probes.
-	pub fn send_payment_probes(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let (_payment_hash, _recipient_onion, route_params) = payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
-			log_error!(self.logger, "Failed to send probes due to the given invoice being \"zero-amount\". Please use send_payment_probes_using_amount instead.");
-			Error::InvalidInvoice
-		})?;
-
-		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
-
-		self.channel_manager
-			.send_preflight_probes(route_params, liquidity_limit_multiplier)
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to send payment probes: {:?}", e);
-				Error::ProbeSendingFailed
-			})?;
-
-		Ok(())
-	}
-
-	/// Sends payment probes over all paths of a route that would be used to pay the given
-	/// amount to the given `node_id`.
-	///
-	/// See [`Self::send_payment_probes`] for more information.
-	pub fn send_spontaneous_payment_probes(
-		&self, amount_msat: u64, node_id: PublicKey,
-	) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
-		let cltv_expiry_delta = self.config.default_cltv_expiry_delta;
-
-		self.channel_manager
-			.send_spontaneous_preflight_probes(
-				node_id,
-				amount_msat,
-				cltv_expiry_delta,
-				liquidity_limit_multiplier,
-			)
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to send payment probes: {:?}", e);
-				Error::ProbeSendingFailed
-			})?;
-
-		Ok(())
-	}
-
-	/// Sends payment probes over all paths of a route that would be used to pay the given
-	/// zero-value invoice using the given amount.
-	///
-	/// This can be used to send pre-flight probes for a so-called "zero-amount" invoice, i.e., an
-	/// invoice that leaves the amount paid to be determined by the user.
-	///
-	/// See [`Self::send_payment_probes`] for more information.
-	pub fn send_payment_probes_using_amount(
-		&self, invoice: &Bolt11Invoice, amount_msat: u64,
-	) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			return Err(Error::NotRunning);
-		}
-
-		let (_payment_hash, _recipient_onion, route_params) = if let Some(invoice_amount_msat) =
-			invoice.amount_milli_satoshis()
-		{
-			if amount_msat < invoice_amount_msat {
-				log_error!(
-					self.logger,
-					"Failed to send probes as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.", invoice_amount_msat, amount_msat);
-				return Err(Error::InvalidAmount);
-			}
-
-			payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
-				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being \"zero-amount\".");
-				Error::InvalidInvoice
-			})?
-		} else {
-			payment::payment_parameters_from_zero_amount_invoice(&invoice, amount_msat).map_err(|_| {
-				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being not \"zero-amount\".");
-				Error::InvalidInvoice
-			})?
-		};
-
-		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
-
-		self.channel_manager
-			.send_preflight_probes(route_params, liquidity_limit_multiplier)
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to send payment probes: {:?}", e);
-				Error::ProbeSendingFailed
-			})?;
-
-		Ok(())
-	}
-
-	/// Returns a payable invoice that can be used to request and receive a payment of the amount
-	/// given.
-	pub fn receive_payment(
-		&self, amount_msat: u64, description: &str, expiry_secs: u32,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_payment_inner(Some(amount_msat), description, expiry_secs)
-	}
-
-	/// Returns a payable invoice that can be used to request and receive a payment for which the
-	/// amount is to be determined by the user, also known as a "zero-amount" invoice.
-	pub fn receive_variable_amount_payment(
-		&self, description: &str, expiry_secs: u32,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_payment_inner(None, description, expiry_secs)
-	}
-
-	fn receive_payment_inner(
-		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
-	) -> Result<Bolt11Invoice, Error> {
-		let currency = Currency::from(self.config.network);
-		let keys_manager = Arc::clone(&self.keys_manager);
-		let invoice = match lightning_invoice::utils::create_invoice_from_channelmanager(
-			&self.channel_manager,
-			keys_manager,
-			Arc::clone(&self.logger),
-			currency,
-			amount_msat,
-			description.to_string(),
-			expiry_secs,
-			None,
-		) {
-			Ok(inv) => {
-				log_info!(self.logger, "Invoice created: {}", inv);
-				inv
-			},
-			Err(e) => {
-				log_error!(self.logger, "Failed to create invoice: {}", e);
-				return Err(Error::InvoiceCreationFailed);
-			},
-		};
-
-		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		let payment = PaymentDetails {
-			hash: payment_hash,
-			preimage: None,
-			secret: Some(invoice.payment_secret().clone()),
-			amount_msat,
-			direction: PaymentDirection::Inbound,
-			status: PaymentStatus::Pending,
-			lsp_fee_limits: None,
-		};
-
-		self.payment_store.insert(payment)?;
-
-		Ok(invoice)
-	}
-
-	/// Returns a payable invoice that can be used to request a payment of the amount given and
-	/// receive it via a newly created just-in-time (JIT) channel.
-	///
-	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
-	/// to us, supplying just-in-time inbound liquidity.
-	///
-	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
-	/// channel to us. We'll use its cheapest offer otherwise.
-	///
-	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn receive_payment_via_jit_channel(
-		&self, amount_msat: u64, description: &str, expiry_secs: u32,
-		max_total_lsp_fee_limit_msat: Option<u64>,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_payment_via_jit_channel_inner(
-			Some(amount_msat),
-			description,
-			expiry_secs,
-			max_total_lsp_fee_limit_msat,
-			None,
-		)
-	}
-
-	/// Returns a payable invoice that can be used to request a variable amount payment (also known
-	/// as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
-	///
-	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
-	/// to us, supplying just-in-time inbound liquidity.
-	///
-	/// If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
-	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
-	/// We'll use its cheapest offer otherwise.
-	///
-	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn receive_variable_amount_payment_via_jit_channel(
-		&self, description: &str, expiry_secs: u32,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_payment_via_jit_channel_inner(
-			None,
-			description,
-			expiry_secs,
-			None,
-			max_proportional_lsp_fee_limit_ppm_msat,
-		)
-	}
-
-	fn receive_payment_via_jit_channel_inner(
-		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
-		max_total_lsp_fee_limit_msat: Option<u64>,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
-	) -> Result<Bolt11Invoice, Error> {
-		let liquidity_source =
-			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let (node_id, address) = liquidity_source
-			.get_liquidity_source_details()
-			.ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let rt_lock = self.runtime.read().unwrap();
-		let runtime = rt_lock.as_ref().unwrap();
-
-		let peer_info = PeerInfo { node_id, address };
-
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
-		})?;
-
-		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
-
-		let liquidity_source = Arc::clone(&liquidity_source);
-		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
-			tokio::task::block_in_place(move || {
-				runtime.block_on(async move {
-					if let Some(amount_msat) = amount_msat {
-						liquidity_source
-							.lsps2_receive_to_jit_channel(
-								amount_msat,
-								description,
-								expiry_secs,
-								max_total_lsp_fee_limit_msat,
-							)
-							.await
-							.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
-					} else {
-						liquidity_source
-							.lsps2_receive_variable_amount_to_jit_channel(
-								description,
-								expiry_secs,
-								max_proportional_lsp_fee_limit_ppm_msat,
-							)
-							.await
-							.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
-					}
-				})
-			})?;
-
-		// Register payment in payment store.
-		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		let lsp_fee_limits = Some(LSPFeeLimits {
-			max_total_opening_fee_msat: lsp_total_opening_fee,
-			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
-		});
-		let payment = PaymentDetails {
-			hash: payment_hash,
-			preimage: None,
-			secret: Some(invoice.payment_secret().clone()),
-			amount_msat,
-			direction: PaymentDirection::Inbound,
-			status: PaymentStatus::Pending,
-			lsp_fee_limits,
-		};
-
-		self.payment_store.insert(payment)?;
-
-		// Persist LSP peer to make sure we reconnect on restart.
-		self.peer_store.add_peer(peer_info)?;
-
-		Ok(invoice)
-	}
-
-	/// Retrieve the details of a specific payment with the given hash.
+	/// Retrieve the details of a specific payment with the given id.
 	///
 	/// Returns `Some` if the payment was known and `None` otherwise.
-	pub fn payment(&self, payment_hash: &PaymentHash) -> Option<PaymentDetails> {
-		self.payment_store.get(payment_hash)
+	pub fn payment(&self, payment_id: &PaymentId) -> Option<PaymentDetails> {
+		self.payment_store.get(payment_id)
 	}
 
-	/// Remove the payment with the given hash from the store.
-	pub fn remove_payment(&self, payment_hash: &PaymentHash) -> Result<(), Error> {
-		self.payment_store.remove(&payment_hash)
+	/// Remove the payment with the given id from the store.
+	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
+		self.payment_store.remove(&payment_id)
 	}
 
 	/// Retrieves an overview of all known balances.
@@ -1727,7 +1206,8 @@ impl Node {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
-	/// # use ldk_node::{Builder, Config, PaymentDirection};
+	/// # use ldk_node::{Builder, Config};
+	/// # use ldk_node::payment::PaymentDirection;
 	/// # use ldk_node::bitcoin::Network;
 	/// # let mut config = Config::default();
 	/// # config.network = Network::Regtest;
