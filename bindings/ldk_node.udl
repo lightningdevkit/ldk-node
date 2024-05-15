@@ -136,6 +136,7 @@ enum NodeError {
 	"PersistenceFailed",
 	"FeerateEstimationUpdateFailed",
 	"WalletOperationFailed",
+	"WalletOperationTimeout",
 	"OnchainTxSigningFailed",
 	"MessageSigningFailed",
 	"TxSyncFailed",
