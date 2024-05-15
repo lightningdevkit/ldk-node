@@ -171,6 +171,7 @@ uniffi::include_scaffolding!("ldk_node");
 pub struct Node {
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
+	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
@@ -710,6 +711,7 @@ impl Node {
 		};
 
 		let background_stop_logger = Arc::clone(&self.logger);
+		let event_handling_stopped_sender = self.event_handling_stopped_sender.clone();
 		runtime.spawn(async move {
 			process_events_async(
 				background_persister,
@@ -730,6 +732,18 @@ impl Node {
 				panic!("Failed to process events");
 			});
 			log_trace!(background_stop_logger, "Events processing stopped.",);
+
+			match event_handling_stopped_sender.send(()) {
+				Ok(_) => (),
+				Err(e) => {
+					log_error!(
+						background_stop_logger,
+						"Failed to send 'events handling stopped' signal. This should never happen: {}",
+						e
+						);
+					debug_assert!(false);
+				},
+			}
 		});
 
 		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
@@ -779,9 +793,47 @@ impl Node {
 			},
 		}
 
-		// Stop disconnect peers.
+		// Disconnect all peers.
 		self.peer_manager.disconnect_all_peers();
 
+		// Wait until event handling stopped, at least until a timeout is reached.
+		let event_handling_stopped_logger = Arc::clone(&self.logger);
+		let mut event_handling_stopped_receiver = self.event_handling_stopped_sender.subscribe();
+
+		let _ = runtime
+			.block_on(async {
+				tokio::time::timeout(
+					Duration::from_secs(10),
+					event_handling_stopped_receiver.changed(),
+				)
+				.await
+			})
+			.map_err(|e| {
+				log_error!(
+					event_handling_stopped_logger,
+					"Stopping event handling timed out. This should never happen: {}",
+					e
+				);
+				debug_assert!(false);
+			})
+			.unwrap_or_else(|_| {
+				log_error!(
+					event_handling_stopped_logger,
+					"Stopping event handling failed. This should never happen.",
+				);
+				panic!("Stopping event handling failed. This should never happen.");
+			});
+
+		#[cfg(tokio_unstable)]
+		{
+			log_trace!(
+				self.logger,
+				"Active runtime tasks left prior to shutdown: {}",
+				runtime.metrics().active_tasks_count()
+			);
+		}
+
+		// Shutdown our runtime. By now ~no or only very few tasks should be left.
 		runtime.shutdown_timeout(Duration::from_secs(10));
 
 		log_info!(self.logger, "Shutdown complete.");
