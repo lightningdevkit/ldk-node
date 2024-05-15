@@ -981,6 +981,7 @@ fn build_with_store_internal(
 	};
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
+	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
 
 	let is_listening = Arc::new(AtomicBool::new(false));
 	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
@@ -992,6 +993,7 @@ fn build_with_store_internal(
 	Ok(Node {
 		runtime,
 		stop_sender,
+		event_handling_stopped_sender,
 		config,
 		wallet,
 		tx_sync,
