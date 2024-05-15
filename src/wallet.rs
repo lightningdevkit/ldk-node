@@ -344,7 +344,13 @@ where
 	fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+		// While BDK populates both `witness_utxo` and `non_witness_utxo` fields, LDK does not. As
+		// BDK by default doesn't trust the witness UTXO to account for the Segwit bug, we must
+		// disable it here as otherwise we fail to sign.
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		match locked_wallet.sign(&mut psbt, sign_options) {
 			Ok(finalized) => {
 				if !finalized {
 					log_error!(self.logger, "Failed to finalize PSBT.");
