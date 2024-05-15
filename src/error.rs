@@ -29,6 +29,8 @@ pub enum Error {
 	FeerateEstimationUpdateFailed,
 	/// A wallet operation failed.
 	WalletOperationFailed,
+	/// A wallet operation timed out.
+	WalletOperationTimeout,
 	/// A signing operation for transaction failed.
 	OnchainTxSigningFailed,
 	/// A signing operation for message failed.
@@ -93,6 +95,7 @@ impl fmt::Display for Error {
 				write!(f, "Failed to update fee rate estimates.")
 			},
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
+			Self::WalletOperationTimeout => write!(f, "A wallet operation timed out."),
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::MessageSigningFailed => write!(f, "Failed to sign given message."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
