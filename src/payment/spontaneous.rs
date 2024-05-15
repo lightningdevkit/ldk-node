@@ -3,7 +3,7 @@
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
-use crate::payment::payment_store::{
+use crate::payment::store::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
 use crate::types::{ChannelManager, KeysManager, TlvEntry};
@@ -84,14 +84,12 @@ impl SpontaneousPayment {
 			Ok(_hash) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
 
-				let kind = PaymentKind::Spontaneous {
-					hash: payment_hash,
-					preimage: Some(payment_preimage),
-				};
-
 				let payment = PaymentDetails {
 					id: payment_id,
-					kind,
+					kind: PaymentKind::Spontaneous {
+						hash: payment_hash,
+						preimage: Some(payment_preimage),
+					},
 					status: PaymentStatus::Pending,
 					direction: PaymentDirection::Outbound,
 					amount_msat: Some(amount_msat),
@@ -108,14 +106,13 @@ impl SpontaneousPayment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let kind = PaymentKind::Spontaneous {
-							hash: payment_hash,
-							preimage: Some(payment_preimage),
-						};
-
 						let payment = PaymentDetails {
 							id: payment_id,
-							kind,
+							kind: PaymentKind::Spontaneous {
+								hash: payment_hash,
+								preimage: Some(payment_preimage),
+							},
+
 							status: PaymentStatus::Failed,
 							direction: PaymentDirection::Outbound,
 							amount_msat: Some(amount_msat),

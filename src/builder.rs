@@ -11,7 +11,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::payment_store::PaymentStore;
+use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{

@@ -4,7 +4,7 @@ use crate::{
 	PeerStore, UserChannelId,
 };
 
-use crate::payment::payment_store::{
+use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 	PaymentStore,
 };
@@ -621,13 +621,12 @@ where
 						return;
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
-						let kind = PaymentKind::Spontaneous {
-							hash: payment_hash,
-							preimage: Some(preimage),
-						};
 						let payment = PaymentDetails {
 							id: payment_id,
-							kind,
+							kind: PaymentKind::Spontaneous {
+								hash: payment_hash,
+								preimage: Some(preimage),
+							},
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,

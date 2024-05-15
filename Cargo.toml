@@ -46,7 +46,7 @@ bip39 = "2.0.0"
 
 rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tokio = { version = "1.37.0", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
+tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
 esplora-client = { version = "0.6", default-features = false }
 libc = "0.2"
 uniffi = { version = "0.25.3", features = ["build"], optional = true }

@@ -7,7 +7,7 @@ use crate::connection::ConnectionManager;
 use crate::error::Error;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
-use crate::payment::payment_store::{
+use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
@@ -102,22 +102,21 @@ impl Bolt11Payment {
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
 
-				let kind = PaymentKind::Bolt11 {
-					hash: payment_hash,
-					preimage: None,
-					secret: payment_secret,
-					bolt11_invoice: Some(invoice.to_string()),
-				};
-
 				let payment = PaymentDetails {
 					id: payment_id,
-					kind,
+					kind: PaymentKind::Bolt11 {
+						hash: payment_hash,
+						preimage: None,
+						secret: payment_secret,
+						bolt11_invoice: Some(invoice.to_string()),
+					},
 					amount_msat: invoice.amount_milli_satoshis(),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
 					last_update: 0,
 					fee_msat: None,
 				};
+
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_id)
@@ -127,15 +126,14 @@ impl Bolt11Payment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let kind = PaymentKind::Bolt11 {
-							hash: payment_hash,
-							preimage: None,
-							secret: payment_secret,
-							bolt11_invoice: Some(invoice.to_string()),
-						};
 						let payment = PaymentDetails {
 							id: payment_id,
-							kind,
+							kind: PaymentKind::Bolt11 {
+								hash: payment_hash,
+								preimage: None,
+								secret: payment_secret,
+								bolt11_invoice: Some(invoice.to_string()),
+							},
 							amount_msat: invoice.amount_milli_satoshis(),
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
@@ -221,16 +219,14 @@ impl Bolt11Payment {
 					payee_pubkey
 				);
 
-				let kind = PaymentKind::Bolt11 {
-					hash: payment_hash,
-					preimage: None,
-					secret: Some(*payment_secret),
-					bolt11_invoice: Some(invoice.to_string()),
-				};
-
 				let payment = PaymentDetails {
 					id: payment_id,
-					kind,
+					kind: PaymentKind::Bolt11 {
+						hash: payment_hash,
+						preimage: None,
+						secret: Some(*payment_secret),
+						bolt11_invoice: Some(invoice.to_string()),
+					},
 					amount_msat: Some(amount_msat),
 					direction: PaymentDirection::Outbound,
 					status: PaymentStatus::Pending,
@@ -247,16 +243,14 @@ impl Bolt11Payment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let kind = PaymentKind::Bolt11 {
-							hash: payment_hash,
-							preimage: None,
-							secret: Some(*payment_secret),
-							bolt11_invoice: Some(invoice.to_string()),
-						};
-
 						let payment = PaymentDetails {
 							id: payment_id,
-							kind,
+							kind: PaymentKind::Bolt11 {
+								hash: payment_hash,
+								preimage: None,
+								secret: Some(*payment_secret),
+								bolt11_invoice: Some(invoice.to_string()),
+							},
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Outbound,
 							status: PaymentStatus::Failed,
@@ -315,16 +309,15 @@ impl Bolt11Payment {
 
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 		let id = PaymentId(payment_hash.0);
-		let kind = PaymentKind::Bolt11 {
-			hash: payment_hash,
-			preimage: None,
-			secret: Some(invoice.payment_secret().clone()),
-			bolt11_invoice: Some(invoice.to_string()),
-		};
-
 		let payment = PaymentDetails {
 			id,
-			kind,
+			kind: PaymentKind::Bolt11 {
+				hash: payment_hash,
+				preimage: None,
+				secret: Some(invoice.payment_secret().clone()),
+				bolt11_invoice: Some(invoice.to_string()),
+			},
+
 			amount_msat,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
@@ -449,15 +442,14 @@ impl Bolt11Payment {
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
 		};
 		let id = PaymentId(payment_hash.0);
-		let kind = PaymentKind::Bolt11Jit {
-			hash: payment_hash,
-			preimage: None,
-			secret: Some(invoice.payment_secret().clone()),
-			lsp_fee_limits,
-		};
 		let payment = PaymentDetails {
 			id,
-			kind,
+			kind: PaymentKind::Bolt11Jit {
+				hash: payment_hash,
+				preimage: None,
+				secret: Some(invoice.payment_secret().clone()),
+				lsp_fee_limits,
+			},
 			amount_msat,
 			direction: PaymentDirection::Inbound,
 			status: PaymentStatus::Pending,
