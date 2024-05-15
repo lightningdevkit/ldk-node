@@ -1,3 +1,4 @@
+use crate::config::RGS_SYNC_TIMEOUT_SECS;
 use crate::logger::{log_trace, FilesystemLogger, Logger};
 use crate::types::{GossipSync, NetworkGraph, P2PGossipSync, RapidGossipSync};
 use crate::Error;
@@ -6,6 +7,7 @@ use lightning::routing::utxo::UtxoLookup;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub(crate) enum GossipSource {
 	P2PNetwork {
@@ -55,7 +57,17 @@ impl GossipSource {
 			Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger } => {
 				let query_timestamp = latest_sync_timestamp.load(Ordering::Acquire);
 				let query_url = format!("{}/{}", server_url, query_timestamp);
-				let response = reqwest::get(query_url).await.map_err(|e| {
+
+				let response = tokio::time::timeout(
+					Duration::from_secs(RGS_SYNC_TIMEOUT_SECS),
+					reqwest::get(query_url),
+				)
+				.await
+				.map_err(|e| {
+					log_trace!(logger, "Retrieving RGS gossip update timed out: {}", e);
+					Error::GossipUpdateTimeout
+				})?
+				.map_err(|e| {
 					log_trace!(logger, "Failed to retrieve RGS gossip update: {}", e);
 					Error::GossipUpdateFailed
 				})?;
