@@ -1,5 +1,6 @@
 use crate::logger::{log_error, log_info, log_trace, Logger};
 
+use crate::config::BDK_WALLET_SYNC_TIMEOUT_SECS;
 use crate::Error;
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
@@ -35,6 +36,7 @@ use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 enum WalletSyncStatus {
 	Completed,
@@ -98,34 +100,46 @@ where
 
 		let res = {
 			let wallet_lock = self.inner.lock().unwrap();
-			match wallet_lock.sync(&self.blockchain, SyncOptions { progress: None }).await {
-				Ok(()) => {
-					// TODO: Drop this workaround after BDK 1.0 upgrade.
-					// Update balance cache after syncing.
-					if let Ok(balance) = wallet_lock.get_balance() {
-						*self.balance_cache.write().unwrap() = balance;
-					}
-					Ok(())
-				},
-				Err(e) => match e {
-					bdk::Error::Esplora(ref be) => match **be {
-						bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
-							log_error!(
-								self.logger,
-								"Sync failed due to HTTP connection error: {}",
-								e
-							);
-							Err(From::from(e))
+
+			let wallet_sync_timeout_fut = tokio::time::timeout(
+				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+				wallet_lock.sync(&self.blockchain, SyncOptions { progress: None }),
+			);
+
+			match wallet_sync_timeout_fut.await {
+				Ok(res) => match res {
+					Ok(()) => {
+						// TODO: Drop this workaround after BDK 1.0 upgrade.
+						// Update balance cache after syncing.
+						if let Ok(balance) = wallet_lock.get_balance() {
+							*self.balance_cache.write().unwrap() = balance;
+						}
+						Ok(())
+					},
+					Err(e) => match e {
+						bdk::Error::Esplora(ref be) => match **be {
+							bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
+								log_error!(
+									self.logger,
+									"Sync failed due to HTTP connection error: {}",
+									e
+								);
+								Err(From::from(e))
+							},
+							_ => {
+								log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
+								Err(From::from(e))
+							},
 						},
 						_ => {
-							log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
+							log_error!(self.logger, "Wallet sync error: {}", e);
 							Err(From::from(e))
 						},
 					},
-					_ => {
-						log_error!(self.logger, "Wallet sync error: {}", e);
-						Err(From::from(e))
-					},
+				},
+				Err(e) => {
+					log_error!(self.logger, "On-chain wallet sync timed out: {}", e);
+					Err(Error::WalletOperationTimeout)
 				},
 			}
 		};

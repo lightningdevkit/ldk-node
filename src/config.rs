@@ -46,6 +46,9 @@ pub(crate) const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60
 // The lower limit which we apply to any configured wallet sync intervals.
 pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
 
+// The timeout after which we abort a wallet syncing operation.
+pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90;
+
 // The length in bytes of our wallets' keys seed.
 pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 
