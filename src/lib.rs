@@ -122,8 +122,8 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
-	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -366,19 +366,25 @@ impl Node {
 							&*sync_sweeper as &(dyn Confirm + Sync + Send),
 						];
 						let now = Instant::now();
-						match tx_sync.sync(confirmables).await {
-							Ok(()) => {
-								log_trace!(
-								sync_logger,
-								"Background sync of Lightning wallet finished in {}ms.",
-								now.elapsed().as_millis()
-								);
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
+						match timeout_fut.await {
+							Ok(res) => match res {
+								Ok(()) => {
+									log_trace!(
+										sync_logger,
+										"Background sync of Lightning wallet finished in {}ms.",
+										now.elapsed().as_millis()
+										);
+									let unix_time_secs_opt =
+										SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+									*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+								}
+								Err(e) => {
+									log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+								}
 							}
 							Err(e) => {
-								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+								log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
 							}
 						}
 					}
