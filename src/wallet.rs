@@ -1,5 +1,6 @@
 use crate::logger::{log_error, log_info, log_trace, Logger};
 
+use crate::config::BDK_WALLET_SYNC_TIMEOUT_SECS;
 use crate::Error;
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
@@ -8,8 +9,8 @@ use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
-	EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner, Recipient, SignerProvider,
-	SpendableOutputDescriptor,
+	ChangeDestinationSource, EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner,
+	OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 
 use lightning::util::message_signing;
@@ -33,9 +34,15 @@ use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
-use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::mem;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+
+enum WalletSyncStatus {
+	Completed,
+	InProgress { subscribers: Vec<tokio::sync::oneshot::Sender<Result<(), Error>>> },
+}
 
 pub struct Wallet<D, B: Deref, E: Deref, L: Deref>
 where
@@ -51,7 +58,8 @@ where
 	// A cache storing the most recently retrieved fee rate estimations.
 	broadcaster: B,
 	fee_estimator: E,
-	sync_lock: (Mutex<()>, Condvar),
+	// A Mutex holding the current sync status.
+	sync_status: Mutex<WalletSyncStatus>,
 	// TODO: Drop this workaround after BDK 1.0 upgrade.
 	balance_cache: RwLock<Balance>,
 	logger: L,
@@ -76,69 +84,70 @@ where
 		});
 
 		let inner = Mutex::new(wallet);
-		let sync_lock = (Mutex::new(()), Condvar::new());
+		let sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let balance_cache = RwLock::new(start_balance);
-		Self { blockchain, inner, broadcaster, fee_estimator, sync_lock, balance_cache, logger }
+		Self { blockchain, inner, broadcaster, fee_estimator, sync_status, balance_cache, logger }
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
-		let (lock, cvar) = &self.sync_lock;
+		if let Some(sync_receiver) = self.register_or_subscribe_pending_sync() {
+			log_info!(self.logger, "Sync in progress, skipping.");
+			return sync_receiver.await.map_err(|e| {
+				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
+				Error::WalletOperationFailed
+			})?;
+		}
 
-		let guard = match lock.try_lock() {
-			Ok(guard) => guard,
-			Err(_) => {
-				log_info!(self.logger, "Sync in progress, skipping.");
-				let guard = cvar.wait(lock.lock().unwrap());
-				drop(guard);
-				cvar.notify_all();
-				return Ok(());
-			},
-		};
+		let res = {
+			let sync_options = SyncOptions { progress: None };
+			let wallet_lock = self.inner.lock().unwrap();
 
-		let sync_options = SyncOptions { progress: None };
-		let wallet_lock = self.inner.lock().unwrap();
-		let res = match wallet_lock.sync(&self.blockchain, sync_options).await {
-			Ok(()) => {
-				// TODO: Drop this workaround after BDK 1.0 upgrade.
-				// Update balance cache after syncing.
-				if let Ok(balance) = wallet_lock.get_balance() {
-					*self.balance_cache.write().unwrap() = balance;
-				}
-				Ok(())
-			},
-			Err(e) => match e {
-				bdk::Error::Esplora(ref be) => match **be {
-					bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
-						// Drop lock, sleep for a second, retry.
-						drop(wallet_lock);
-						tokio::time::sleep(Duration::from_secs(1)).await;
-						log_error!(
-							self.logger,
-							"Sync failed due to HTTP connection error, retrying: {}",
-							e
-						);
-						let sync_options = SyncOptions { progress: None };
-						self.inner
-							.lock()
-							.unwrap()
-							.sync(&self.blockchain, sync_options)
-							.await
-							.map_err(|e| From::from(e))
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+				wallet_lock.sync(&self.blockchain, sync_options),
+			);
+
+			match timeout_fut.await {
+				Ok(res) => match res {
+					Ok(()) => {
+						// TODO: Drop this workaround after BDK 1.0 upgrade.
+						// Update balance cache after syncing.
+						if let Ok(balance) = wallet_lock.get_balance() {
+							*self.balance_cache.write().unwrap() = balance;
+						}
+						Ok(())
 					},
-					_ => {
-						log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
-						Err(From::from(e))
+					Err(e) => match e {
+						bdk::Error::Esplora(ref be) => match **be {
+							bdk::blockchain::esplora::EsploraError::Reqwest(_) => {
+								log_error!(
+									self.logger,
+									"Sync failed due to HTTP connection error: {}",
+									e
+								);
+								Err(From::from(e))
+							},
+							_ => {
+								log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
+								Err(From::from(e))
+							},
+						},
+						_ => {
+							log_error!(self.logger, "Wallet sync error: {}", e);
+							Err(From::from(e))
+						},
 					},
 				},
-				_ => {
-					log_error!(self.logger, "Wallet sync error: {}", e);
-					Err(From::from(e))
+				Err(e) => {
+					log_error!(self.logger, "On-chain wallet sync timed out: {}", e);
+					Err(Error::WalletOperationTimeout)
 				},
-			},
+			}
 		};
 
-		drop(guard);
-		cvar.notify_all();
+		self.propagate_result_to_subscribers(res);
+
 		res
 	}
 
@@ -221,7 +230,7 @@ where
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, amount_msat_or_drain: Option<u64>,
 	) -> Result<Txid, Error> {
-		let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+		let confirmation_target = ConfirmationTarget::OutputSpendingFee;
 		let fee_rate = FeeRate::from_sat_per_kwu(
 			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
 		);
@@ -290,6 +299,55 @@ where
 		}
 
 		Ok(txid)
+	}
+
+	fn register_or_subscribe_pending_sync(
+		&self,
+	) -> Option<tokio::sync::oneshot::Receiver<Result<(), Error>>> {
+		let mut sync_status_lock = self.sync_status.lock().unwrap();
+		match sync_status_lock.deref_mut() {
+			WalletSyncStatus::Completed => {
+				// We're first to register for a sync.
+				*sync_status_lock = WalletSyncStatus::InProgress { subscribers: Vec::new() };
+				None
+			},
+			WalletSyncStatus::InProgress { subscribers } => {
+				// A sync is in-progress, we subscribe.
+				let (tx, rx) = tokio::sync::oneshot::channel();
+				subscribers.push(tx);
+				Some(rx)
+			},
+		}
+	}
+
+	fn propagate_result_to_subscribers(&self, res: Result<(), Error>) {
+		// Send the notification to any other tasks that might be waiting on it by now.
+		let mut waiting_subscribers = Vec::new();
+		{
+			let mut sync_status_lock = self.sync_status.lock().unwrap();
+			match sync_status_lock.deref_mut() {
+				WalletSyncStatus::Completed => {
+					// No sync in-progress, do nothing.
+					return;
+				},
+				WalletSyncStatus::InProgress { subscribers } => {
+					// A sync is in-progress, we notify subscribers.
+					mem::swap(&mut waiting_subscribers, subscribers);
+					*sync_status_lock = WalletSyncStatus::Completed;
+				},
+			}
+		}
+
+		for sender in waiting_subscribers {
+			sender.send(res).unwrap_or_else(|e| {
+				debug_assert!(false, "Failed to send wallet sync result to subscribers: {:?}", e);
+				log_error!(
+					self.logger,
+					"Failed to send wallet sync result to subscribers: {:?}",
+					e
+				);
+			});
+		}
 	}
 }
 
@@ -438,22 +496,6 @@ where
 		Self { inner, wallet, logger }
 	}
 
-	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
-	pub fn spend_spendable_outputs<C: Signing>(
-		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
-		change_destination_script: ScriptBuf, feerate_sat_per_1000_weight: u32,
-		locktime: Option<LockTime>, secp_ctx: &Secp256k1<C>,
-	) -> Result<Transaction, ()> {
-		self.inner.spend_spendable_outputs(
-			descriptors,
-			outputs,
-			change_destination_script,
-			feerate_sat_per_1000_weight,
-			locktime,
-			secp_ctx,
-		)
-	}
-
 	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
 		message_signing::sign(msg, &self.inner.get_node_secret_key())
 			.or(Err(Error::MessageSigningFailed))
@@ -509,6 +551,30 @@ where
 		&self, invoice_request: &lightning::offers::invoice_request::UnsignedInvoiceRequest,
 	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
 		self.inner.sign_bolt12_invoice_request(invoice_request)
+	}
+}
+
+impl<D, B: Deref, E: Deref, L: Deref> OutputSpender for WalletKeysManager<D, B, E, L>
+where
+	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
+	fn spend_spendable_outputs<C: Signing>(
+		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
+		change_destination_script: ScriptBuf, feerate_sat_per_1000_weight: u32,
+		locktime: Option<LockTime>, secp_ctx: &Secp256k1<C>,
+	) -> Result<Transaction, ()> {
+		self.inner.spend_spendable_outputs(
+			descriptors,
+			outputs,
+			change_destination_script,
+			feerate_sat_per_1000_weight,
+			locktime,
+			secp_ctx,
+		)
 	}
 }
 
@@ -574,5 +640,20 @@ where
 				panic!("Tried to use a non-witness address. This must never happen.");
 			},
 		}
+	}
+}
+
+impl<D, B: Deref, E: Deref, L: Deref> ChangeDestinationSource for WalletKeysManager<D, B, E, L>
+where
+	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
+		let address = self.wallet.get_new_address().map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+		})?;
+		Ok(address.script_pubkey())
 	}
 }

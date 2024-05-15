@@ -195,7 +195,7 @@ where
 
 	pub(crate) fn next_event(&self) -> Option<Event> {
 		let locked_queue = self.queue.lock().unwrap();
-		locked_queue.front().map(|e| e.clone())
+		locked_queue.front().cloned()
 	}
 
 	pub(crate) async fn next_event_async(&self) -> Event {
@@ -501,7 +501,7 @@ where
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret } => {
+					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, payment_secret } => {
 						if payment_preimage.is_some() {
 							payment_preimage
 						} else {
@@ -509,6 +509,26 @@ where
 								.get_payment_preimage(payment_hash, payment_secret)
 								.ok()
 						}
+					},
+					PaymentPurpose::Bolt12OfferPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+						return;
+					},
+					PaymentPurpose::Bolt12RefundPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+						return;
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
 				};
@@ -549,7 +569,11 @@ where
 				);
 				let payment_id = PaymentId(payment_hash.0);
 				match purpose {
-					PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
+					PaymentPurpose::Bolt11InvoicePayment {
+						payment_preimage,
+						payment_secret,
+						..
+					} => {
 						let update = PaymentDetailsUpdate {
 							preimage: Some(payment_preimage),
 							secret: Some(Some(payment_secret)),
@@ -577,6 +601,24 @@ where
 								debug_assert!(false);
 							},
 						}
+					},
+					PaymentPurpose::Bolt12OfferPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						return;
+					},
+					PaymentPurpose::Bolt12RefundPayment { .. } => {
+						// TODO: support BOLT12.
+						log_error!(
+							self.logger,
+							"Failed to claim unsupported BOLT12 payment with hash: {}",
+							payment_hash
+						);
+						return;
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
 						let kind = PaymentKind::Spontaneous {
@@ -730,7 +772,12 @@ where
 				}
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
-				self.output_sweeper.add_outputs(outputs, channel_id)
+				self.output_sweeper
+					.track_spendable_outputs(outputs, channel_id, true, None)
+					.unwrap_or_else(|_| {
+						log_error!(self.logger, "Failed to track spendable outputs");
+						panic!("Failed to track spendable outputs");
+					});
 			},
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,
@@ -985,7 +1032,13 @@ where
 				counterparty_node_id,
 				..
 			} => {
-				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+				log_info!(
+					self.logger,
+					"Channel {} peer {:?} closed due to: {}",
+					channel_id,
+					counterparty_node_id,
+					reason
+				);
 				self.event_queue
 					.add_event(Event::ChannelClosed {
 						channel_id,
@@ -1030,7 +1083,7 @@ where
 				self.bump_tx_event_handler.handle_event(&bte);
 			},
 			LdkEvent::InvoiceRequestFailed { .. } => {},
-			LdkEvent::InvoiceGenerated { .. } => {},
+			// LdkEvent::InvoiceGenerated { .. } => {},
 			LdkEvent::ConnectionNeeded { .. } => {},
 		}
 	}

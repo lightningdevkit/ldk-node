@@ -122,8 +122,8 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
-	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -136,9 +136,7 @@ use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
 	KeysManager, NetworkGraph, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{
-	ChannelDetails, ChannelType, PeerDetails, PersistentRecordKey, TlvEntry, UserChannelId,
-};
+pub use types::{ChannelDetails, ChannelType, PeerDetails, TlvEntry, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -173,6 +171,7 @@ uniffi::include_scaffolding!("ldk_node");
 pub struct Node {
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
+	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
@@ -269,6 +268,10 @@ impl Node {
 					loop {
 						tokio::select! {
 							_ = stop_sync.changed() => {
+								log_trace!(
+									sync_logger,
+									"Stopping background syncing on-chain wallet.",
+									);
 								return;
 							}
 							_ = onchain_wallet_sync_interval.tick() => {
@@ -315,6 +318,10 @@ impl Node {
 			loop {
 				tokio::select! {
 					_ = stop_fee_updates.changed() => {
+						log_trace!(
+							fee_update_logger,
+							"Stopping background updates of fee rate cache.",
+						);
 						return;
 					}
 					_ = fee_rate_update_interval.tick() => {
@@ -359,6 +366,10 @@ impl Node {
 			loop {
 				tokio::select! {
 					_ = stop_sync.changed() => {
+						log_trace!(
+							sync_logger,
+							"Stopping background syncing Lightning wallet.",
+						);
 						return;
 					}
 					_ = wallet_sync_interval.tick() => {
@@ -368,19 +379,25 @@ impl Node {
 							&*sync_sweeper as &(dyn Confirm + Sync + Send),
 						];
 						let now = Instant::now();
-						match tx_sync.sync(confirmables).await {
-							Ok(()) => {
-								log_trace!(
-								sync_logger,
-								"Background sync of Lightning wallet finished in {}ms.",
-								now.elapsed().as_millis()
-								);
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
+						match timeout_fut.await {
+							Ok(res) => match res {
+								Ok(()) => {
+									log_trace!(
+										sync_logger,
+										"Background sync of Lightning wallet finished in {}ms.",
+										now.elapsed().as_millis()
+										);
+									let unix_time_secs_opt =
+										SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+									*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+								}
+								Err(e) => {
+									log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+								}
 							}
 							Err(e) => {
-								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+								log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
 							}
 						}
 					}
@@ -399,6 +416,10 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_gossip_sync.changed() => {
+							log_trace!(
+								gossip_sync_logger,
+								"Stopping background syncing RGS gossip data.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -474,6 +495,10 @@ impl Node {
 					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
 					tokio::select! {
 						_ = stop_listen.changed() => {
+							log_trace!(
+								listening_logger,
+								"Stopping listening to inbound connections.",
+							);
 							break;
 						}
 						res = listener.accept() => {
@@ -506,6 +531,10 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_connect.changed() => {
+							log_trace!(
+								connect_logger,
+								"Stopping reconnecting known peers.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -548,6 +577,10 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_bcast.changed() => {
+							log_trace!(
+								bcast_logger,
+								"Stopping broadcasting node announcements.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -604,6 +637,7 @@ impl Node {
 
 		let mut stop_tx_bcast = self.stop_sender.subscribe();
 		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
+		let tx_bcast_logger = Arc::clone(&self.logger);
 		runtime.spawn(async move {
 			// Every second we try to clear our broadcasting queue.
 			let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -611,6 +645,10 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_tx_bcast.changed() => {
+							log_trace!(
+								tx_bcast_logger,
+								"Stopping broadcasting transactions.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -652,11 +690,17 @@ impl Node {
 		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
 		let stop_bp = self.stop_sender.subscribe();
+		let sleeper_logger = Arc::clone(&self.logger);
 		let sleeper = move |d| {
 			let mut stop = stop_bp.clone();
+			let sleeper_logger = Arc::clone(&sleeper_logger);
 			Box::pin(async move {
 				tokio::select! {
 					_ = stop.changed() => {
+						log_trace!(
+							sleeper_logger,
+							"Stopping processing events.",
+						);
 						true
 					}
 					_ = tokio::time::sleep(d) => {
@@ -666,6 +710,8 @@ impl Node {
 			})
 		};
 
+		let background_stop_logger = Arc::clone(&self.logger);
+		let event_handling_stopped_sender = self.event_handling_stopped_sender.clone();
 		runtime.spawn(async move {
 			process_events_async(
 				background_persister,
@@ -685,15 +731,33 @@ impl Node {
 				log_error!(background_error_logger, "Failed to process events: {}", e);
 				panic!("Failed to process events");
 			});
+			log_trace!(background_stop_logger, "Events processing stopped.",);
+
+			match event_handling_stopped_sender.send(()) {
+				Ok(_) => (),
+				Err(e) => {
+					log_error!(
+						background_stop_logger,
+						"Failed to send 'events handling stopped' signal. This should never happen: {}",
+						e
+						);
+					debug_assert!(false);
+				},
+			}
 		});
 
 		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 			let mut stop_liquidity_handler = self.stop_sender.subscribe();
 			let liquidity_handler = Arc::clone(&liquidity_source);
+			let liquidity_logger = Arc::clone(&self.logger);
 			runtime.spawn(async move {
 				loop {
 					tokio::select! {
 						_ = stop_liquidity_handler.changed() => {
+							log_trace!(
+								liquidity_logger,
+								"Stopping processing liquidity events.",
+							);
 							return;
 						}
 						_ = liquidity_handler.handle_next_event() => {}
@@ -729,9 +793,47 @@ impl Node {
 			},
 		}
 
-		// Stop disconnect peers.
+		// Disconnect all peers.
 		self.peer_manager.disconnect_all_peers();
 
+		// Wait until event handling stopped, at least until a timeout is reached.
+		let event_handling_stopped_logger = Arc::clone(&self.logger);
+		let mut event_handling_stopped_receiver = self.event_handling_stopped_sender.subscribe();
+
+		let _ = runtime
+			.block_on(async {
+				tokio::time::timeout(
+					Duration::from_secs(10),
+					event_handling_stopped_receiver.changed(),
+				)
+				.await
+			})
+			.map_err(|e| {
+				log_error!(
+					event_handling_stopped_logger,
+					"Stopping event handling timed out. This should never happen: {}",
+					e
+				);
+				debug_assert!(false);
+			})
+			.unwrap_or_else(|_| {
+				log_error!(
+					event_handling_stopped_logger,
+					"Stopping event handling failed. This should never happen.",
+				);
+				panic!("Stopping event handling failed. This should never happen.");
+			});
+
+		#[cfg(tokio_unstable)]
+		{
+			log_trace!(
+				self.logger,
+				"Active runtime tasks left prior to shutdown: {}",
+				runtime.metrics().active_tasks_count()
+			);
+		}
+
+		// Shutdown our runtime. By now ~no or only very few tasks should be left.
 		runtime.shutdown_timeout(Duration::from_secs(10));
 
 		log_info!(self.logger, "Shutdown complete.");
@@ -1262,6 +1364,8 @@ impl Node {
 		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
 			match self.chain_monitor.get_monitor(funding_txo) {
 				Ok(monitor) => {
+					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
+					// LDK Node 0.1 depended on 0.0.115 already.
 					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
 					for ldk_balance in monitor.get_claimable_balances() {
 						total_lightning_balance_sats += ldk_balance.claimable_amount_satoshis();
@@ -1282,7 +1386,7 @@ impl Node {
 			.output_sweeper
 			.tracked_spendable_outputs()
 			.into_iter()
-			.map(|o| PendingSweepBalance::from_tracked_spendable_output(o))
+			.map(PendingSweepBalance::from_tracked_spendable_output)
 			.collect();
 
 		BalanceDetails {
@@ -1345,7 +1449,7 @@ impl Node {
 
 		// Now add all known-but-offline peers, too.
 		for p in self.peer_store.list_peers() {
-			if peers.iter().take(connected_peers_len).find(|d| d.node_id == p.node_id).is_some() {
+			if peers.iter().take(connected_peers_len).any(|d| d.node_id == p.node_id) {
 				continue;
 			}
 
@@ -1376,21 +1480,6 @@ impl Node {
 	/// secret key corresponding to the given public key.
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		self.keys_manager.verify_signature(msg, sig, pkey)
-	}
-
-	/// Resets all supported router state entries.
-	pub fn reset_router(&self) -> Result<(), Error> {
-		self.reset_router_record(PersistentRecordKey::LatestRgsSyncTimestamp)?;
-		self.reset_router_record(PersistentRecordKey::Scorer)?;
-		self.reset_router_record(PersistentRecordKey::NetworkGraph)?;
-		Ok(())
-	}
-
-	/// Resets router state record.
-	pub fn reset_router_record(&self, key: PersistentRecordKey) -> Result<(), Error> {
-		self.kv_store
-			.remove(key.get_pri_ns(), key.get_sec_ns(), key.get_key(), false)
-			.map_err(|_| Error::PersistenceFailed)
 	}
 }
 

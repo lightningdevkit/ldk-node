@@ -9,15 +9,14 @@ use crate::gossip::GossipSource;
 use crate::io;
 use crate::io::sqlite_store::SqliteStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::payment_store::PaymentStore;
 use crate::peer_store::PeerStore;
-use crate::sweep::OutputSweeper;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, FakeMessageRouter, GossipSync, KeysManager,
-	NetworkGraph, OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, DynStore, GossipSync, KeysManager, MessageRouter, NetworkGraph,
+	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::{LogLevel, Node};
@@ -38,6 +37,7 @@ use lightning::util::persist::{
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
+use lightning::util::sweep::OutputSweeper;
 
 use lightning_persister::fs_store::FilesystemStore;
 
@@ -184,7 +184,6 @@ impl NodeBuilder {
 
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
-		let config = config;
 		let entropy_source_config = None;
 		let chain_data_source_config = None;
 		let gossip_source_config = None;
@@ -785,12 +784,15 @@ fn build_with_store_internal(
 		})?;
 	}
 
+	let message_router = MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
+
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
-		Arc::new(FakeMessageRouter {}),
+		Arc::clone(&channel_manager),
+		Arc::new(message_router),
 		IgnoringMessageHandler {},
 		IgnoringMessageHandler {},
 	));
@@ -904,6 +906,47 @@ fn build_with_store_internal(
 	let connection_manager =
 		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
 
+	let output_sweeper = match io::utils::read_output_sweeper(
+		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
+		Arc::clone(&tx_sync),
+		Arc::clone(&keys_manager),
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+	) {
+		Ok(output_sweeper) => Arc::new(output_sweeper),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(OutputSweeper::new(
+					channel_manager.current_best_block(),
+					Arc::clone(&tx_broadcaster),
+					Arc::clone(&fee_estimator),
+					Some(Arc::clone(&tx_sync)),
+					Arc::clone(&keys_manager),
+					Arc::clone(&keys_manager),
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				))
+			} else {
+				return Err(BuildError::ReadFailed);
+			}
+		},
+	};
+
+	match io::utils::migrate_deprecated_spendable_outputs(
+		Arc::clone(&output_sweeper),
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+	) {
+		Ok(()) => {
+			log_info!(logger, "Successfully migrated OutputSweeper data.");
+		},
+		Err(e) => {
+			log_error!(logger, "Failed to migrate OutputSweeper data: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	}
+
 	// Init payment info storage
 	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(payments) => {
@@ -937,26 +980,8 @@ fn build_with_store_internal(
 		},
 	};
 
-	let best_block = channel_manager.current_best_block();
-	let output_sweeper =
-		match io::utils::read_spendable_outputs(Arc::clone(&kv_store), Arc::clone(&logger)) {
-			Ok(outputs) => Arc::new(OutputSweeper::new(
-				outputs,
-				Arc::clone(&wallet),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&fee_estimator),
-				Arc::clone(&keys_manager),
-				Arc::clone(&kv_store),
-				best_block,
-				Some(Arc::clone(&tx_sync)),
-				Arc::clone(&logger),
-			)),
-			Err(_) => {
-				return Err(BuildError::ReadFailed);
-			},
-		};
-
 	let (stop_sender, _) = tokio::sync::watch::channel(());
+	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
 
 	let is_listening = Arc::new(AtomicBool::new(false));
 	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
@@ -968,6 +993,7 @@ fn build_with_store_internal(
 	Ok(Node {
 		runtime,
 		stop_sender,
+		event_handling_stopped_sender,
 		config,
 		wallet,
 		tx_sync,
@@ -1017,7 +1043,7 @@ fn seed_bytes_from_config(
 	match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
 		Some(EntropySourceConfig::SeedFile(seed_path)) => {
-			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
+			Ok(io::utils::read_or_generate_seed_file(seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
 		},
 		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {

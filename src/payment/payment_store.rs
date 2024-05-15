@@ -431,7 +431,7 @@ mod tests {
 		(4, secret, required),
 		(6, amount_msat, required),
 		(8, direction, required),
-		(10, status, required),
+		(10, status, required)
 	});
 
 	#[test]
@@ -442,7 +442,7 @@ mod tests {
 
 		let hash = PaymentHash([42u8; 32]);
 		let id = PaymentId([42u8; 32]);
-		assert!(!payment_store.get(&id).is_some());
+		assert!(payment_store.get(&id).is_none());
 
 		let store_key = hex_utils::to_string(&hash.0);
 		assert!(store

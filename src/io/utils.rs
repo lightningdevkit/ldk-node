@@ -1,10 +1,10 @@
 use super::*;
 use crate::config::WALLET_KEYS_SEED_LEN;
 
-use crate::logger::log_error;
+use crate::logger::{log_error, FilesystemLogger};
 use crate::peer_store::PeerStore;
-use crate::sweep::SpendableOutputInfo;
-use crate::types::DynStore;
+use crate::sweep::DeprecatedSpendableOutputInfo;
+use crate::types::{Broadcaster, ChainSource, DynStore, FeeEstimator, KeysManager, Sweeper};
 use crate::{Error, EventQueue, PaymentDetails};
 
 use lightning::routing::gossip::NetworkGraph;
@@ -13,13 +13,15 @@ use lightning::util::logger::Logger;
 use lightning::util::persist::{
 	KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::string::PrintableString;
 
 use bip39::Mnemonic;
+use lightning::util::sweep::{OutputSpendStatus, OutputSweeper};
 use rand::{thread_rng, RngCore};
 
 use std::fs;
@@ -197,34 +199,127 @@ where
 	Ok(res)
 }
 
-/// Read previously persisted spendable output information from the store.
-pub(crate) fn read_spendable_outputs<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
-) -> Result<Vec<SpendableOutputInfo>, std::io::Error>
+/// Read `OutputSweeper` state from the store.
+pub(crate) fn read_output_sweeper(
+	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<FeeEstimator>,
+	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
+	logger: Arc<FilesystemLogger>,
+) -> Result<Sweeper, std::io::Error> {
+	let mut reader = Cursor::new(kv_store.read(
+		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+		OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
+		OUTPUT_SWEEPER_PERSISTENCE_KEY,
+	)?);
+	let args = (
+		broadcaster,
+		fee_estimator,
+		Some(chain_data_source),
+		Arc::clone(&keys_manager),
+		keys_manager,
+		kv_store,
+		logger.clone(),
+	);
+	OutputSweeper::read(&mut reader, args).map_err(|e| {
+		log_error!(logger, "Failed to deserialize OutputSweeper: {}", e);
+		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize OutputSweeper")
+	})
+}
+
+/// Read previously persisted spendable output information from the store and migrate to the
+/// upstreamed `OutputSweeper`.
+///
+/// We first iterate all `DeprecatedSpendableOutputInfo`s and have them tracked by the new
+/// `OutputSweeper`. In order to be certain the initial output spends will happen in a single
+/// transaction (and safe on-chain fees), we batch them to happen at current height plus two
+/// blocks. Lastly, we remove the previously persisted data once we checked they are tracked and
+/// awaiting their initial spend at the correct height.
+///
+/// Note that this migration will be run in the `Builder`, i.e., at the time when the migration is
+/// happening no background sync is ongoing, so we shouldn't have a risk of interleaving block
+/// connections during the migration.
+pub(crate) fn migrate_deprecated_spendable_outputs<L: Deref>(
+	sweeper: Arc<Sweeper>, kv_store: Arc<DynStore>, logger: L,
+) -> Result<(), std::io::Error>
 where
 	L::Target: Logger,
 {
-	let mut res = Vec::new();
+	let best_block = sweeper.current_best_block();
 
 	for stored_key in kv_store.list(
-		SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-		SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	)? {
 		let mut reader = Cursor::new(kv_store.read(
-			SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-			SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 			&stored_key,
 		)?);
-		let output = SpendableOutputInfo::read(&mut reader).map_err(|e| {
+		let output = DeprecatedSpendableOutputInfo::read(&mut reader).map_err(|e| {
 			log_error!(logger, "Failed to deserialize SpendableOutputInfo: {}", e);
 			std::io::Error::new(
 				std::io::ErrorKind::InvalidData,
 				"Failed to deserialize SpendableOutputInfo",
 			)
 		})?;
-		res.push(output);
+		let descriptors = vec![output.descriptor.clone()];
+		let spend_delay = Some(best_block.height + 2);
+		sweeper
+			.track_spendable_outputs(descriptors, output.channel_id, true, spend_delay)
+			.map_err(|_| {
+				log_error!(logger, "Failed to track spendable outputs. Aborting migration, will retry in the future.");
+				std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					"Failed to track spendable outputs. Aborting migration, will retry in the future.",
+				)
+			})?;
+
+		if let Some(tracked_spendable_output) =
+			sweeper.tracked_spendable_outputs().iter().find(|o| o.descriptor == output.descriptor)
+		{
+			match tracked_spendable_output.status {
+				OutputSpendStatus::PendingInitialBroadcast { delayed_until_height } => {
+					if delayed_until_height == spend_delay {
+						kv_store.remove(
+							DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+							DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+							&stored_key,
+							false,
+						)?;
+					} else {
+						debug_assert!(false, "Unexpected status in OutputSweeper migration.");
+						log_error!(logger, "Unexpected status in OutputSweeper migration.");
+						return Err(std::io::Error::new(
+							std::io::ErrorKind::Other,
+							"Failed to migrate OutputSweeper state.",
+						));
+					}
+				},
+				_ => {
+					debug_assert!(false, "Unexpected status in OutputSweeper migration.");
+					log_error!(logger, "Unexpected status in OutputSweeper migration.");
+					return Err(std::io::Error::new(
+						std::io::ErrorKind::Other,
+						"Failed to migrate OutputSweeper state.",
+					));
+				},
+			}
+		} else {
+			debug_assert!(
+				false,
+				"OutputSweeper failed to track and persist outputs during migration."
+			);
+			log_error!(
+				logger,
+				"OutputSweeper failed to track and persist outputs during migration."
+			);
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::Other,
+				"Failed to migrate OutputSweeper state.",
+			));
+		}
 	}
-	Ok(res)
+
+	Ok(())
 }
 
 pub(crate) fn read_latest_rgs_sync_timestamp<L: Deref>(
