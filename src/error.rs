@@ -33,6 +33,8 @@ pub enum Error {
 	PersistenceFailed,
 	/// A fee rate estimation update failed.
 	FeerateEstimationUpdateFailed,
+	/// A fee rate estimation update timed out.
+	FeerateEstimationUpdateTimeout,
 	/// A wallet operation failed.
 	WalletOperationFailed,
 	/// A wallet operation timed out.
@@ -114,6 +116,9 @@ impl fmt::Display for Error {
 			Self::PersistenceFailed => write!(f, "Failed to persist data."),
 			Self::FeerateEstimationUpdateFailed => {
 				write!(f, "Failed to update fee rate estimates.")
+			},
+			Self::FeerateEstimationUpdateTimeout => {
+				write!(f, "Updating fee rate estimates timed out.")
 			},
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
 			Self::WalletOperationTimeout => write!(f, "A wallet operation timed out."),

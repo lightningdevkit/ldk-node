@@ -165,6 +165,7 @@ enum NodeError {
 	"ChannelConfigUpdateFailed",
 	"PersistenceFailed",
 	"FeerateEstimationUpdateFailed",
+	"FeerateEstimationUpdateTimeout",
 	"WalletOperationFailed",
 	"WalletOperationTimeout",
 	"OnchainTxSigningFailed",
