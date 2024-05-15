@@ -267,6 +267,10 @@ impl Node {
 					loop {
 						tokio::select! {
 							_ = stop_sync.changed() => {
+								log_trace!(
+									sync_logger,
+									"Stopping background syncing on-chain wallet.",
+									);
 								return;
 							}
 							_ = onchain_wallet_sync_interval.tick() => {
@@ -313,6 +317,10 @@ impl Node {
 			loop {
 				tokio::select! {
 					_ = stop_fee_updates.changed() => {
+						log_trace!(
+							fee_update_logger,
+							"Stopping background updates of fee rate cache.",
+						);
 						return;
 					}
 					_ = fee_rate_update_interval.tick() => {
@@ -357,6 +365,10 @@ impl Node {
 			loop {
 				tokio::select! {
 					_ = stop_sync.changed() => {
+						log_trace!(
+							sync_logger,
+							"Stopping background syncing Lightning wallet.",
+						);
 						return;
 					}
 					_ = wallet_sync_interval.tick() => {
@@ -403,6 +415,10 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_gossip_sync.changed() => {
+							log_trace!(
+								gossip_sync_logger,
+								"Stopping background syncing RGS gossip data.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -478,6 +494,10 @@ impl Node {
 					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
 					tokio::select! {
 						_ = stop_listen.changed() => {
+							log_trace!(
+								listening_logger,
+								"Stopping listening to inbound connections.",
+							);
 							break;
 						}
 						res = listener.accept() => {
@@ -510,6 +530,10 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_connect.changed() => {
+							log_trace!(
+								connect_logger,
+								"Stopping reconnecting known peers.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -552,6 +576,10 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_bcast.changed() => {
+							log_trace!(
+								bcast_logger,
+								"Stopping broadcasting node announcements.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -608,6 +636,7 @@ impl Node {
 
 		let mut stop_tx_bcast = self.stop_sender.subscribe();
 		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
+		let tx_bcast_logger = Arc::clone(&self.logger);
 		runtime.spawn(async move {
 			// Every second we try to clear our broadcasting queue.
 			let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -615,6 +644,10 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_tx_bcast.changed() => {
+							log_trace!(
+								tx_bcast_logger,
+								"Stopping broadcasting transactions.",
+							);
 							return;
 						}
 						_ = interval.tick() => {
@@ -656,11 +689,17 @@ impl Node {
 		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
 		let stop_bp = self.stop_sender.subscribe();
+		let sleeper_logger = Arc::clone(&self.logger);
 		let sleeper = move |d| {
 			let mut stop = stop_bp.clone();
+			let sleeper_logger = Arc::clone(&sleeper_logger);
 			Box::pin(async move {
 				tokio::select! {
 					_ = stop.changed() => {
+						log_trace!(
+							sleeper_logger,
+							"Stopping processing events.",
+						);
 						true
 					}
 					_ = tokio::time::sleep(d) => {
@@ -670,6 +709,7 @@ impl Node {
 			})
 		};
 
+		let background_stop_logger = Arc::clone(&self.logger);
 		runtime.spawn(async move {
 			process_events_async(
 				background_persister,
@@ -689,15 +729,21 @@ impl Node {
 				log_error!(background_error_logger, "Failed to process events: {}", e);
 				panic!("Failed to process events");
 			});
+			log_trace!(background_stop_logger, "Events processing stopped.",);
 		});
 
 		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 			let mut stop_liquidity_handler = self.stop_sender.subscribe();
 			let liquidity_handler = Arc::clone(&liquidity_source);
+			let liquidity_logger = Arc::clone(&self.logger);
 			runtime.spawn(async move {
 				loop {
 					tokio::select! {
 						_ = stop_liquidity_handler.changed() => {
+							log_trace!(
+								liquidity_logger,
+								"Stopping processing liquidity events.",
+							);
 							return;
 						}
 						_ = liquidity_handler.handle_next_event() => {}
