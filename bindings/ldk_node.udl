@@ -84,10 +84,6 @@ interface Node {
 	[Throws=NodeError]
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
-	[Throws=NodeError]
-	void reset_router();
-	[Throws=NodeError]
-	void reset_router_record(PersistentRecordKey key);
 };
 
 interface Bolt11Payment {
@@ -228,6 +224,7 @@ interface ClosureReason {
 	OutdatedChannelManager();
 	CounterpartyCoopClosedUnfundedChannel();
 	FundingBatchClosure();
+	HTLCsTimedOut();
 };
 
 [Enum]
@@ -421,9 +418,3 @@ typedef string Mnemonic;
 
 [Custom]
 typedef string UntrustedString;
-
-enum PersistentRecordKey {
-	"LatestRgsSyncTimestamp",
-	"Scorer",
-	"NetworkGraph",
-};

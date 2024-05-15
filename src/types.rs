@@ -1,8 +1,6 @@
 use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::sweep::OutputSweeper;
 
-use lightning::blinded_path::BlindedPath;
 use lightning::chain::chainmonitor;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
@@ -15,22 +13,15 @@ use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeePa
 use lightning::sign::InMemorySigner;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
-use lightning::util::persist::{
-	KVStore, NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-};
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::util::sweep::OutputSweeper;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_transaction_sync::EsploraSyncClient;
 
-use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
 
-use crate::io::{
-	LATEST_RGS_SYNC_TIMESTAMP_KEY, LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-	LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-};
 use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) type DynStore = dyn KVStore + Sync + Send;
@@ -122,33 +113,26 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
-	Arc<FakeMessageRouter>,
+	Arc<ChannelManager>,
+	Arc<MessageRouter>,
 	IgnoringMessageHandler,
 	IgnoringMessageHandler,
 >;
 
-pub(crate) struct FakeMessageRouter {}
-
-impl lightning::onion_message::messenger::MessageRouter for FakeMessageRouter {
-	fn find_path(
-		&self, _sender: PublicKey, _peers: Vec<PublicKey>,
-		_destination: lightning::onion_message::messenger::Destination,
-	) -> Result<lightning::onion_message::messenger::OnionMessagePath, ()> {
-		unimplemented!()
-	}
-	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-		&self, _recipient: PublicKey, _peers: Vec<PublicKey>, _secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedPath>, ()> {
-		unreachable!()
-	}
-}
+pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
+	Arc<NetworkGraph>,
+	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
+>;
 
 pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,
+	Arc<KeysManager>,
 	Arc<FeeEstimator>,
 	Arc<ChainSource>,
 	Arc<DynStore>,
 	Arc<FilesystemLogger>,
+	Arc<KeysManager>,
 >;
 
 pub(crate) type BumpTransactionEventHandler =
@@ -331,7 +315,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 		ChannelDetails {
 			channel_id: value.channel_id,
 			counterparty_node_id: value.counterparty.node_id,
-			funding_txo: value.funding_txo.and_then(|o| Some(o.into_bitcoin_outpoint())),
+			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
 			channel_type,
 			channel_value_sats: value.channel_value_satoshis,
 			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
@@ -503,46 +487,4 @@ pub struct TlvEntry {
 
 	/// Serialized value.
 	pub value: Vec<u8>,
-}
-
-/// Persistent record key.
-pub enum PersistentRecordKey {
-	/// Latest RGS sync timestamp (LATEST_RGS_SYNC_TIMESTAMP_KEY).
-	LatestRgsSyncTimestamp,
-
-	/// Scorer data (SCORER_PERSISTENCE_KEY).
-	Scorer,
-
-	/// Network graph data (NETWORK_GRAPH_PERSISTENCE_KEY).
-	NetworkGraph,
-}
-
-impl PersistentRecordKey {
-	pub(crate) fn get_pri_ns(&self) -> &'static str {
-		match self {
-			PersistentRecordKey::LatestRgsSyncTimestamp => {
-				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE
-			},
-			PersistentRecordKey::Scorer => SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-			PersistentRecordKey::NetworkGraph => NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-		}
-	}
-
-	pub(crate) fn get_sec_ns(&self) -> &'static str {
-		match self {
-			PersistentRecordKey::LatestRgsSyncTimestamp => {
-				LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE
-			},
-			PersistentRecordKey::Scorer => SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-			PersistentRecordKey::NetworkGraph => NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-		}
-	}
-
-	pub(crate) fn get_key(&self) -> &'static str {
-		match self {
-			PersistentRecordKey::LatestRgsSyncTimestamp => LATEST_RGS_SYNC_TIMESTAMP_KEY,
-			PersistentRecordKey::Scorer => SCORER_PERSISTENCE_KEY,
-			PersistentRecordKey::NetworkGraph => NETWORK_GRAPH_PERSISTENCE_KEY,
-		}
-	}
 }

@@ -1,10 +1,11 @@
+use crate::sweep::value_satoshis_from_descriptor;
+
 use lightning::chain::channelmonitor::Balance as LdkBalance;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
+use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Txid};
-
-use crate::sweep::SpendableOutputInfo;
 
 /// Details of the known available balances returned by [`Node::list_balances`].
 ///
@@ -266,46 +267,45 @@ pub enum PendingSweepBalance {
 }
 
 impl PendingSweepBalance {
-	pub(crate) fn from_tracked_spendable_output(output_info: SpendableOutputInfo) -> Self {
-		if let Some(confirmation_hash) = output_info.confirmation_hash {
-			debug_assert!(output_info.confirmation_height.is_some());
-			debug_assert!(output_info.latest_spending_tx.is_some());
-			let channel_id = output_info.channel_id;
-			let confirmation_height = output_info
-				.confirmation_height
-				.expect("Height must be set if the output is confirmed");
-			let latest_spending_txid = output_info
-				.latest_spending_tx
-				.as_ref()
-				.expect("Spending tx must be set if the output is confirmed")
-				.txid();
-			let amount_satoshis = output_info.value_satoshis();
-			Self::AwaitingThresholdConfirmations {
-				channel_id,
-				latest_spending_txid,
-				confirmation_hash,
-				confirmation_height,
-				amount_satoshis,
-			}
-		} else if let Some(latest_broadcast_height) = output_info.latest_broadcast_height {
-			debug_assert!(output_info.latest_spending_tx.is_some());
-			let channel_id = output_info.channel_id;
-			let latest_spending_txid = output_info
-				.latest_spending_tx
-				.as_ref()
-				.expect("Spending tx must be set if the spend was broadcast")
-				.txid();
-			let amount_satoshis = output_info.value_satoshis();
-			Self::BroadcastAwaitingConfirmation {
-				channel_id,
+	pub(crate) fn from_tracked_spendable_output(output_info: TrackedSpendableOutput) -> Self {
+		match output_info.status {
+			OutputSpendStatus::PendingInitialBroadcast { .. } => {
+				let channel_id = output_info.channel_id;
+				let amount_satoshis = value_satoshis_from_descriptor(&output_info.descriptor);
+				Self::PendingBroadcast { channel_id, amount_satoshis }
+			},
+			OutputSpendStatus::PendingFirstConfirmation {
 				latest_broadcast_height,
-				latest_spending_txid,
-				amount_satoshis,
-			}
-		} else {
-			let channel_id = output_info.channel_id;
-			let amount_satoshis = output_info.value_satoshis();
-			Self::PendingBroadcast { channel_id, amount_satoshis }
+				latest_spending_tx,
+				..
+			} => {
+				let channel_id = output_info.channel_id;
+				let amount_satoshis = value_satoshis_from_descriptor(&output_info.descriptor);
+				let latest_spending_txid = latest_spending_tx.txid();
+				Self::BroadcastAwaitingConfirmation {
+					channel_id,
+					latest_broadcast_height,
+					latest_spending_txid,
+					amount_satoshis,
+				}
+			},
+			OutputSpendStatus::PendingThresholdConfirmations {
+				latest_spending_tx,
+				confirmation_height,
+				confirmation_hash,
+				..
+			} => {
+				let channel_id = output_info.channel_id;
+				let amount_satoshis = value_satoshis_from_descriptor(&output_info.descriptor);
+				let latest_spending_txid = latest_spending_tx.txid();
+				Self::AwaitingThresholdConfirmations {
+					channel_id,
+					latest_spending_txid,
+					confirmation_hash,
+					confirmation_height,
+					amount_satoshis,
+				}
+			},
 		}
 	}
 }

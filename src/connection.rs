@@ -6,6 +6,7 @@ use lightning::ln::msgs::SocketAddress;
 
 use bitcoin::secp256k1::PublicKey;
 
+use std::collections::hash_map::{self, HashMap};
 use std::net::ToSocketAddrs;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,7 @@ where
 	L::Target: Logger,
 {
 	pending_connections:
-		Mutex<Vec<(PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>)>>,
+		Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>,
 	peer_manager: Arc<PeerManager>,
 	logger: L,
 }
@@ -26,7 +27,7 @@ where
 	L::Target: Logger,
 {
 	pub(crate) fn new(peer_manager: Arc<PeerManager>, logger: L) -> Self {
-		let pending_connections = Mutex::new(Vec::new());
+		let pending_connections = Mutex::new(HashMap::new());
 		Self { pending_connections, peer_manager, logger }
 	}
 
@@ -60,14 +61,15 @@ where
 		let socket_addr = addr
 			.to_socket_addrs()
 			.map_err(|e| {
-				log_error!(self.logger, "Failed to resolve network address: {}", e);
+				log_error!(self.logger, "Failed to resolve network address {}: {}", addr, e);
 				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
 				Error::InvalidSocketAddress
 			})?
 			.next()
 			.ok_or_else(|| {
-				self.propagate_result_to_subscribers(&node_id, Err(Error::ConnectionFailed));
-				Error::ConnectionFailed
+				log_error!(self.logger, "Failed to resolve network address {}", addr);
+				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
+				Error::InvalidSocketAddress
 			})?;
 
 		let connection_future = lightning_net_tokio::connect_outbound(
@@ -109,26 +111,23 @@ where
 		&self, node_id: &PublicKey,
 	) -> Option<tokio::sync::oneshot::Receiver<Result<(), Error>>> {
 		let mut pending_connections_lock = self.pending_connections.lock().unwrap();
-		if let Some((_, connection_ready_senders)) =
-			pending_connections_lock.iter_mut().find(|(id, _)| id == node_id)
-		{
-			let (tx, rx) = tokio::sync::oneshot::channel();
-			connection_ready_senders.push(tx);
-			Some(rx)
-		} else {
-			pending_connections_lock.push((*node_id, Vec::new()));
-			None
+		match pending_connections_lock.entry(*node_id) {
+			hash_map::Entry::Occupied(mut entry) => {
+				let (tx, rx) = tokio::sync::oneshot::channel();
+				entry.get_mut().push(tx);
+				Some(rx)
+			},
+			hash_map::Entry::Vacant(entry) => {
+				entry.insert(Vec::new());
+				None
+			},
 		}
 	}
 
 	fn propagate_result_to_subscribers(&self, node_id: &PublicKey, res: Result<(), Error>) {
 		// Send the result to any other tasks that might be waiting on it by now.
 		let mut pending_connections_lock = self.pending_connections.lock().unwrap();
-		if let Some((_, connection_ready_senders)) = pending_connections_lock
-			.iter()
-			.position(|(id, _)| id == node_id)
-			.map(|i| pending_connections_lock.remove(i))
-		{
+		if let Some(connection_ready_senders) = pending_connections_lock.remove(node_id) {
 			for sender in connection_ready_senders {
 				let _ = sender.send(res).map_err(|e| {
 					debug_assert!(

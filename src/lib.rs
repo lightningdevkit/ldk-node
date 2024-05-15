@@ -136,9 +136,7 @@ use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
 	KeysManager, NetworkGraph, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{
-	ChannelDetails, ChannelType, PeerDetails, PersistentRecordKey, TlvEntry, UserChannelId,
-};
+pub use types::{ChannelDetails, ChannelType, PeerDetails, TlvEntry, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -1262,6 +1260,8 @@ impl Node {
 		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
 			match self.chain_monitor.get_monitor(funding_txo) {
 				Ok(monitor) => {
+					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
+					// LDK Node 0.1 depended on 0.0.115 already.
 					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
 					for ldk_balance in monitor.get_claimable_balances() {
 						total_lightning_balance_sats += ldk_balance.claimable_amount_satoshis();
@@ -1282,7 +1282,7 @@ impl Node {
 			.output_sweeper
 			.tracked_spendable_outputs()
 			.into_iter()
-			.map(|o| PendingSweepBalance::from_tracked_spendable_output(o))
+			.map(PendingSweepBalance::from_tracked_spendable_output)
 			.collect();
 
 		BalanceDetails {
@@ -1345,7 +1345,7 @@ impl Node {
 
 		// Now add all known-but-offline peers, too.
 		for p in self.peer_store.list_peers() {
-			if peers.iter().take(connected_peers_len).find(|d| d.node_id == p.node_id).is_some() {
+			if peers.iter().take(connected_peers_len).any(|d| d.node_id == p.node_id) {
 				continue;
 			}
 
@@ -1376,21 +1376,6 @@ impl Node {
 	/// secret key corresponding to the given public key.
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		self.keys_manager.verify_signature(msg, sig, pkey)
-	}
-
-	/// Resets all supported router state entries.
-	pub fn reset_router(&self) -> Result<(), Error> {
-		self.reset_router_record(PersistentRecordKey::LatestRgsSyncTimestamp)?;
-		self.reset_router_record(PersistentRecordKey::Scorer)?;
-		self.reset_router_record(PersistentRecordKey::NetworkGraph)?;
-		Ok(())
-	}
-
-	/// Resets router state record.
-	pub fn reset_router_record(&self, key: PersistentRecordKey) -> Result<(), Error> {
-		self.kv_store
-			.remove(key.get_pri_ns(), key.get_sec_ns(), key.get_key(), false)
-			.map_err(|_| Error::PersistenceFailed)
 	}
 }
 

@@ -8,8 +8,8 @@ use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
-	EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner, Recipient, SignerProvider,
-	SpendableOutputDescriptor,
+	ChangeDestinationSource, EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner,
+	OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 
 use lightning::util::message_signing;
@@ -123,7 +123,7 @@ where
 							.unwrap()
 							.sync(&self.blockchain, sync_options)
 							.await
-							.map_err(|e| From::from(e))
+							.map_err(From::from)
 					},
 					_ => {
 						log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
@@ -221,7 +221,7 @@ where
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, amount_msat_or_drain: Option<u64>,
 	) -> Result<Txid, Error> {
-		let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+		let confirmation_target = ConfirmationTarget::OutputSpendingFee;
 		let fee_rate = FeeRate::from_sat_per_kwu(
 			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
 		);
@@ -438,22 +438,6 @@ where
 		Self { inner, wallet, logger }
 	}
 
-	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
-	pub fn spend_spendable_outputs<C: Signing>(
-		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
-		change_destination_script: ScriptBuf, feerate_sat_per_1000_weight: u32,
-		locktime: Option<LockTime>, secp_ctx: &Secp256k1<C>,
-	) -> Result<Transaction, ()> {
-		self.inner.spend_spendable_outputs(
-			descriptors,
-			outputs,
-			change_destination_script,
-			feerate_sat_per_1000_weight,
-			locktime,
-			secp_ctx,
-		)
-	}
-
 	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
 		message_signing::sign(msg, &self.inner.get_node_secret_key())
 			.or(Err(Error::MessageSigningFailed))
@@ -509,6 +493,30 @@ where
 		&self, invoice_request: &lightning::offers::invoice_request::UnsignedInvoiceRequest,
 	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
 		self.inner.sign_bolt12_invoice_request(invoice_request)
+	}
+}
+
+impl<D, B: Deref, E: Deref, L: Deref> OutputSpender for WalletKeysManager<D, B, E, L>
+where
+	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
+	fn spend_spendable_outputs<C: Signing>(
+		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
+		change_destination_script: ScriptBuf, feerate_sat_per_1000_weight: u32,
+		locktime: Option<LockTime>, secp_ctx: &Secp256k1<C>,
+	) -> Result<Transaction, ()> {
+		self.inner.spend_spendable_outputs(
+			descriptors,
+			outputs,
+			change_destination_script,
+			feerate_sat_per_1000_weight,
+			locktime,
+			secp_ctx,
+		)
 	}
 }
 
@@ -574,5 +582,20 @@ where
 				panic!("Tried to use a non-witness address. This must never happen.");
 			},
 		}
+	}
+}
+
+impl<D, B: Deref, E: Deref, L: Deref> ChangeDestinationSource for WalletKeysManager<D, B, E, L>
+where
+	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
+		let address = self.wallet.get_new_address().map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+		})?;
+		Ok(address.script_pubkey())
 	}
 }
