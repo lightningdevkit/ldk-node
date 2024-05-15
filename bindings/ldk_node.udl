@@ -173,6 +173,7 @@ enum NodeError {
 	"TxSyncFailed",
 	"TxSyncTimeout",
 	"GossipUpdateFailed",
+	"GossipUpdateTimeout",
 	"LiquidityRequestFailed",
 	"InvalidAddress",
 	"InvalidSocketAddress",
