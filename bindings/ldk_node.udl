@@ -170,6 +170,7 @@ enum NodeError {
 	"OnchainTxSigningFailed",
 	"MessageSigningFailed",
 	"TxSyncFailed",
+	"TxSyncTimeout",
 	"GossipUpdateFailed",
 	"LiquidityRequestFailed",
 	"InvalidAddress",

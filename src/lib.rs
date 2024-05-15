@@ -123,8 +123,8 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	default_user_config, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
+	default_user_config, LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL,
+	PEER_RECONNECTION_INTERVAL, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
@@ -377,25 +377,31 @@ impl Node {
 							&*sync_sweeper as &(dyn Confirm + Sync + Send),
 						];
 						let now = Instant::now();
-						match tx_sync.sync(confirmables).await {
-							Ok(()) => {
-								log_trace!(
-								sync_logger,
-								"Background sync of Lightning wallet finished in {}ms.",
-								now.elapsed().as_millis()
-								);
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
+						match timeout_fut.await {
+							Ok(res) => match res {
+								Ok(()) => {
+									log_trace!(
+										sync_logger,
+										"Background sync of Lightning wallet finished in {}ms.",
+										now.elapsed().as_millis()
+										);
+									let unix_time_secs_opt =
+										SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+									*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
 
-								periodically_archive_fully_resolved_monitors(
-									Arc::clone(&archive_cman),
-									Arc::clone(&archive_cmon),
-									Arc::clone(&sync_monitor_archival_height)
-								);
+									periodically_archive_fully_resolved_monitors(
+										Arc::clone(&archive_cman),
+										Arc::clone(&archive_cmon),
+										Arc::clone(&sync_monitor_archival_height)
+									);
+								}
+								Err(e) => {
+									log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+								}
 							}
 							Err(e) => {
-								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+								log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
 							}
 						}
 					}
@@ -1167,6 +1173,8 @@ impl Node {
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
 				async move {
 					let now = Instant::now();
+					// We don't add an additional timeout here, as `Wallet::sync` already returns
+					// after a timeout.
 					match wallet.sync().await {
 						Ok(()) => {
 							log_info!(
@@ -1187,6 +1195,8 @@ impl Node {
 					};
 
 					let now = Instant::now();
+					// We don't add an additional timeout here, as
+					// `FeeEstimator::update_fee_estimates` already returns after a timeout.
 					match fee_estimator.update_fee_estimates().await {
 						Ok(()) => {
 							log_info!(
@@ -1207,30 +1217,40 @@ impl Node {
 					}
 
 					let now = Instant::now();
-					match tx_sync.sync(confirmables).await {
-						Ok(()) => {
-							log_info!(
-								sync_logger,
-								"Sync of Lightning wallet finished in {}ms.",
-								now.elapsed().as_millis()
-							);
+					let tx_sync_timeout_fut = tokio::time::timeout(
+						Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
+						tx_sync.sync(confirmables),
+					);
+					match tx_sync_timeout_fut.await {
+						Ok(res) => match res {
+							Ok(()) => {
+								log_info!(
+									sync_logger,
+									"Sync of Lightning wallet finished in {}ms.",
+									now.elapsed().as_millis()
+								);
 
-							let unix_time_secs_opt = SystemTime::now()
-								.duration_since(UNIX_EPOCH)
-								.ok()
-								.map(|d| d.as_secs());
-							*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+								let unix_time_secs_opt = SystemTime::now()
+									.duration_since(UNIX_EPOCH)
+									.ok()
+									.map(|d| d.as_secs());
+								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
 
-							periodically_archive_fully_resolved_monitors(
-								archive_cman,
-								archive_cmon,
-								sync_monitor_archival_height,
-							);
-							Ok(())
+								periodically_archive_fully_resolved_monitors(
+									archive_cman,
+									archive_cmon,
+									sync_monitor_archival_height,
+								);
+								Ok(())
+							},
+							Err(e) => {
+								log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
+								Err(e.into())
+							},
 						},
 						Err(e) => {
-							log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
-							Err(e.into())
+							log_error!(sync_logger, "Sync of Lightning wallet timed out: {}", e);
+							Err(Error::TxSyncTimeout)
 						},
 					}
 				},
