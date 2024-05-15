@@ -129,7 +129,7 @@ use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
-use payment::payment_store::PaymentStore;
+use payment::store::PaymentStore;
 use payment::{Bolt11Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
 use peer_store::{PeerInfo, PeerStore};
 use types::{

@@ -179,7 +179,10 @@ where
 			},
 		};
 
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		match locked_wallet.sign(&mut psbt, sign_options) {
 			Ok(finalized) => {
 				if !finalized {
 					return Err(Error::OnchainTxCreationFailed);

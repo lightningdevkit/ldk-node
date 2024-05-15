@@ -1,6 +1,4 @@
-pub use crate::payment::payment_store::{
-	LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
-};
+pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus};
 
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
