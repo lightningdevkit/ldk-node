@@ -51,6 +51,9 @@ pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 30;
 // The timeout after which we abort a fee rate cache update operation.
 pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
 
+// The timeout after which we abort a RGS sync operation.
+pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
+
 // The length in bytes of our wallets' keys seed.
 pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 
