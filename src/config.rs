@@ -10,7 +10,7 @@ use bitcoin::Network;
 const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
-const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
+const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 300; //80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
@@ -43,10 +43,10 @@ pub(crate) const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60
 pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
 
 // The timeout after which we abort a wallet syncing operation.
-pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 30;
+pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90;
 
 // The timeout after which we abort a wallet syncing operation.
-pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 10;
+pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90; // 10
 
 // The timeout after which we abort a fee rate cache update operation.
 pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;

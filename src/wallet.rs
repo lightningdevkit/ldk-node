@@ -140,7 +140,12 @@ where
 					},
 				},
 				Err(e) => {
-					log_error!(self.logger, "On-chain wallet sync timed out: {}", e);
+					log_error!(
+						self.logger,
+						"On-chain wallet sync timed out after {}s: {}",
+						BDK_WALLET_SYNC_TIMEOUT_SECS,
+						e
+					);
 					Err(Error::WalletOperationTimeout)
 				},
 			}
@@ -449,7 +454,10 @@ where
 	fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		match locked_wallet.sign(&mut psbt, sign_options) {
 			Ok(finalized) => {
 				if !finalized {
 					log_error!(self.logger, "Failed to finalize PSBT.");
