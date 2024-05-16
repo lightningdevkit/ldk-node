@@ -5,10 +5,13 @@ use crate::Error;
 use lightning::ln::msgs::SocketAddress;
 
 use bitcoin::secp256k1::PublicKey;
+use tokio::sync::watch;
+use tokio::sync::watch::{Receiver, Sender};
 
 use std::collections::hash_map::{self, HashMap};
 use std::net::ToSocketAddrs;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +23,8 @@ where
 		Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>,
 	peer_manager: Arc<PeerManager>,
 	logger: L,
+	is_initial_connection_established: Arc<AtomicBool>,
+	initial_connection_established_sender: Sender<bool>,
 }
 
 impl<L: Deref + Clone + Sync + Send> ConnectionManager<L>
@@ -28,7 +33,15 @@ where
 {
 	pub(crate) fn new(peer_manager: Arc<PeerManager>, logger: L) -> Self {
 		let pending_connections = Mutex::new(HashMap::new());
-		Self { pending_connections, peer_manager, logger }
+		let is_initial_connection_established = Arc::new(AtomicBool::new(false));
+		let (initial_connection_established_sender, _) = watch::channel(false);
+		Self {
+			pending_connections,
+			peer_manager,
+			logger,
+			is_initial_connection_established,
+			initial_connection_established_sender,
+		}
 	}
 
 	pub(crate) async fn connect_peer_if_necessary(
@@ -36,6 +49,18 @@ where
 	) -> Result<(), Error> {
 		if self.peer_manager.peer_by_node_id(&node_id).is_some() {
 			return Ok(());
+		}
+
+		self.is_initial_connection_established.store(true, Ordering::Release);
+		match self.initial_connection_established_sender.send(true) {
+			Ok(_) => {},
+			Err(err) => {
+				log_error!(
+					self.logger,
+					"Failed to send initial connection state through watch channel {:?}",
+					err
+				);
+			},
 		}
 
 		self.do_connect_peer(node_id, addr).await
@@ -143,5 +168,13 @@ where
 				});
 			}
 		}
+	}
+
+	pub fn subscribe_initial_connection(&self) -> Receiver<bool> {
+		self.initial_connection_established_sender.subscribe()
+	}
+
+	pub fn is_initial_connection_established(&self) -> bool {
+		self.is_initial_connection_established.load(Ordering::Acquire)
 	}
 }

@@ -533,18 +533,30 @@ impl Node {
 
 		// Regularly broadcast node announcements.
 		let bcast_cm = Arc::clone(&self.channel_manager);
+		let connect_cm = Arc::clone(&self.connection_manager);
 		let bcast_pm = Arc::clone(&self.peer_manager);
 		let bcast_config = Arc::clone(&self.config);
 		let bcast_store = Arc::clone(&self.kv_store);
 		let bcast_logger = Arc::clone(&self.logger);
 		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
 		let mut stop_bcast = self.stop_sender.subscribe();
+		let mut intial_connection_bcast = connect_cm.subscribe_initial_connection();
 		runtime.spawn(async move {
 			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 			#[cfg(not(test))]
 			let mut interval = tokio::time::interval(Duration::from_secs(30));
 			#[cfg(test)]
 			let mut interval = tokio::time::interval(Duration::from_secs(5));
+
+			if !connect_cm.is_initial_connection_established() {
+				match intial_connection_bcast.changed().await {
+					Ok(_) => {},
+					Err(err) => {
+						log_error!(bcast_logger, "Error watching change for intial connection: {}", err);
+					},
+				}
+			}
+
 			loop {
 				tokio::select! {
 						_ = stop_bcast.changed() => {
