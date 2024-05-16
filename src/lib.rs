@@ -800,29 +800,37 @@ impl Node {
 		let event_handling_stopped_logger = Arc::clone(&self.logger);
 		let mut event_handling_stopped_receiver = self.event_handling_stopped_sender.subscribe();
 
-		let _ = runtime
-			.block_on(async {
-				tokio::time::timeout(
-					Duration::from_secs(10),
-					event_handling_stopped_receiver.changed(),
-				)
-				.await
-			})
-			.map_err(|e| {
+		// FIXME: For now, we wait up to 100 secs (BDK_WALLET_SYNC_TIMEOUT_SECS + 10) to allow
+		// event handling to exit gracefully even if it was blocked on the BDK wallet syncing. We
+		// should drop this considerably post upgrading to BDK 1.0.
+		let timeout_res = runtime.block_on(async {
+			tokio::time::timeout(
+				Duration::from_secs(100),
+				event_handling_stopped_receiver.changed(),
+			)
+			.await
+		});
+
+		match timeout_res {
+			Ok(stop_res) => match stop_res {
+				Ok(()) => {},
+				Err(e) => {
+					log_error!(
+						event_handling_stopped_logger,
+						"Stopping event handling failed. This should never happen: {}",
+						e
+					);
+					panic!("Stopping event handling failed. This should never happen.");
+				},
+			},
+			Err(e) => {
 				log_error!(
 					event_handling_stopped_logger,
-					"Stopping event handling timed out. This should never happen: {}",
+					"Stopping event handling timed out: {}",
 					e
 				);
-				debug_assert!(false);
-			})
-			.unwrap_or_else(|_| {
-				log_error!(
-					event_handling_stopped_logger,
-					"Stopping event handling failed. This should never happen.",
-				);
-				panic!("Stopping event handling failed. This should never happen.");
-			});
+			},
+		}
 
 		#[cfg(tokio_unstable)]
 		{
