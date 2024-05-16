@@ -334,7 +334,7 @@ where
 
 	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
-		let address_info = locked_wallet.get_address(AddressIndex::New).map_err(|e| {
+		let address_info = locked_wallet.get_address(AddressIndex::LastUnused).map_err(|e| {
 			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
 		})?;
 
