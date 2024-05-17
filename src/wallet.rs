@@ -351,11 +351,10 @@ where
 		sign_options.trust_witness_utxo = true;
 
 		match locked_wallet.sign(&mut psbt, sign_options) {
-			Ok(finalized) => {
-				if !finalized {
-					log_error!(self.logger, "Failed to finalize PSBT.");
-					return Err(());
-				}
+			Ok(_finalized) => {
+				// BDK will fail to finalize for all LDK-provided inputs of the PSBT. Unfortunately
+				// we can't check more fine grained if it succeeded for all the other inputs here,
+				// so we just ignore the returned `finalized` bool.
 			},
 			Err(err) => {
 				log_error!(self.logger, "Failed to sign transaction: {}", err);
