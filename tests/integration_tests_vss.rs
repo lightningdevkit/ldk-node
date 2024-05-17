@@ -24,5 +24,13 @@ fn channel_full_cycle_with_vss_store() {
 	let node_b = builder_b.build_with_vss_store(vss_base_url, "node_2_store".to_string()).unwrap();
 	node_b.start().unwrap();
 
-	common::do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true);
+	common::do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		true,
+		false,
+	);
 }

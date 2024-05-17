@@ -3,7 +3,9 @@
 
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentStatus};
-use ldk_node::{Builder, Config, Event, LogLevel, Node, NodeError};
+use ldk_node::{
+	Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance,
+};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::persist::KVStore;
@@ -169,6 +171,8 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	}
 
 	config.network = Network::Regtest;
+	config.onchain_wallet_sync_interval_secs = 100000;
+	config.wallet_sync_interval_secs = 100000;
 	println!("Setting network: {}", config.network);
 
 	let rand_dir = random_storage_path();
@@ -359,7 +363,7 @@ pub fn open_channel(
 
 pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
-	expect_anchor_channel: bool,
+	expect_anchor_channel: bool, force_close: bool,
 ) {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -564,8 +568,14 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
 
-	println!("\nB close_channel");
-	node_b.close_channel(&user_channel_id, node_a.node_id(), false).unwrap();
+	println!("\nB close_channel (force: {})", force_close);
+	if force_close {
+		std::thread::sleep(Duration::from_secs(1));
+		node_b.close_channel(&user_channel_id, node_a.node_id(), true).unwrap();
+	} else {
+		node_b.close_channel(&user_channel_id, node_a.node_id(), false).unwrap();
+	}
+
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
@@ -574,6 +584,87 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	generate_blocks_and_wait(&bitcoind, electrsd, 1);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
+
+	if force_close {
+		// Check node_a properly sees all balances and sweeps them.
+		assert_eq!(node_a.list_balances().lightning_balances.len(), 1);
+		match node_a.list_balances().lightning_balances[0] {
+			LightningBalance::ClaimableAwaitingConfirmations {
+				counterparty_node_id,
+				confirmation_height,
+				..
+			} => {
+				assert_eq!(counterparty_node_id, node_b.node_id());
+				let cur_height = node_a.status().current_best_block.height;
+				let blocks_to_go = confirmation_height - cur_height;
+				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize);
+				node_a.sync_wallets().unwrap();
+				node_b.sync_wallets().unwrap();
+			},
+			_ => panic!("Unexpected balance state!"),
+		}
+
+		assert!(node_a.list_balances().lightning_balances.is_empty());
+		assert_eq!(node_a.list_balances().pending_balances_from_channel_closures.len(), 1);
+		match node_a.list_balances().pending_balances_from_channel_closures[0] {
+			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
+			_ => panic!("Unexpected balance state!"),
+		}
+		generate_blocks_and_wait(&bitcoind, electrsd, 1);
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+
+		assert!(node_a.list_balances().lightning_balances.is_empty());
+		assert_eq!(node_a.list_balances().pending_balances_from_channel_closures.len(), 1);
+		match node_a.list_balances().pending_balances_from_channel_closures[0] {
+			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
+			_ => panic!("Unexpected balance state!"),
+		}
+		generate_blocks_and_wait(&bitcoind, electrsd, 5);
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+
+		assert!(node_a.list_balances().lightning_balances.is_empty());
+		assert!(node_a.list_balances().pending_balances_from_channel_closures.is_empty());
+
+		// Check node_b properly sees all balances and sweeps them.
+		assert_eq!(node_b.list_balances().lightning_balances.len(), 1);
+		match node_b.list_balances().lightning_balances[0] {
+			LightningBalance::ClaimableAwaitingConfirmations {
+				counterparty_node_id,
+				confirmation_height,
+				..
+			} => {
+				assert_eq!(counterparty_node_id, node_a.node_id());
+				let cur_height = node_b.status().current_best_block.height;
+				let blocks_to_go = confirmation_height - cur_height;
+				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize);
+				node_b.sync_wallets().unwrap();
+				node_a.sync_wallets().unwrap();
+			},
+			_ => panic!("Unexpected balance state!"),
+		}
+
+		assert!(node_b.list_balances().lightning_balances.is_empty());
+		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
+		match node_b.list_balances().pending_balances_from_channel_closures[0] {
+			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
+			_ => panic!("Unexpected balance state!"),
+		}
+		generate_blocks_and_wait(&bitcoind, electrsd, 1);
+		node_b.sync_wallets().unwrap();
+		node_a.sync_wallets().unwrap();
+
+		assert!(node_b.list_balances().lightning_balances.is_empty());
+		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
+		match node_b.list_balances().pending_balances_from_channel_closures[0] {
+			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
+			_ => panic!("Unexpected balance state!"),
+		}
+		generate_blocks_and_wait(&bitcoind, electrsd, 5);
+		node_b.sync_wallets().unwrap();
+		node_a.sync_wallets().unwrap();
+	}
 
 	let sum_of_all_payments_sat = (push_msat
 		+ invoice_amount_1_msat
@@ -586,11 +677,11 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
 	assert!(node_a.list_balances().spendable_onchain_balance_sats > node_a_lower_bound_sat);
 	assert!(node_a.list_balances().spendable_onchain_balance_sats < node_a_upper_bound_sat);
-	let expected_final_amount_node_b_sat = premine_amount_sat + sum_of_all_payments_sat;
-	assert_eq!(
-		node_b.list_balances().spendable_onchain_balance_sats,
-		expected_final_amount_node_b_sat
-	);
+
+	let node_b_upper_bound_sat = premine_amount_sat + sum_of_all_payments_sat;
+	let node_b_lower_bound_sat = node_b_upper_bound_sat - onchain_fee_buffer_sat;
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > node_b_lower_bound_sat);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats <= node_b_upper_bound_sat);
 
 	// Check we handled all events
 	assert_eq!(node_a.next_event(), None);
