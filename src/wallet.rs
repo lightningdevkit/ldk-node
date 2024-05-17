@@ -166,6 +166,12 @@ where
 		Ok(address_info.address)
 	}
 
+	fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
+		let address_info =
+			self.inner.lock().unwrap().get_internal_address(AddressIndex::LastUnused)?;
+		Ok(address_info.address)
+	}
+
 	pub(crate) fn get_balances(
 		&self, total_anchor_channels_reserve_sats: u64,
 	) -> Result<(u64, u64), Error> {
@@ -349,9 +355,10 @@ where
 
 	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
-		let address_info = locked_wallet.get_address(AddressIndex::LastUnused).map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
+		let address_info =
+			locked_wallet.get_internal_address(AddressIndex::LastUnused).map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			})?;
 
 		Ok(address_info.address.script_pubkey())
 	}
@@ -569,7 +576,7 @@ where
 	L::Target: Logger,
 {
 	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.get_new_address().map_err(|e| {
+		let address = self.wallet.get_new_internal_address().map_err(|e| {
 			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
 		})?;
 		Ok(address.script_pubkey())
