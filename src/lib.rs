@@ -134,7 +134,7 @@ use payment::{Bolt11Payment, OnchainPayment, PaymentDetails, SpontaneousPayment}
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
-	KeysManager, NetworkGraph, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Graph, KeysManager, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, ChannelType, PeerDetails, UserChannelId};
 
@@ -184,7 +184,7 @@ pub struct Node {
 	peer_manager: Arc<PeerManager>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	keys_manager: Arc<KeysManager>,
-	network_graph: Arc<NetworkGraph>,
+	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
 	kv_store: Arc<DynStore>,

@@ -80,31 +80,28 @@ pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
 >;
 
 pub(crate) type Router = DefaultRouter<
-	Arc<NetworkGraph>,
+	Arc<Graph>,
 	Arc<FilesystemLogger>,
 	Arc<KeysManager>,
 	Arc<Mutex<Scorer>>,
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
-pub(crate) type Scorer = ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
+pub(crate) type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<FilesystemLogger>>;
 
-pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
+pub(crate) type Graph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
 pub(crate) type UtxoLookup = dyn lightning::routing::utxo::UtxoLookup + Send + Sync;
 
-pub(crate) type P2PGossipSync = lightning::routing::gossip::P2PGossipSync<
-	Arc<NetworkGraph>,
-	Arc<UtxoLookup>,
-	Arc<FilesystemLogger>,
->;
+pub(crate) type P2PGossipSync =
+	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<FilesystemLogger>>;
 pub(crate) type RapidGossipSync =
-	lightning_rapid_gossip_sync::RapidGossipSync<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
+	lightning_rapid_gossip_sync::RapidGossipSync<Arc<Graph>, Arc<FilesystemLogger>>;
 
 pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 	Arc<P2PGossipSync>,
 	Arc<RapidGossipSync>,
-	Arc<NetworkGraph>,
+	Arc<Graph>,
 	Arc<UtxoLookup>,
 	Arc<FilesystemLogger>,
 >;
@@ -120,7 +117,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 >;
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
-	Arc<NetworkGraph>,
+	Arc<Graph>,
 	Arc<FilesystemLogger>,
 	Arc<KeysManager>,
 >;
