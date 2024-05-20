@@ -511,6 +511,15 @@ pub(crate) fn check_namespace_key_validity(
 	Ok(())
 }
 
+pub(crate) fn ohttp_headers() -> reqwest::header::HeaderMap {
+	let mut headers = reqwest::header::HeaderMap::new();
+	headers.insert(
+		reqwest::header::CONTENT_TYPE,
+		reqwest::header::HeaderValue::from_static("message/ohttp-req"),
+	);
+	headers
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

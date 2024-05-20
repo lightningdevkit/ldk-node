@@ -11,6 +11,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
+use crate::payment::payjoin::send::PayjoinSender;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::tx_broadcaster::TransactionBroadcaster;
@@ -93,6 +94,11 @@ struct LiquiditySourceConfig {
 	lsps2_service: Option<(SocketAddress, PublicKey, Option<String>)>,
 }
 
+#[derive(Debug, Clone)]
+struct PayjoinConfig {
+	payjoin_relay: payjoin::Url,
+}
+
 impl Default for LiquiditySourceConfig {
 	fn default() -> Self {
 		Self { lsps2_service: None }
@@ -132,6 +138,8 @@ pub enum BuildError {
 	WalletSetupFailed,
 	/// We failed to setup the logger.
 	LoggerSetupFailed,
+	/// Invalid Payjoin configuration.
+	InvalidPayjoinConfig,
 }
 
 impl fmt::Display for BuildError {
@@ -152,6 +160,10 @@ impl fmt::Display for BuildError {
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
+			Self::InvalidPayjoinConfig => write!(
+				f,
+				"Invalid Payjoin configuration. Make sure the provided arguments are valid URLs."
+			),
 		}
 	}
 }
@@ -172,6 +184,7 @@ pub struct NodeBuilder {
 	chain_data_source_config: Option<ChainDataSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
+	payjoin_config: Option<PayjoinConfig>,
 }
 
 impl NodeBuilder {
@@ -187,12 +200,14 @@ impl NodeBuilder {
 		let chain_data_source_config = None;
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
+		let payjoin_config = None;
 		Self {
 			config,
 			entropy_source_config,
 			chain_data_source_config,
 			gossip_source_config,
 			liquidity_source_config,
+			payjoin_config,
 		}
 	}
 
@@ -245,6 +260,14 @@ impl NodeBuilder {
 	pub fn set_gossip_source_rgs(&mut self, rgs_server_url: String) -> &mut Self {
 		self.gossip_source_config = Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
 		self
+	}
+
+	/// Configures the [`Node`] instance to enable payjoin transactions.
+	pub fn set_payjoin_config(&mut self, payjoin_relay: String) -> Result<&mut Self, BuildError> {
+		let payjoin_relay =
+			payjoin::Url::parse(&payjoin_relay).map_err(|_| BuildError::InvalidPayjoinConfig)?;
+		self.payjoin_config = Some(PayjoinConfig { payjoin_relay });
+		Ok(self)
 	}
 
 	/// Configures the [`Node`] instance to source its inbound liquidity from the given
@@ -365,6 +388,7 @@ impl NodeBuilder {
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
+			self.payjoin_config.as_ref(),
 			seed_bytes,
 			logger,
 			vss_store,
@@ -386,6 +410,7 @@ impl NodeBuilder {
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
+			self.payjoin_config.as_ref(),
 			seed_bytes,
 			logger,
 			kv_store,
@@ -451,6 +476,11 @@ impl ArcedNodeBuilder {
 	/// network.
 	pub fn set_gossip_source_p2p(&self) {
 		self.inner.write().unwrap().set_gossip_source_p2p();
+	}
+
+	/// Configures the [`Node`] instance to enable payjoin transactions.
+	pub fn set_payjoin_config(&self, payjoin_relay: String) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_payjoin_config(payjoin_relay).map(|_| ())
 	}
 
 	/// Configures the [`Node`] instance to source its gossip data from the given RapidGossipSync
@@ -521,8 +551,9 @@ impl ArcedNodeBuilder {
 fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
-	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+	liquidity_source_config: Option<&LiquiditySourceConfig>,
+	payjoin_config: Option<&PayjoinConfig>, seed_bytes: [u8; 64], logger: Arc<FilesystemLogger>,
+	kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
@@ -966,6 +997,14 @@ fn build_with_store_internal(
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
 
+	let mut payjoin_sender = None;
+	if let Some(pj_config) = payjoin_config {
+		payjoin_sender = Some(Arc::new(PayjoinSender::new(
+			Arc::clone(&logger),
+			pj_config.payjoin_relay.clone(),
+		)));
+	}
+
 	let is_listening = Arc::new(AtomicBool::new(false));
 	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
 	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
@@ -987,6 +1026,7 @@ fn build_with_store_internal(
 		channel_manager,
 		chain_monitor,
 		output_sweeper,
+		payjoin_sender,
 		peer_manager,
 		connection_manager,
 		keys_manager,

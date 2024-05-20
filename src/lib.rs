@@ -109,6 +109,7 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
+use payment::payjoin::send::PayjoinSender;
 pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
@@ -133,7 +134,10 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
-use payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
+use payment::{
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PayjoinPayment, PaymentDetails,
+	SpontaneousPayment,
+};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
@@ -185,6 +189,7 @@ pub struct Node {
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
+	payjoin_sender: Option<Arc<PayjoinSender>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
@@ -1060,6 +1065,46 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a payment handler allowing to send payjoin payments.
+	///
+	/// In order to utilize the Payjoin functionality, it's necessary
+	/// to configure your node using [`set_payjoin_config`].
+	///
+	/// [`set_payjoin_config`]: crate::builder::NodeBuilder::set_payjoin_config
+	#[cfg(not(feature = "uniffi"))]
+	pub fn payjoin_payment(&self) -> PayjoinPayment {
+		let payjoin_sender = self.payjoin_sender.as_ref();
+		PayjoinPayment::new(
+			Arc::clone(&self.runtime),
+			payjoin_sender.map(Arc::clone),
+			Arc::clone(&self.config),
+			Arc::clone(&self.event_queue),
+			Arc::clone(&self.logger),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.tx_broadcaster),
+		)
+	}
+
+	/// Returns a payment handler allowing to send payjoin payments.
+	///
+	/// In order to utilize the Payjoin functionality, it's necessary
+	/// to configure your node using [`set_payjoin_config`].
+	///
+	/// [`set_payjoin_config`]: crate::builder::NodeBuilder::set_payjoin_config
+	#[cfg(feature = "uniffi")]
+	pub fn payjoin_payment(&self) -> Arc<PayjoinPayment> {
+		let payjoin_sender = self.payjoin_sender.as_ref();
+		Arc::new(PayjoinPayment::new(
+			Arc::clone(&self.runtime),
+			payjoin_sender.map(Arc::clone),
+			Arc::clone(&self.config),
+			Arc::clone(&self.event_queue),
+			Arc::clone(&self.logger),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.tx_broadcaster),
 		))
 	}
 

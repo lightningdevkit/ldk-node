@@ -3,6 +3,7 @@ use crate::logger::{log_error, log_info, log_trace, Logger};
 use crate::config::BDK_WALLET_SYNC_TIMEOUT_SECS;
 use crate::Error;
 
+use bitcoin::psbt::Psbt;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
 use lightning::events::bump_transaction::{Utxo, WalletSource};
@@ -147,6 +148,65 @@ where
 		self.propagate_result_to_subscribers(res);
 
 		res
+	}
+
+	pub(crate) fn build_payjoin_transaction(
+		&self, output_script: ScriptBuf, value_sats: u64,
+	) -> Result<Psbt, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let network = locked_wallet.network();
+		let fee_rate = match network {
+			bitcoin::Network::Regtest => 1000.0,
+			_ => self
+				.fee_estimator
+				.get_est_sat_per_1000_weight(ConfirmationTarget::OutputSpendingFee) as f32,
+		};
+		let fee_rate = FeeRate::from_sat_per_kwu(fee_rate);
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut tx_builder = locked_wallet.build_tx();
+		tx_builder.add_recipient(output_script, value_sats).fee_rate(fee_rate).enable_rbf();
+		let mut psbt = match tx_builder.finish() {
+			Ok((psbt, _)) => {
+				log_trace!(self.logger, "Created Payjoin transaction: {:?}", psbt);
+				psbt
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create Payjoin transaction: {}", err);
+				return Err(err.into());
+			},
+		};
+		locked_wallet.sign(&mut psbt, SignOptions::default())?;
+		Ok(psbt)
+	}
+
+	pub(crate) fn sign_payjoin_proposal(
+		&self, payjoin_proposal_psbt: &mut Psbt, original_psbt: &mut Psbt,
+	) -> Result<bool, Error> {
+		// BDK only signs scripts that match its target descriptor by iterating through input map.
+		// The BIP 78 spec makes receiver clear sender input map UTXOs, so process_response will
+		// fail unless they're cleared.  A PSBT unsigned_tx.input references input OutPoints and
+		// not a Script, so the sender signer must either be able to sign based on OutPoint UTXO
+		// lookup or otherwise re-introduce the Script from original_psbt.  Since BDK PSBT signer
+		// only checks Input map Scripts for match against its descriptor, it won't sign if they're
+		// empty.  Re-add the scripts from the original_psbt in order for BDK to sign properly.
+		// reference: https://github.com/bitcoindevkit/bdk-cli/pull/156#discussion_r1261300637
+		let mut original_inputs =
+			original_psbt.unsigned_tx.input.iter().zip(&mut original_psbt.inputs).peekable();
+		for (proposed_txin, proposed_psbtin) in
+			payjoin_proposal_psbt.unsigned_tx.input.iter().zip(&mut payjoin_proposal_psbt.inputs)
+		{
+			if let Some((original_txin, original_psbtin)) = original_inputs.peek() {
+				if proposed_txin.previous_output == original_txin.previous_output {
+					proposed_psbtin.witness_utxo = original_psbtin.witness_utxo.clone();
+					proposed_psbtin.non_witness_utxo = original_psbtin.non_witness_utxo.clone();
+					original_inputs.next();
+				}
+			}
+		}
+
+		let wallet = self.inner.lock().unwrap();
+		let is_signed = wallet.sign(payjoin_proposal_psbt, SignOptions::default())?;
+		Ok(is_signed)
 	}
 
 	pub(crate) fn create_funding_transaction(

@@ -63,6 +63,7 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
+	PayjoinPayment payjoin_payment();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
@@ -148,6 +149,13 @@ interface OnchainPayment {
 	Txid send_all_to_address([ByRef]Address address);
 };
 
+interface PayjoinPayment {
+	[Throws=NodeError]
+	void send(string payjoin_uri);
+	[Throws=NodeError]
+	void send_with_amount(string payjoin_uri, u64 amount_sats);
+};
+
 [Error]
 enum NodeError {
 	"AlreadyRunning",
@@ -196,6 +204,11 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+	"PayjoinUnavailable",
+	"PayjoinUriInvalid",
+	"PayjoinRequestMissingAmount",
+	"PayjoinRequestCreationFailed",
+	"PayjoinResponseProcessingFailed",
 };
 
 dictionary NodeStatus {
@@ -227,6 +240,7 @@ enum BuildError {
 	"KVStoreSetupFailed",
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
+	"InvalidPayjoinConfig",
 };
 
 [Enum]
@@ -238,6 +252,8 @@ interface Event {
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
+	PayjoinTxSendSuccess(Txid txid);
+	PayjoinTxSendFailed(string reason);
 };
 
 enum PaymentFailureReason {

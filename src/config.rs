@@ -40,6 +40,15 @@ pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
 // The time in-between peer reconnection attempts.
 pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(10);
 
+// The time before payjoin sender requests timeout.
+pub(crate) const PAYJOIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+// The time before payjoin sender try to send the next request.
+pub(crate) const PAYJOIN_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
+// The total time payjoin sender try to send a request.
+pub(crate) const PAYJOIN_REQUEST_TOTAL_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
+
 // The time in-between RGS sync attempts.
 pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 

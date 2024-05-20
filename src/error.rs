@@ -95,6 +95,16 @@ pub enum Error {
 	LiquiditySourceUnavailable,
 	/// The given operation failed due to the LSP's required opening fee being too high.
 	LiquidityFeeTooHigh,
+	/// Failed to access Payjoin sender object.
+	PayjoinUnavailable,
+	/// Payjoin URI is invalid.
+	PayjoinUriInvalid,
+	/// Amount is neither user-provided nor defined in the URI.
+	PayjoinRequestMissingAmount,
+	/// Failed to build a Payjoin request.
+	PayjoinRequestCreationFailed,
+	/// Payjoin response processing failed.
+	PayjoinResponseProcessingFailed,
 }
 
 impl fmt::Display for Error {
@@ -161,6 +171,21 @@ impl fmt::Display for Error {
 			},
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
+			},
+			Self::PayjoinUnavailable => {
+				write!(f, "Failed to access Payjoin sender object. Make sure you have enabled Payjoin sending support.")
+			},
+			Self::PayjoinRequestMissingAmount => {
+				write!(f, "Amount is neither user-provided nor defined in the URI.")
+			},
+			Self::PayjoinRequestCreationFailed => {
+				write!(f, "Failed construct a Payjoin request")
+			},
+			Self::PayjoinUriInvalid => {
+				write!(f, "The provided Payjoin URI is invalid")
+			},
+			Self::PayjoinResponseProcessingFailed => {
+				write!(f, "Payjoin receiver responded to our request with an invalid response that was ignored")
 			},
 		}
 	}
