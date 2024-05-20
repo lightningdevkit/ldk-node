@@ -83,6 +83,7 @@ mod error;
 mod event;
 mod fee_estimator;
 mod gossip;
+pub mod graph;
 mod hex_utils;
 pub mod io;
 mod liquidity;
@@ -128,6 +129,7 @@ use config::{
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
+use graph::NetworkGraph;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
 use payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
@@ -1405,6 +1407,18 @@ impl Node {
 		}
 
 		peers
+	}
+
+	/// Returns a handler allowing to query the network graph.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn network_graph(&self) -> NetworkGraph {
+		NetworkGraph::new(Arc::clone(&self.network_graph))
+	}
+
+	/// Returns a handler allowing to query the network graph.
+	#[cfg(feature = "uniffi")]
+	pub fn network_graph(&self) -> Arc<NetworkGraph> {
+		Arc::new(NetworkGraph::new(Arc::clone(&self.network_graph)))
 	}
 
 	/// Creates a digital ECDSA signature of a message with the node's secret key.
