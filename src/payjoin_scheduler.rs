@@ -1,14 +1,15 @@
-use bitcoin::{secp256k1::PublicKey, ScriptBuf, TxOut};
+use bitcoin::{secp256k1::PublicKey, ScriptBuf, Transaction, TxOut};
 
 #[derive(Clone)]
 pub struct PayjoinScheduler {
 	channels: Vec<PayjoinChannel>,
+	seen_txs: Vec<Transaction>,
 }
 
 impl PayjoinScheduler {
 	/// Create a new empty channel scheduler.
 	pub fn new() -> Self {
-		Self { channels: vec![] }
+		Self { channels: vec![], seen_txs: vec![] }
 	}
 	/// Schedule a new channel.
 	///
@@ -115,6 +116,29 @@ impl PayjoinScheduler {
 	pub fn in_progress(&self) -> bool {
 		self.channels.iter().any(|channel| !channel.is_channel_accepted())
 	}
+
+	pub fn add_seen_tx(&mut self, tx: &Transaction) -> bool {
+		for input in tx.input.iter() {
+			for tx in self.seen_txs.clone() {
+				if tx.input.contains(&input) {
+					return false;
+				}
+			}
+		}
+		self.seen_txs.push(tx.clone());
+		return true;
+	}
+
+	// pub fn seen_outpoints(&self, tx: &bitcoin::Transaction) -> bool {
+	// 	tx.input.iter().any(|input| self.seen_outpoints_internal(&input.previous_output))
+	// }
+
+	// fn seen_outpoints_internal(&self, outpoint: &bitcoin::OutPoint) -> bool {
+	// 	self.seen_txs
+	// 		.iter()
+	// 		.any(|seen_tx| seen_tx.input.iter().any(|input| &input.previous_output == outpoint))
+	// }
+
 	fn internal_find_by_tx_out(&self, txout: &TxOut) -> Option<PayjoinChannel> {
 		let channel = self.channels.iter().find(|channel| {
 			return Some(&txout.script_pubkey) == channel.output_script();
