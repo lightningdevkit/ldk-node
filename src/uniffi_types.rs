@@ -1,3 +1,4 @@
+pub use crate::event::PayjoinPaymentFailureReason;
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus};
 
@@ -11,7 +12,7 @@ pub use lightning::util::string::UntrustedString;
 
 pub use lightning_invoice::Bolt11Invoice;
 
-pub use bitcoin::{Address, BlockHash, Network, OutPoint, Txid};
+pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 
 pub use bip39::Mnemonic;
 
@@ -30,6 +31,18 @@ use lightning_invoice::SignedRawBolt11Invoice;
 
 use std::convert::TryInto;
 use std::str::FromStr;
+
+impl UniffiCustomTypeConverter for ScriptBuf {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(ScriptBuf::from_hex(&val).map_err(|_| Error::InvalidPublicKey)?)
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_hex_string()
+	}
+}
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;

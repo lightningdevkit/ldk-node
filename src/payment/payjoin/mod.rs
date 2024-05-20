@@ -1,18 +1,18 @@
 //! Holds a payment handler allowing to send Payjoin payments.
 
-use lightning::chain::chaininterface::BroadcasterInterface;
+use lightning::util::logger::Logger;
+use lightning::{log_error, log_info};
 
 use crate::config::{PAYJOIN_REQUEST_TOTAL_DURATION, PAYJOIN_RETRY_INTERVAL};
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
-use crate::types::{Broadcaster, EventQueue, Wallet};
-use crate::Event;
+use crate::logger::FilesystemLogger;
+use crate::types::Wallet;
 use crate::{error::Error, Config};
 
 use std::sync::{Arc, RwLock};
 
-use self::send::PayjoinSender;
+pub(crate) mod handler;
 
-pub(crate) mod send;
+use handler::PayjoinHandler;
 
 /// A payment handler allowing to send Payjoin payments.
 ///
@@ -58,21 +58,19 @@ pub(crate) mod send;
 /// [`BIP77`]: https://github.com/bitcoin/bips/blob/3b863a402e0250658985f08a455a6cd103e269e5/bip-0077.mediawiki
 pub struct PayjoinPayment {
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
-	sender: Option<Arc<PayjoinSender>>,
+	handler: Option<Arc<PayjoinHandler>>,
 	config: Arc<Config>,
-	event_queue: Arc<EventQueue>,
 	logger: Arc<FilesystemLogger>,
 	wallet: Arc<Wallet>,
-	tx_broadcaster: Arc<Broadcaster>,
 }
 
 impl PayjoinPayment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, sender: Option<Arc<PayjoinSender>>,
-		config: Arc<Config>, event_queue: Arc<EventQueue>, logger: Arc<FilesystemLogger>,
-		wallet: Arc<Wallet>, tx_broadcaster: Arc<Broadcaster>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		handler: Option<Arc<PayjoinHandler>>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
+		wallet: Arc<Wallet>,
 	) -> Self {
-		Self { runtime, sender, config, event_queue, logger, wallet, tx_broadcaster }
+		Self { runtime, handler, config, logger, wallet }
 	}
 
 	/// Send a Payjoin transaction to the address specified in the `payjoin_uri`.
@@ -83,8 +81,8 @@ impl PayjoinPayment {
 	/// Due to the asynchronous nature of the Payjoin process, this method will return immediately
 	/// after constucting the Payjoin request and sending it in the background. The result of the
 	/// operation will be communicated through the event queue. If the Payjoin request is
-	/// successful, [`Event::PayjoinTxSendSuccess`] event will be added to the event queue.
-	/// Otherwise, [`Event::PayjoinTxSendFailed`] is added.
+	/// successful, [`Event::PayjoinPaymentSuccess`] event will be added to the event queue.
+	/// Otherwise, [`Event::PayjoinPaymentFailed`] is added.
 	///
 	/// The total duration of the Payjoin process is defined in `PAYJOIN_REQUEST_TOTAL_DURATION`.
 	/// If the Payjoin receiver does not respond within this duration, the process is considered
@@ -95,84 +93,46 @@ impl PayjoinPayment {
 	///
 	/// [`BIP21`]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	/// [`BIP77`]: https://github.com/bitcoin/bips/blob/d7ffad81e605e958dcf7c2ae1f4c797a8631f146/bip-0077.mediawiki
-	/// [`Event::PayjoinTxSendSuccess`]: crate::Event::PayjoinTxSendSuccess
-	/// [`Event::PayjoinTxSendFailed`]: crate::Event::PayjoinTxSendFailed
+	/// [`Event::PayjoinPaymentSuccess`]: crate::Event::PayjoinPaymentSuccess
+	/// [`Event::PayjoinPaymentFailed`]: crate::Event::PayjoinPaymentFailed
 	pub fn send(&self, payjoin_uri: String) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
-		let payjoin_sender = self.sender.as_ref().ok_or(Error::PayjoinUnavailable)?;
 		let payjoin_uri =
-			payjoin::Uri::try_from(payjoin_uri).map_err(|_| Error::PayjoinUriInvalid)?;
-		let payjoin_uri =
-			payjoin_uri.require_network(self.config.network).map_err(|_| Error::InvalidNetwork)?;
-		let amount_to_send = match payjoin_uri.amount {
-			Some(amount) => amount,
-			None => return Err(Error::PayjoinRequestMissingAmount),
-		};
-		let original_psbt = self.wallet.build_payjoin_transaction(
-			payjoin_uri.address.script_pubkey(),
-			amount_to_send.to_sat(),
-		)?;
-		let payjoin_sender = Arc::clone(payjoin_sender);
-		let runtime = rt_lock.as_ref().unwrap();
-		let event_queue = Arc::clone(&self.event_queue);
-		let tx_broadcaster = Arc::clone(&self.tx_broadcaster);
-		let wallet = Arc::clone(&self.wallet);
+			payjoin::Uri::try_from(payjoin_uri).map_err(|_| Error::PayjoinUriInvalid).and_then(
+				|uri| uri.require_network(self.config.network).map_err(|_| Error::InvalidNetwork),
+			)?;
+		let mut original_psbt = self.wallet.build_payjoin_transaction(payjoin_uri.clone())?;
+		let payjoin_handler = self.handler.as_ref().ok_or(Error::PayjoinUnavailable)?;
+		let payjoin_handler = Arc::clone(payjoin_handler);
 		let logger = Arc::clone(&self.logger);
-		let payjoin_relay = payjoin_sender.payjoin_relay().clone();
-		runtime.spawn(async move {
+		log_info!(logger, "Sending Payjoin request to: {}", payjoin_uri.address);
+		rt_lock.as_ref().unwrap().spawn(async move {
 			let mut interval = tokio::time::interval(PAYJOIN_RETRY_INTERVAL);
 			loop {
 				tokio::select! {
 					_ = tokio::time::sleep(PAYJOIN_REQUEST_TOTAL_DURATION) => {
-						let _ = event_queue.add_event(Event::PayjoinTxSendFailed {
-							reason: "Payjoin request timed out.".to_string(),
-						});
+						log_error!(logger, "Payjoin request timed out.");
+						let _ = payjoin_handler.timeout_payjoin_transaction(payjoin_uri.clone());
 						break;
 					}
 					_ = interval.tick() => {
-						let payjoin_uri = payjoin_uri.clone();
-
-						let (request, context) =
-							payjoin::send::RequestBuilder::from_psbt_and_uri(original_psbt.clone(), payjoin_uri)
-							.and_then(|b| b.build_non_incentivizing())
-							.and_then(|mut c| c.extract_v2(payjoin_relay.clone()))
-							.map_err(|_e| Error::PayjoinRequestCreationFailed).unwrap();
-						match payjoin_sender.send_request(&request).await {
-							Some(response) => {
-								match context.process_response(&mut response.as_slice()) {
-											Ok(Some(payjoin_proposal_psbt)) => {
-													let payjoin_proposal_psbt = &mut payjoin_proposal_psbt.clone();
-													let is_signed = wallet.sign_payjoin_proposal(payjoin_proposal_psbt, &mut original_psbt.clone()).unwrap();
-													if is_signed {
-														let tx = payjoin_proposal_psbt.clone().extract_tx();
-														tx_broadcaster.broadcast_transactions(&[&tx]);
-														let txid = tx.txid();
-														let _ = event_queue.add_event(Event::PayjoinPaymentPending { txid });
-													} else {
-														let _ = event_queue
-															.add_event(Event::PayjoinTxSendFailed { reason: "Unable to sign proposal".to_string(), });
-															break;
-													}
-											},
-											Err(e) => {
-													let _ = event_queue
-														.add_event(Event::PayjoinTxSendFailed { reason: e.to_string() });
-													log_error!(logger, "Error processing Payjoin response: {}", e);
-													break;
-											},
-											Ok(None) => {
-													log_info!(logger, "Payjoin response received, waiting for next response.");
-													continue;
-											}
-								}
+						match payjoin_handler.send_payjoin_transaction(&mut original_psbt, payjoin_uri.clone()).await {
+							Ok(Some(_)) => {
+								log_info!(logger, "Payjoin transaction sent successfully.");
+								break
 							},
-						None => {
-							continue;
-						},
-						};
+							Ok(None) => {
+								log_info!(logger, "No Payjoin response yet.");
+								continue
+							},
+							Err(e) => {
+								log_error!(logger, "Failed to process Payjoin receiver response: {}.", e);
+								break;
+							}
+						}
 					}
 				}
 			}
@@ -191,8 +151,8 @@ impl PayjoinPayment {
 	/// Due to the asynchronous nature of the Payjoin process, this method will return immediately
 	/// after constucting the Payjoin request and sending it in the background. The result of the
 	/// operation will be communicated through the event queue. If the Payjoin request is
-	/// successful, [`Event::PayjoinTxSendSuccess`] event will be added to the event queue.
-	/// Otherwise, [`Event::PayjoinTxSendFailed`] is added.
+	/// successful, [`Event::PayjoinPaymentSuccess`] event will be added to the event queue.
+	/// Otherwise, [`Event::PayjoinPaymentFailed`] is added.
 	///
 	/// The total duration of the Payjoin process is defined in `PAYJOIN_REQUEST_TOTAL_DURATION`.
 	/// If the Payjoin receiver does not respond within this duration, the process is considered
@@ -203,8 +163,8 @@ impl PayjoinPayment {
 	///
 	/// [`BIP21`]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	/// [`BIP77`]: https://github.com/bitcoin/bips/blob/d7ffad81e605e958dcf7c2ae1f4c797a8631f146/bip-0077.mediawiki
-	/// [`Event::PayjoinTxSendSuccess`]: crate::Event::PayjoinTxSendSuccess
-	/// [`Event::PayjoinTxSendFailed`]: crate::Event::PayjoinTxSendFailed
+	/// [`Event::PayjoinPaymentSuccess`]: crate::Event::PayjoinPaymentSuccess
+	/// [`Event::PayjoinPaymentFailed`]: crate::Event::PayjoinPaymentFailed
 	pub fn send_with_amount(&self, payjoin_uri: String, amount_sats: u64) -> Result<(), Error> {
 		let payjoin_uri = match payjoin::Uri::try_from(payjoin_uri) {
 			Ok(uri) => uri,

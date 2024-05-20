@@ -24,6 +24,7 @@ use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::msgs::DecodeError;
 use lightning::ln::{ChannelId, PaymentHash};
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
@@ -143,28 +144,70 @@ pub enum Event {
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
-	/// A Payjoin transaction has been successfully sent.
-	///
-	/// This event is emitted when we send a Payjoin transaction and it was accepted by the
-	/// receiver, and then finalised and broadcasted by us.
-	PayjoinTxSendSuccess {
-		/// Transaction ID of the successfully sent Payjoin transaction.
-		txid: bitcoin::Txid,
-	},
-	/// Failed to send Payjoin transaction.
-	///
-	/// This event is emitted when our attempt to send Payjoin transaction fail.
-	PayjoinTxSendFailed {
-		/// Reason for the failure.
-		reason: String,
-	},
 	/// Failed to send Payjoin transaction.
 	///
 	/// This event is emitted when our attempt to send Payjoin transaction fail.
 	PayjoinPaymentPending {
 		/// Transaction ID of the successfully sent Payjoin transaction.
 		txid: bitcoin::Txid,
+		/// docs
+		amount: u64,
+		/// docs
+		receipient: bitcoin::ScriptBuf,
 	},
+	/// A Payjoin transaction has been successfully sent.
+	///
+	/// This event is emitted when we send a Payjoin transaction and it was accepted by the
+	/// receiver, and then finalised and broadcasted by us.
+	PayjoinPaymentSuccess {
+		/// Transaction ID of the successfully sent Payjoin transaction.
+		txid: bitcoin::Txid,
+		/// docs
+		amount: u64,
+		/// docs
+		receipient: bitcoin::ScriptBuf,
+	},
+	/// Failed to send Payjoin transaction.
+	///
+	/// This event is emitted when our attempt to send Payjoin transaction fail.
+	PayjoinPaymentFailed {
+		/// Transaction ID of the successfully sent Payjoin transaction.
+		txid: Option<bitcoin::Txid>,
+		/// docs
+		amount: u64,
+		/// docs
+		receipient: bitcoin::ScriptBuf,
+		/// Reason for the failure.
+		reason: PayjoinPaymentFailureReason,
+	},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayjoinPaymentFailureReason {
+	Timeout,
+	TransactionFinalisationFailed,
+	InvalidReceiverResponse,
+}
+
+impl Readable for PayjoinPaymentFailureReason {
+	fn read<R: std::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		match u8::read(reader)? {
+			0 => Ok(Self::Timeout),
+			1 => Ok(Self::TransactionFinalisationFailed),
+			2 => Ok(Self::InvalidReceiverResponse),
+			_ => Err(DecodeError::InvalidValue),
+		}
+	}
+}
+
+impl Writeable for PayjoinPaymentFailureReason {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+		match *self {
+			Self::Timeout => 0u8.write(writer),
+			Self::TransactionFinalisationFailed => 1u8.write(writer),
+			Self::InvalidReceiverResponse => 2u8.write(writer),
+		}
+	}
 }
 
 impl_writeable_tlv_based_enum!(Event,
@@ -207,14 +250,21 @@ impl_writeable_tlv_based_enum!(Event,
 		(4, claimable_amount_msat, required),
 		(6, claim_deadline, option),
 	},
-	(7, PayjoinTxSendSuccess) => {
+	(7, PayjoinPaymentPending) => {
 		(0, txid, required),
+		(2, amount, required),
+		(4, receipient, required),
 	},
-	(8, PayjoinTxSendFailed) => {
-		(0, reason, required),
-	},
-	(9, PayjoinPaymentPending) => {
+	(8, PayjoinPaymentSuccess) => {
 		(0, txid, required),
+		(2, amount, required),
+		(4, receipient, required),
+	},
+	(9, PayjoinPaymentFailed) => {
+		(0, amount, required),
+		(1, txid, option),
+		(2, receipient, required),
+		(4, reason, required),
 	};
 );
 

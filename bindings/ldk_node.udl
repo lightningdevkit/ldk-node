@@ -252,8 +252,9 @@ interface Event {
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
-	PayjoinTxSendSuccess(Txid txid);
-	PayjoinTxSendFailed(string reason);
+	PayjoinPaymentPending(Txid txid, u64 amount, ScriptBuf receipient);
+	PayjoinPaymentSuccess(Txid txid, u64 amount, ScriptBuf receipient);
+	PayjoinPaymentFailed(Txid? txid, u64 amount, ScriptBuf receipient, PayjoinPaymentFailureReason reason);
 };
 
 enum PaymentFailureReason {
@@ -264,6 +265,13 @@ enum PaymentFailureReason {
 	"RouteNotFound",
 	"UnexpectedError",
 };
+
+enum PayjoinPaymentFailureReason {
+	"Timeout",
+	"TransactionFinalisationFailed",
+	"InvalidReceiverResponse",
+};
+
 
 [Enum]
 interface ClosureReason {
@@ -290,6 +298,7 @@ interface PaymentKind {
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id);
 	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
+	Payjoin();
 };
 
 enum PaymentDirection {
@@ -515,3 +524,6 @@ typedef string Mnemonic;
 
 [Custom]
 typedef string UntrustedString;
+
+[Custom]
+typedef string ScriptBuf;

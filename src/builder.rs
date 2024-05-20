@@ -11,7 +11,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::payjoin::send::PayjoinSender;
+use crate::payment::payjoin::handler::PayjoinHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::tx_broadcaster::TransactionBroadcaster;
@@ -997,11 +997,16 @@ fn build_with_store_internal(
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
 
-	let mut payjoin_sender = None;
+	let mut payjoin_handler = None;
 	if let Some(pj_config) = payjoin_config {
-		payjoin_sender = Some(Arc::new(PayjoinSender::new(
+		payjoin_handler = Some(Arc::new(PayjoinHandler::new(
+			Arc::clone(&tx_broadcaster),
 			Arc::clone(&logger),
 			pj_config.payjoin_relay.clone(),
+			Arc::clone(&tx_sync),
+			Arc::clone(&event_queue),
+			Arc::clone(&wallet),
+			Arc::clone(&payment_store),
 		)));
 	}
 
@@ -1026,7 +1031,7 @@ fn build_with_store_internal(
 		channel_manager,
 		chain_monitor,
 		output_sweeper,
-		payjoin_sender,
+		payjoin_handler,
 		peer_manager,
 		connection_manager,
 		keys_manager,

@@ -109,7 +109,7 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
-use payment::payjoin::send::PayjoinSender;
+use payment::payjoin::handler::PayjoinHandler;
 pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
@@ -189,7 +189,7 @@ pub struct Node {
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
-	payjoin_sender: Option<Arc<PayjoinSender>>,
+	payjoin_handler: Option<Arc<PayjoinHandler>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
@@ -1076,15 +1076,13 @@ impl Node {
 	/// [`set_payjoin_config`]: crate::builder::NodeBuilder::set_payjoin_config
 	#[cfg(not(feature = "uniffi"))]
 	pub fn payjoin_payment(&self) -> PayjoinPayment {
-		let payjoin_sender = self.payjoin_sender.as_ref();
+		let payjoin_handler = self.payjoin_handler.as_ref();
 		PayjoinPayment::new(
 			Arc::clone(&self.runtime),
-			payjoin_sender.map(Arc::clone),
+			payjoin_handler.map(Arc::clone),
 			Arc::clone(&self.config),
-			Arc::clone(&self.event_queue),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.wallet),
-			Arc::clone(&self.tx_broadcaster),
 		)
 	}
 
@@ -1096,15 +1094,13 @@ impl Node {
 	/// [`set_payjoin_config`]: crate::builder::NodeBuilder::set_payjoin_config
 	#[cfg(feature = "uniffi")]
 	pub fn payjoin_payment(&self) -> Arc<PayjoinPayment> {
-		let payjoin_sender = self.payjoin_sender.as_ref();
+		let payjoin_handler = self.payjoin_handler.as_ref();
 		Arc::new(PayjoinPayment::new(
 			Arc::clone(&self.runtime),
-			payjoin_sender.map(Arc::clone),
+			payjoin_handler.map(Arc::clone),
 			Arc::clone(&self.config),
-			Arc::clone(&self.event_queue),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.wallet),
-			Arc::clone(&self.tx_broadcaster),
 		))
 	}
 

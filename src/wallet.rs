@@ -22,7 +22,7 @@ use bdk::wallet::AddressIndex;
 use bdk::{Balance, FeeRate};
 use bdk::{SignOptions, SyncOptions};
 
-use bitcoin::address::{Payload, WitnessVersion};
+use bitcoin::address::{NetworkChecked, Payload, WitnessVersion};
 use bitcoin::bech32::u5;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -151,10 +151,12 @@ where
 	}
 
 	pub(crate) fn build_payjoin_transaction(
-		&self, output_script: ScriptBuf, value_sats: u64,
+		&self, payjoin_uri: payjoin::Uri<NetworkChecked>,
 	) -> Result<Psbt, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let network = locked_wallet.network();
+		let output_script = payjoin_uri.address.script_pubkey();
+		let amount = payjoin_uri.amount.ok_or(Error::PayjoinRequestMissingAmount)?.to_sat();
 		let fee_rate = match network {
 			bitcoin::Network::Regtest => 1000.0,
 			_ => self
@@ -164,7 +166,7 @@ where
 		let fee_rate = FeeRate::from_sat_per_kwu(fee_rate);
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
-		tx_builder.add_recipient(output_script, value_sats).fee_rate(fee_rate).enable_rbf();
+		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).enable_rbf();
 		let mut psbt = match tx_builder.finish() {
 			Ok((psbt, _)) => {
 				log_trace!(self.logger, "Created Payjoin transaction: {:?}", psbt);
@@ -207,6 +209,11 @@ where
 		let wallet = self.inner.lock().unwrap();
 		let is_signed = wallet.sign(payjoin_proposal_psbt, SignOptions::default())?;
 		Ok(is_signed)
+	}
+
+	pub(crate) fn is_mine(&self, script: &ScriptBuf) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		Ok(locked_wallet.is_mine(script)?)
 	}
 
 	pub(crate) fn create_funding_transaction(

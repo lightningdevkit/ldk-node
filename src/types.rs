@@ -142,6 +142,8 @@ pub(crate) type BumpTransactionEventHandler =
 		Arc<FilesystemLogger>,
 	>;
 
+pub(crate) type PaymentStore = crate::payment::store::PaymentStore<Arc<FilesystemLogger>>;
+
 /// A local, potentially user-provided, identifier of a channel.
 ///
 /// By default, this will be randomly generated for the user to ensure local uniqueness.
