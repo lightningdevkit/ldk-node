@@ -17,7 +17,7 @@ use lightning::util::message_signing;
 use bdk::blockchain::EsploraBlockchain;
 use bdk::database::BatchDatabase;
 use bdk::wallet::AddressIndex;
-use bdk::FeeRate;
+use bdk::{FeeRate, TransactionDetails};
 use bdk::{SignOptions, SyncOptions};
 
 use bitcoin::bech32::u5;
@@ -158,6 +158,11 @@ where
 	pub(crate) fn is_mine(&self, script: &ScriptBuf) -> Result<bool, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
 		Ok(locked_wallet.is_mine(script)?)
+	}
+
+	pub(crate) fn list_transactions(&self) -> Result<Vec<TransactionDetails>, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		Ok(locked_wallet.list_transactions(false)?)
 	}
 
 	/// Verifies that the given transaction meets the bitcoin consensus rules.

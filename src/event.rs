@@ -1,4 +1,4 @@
-use crate::payjoin_handler::PayjoinReceiver;
+use crate::payjoin_receiver::PayjoinLightningReceiver;
 use crate::types::{DynStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
@@ -323,7 +323,7 @@ where
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
-	payjoin_receiver: Option<Arc<PayjoinReceiver<L>>>,
+	payjoin_receiver: Option<Arc<PayjoinLightningReceiver<L>>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -335,7 +335,7 @@ where
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
 		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
 		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
-		payjoin_receiver: Option<Arc<PayjoinReceiver<L>>>,
+		payjoin_receiver: Option<Arc<PayjoinLightningReceiver<L>>>,
 	) -> Self {
 		Self {
 			event_queue,

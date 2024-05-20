@@ -25,9 +25,15 @@ fn send_receive_regular_payjoin_transaction() {
 	assert_eq!(node_a_pj_receiver.next_event(), None);
 	assert_eq!(node_a_pj_receiver.list_channels().len(), 0);
 	let payjoin_uri = node_a_pj_receiver.request_payjoin_transaction(80_000).unwrap();
-	let txid = node_b_pj_sender.send_payjoin_transaction(
-		payjoin::Uri::try_from(payjoin_uri.to_string()).unwrap().assume_checked(),
-	);
+	let txid = tokio::runtime::Runtime::new().unwrap().handle().block_on(async {
+		let txid = node_b_pj_sender
+			.send_payjoin_transaction(
+				payjoin::Uri::try_from(payjoin_uri.to_string()).unwrap().assume_checked(),
+				None,
+			)
+			.await;
+		txid
+	});
 	dbg!(&txid);
 	wait_for_tx(&electrsd.client, txid.unwrap().unwrap());
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);

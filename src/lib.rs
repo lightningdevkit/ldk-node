@@ -77,7 +77,6 @@
 
 mod balance;
 mod builder;
-mod channel_scheduler;
 mod config;
 mod connection;
 mod error;
@@ -89,7 +88,10 @@ pub mod io;
 mod liquidity;
 mod logger;
 mod message_handler;
-mod payjoin_handler;
+// mod payjoin_handler;
+mod payjoin_receiver;
+mod payjoin_scheduler;
+mod payjoin_sender;
 pub mod payment;
 mod peer_store;
 mod sweep;
@@ -110,10 +112,11 @@ pub use config::{default_config, Config};
 pub use error::Error as NodeError;
 use error::Error;
 
-use channel_scheduler::ScheduledChannel;
 pub use event::Event;
 use payjoin::PjUri;
-use payjoin_handler::{PayjoinReceiver, PayjoinSender};
+use payjoin_receiver::{PayjoinLightningReceiver, PayjoinReceiver};
+use payjoin_scheduler::PayjoinChannel;
+use payjoin_sender::PayjoinSender;
 pub use types::ChannelConfig;
 
 pub use io::utils::generate_entropy_mnemonic;
@@ -189,6 +192,7 @@ pub struct Node {
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	payjoin_receiver: Option<Arc<PayjoinReceiver<Arc<FilesystemLogger>>>>,
 	payjoin_sender: Option<Arc<PayjoinSender<Arc<FilesystemLogger>>>>,
+	payjoin_lightning_receiver: Option<Arc<PayjoinLightningReceiver<Arc<FilesystemLogger>>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
 	gossip_source: Arc<GossipSource>,
@@ -502,7 +506,7 @@ impl Node {
 		if let Some(payjoin_receiver) = &self.payjoin_receiver {
 			let mut stop_payjoin_server = self.stop_sender.subscribe();
 			let payjoin_receiver = Arc::clone(&payjoin_receiver);
-			let payjoin_check_interval = 1;
+			let payjoin_check_interval = 10;
 			runtime.spawn(async move {
 				let mut payjoin_interval =
 					tokio::time::interval(Duration::from_secs(payjoin_check_interval));
@@ -521,27 +525,50 @@ impl Node {
 			});
 		}
 
-		if let Some(payjoin_sender) = &self.payjoin_sender {
+		if let Some(payjoin_lightning_receiver) = &self.payjoin_lightning_receiver {
 			let mut stop_payjoin_server = self.stop_sender.subscribe();
-			let payjoin_sender = Arc::clone(&payjoin_sender);
-			let payjoin_check_interval = 1;
+			let payjoin_lightning_receiver = Arc::clone(&payjoin_lightning_receiver);
+			let payjoin_check_interval = 10;
 			runtime.spawn(async move {
-				let mut payjoin_interval =
+				let mut lightning_payjoin_interval =
 					tokio::time::interval(Duration::from_secs(payjoin_check_interval));
-				payjoin_interval.reset();
-				payjoin_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				lightning_payjoin_interval.reset();
+				lightning_payjoin_interval
+					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 				loop {
 					tokio::select! {
 						_ = stop_payjoin_server.changed() => {
 							return;
 						}
-						_ = payjoin_interval.tick() => {
-							let _ = payjoin_sender.process_payjoin_response().await;
+						_ = lightning_payjoin_interval.tick() => {
+							let _ = payjoin_lightning_receiver.process_payjoin_request().await;
 						}
 					}
 				}
 			});
 		}
+
+		// if let Some(payjoin_sender) = &self.payjoin_sender {
+		// 	let mut stop_payjoin_server = self.stop_sender.subscribe();
+		// 	let payjoin_sender = Arc::clone(&payjoin_sender);
+		// 	let payjoin_check_interval = 2;
+		// 	runtime.spawn(async move {
+		// 		let mut payjoin_interval =
+		// 			tokio::time::interval(Duration::from_secs(payjoin_check_interval));
+		// 		payjoin_interval.reset();
+		// 		payjoin_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+		// 		loop {
+		// 			tokio::select! {
+		// 				_ = stop_payjoin_server.changed() => {
+		// 					return;
+		// 				}
+		// 				_ = payjoin_interval.tick() => {
+		// 					let _ = payjoin_sender.process_payjoin_response().await;
+		// 				}
+		// 			}
+		// 		}
+		// 	});
+		// }
 
 		// Regularly reconnect to persisted peers.
 		let connect_cm = Arc::clone(&self.connection_manager);
@@ -680,7 +707,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
-			self.payjoin_receiver.clone(),
+			self.payjoin_lightning_receiver.clone(),
 		));
 
 		// Setup background processing
@@ -750,25 +777,81 @@ impl Node {
 		Ok(())
 	}
 
-	/// Send a payjoin transaction from the node on chain funds to the address as specified in the
-	/// payjoin URI.
-	pub fn send_payjoin_transaction(
-		&self, payjoin_uri: payjoin::Uri<'static, NetworkChecked>,
+	/// This method can be used to send a payjoin transaction as defined
+	/// in BIP77.
+	///
+	/// The method will construct an `Original PSBT` from the data
+	/// provided in the `payjoin_uri` and `amount` parameters. The
+	/// amount must be set either in the `payjoin_uri` or in the
+	/// `amount` parameter. If the amount is set in both, the paramter
+	/// amount parameter will be used.
+	///
+	/// After constructing the `Original PSBT`, the method will
+	/// extract the payjoin request data from the `Original PSBT`
+	/// utilising the `payjoin` crate.
+	///
+	/// Then we start a background process to that will run for 1
+	/// hour, polling the payjoin endpoint every 10 seconds. If an `OK` (ie status code == 200)
+	/// is received, polling will stop and we will try to process the
+	/// response from the payjoin receiver. If the response(or `Payjoin Proposal`) is valid, we will finalise the
+	/// transaction and broadcast it to the network.
+	///
+	/// Notice that the `Txid` returned from this method is the
+	/// `Original PSBT` transaction id, but the `Payjoin Proposal`
+	/// transaction id could be different if the receiver changed the
+	/// transaction.
+	pub async fn send_payjoin_transaction(
+		&self, payjoin_uri: payjoin::Uri<'static, NetworkChecked>, amount: Option<bitcoin::Amount>,
 	) -> Result<Option<bitcoin::Txid>, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
-		let payjoin_sender = self.payjoin_sender.as_ref().ok_or(Error::PayjoinSender)?;
-		let psbt = payjoin_sender.create_payjoin_request(payjoin_uri.clone()).unwrap();
-		payjoin_sender.send_payjoin_request(payjoin_uri, psbt)
+		let payjoin_sender = Arc::clone(self.payjoin_sender.as_ref().ok_or(Error::PayjoinSender)?);
+		let original_psbt = payjoin_sender.create_payjoin_request(payjoin_uri.clone(), amount)?;
+		let txid = original_psbt.clone().unsigned_tx.txid();
+		let (request, context) =
+			payjoin_sender.extract_request_data(payjoin_uri, original_psbt.clone())?;
+
+		let time = std::time::Instant::now();
+		let runtime = rt_lock.as_ref().unwrap();
+		runtime.spawn(async move {
+			let response = payjoin_sender.poll(&request, time).await;
+			if let Some(response) = response {
+				let psbt = context.process_response(&mut response.as_slice());
+				match psbt {
+					Ok(Some(psbt)) => {
+						let finalized =
+							payjoin_sender.finalise_payjoin_tx(psbt, original_psbt.clone());
+						if let Ok(txid) = finalized {
+							let txid: bitcoin::Txid = txid.into();
+							return Some(txid);
+						}
+					},
+					_ => return None,
+				}
+			}
+			None
+		});
+		Ok(Some(txid))
 	}
 
 	/// Creates a payjoin URI with the given amount that can be used to request a payjoin
 	/// transaction.
 	pub fn request_payjoin_transaction(&self, amount_sats: u64) -> Result<PjUri, Error> {
-		let payjoin_receiver = self.payjoin_receiver.as_ref().ok_or(Error::PayjoinReceiver)?;
-		payjoin_receiver.payjoin_uri(bitcoin::Amount::from_sat(amount_sats))
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+		let payjoin_receiver = match self.payjoin_receiver.as_ref() {
+			Some(pr) => pr,
+			None => {
+				dbg!("unable to get payjoin receiver");
+				return Err(Error::PayjoinReceiver);
+			},
+		};
+		let payjoin_uri = payjoin_receiver.payjoin_uri(bitcoin::Amount::from_sat(amount_sats));
+		payjoin_uri
 	}
 
 	/// Requests a payjoin transaction with the given amount and a corresponding lightning channel
@@ -791,7 +874,8 @@ impl Node {
 		}
 		let runtime = rt_lock.as_ref().unwrap();
 		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
-		let payjoin_receiver = self.payjoin_receiver.as_ref().ok_or(Error::PayjoinReceiver)?;
+		let payjoin_receiver =
+			self.payjoin_lightning_receiver.as_ref().ok_or(Error::PayjoinReceiver)?;
 		payjoin_receiver.schedule_channel(
 			bitcoin::Amount::from_sat(channel_amount_sats),
 			node_id,
@@ -815,21 +899,24 @@ impl Node {
 			Some(user_config),
 			runtime,
 		)?;
-		let payjoin_uri = self
-			.payjoin_receiver
-			.as_ref()
-			.ok_or(Error::PayjoinReceiver)?
-			.payjoin_uri(bitcoin::Amount::from_sat(channel_amount_sats))?;
+		let payjoin_uri =
+			payjoin_receiver.payjoin_uri(bitcoin::Amount::from_sat(channel_amount_sats))?;
 		Ok(payjoin_uri)
 	}
 
 	/// List all scheduled payjoin channels.
-	pub fn list_scheduled_payjoin_channels(&self) -> Result<Vec<ScheduledChannel>, Error> {
-		if let Some(payjoin_receiver) = self.payjoin_receiver.clone() {
+	pub fn list_scheduled_payjoin_channels(&self) -> Result<Vec<PayjoinChannel>, Error> {
+		if let Some(payjoin_receiver) = self.payjoin_lightning_receiver.clone() {
 			Ok(payjoin_receiver.list_scheduled_channels())
 		} else {
 			Ok(Vec::new())
 		}
+	}
+
+	/// List all scheduled payjoin channels.
+	pub fn list_transactions(&self) -> Result<Vec<bdk::TransactionDetails>, Error> {
+		let transactions = self.wallet.list_transactions()?;
+		Ok(transactions)
 	}
 
 	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].

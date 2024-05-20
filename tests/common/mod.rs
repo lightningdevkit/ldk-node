@@ -196,32 +196,74 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
-pub(crate) fn setup_two_nodes(
-	electrsd: &ElectrsD, allow_0conf: bool, allow_payjoin: bool,
-) -> (TestNode, TestNode) {
+pub(crate) fn setup_two_nodes(electrsd: &ElectrsD, allow_0conf: bool) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config();
-	let node_a = setup_node(electrsd, config_a, allow_payjoin);
+	let node_a = setup_node(electrsd, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config();
 	if allow_0conf {
 		config_b.trusted_peers_0conf.push(node_a.node_id());
 	}
-	let node_b = setup_node(electrsd, config_b, allow_payjoin);
+	let node_b = setup_node(electrsd, config_b);
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config, allow_payjoin: bool) -> TestNode {
+pub(crate) fn setup_two_payjoin_nodes(
+	electrsd: &ElectrsD, allow_0conf: bool,
+) -> (TestNode, TestNode) {
+	println!("== Node A ==");
+	let config_a = random_config();
+	let node_a_payjoin_receiver = setup_payjoin_receiver_node(electrsd, config_a);
+
+	println!("\n== Node B ==");
+	let mut config_b = random_config();
+	if allow_0conf {
+		config_b.trusted_peers_0conf.push(node_a_payjoin_receiver.node_id());
+	}
+	let node_b_payjoin_sender = setup_payjoin_sender_node(electrsd, config_b);
+	(node_a_payjoin_receiver, node_b_payjoin_sender)
+}
+
+pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	setup_builder!(builder, config);
 	builder.set_esplora_server(esplora_url.clone());
-	// enable payjoin
-	if allow_payjoin {
-		let payjoin_directory = payjoin::Url::parse("https://payjo.in").unwrap();
-		let payjoin_relay = payjoin::Url::parse("https://pj.bobspacebkk.com").unwrap();
-		builder.set_payjoin_config(payjoin_directory, payjoin_relay, None);
-	}
+	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
+	let node = builder.build_with_store(test_sync_store).unwrap();
+	node.start().unwrap();
+	assert!(node.status().is_running);
+	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+	node
+}
+
+pub(crate) fn setup_payjoin_sender_node(electrsd: &ElectrsD, config: Config) -> TestNode {
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	setup_builder!(builder, config);
+	builder.set_esplora_server(esplora_url.clone());
+	let payjoin_relay = payjoin::Url::parse("https://pj.bobspacebkk.com").unwrap();
+	builder.set_payjoin_sender_config(payjoin_relay);
+	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
+	let node = builder.build_with_store(test_sync_store).unwrap();
+	node.start().unwrap();
+	assert!(node.status().is_running);
+	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+	node
+}
+
+pub(crate) fn setup_payjoin_receiver_node(electrsd: &ElectrsD, config: Config) -> TestNode {
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	setup_builder!(builder, config);
+	builder.set_esplora_server(esplora_url.clone());
+	let payjoin_directory = payjoin::Url::parse("https://payjo.in").unwrap();
+	let payjoin_relay = payjoin::Url::parse("https://pj.bobspacebkk.com").unwrap();
+	let payjoin_ohttp_keys = [
+		1, 0, 32, 221, 207, 106, 162, 243, 25, 188, 252, 203, 135, 197, 199, 128, 63, 42, 243, 165,
+		134, 237, 41, 143, 66, 243, 218, 152, 36, 239, 18, 139, 158, 40, 27, 0, 4, 0, 1, 0, 3,
+	];
+	let payjoin_ohttp_keys = payjoin::OhttpKeys::decode(payjoin_ohttp_keys.as_slice()).unwrap();
+	builder.set_payjoin_receiver_config(payjoin_directory, payjoin_relay, Some(payjoin_ohttp_keys));
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();

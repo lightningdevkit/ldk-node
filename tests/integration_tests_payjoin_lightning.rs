@@ -46,11 +46,16 @@ fn send_receive_with_channel_opening_payjoin_transaction() {
 			panic!("should generate payjoin uri");
 		},
 	};
-	assert!(node_b
-		.send_payjoin_transaction(
-			payjoin::Uri::try_from(payjoin_uri.to_string()).unwrap().assume_checked()
-		)
-		.is_ok());
+
+	let _ = tokio::runtime::Runtime::new().unwrap().handle().block_on(async {
+		let txid = node_b
+			.send_payjoin_transaction(
+				payjoin::Uri::try_from(payjoin_uri.to_string()).unwrap().assume_checked(),
+				None,
+			)
+			.await;
+		txid
+	});
 	expect_channel_pending_event!(node_a, node_b.node_id());
 	expect_channel_pending_event!(node_b, node_a.node_id());
 	let channels = node_a.list_channels();
