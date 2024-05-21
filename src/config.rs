@@ -46,7 +46,7 @@ pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
 pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90;
 
 // The timeout after which we abort a wallet syncing operation.
-pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90; // 10
+pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90; // 30
 
 // The timeout after which we abort a fee rate cache update operation.
 pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;

@@ -15,7 +15,7 @@ use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, GossipSync, KeysManager, MessageRouter, NetworkGraph,
+	ChainMonitor, ChannelManager, DynStore, GossipSync, Graph, KeysManager, MessageRouter,
 	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
@@ -633,7 +633,7 @@ fn build_with_store_internal(
 			Ok(graph) => Arc::new(graph),
 			Err(e) => {
 				if e.kind() == std::io::ErrorKind::NotFound {
-					Arc::new(NetworkGraph::new(config.network.into(), Arc::clone(&logger)))
+					Arc::new(Graph::new(config.network.into(), Arc::clone(&logger)))
 				} else {
 					return Err(BuildError::ReadFailed);
 				}

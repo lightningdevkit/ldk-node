@@ -207,6 +207,12 @@ where
 		Ok(address_info.address)
 	}
 
+	fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
+		let address_info =
+			self.inner.lock().unwrap().get_internal_address(AddressIndex::LastUnused)?;
+		Ok(address_info.address)
+	}
+
 	pub(crate) fn get_balances(
 		&self, total_anchor_channels_reserve_sats: u64,
 	) -> Result<(u64, u64), Error> {
@@ -444,9 +450,10 @@ where
 
 	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
-		let address_info = locked_wallet.get_address(AddressIndex::New).map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
+		let address_info =
+			locked_wallet.get_internal_address(AddressIndex::LastUnused).map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			})?;
 
 		Ok(address_info.address.script_pubkey())
 	}
@@ -454,15 +461,17 @@ where
 	fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 
+		// While BDK populates both `witness_utxo` and `non_witness_utxo` fields, LDK does not. As
+		// BDK by default doesn't trust the witness UTXO to account for the Segwit bug, we must
+		// disable it here as otherwise we fail to sign.
 		let mut sign_options = SignOptions::default();
 		sign_options.trust_witness_utxo = true;
 
 		match locked_wallet.sign(&mut psbt, sign_options) {
-			Ok(finalized) => {
-				if !finalized {
-					log_error!(self.logger, "Failed to finalize PSBT.");
-					return Err(());
-				}
+			Ok(_finalized) => {
+				// BDK will fail to finalize for all LDK-provided inputs of the PSBT. Unfortunately
+				// we can't check more fine grained if it succeeded for all the other inputs here,
+				// so we just ignore the returned `finalized` bool.
 			},
 			Err(err) => {
 				log_error!(self.logger, "Failed to sign transaction: {}", err);
@@ -662,7 +671,7 @@ where
 	L::Target: Logger,
 {
 	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.get_new_address().map_err(|e| {
+		let address = self.wallet.get_new_internal_address().map_err(|e| {
 			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
 		})?;
 		Ok(address.script_pubkey())
