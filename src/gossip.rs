@@ -1,6 +1,6 @@
 use crate::config::RGS_SYNC_TIMEOUT_SECS;
 use crate::logger::{log_trace, FilesystemLogger, Logger};
-use crate::types::{GossipSync, NetworkGraph, P2PGossipSync, RapidGossipSync};
+use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync};
 use crate::Error;
 
 use lightning::routing::utxo::UtxoLookup;
@@ -22,7 +22,7 @@ pub(crate) enum GossipSource {
 }
 
 impl GossipSource {
-	pub fn new_p2p(network_graph: Arc<NetworkGraph>, logger: Arc<FilesystemLogger>) -> Self {
+	pub fn new_p2p(network_graph: Arc<Graph>, logger: Arc<FilesystemLogger>) -> Self {
 		let gossip_sync = Arc::new(P2PGossipSync::new(
 			network_graph,
 			None::<Arc<dyn UtxoLookup + Send + Sync>>,
@@ -32,7 +32,7 @@ impl GossipSource {
 	}
 
 	pub fn new_rgs(
-		server_url: String, latest_sync_timestamp: u32, network_graph: Arc<NetworkGraph>,
+		server_url: String, latest_sync_timestamp: u32, network_graph: Arc<Graph>,
 		logger: Arc<FilesystemLogger>,
 	) -> Self {
 		let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
