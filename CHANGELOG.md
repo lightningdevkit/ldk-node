@@ -1,3 +1,17 @@
+# 0.2.2 - May 21, 2024
+
+This is a bugfix release that reestablishes compatibility of Swift packages
+with Xcode 15.3 and later.
+
+## Bug Fixes
+
+- Swift bindings can now be built using Xcode 15.3 and later again (#294)
+
+In total, this release features 5 files changed, 66 insertions, 2 deletions
+deletions in 2 commits from 1 author, in alphabetical order:
+
+- Elias Rohrer
+
 # 0.2.1 - Jan 26, 2024
 
 This is a bugfix release bumping the used LDK and BDK dependencies to the
