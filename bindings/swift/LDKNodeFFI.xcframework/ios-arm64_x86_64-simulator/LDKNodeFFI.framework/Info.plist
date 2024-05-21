@@ -7,9 +7,9 @@
 	<key>CFBundleName</key>
 	<string>LDKNodeFFI</string>
 	<key>CFBundleVersion</key>
-	<string>0.3.0</string>
+	<string>0.2.2</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.3.0</string>
+	<string>0.2.2</string>
 	<key>CFBundleExecutable</key>
 	<string>LDKNodeFFI</string>
 	<key>MinimumOSVersion</key>
