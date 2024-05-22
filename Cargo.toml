@@ -58,6 +58,9 @@ prost = { version = "0.11.6", default-features = false}
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
 
+[patch.crates-io]
+bdk = { version = "0.29", git = "https://github.com/getAlby/bdk.git", branch = "0.29-alby" }
+
 [dev-dependencies]
 lightning = { version = "0.0.123", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event", features = ["std", "_test_utils"] }
