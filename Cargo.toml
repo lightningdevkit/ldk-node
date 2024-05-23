@@ -37,7 +37,9 @@ lightning-rapid-gossip-sync = { version = "0.0.123" }
 lightning-transaction-sync = { version = "0.0.123", features = ["esplora-async-https", "time"] }
 lightning-liquidity = { version = "0.1.0-alpha.4", features = ["std"] }
 
-bdk = { version = "0.29.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
+# Alby uses forked BDK version with CACHE_ADDR_BATCH_SIZE=1 to reduce unnecessary esplora calls and speed up wallet sync
+bdk = { git = "https://github.com/getAlby/bdk.git", branch = "0.29-alby-v2", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
+#bdk = { version = "0.29.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
 
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.28.0", features = ["bundled"] }
