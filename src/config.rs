@@ -17,6 +17,9 @@ const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 
+// Enable background syncing of fee rates, onchain and lightning wallet
+pub(crate) const ENABLE_BACKGROUND_SYNC: bool = false;
+
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
 pub(crate) const BDK_CLIENT_STOP_GAP: usize = 20;
