@@ -17,6 +17,8 @@ pub enum Error {
 	InvoiceRequestCreationFailed,
 	/// Offer creation failed.
 	OfferCreationFailed,
+	/// Refund creation failed.
+	RefundCreationFailed,
 	/// Sending a payment has failed.
 	PaymentSendingFailed,
 	/// Sending a payment probe has failed.
@@ -67,6 +69,8 @@ pub enum Error {
 	InvalidInvoice,
 	/// The given offer is invalid.
 	InvalidOffer,
+	/// The given refund is invalid.
+	InvalidRefund,
 	/// The given channel ID is invalid.
 	InvalidChannelId,
 	/// The given network is invalid.
@@ -95,6 +99,7 @@ impl fmt::Display for Error {
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
 			Self::InvoiceRequestCreationFailed => write!(f, "Failed to create invoice request."),
 			Self::OfferCreationFailed => write!(f, "Failed to create offer."),
+			Self::RefundCreationFailed => write!(f, "Failed to create refund."),
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
 			Self::ProbeSendingFailed => write!(f, "Failed to send the given payment probe."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
@@ -122,6 +127,7 @@ impl fmt::Display for Error {
 			Self::InvalidAmount => write!(f, "The given amount is invalid."),
 			Self::InvalidInvoice => write!(f, "The given invoice is invalid."),
 			Self::InvalidOffer => write!(f, "The given offer is invalid."),
+			Self::InvalidRefund => write!(f, "The given refund is invalid."),
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
 			Self::DuplicatePayment => {

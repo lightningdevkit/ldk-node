@@ -11,12 +11,15 @@ use crate::payment::store::{
 use crate::types::ChannelManager;
 
 use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::{Amount, Offer};
 use lightning::offers::parse::Bolt12SemanticError;
+use lightning::offers::refund::Refund;
 
 use rand::RngCore;
 
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
@@ -263,5 +266,83 @@ impl Bolt12Payment {
 		})?;
 
 		Ok(offer)
+	}
+
+	/// Requests a refund payment for the given [`Refund`].
+	///
+	/// The returned [`Bolt12Invoice`] is for informational purposes only (i.e., isn't needed to
+	/// retrieve the refund).
+	pub fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
+		let invoice = self.channel_manager.request_refund_payment(refund).map_err(|e| {
+			log_error!(self.logger, "Failed to request refund payment: {:?}", e);
+			Error::InvoiceRequestCreationFailed
+		})?;
+
+		let payment_hash = invoice.payment_hash();
+		let payment_id = PaymentId(payment_hash.0);
+
+		let payment = PaymentDetails {
+			id: payment_id,
+			kind: PaymentKind::Bolt12Refund {
+				hash: Some(payment_hash),
+				preimage: None,
+				secret: None,
+			},
+			amount_msat: Some(refund.amount_msats()),
+			direction: PaymentDirection::Inbound,
+			status: PaymentStatus::Pending,
+		};
+
+		self.payment_store.insert(payment)?;
+
+		Ok(invoice)
+	}
+
+	/// Returns a [`Refund`] object that can be used to offer a refund payment of the amount given.
+	pub fn initiate_refund(&self, amount_msat: u64, expiry_secs: u32) -> Result<Refund, Error> {
+		let mut random_bytes = [0u8; 32];
+		rand::thread_rng().fill_bytes(&mut random_bytes);
+		let payment_id = PaymentId(random_bytes);
+
+		let expiration = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+			.duration_since(UNIX_EPOCH)
+			.unwrap();
+		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let max_total_routing_fee_msat = None;
+
+		let refund = self
+			.channel_manager
+			.create_refund_builder(
+				amount_msat,
+				expiration,
+				payment_id,
+				retry_strategy,
+				max_total_routing_fee_msat,
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to create refund builder: {:?}", e);
+				Error::RefundCreationFailed
+			})?
+			.build()
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to create refund: {:?}", e);
+				Error::RefundCreationFailed
+			})?;
+
+		log_info!(self.logger, "Offering refund of {}msat", amount_msat);
+
+		let kind = PaymentKind::Bolt12Refund { hash: None, preimage: None, secret: None };
+
+		let payment = PaymentDetails {
+			id: payment_id,
+			kind,
+			amount_msat: Some(amount_msat),
+			direction: PaymentDirection::Outbound,
+			status: PaymentStatus::Pending,
+		};
+
+		self.payment_store.insert(payment)?;
+
+		Ok(refund)
 	}
 }

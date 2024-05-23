@@ -487,4 +487,47 @@ fn simple_bolt12_send_receive() {
 		},
 	}
 	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+
+	// Now node_b refunds the amount node_a just overpaid.
+	let overpaid_amount = expected_amount_msat - offer_amount_msat;
+	let refund = node_b.bolt12_payment().initiate_refund(overpaid_amount, 3600).unwrap();
+	let invoice = node_a.bolt12_payment().request_refund_payment(&refund).unwrap();
+	expect_payment_received_event!(node_a, overpaid_amount);
+
+	let node_b_payment_id = node_b
+		.list_payments_with_filter(|p| p.amount_msat == Some(overpaid_amount))
+		.first()
+		.unwrap()
+		.id;
+	expect_payment_successful_event!(node_b, Some(node_b_payment_id), None);
+
+	let node_b_payments = node_b.list_payments_with_filter(|p| p.id == node_b_payment_id);
+	assert_eq!(node_b_payments.len(), 1);
+	match node_b_payments.first().unwrap().kind {
+		PaymentKind::Bolt12Refund { hash, preimage, secret: _ } => {
+			assert!(hash.is_some());
+			assert!(preimage.is_some());
+			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+			//API currently doesn't allow to do that.
+		},
+		_ => {
+			panic!("Unexpected payment kind");
+		},
+	}
+	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(overpaid_amount));
+
+	let node_a_payment_id = PaymentId(invoice.payment_hash().0);
+	let node_a_payments = node_a.list_payments_with_filter(|p| p.id == node_a_payment_id);
+	assert_eq!(node_a_payments.len(), 1);
+	match node_a_payments.first().unwrap().kind {
+		PaymentKind::Bolt12Refund { hash, preimage, secret } => {
+			assert!(hash.is_some());
+			assert!(preimage.is_some());
+			assert!(secret.is_some());
+		},
+		_ => {
+			panic!("Unexpected payment kind");
+		},
+	}
+	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(overpaid_amount));
 }

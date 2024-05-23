@@ -109,6 +109,10 @@ interface Bolt12Payment {
 	Offer receive(u64 amount_msat, [ByRef]string description);
 	[Throws=NodeError]
 	Offer receive_variable_amount([ByRef]string description);
+	[Throws=NodeError]
+	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
+	[Throws=NodeError]
+	Refund initiate_refund(u64 amount_msat, u32 expiry_secs);
 };
 
 interface SpontaneousPayment {
@@ -136,6 +140,7 @@ enum NodeError {
 	"InvoiceCreationFailed",
 	"InvoiceRequestCreationFailed",
 	"OfferCreationFailed",
+	"RefundCreationFailed",
 	"PaymentSendingFailed",
 	"ProbeSendingFailed",
 	"ChannelCreationFailed",
@@ -161,6 +166,7 @@ enum NodeError {
 	"InvalidAmount",
 	"InvalidInvoice",
 	"InvalidOffer",
+	"InvalidRefund",
 	"InvalidChannelId",
 	"InvalidNetwork",
 	"DuplicatePayment",
@@ -392,6 +398,12 @@ typedef string Bolt11Invoice;
 
 [Custom]
 typedef string Offer;
+
+[Custom]
+typedef string Refund;
+
+[Custom]
+typedef string Bolt12Invoice;
 
 [Custom]
 typedef string OfferId;
