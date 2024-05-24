@@ -1,3 +1,4 @@
+use crate::payjoin_receiver::PayjoinReceiver;
 use crate::types::{DynStore, Sweeper, Wallet};
 
 use crate::{
@@ -435,6 +436,7 @@ where
 	network_graph: Arc<Graph>,
 	payment_store: Arc<PaymentStore<L>>,
 	peer_store: Arc<PeerStore<L>>,
+	payjoin_receiver: Option<Arc<PayjoinReceiver>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	logger: L,
 	config: Arc<Config>,
@@ -449,8 +451,9 @@ where
 		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
-		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
+		payment_store: Arc<PaymentStore<L>>, payjoin_receiver: Option<Arc<PayjoinReceiver>>,
+		peer_store: Arc<PeerStore<L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -461,6 +464,7 @@ where
 			output_sweeper,
 			network_graph,
 			payment_store,
+			payjoin_receiver,
 			peer_store,
 			logger,
 			runtime,
@@ -475,6 +479,7 @@ where
 				counterparty_node_id,
 				channel_value_satoshis,
 				output_script,
+				user_channel_id,
 				..
 			} => {
 				// Construct the raw transaction with the output that is paid the amount of the
@@ -485,6 +490,18 @@ where
 				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
+				if let Some(payjoin_receiver) = self.payjoin_receiver.clone() {
+					if payjoin_receiver
+						.set_channel_accepted(
+							user_channel_id,
+							&output_script,
+							temporary_channel_id.0,
+						)
+						.await
+					{
+						return;
+					}
+				}
 				// Sign the final funding transaction and broadcast it.
 				match self.wallet.create_funding_transaction(
 					output_script,
@@ -1145,6 +1162,45 @@ where
 						outbound_amount_forwarded_msat,
 						fee_earned,
 					);
+				}
+			},
+			LdkEvent::FundingTxBroadcastSafe { funding_tx, .. } => {
+				use crate::io::utils::ohttp_headers;
+				if let Some(payjoin_receiver) = self.payjoin_receiver.clone() {
+					let is_payjoin_channel =
+						payjoin_receiver.set_funding_tx_signed(funding_tx.clone()).await;
+					if let Some((url, body)) = is_payjoin_channel {
+						log_info!(
+							self.logger,
+							"Detected payjoin channel transaction. Sending payjoin sender request for transaction {}",
+							funding_tx.txid()
+						);
+						let headers = ohttp_headers();
+						let client = reqwest::Client::builder().build().unwrap();
+						match client.post(url).body(body).headers(headers).send().await {
+							Ok(response) => {
+								if response.status().is_success() {
+									log_info!(
+										self.logger,
+										"Responded to 'Payjoin Sender' successfuly"
+									);
+								} else {
+									log_info!(
+										self.logger,
+										"Got unsuccessful response from 'Payjoin Sender': {}",
+										response.status()
+									);
+								}
+							},
+							Err(e) => {
+								log_error!(
+									self.logger,
+									"Failed to send a response to 'Payjoin Sender': {}",
+									e
+								);
+							},
+						};
+					}
 				}
 			},
 			LdkEvent::ChannelPending {

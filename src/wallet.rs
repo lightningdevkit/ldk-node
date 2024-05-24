@@ -151,6 +151,18 @@ where
 		res
 	}
 
+	// Returns the total value of all outputs in the given transaction that are directed to us
+	pub(crate) fn funds_directed_to_us(&self, tx: &Transaction) -> Result<bitcoin::Amount, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let total_value = tx.output.iter().fold(0, |acc, output| {
+			match locked_wallet.is_mine(&output.script_pubkey) {
+				Ok(true) => acc + output.value,
+				_ => acc,
+			}
+		});
+		Ok(bitcoin::Amount::from_sat(total_value))
+	}
+
 	pub(crate) fn build_payjoin_transaction(
 		&self, payjoin_uri: payjoin::Uri<NetworkChecked>,
 	) -> Result<Psbt, Error> {

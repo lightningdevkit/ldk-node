@@ -1,11 +1,16 @@
 //! Holds a payment handler allowing to send Payjoin payments.
 
 use crate::config::{PAYJOIN_REQUEST_TOTAL_DURATION, PAYJOIN_RETRY_INTERVAL};
-use crate::logger::{log_info, log_error, FilesystemLogger, Logger};
-use crate::types::Wallet;
+use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::types::{ChannelManager, Wallet};
+use bitcoin::secp256k1::PublicKey;
+use lightning::ln::msgs::SocketAddress;
+use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 use payjoin::PjUri;
 
+use crate::connection::ConnectionManager;
 use crate::payjoin_receiver::PayjoinReceiver;
+use crate::peer_store::{PeerInfo, PeerStore};
 use crate::{error::Error, Config};
 
 use std::sync::{Arc, RwLock};
@@ -63,6 +68,9 @@ pub struct PayjoinPayment {
 	config: Arc<Config>,
 	logger: Arc<FilesystemLogger>,
 	wallet: Arc<Wallet>,
+	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
+	channel_manager: Arc<ChannelManager>,
+	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 }
 
 impl PayjoinPayment {
@@ -70,8 +78,10 @@ impl PayjoinPayment {
 		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 		handler: Option<Arc<PayjoinHandler>>, receiver: Option<Arc<PayjoinReceiver>>,
 		config: Arc<Config>, logger: Arc<FilesystemLogger>, wallet: Arc<Wallet>,
+		peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>, channel_manager: Arc<ChannelManager>,
+		connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	) -> Self {
-		Self { runtime, handler, receiver, config, logger, wallet }
+		Self { runtime, handler, receiver, config, logger, wallet, peer_store, channel_manager, connection_manager }
 	}
 
 	/// Send a Payjoin transaction to the address specified in the `payjoin_uri`.
@@ -186,13 +196,89 @@ impl PayjoinPayment {
 	/// Payjoin sender.
 	///
 	/// [BIP21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
-	pub async fn receive(&self, amount: bitcoin::Amount) -> Result<PjUri, Error> {
+	pub fn receive(&self, amount: bitcoin::Amount) -> Result<PjUri, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 		if let Some(receiver) = &self.receiver {
-			receiver.receive(amount).await
+			let runtime = rt_lock.as_ref().unwrap();
+			runtime.handle().block_on(async { receiver.receive(amount).await })
+		} else {
+			Err(Error::PayjoinReceiverUnavailable)
+		}
+	}
+
+	/// Receive on chain Payjoin transaction and open a channel in a single transaction.
+	///
+	/// This method will enroll with the configured Payjoin directory if not already,
+	/// and before returning a [BIP21] URI pointing to our enrolled subdirectory to share with
+	/// Payjoin sender, we start the channel opening process and halt it when we receive
+	/// `accept_channel` from counterparty node. Once the Payjoin request is received, we move
+	/// forward with the channel opening process.
+	///
+	/// [BIP21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+	pub fn receive_with_channel_opening(
+		&self, channel_amount_sats: u64, push_msat: Option<u64>, announce_channel: bool,
+		node_id: PublicKey, address: SocketAddress,
+	) -> Result<PjUri, Error> {
+		use rand::Rng;
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+		if let Some(receiver) = &self.receiver {
+			let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
+			let runtime = rt_lock.as_ref().unwrap();
+			runtime.handle().block_on(async {
+				receiver
+					.schedule_channel(
+						bitcoin::Amount::from_sat(channel_amount_sats),
+						node_id,
+						user_channel_id,
+					)
+					.await;
+			});
+			let user_config = UserConfig {
+				channel_handshake_limits: Default::default(),
+				channel_handshake_config: ChannelHandshakeConfig {
+					announced_channel: announce_channel,
+					..Default::default()
+				},
+				..Default::default()
+			};
+			let push_msat = push_msat.unwrap_or(0);
+			let peer_info = PeerInfo { node_id, address };
+
+			let con_node_id = peer_info.node_id;
+			let con_addr = peer_info.address.clone();
+			let con_cm = Arc::clone(&self.connection_manager);
+
+			runtime.handle().block_on(async {
+				let _ = con_cm.connect_peer_if_necessary(con_node_id, con_addr).await;
+			});
+
+			match self.channel_manager.create_channel(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			) {
+				Ok(_) => {
+					self.peer_store.add_peer(peer_info)?;
+				},
+				Err(_) => {
+					return Err(Error::ChannelCreationFailed);
+				},
+			};
+
+			runtime.handle().block_on(async {
+				let payjoin_uri =
+					receiver.receive(bitcoin::Amount::from_sat(channel_amount_sats)).await?;
+				Ok(payjoin_uri)
+			})
 		} else {
 			Err(Error::PayjoinReceiverUnavailable)
 		}

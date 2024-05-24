@@ -1028,12 +1028,13 @@ fn build_with_store_internal(
 		payjoin_receiver = Some(Arc::new(PayjoinReceiver::new(
 			Arc::clone(&logger),
 			Arc::clone(&wallet),
+			Arc::clone(&channel_manager),
+			Arc::clone(&config),
 			pj_config.payjoin_directory.clone(),
 			pj_config.payjoin_relay.clone(),
 			pj_config.ohttp_keys.clone(),
 		)));
 	}
-
 	let is_listening = Arc::new(AtomicBool::new(false));
 	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
 	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));

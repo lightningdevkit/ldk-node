@@ -1,7 +1,11 @@
 use crate::error::Error;
 use crate::io::utils::ohttp_headers;
 use crate::logger::FilesystemLogger;
-use crate::types::Wallet;
+use crate::payjoin_channel_scheduler::{PayjoinChannel, PayjoinChannelScheduler};
+use crate::types::{ChannelManager, Wallet};
+use crate::Config;
+use bitcoin::{ScriptBuf, Transaction};
+use lightning::ln::ChannelId;
 use lightning::log_info;
 use lightning::util::logger::Logger;
 use payjoin::receive::v2::{Enrolled, Enroller, ProvisionalProposal, UncheckedProposal};
@@ -17,6 +21,8 @@ use tokio::sync::RwLock;
 pub(crate) struct PayjoinReceiver {
 	logger: Arc<FilesystemLogger>,
 	wallet: Arc<Wallet>,
+	channel_manager: Arc<ChannelManager>,
+	channel_scheduler: RwLock<PayjoinChannelScheduler>,
 	/// Directory receiver wish to enroll with
 	payjoin_directory: Url,
 	/// Proxy server receiver wish to make requests through
@@ -28,16 +34,21 @@ pub(crate) struct PayjoinReceiver {
 	/// Optional as they can be fetched on behalf of the user if not provided.
 	/// They are required in order to enroll.
 	ohttp_keys: RwLock<Option<OhttpKeys>>,
+	config: Arc<Config>,
 }
 
 impl PayjoinReceiver {
 	pub(crate) fn new(
-		logger: Arc<FilesystemLogger>, wallet: Arc<Wallet>, payjoin_directory: payjoin::Url,
-		payjoin_relay: payjoin::Url, ohttp_keys: Option<OhttpKeys>,
+		logger: Arc<FilesystemLogger>, wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		config: Arc<Config>, payjoin_directory: payjoin::Url, payjoin_relay: payjoin::Url,
+		ohttp_keys: Option<OhttpKeys>,
 	) -> Self {
 		Self {
 			logger,
 			wallet,
+			channel_manager,
+			channel_scheduler: RwLock::new(PayjoinChannelScheduler::new()),
+			config,
 			payjoin_directory,
 			payjoin_relay,
 			enrolled: RwLock::new(None),
@@ -85,13 +96,21 @@ impl PayjoinReceiver {
 		Ok(payjoin_uri)
 	}
 
+	pub(crate) async fn set_channel_accepted(
+		&self, channel_id: u128, output_script: &ScriptBuf, temporary_channel_id: [u8; 32],
+	) -> bool {
+		let mut scheduler = self.channel_scheduler.write().await;
+		scheduler.set_channel_accepted(channel_id, output_script, temporary_channel_id)
+	}
+
 	/// After enrolling, we should periodacly check if we have received any Payjoin transactions.
 	///
 	/// This function will try to fetch pending Payjoin requests from the subdirectory, and if a
-	/// successful response received, we validate the request as specified in [`BIP78`]. After
-	/// validation we try to preserve privacy by adding more inputs/outputs to the transaction.
-	/// Last, we finalise the transaction and send a response back the the Payjoin sender.
-	///
+	/// successful response received, we validate the request as specified in [BIP78]. After
+	/// validation we check if we have a pending matching channel, and if so, we try fund the channel
+	/// with the incoming funds from the payjoin request. Otherwise, we accept the Payjoin request
+	/// normally by trying to preserve privacy, finalise the Payjoin proposal and send it back the
+	/// the Payjoin sender.
 	///
 	/// [BIP78]: https://github.com/bitcoin/bips/blob/master/bip-0078.mediawiki#user-content-Receivers_original_PSBT_checklist
 	pub(crate) async fn process_payjoin_request(&self) {
@@ -163,6 +182,7 @@ impl PayjoinReceiver {
 					return;
 				},
 			};
+			let original_tx = unchecked_proposal.extract_tx_to_schedule_broadcast();
 			let provisional_proposal = match self.validate_payjoin_request(unchecked_proposal).await
 			{
 				Ok(proposal) => proposal,
@@ -171,7 +191,68 @@ impl PayjoinReceiver {
 					return;
 				},
 			};
-			self.accept_payjoin_transaction(provisional_proposal).await;
+			let amount = match self.wallet.funds_directed_to_us(&original_tx) {
+				Ok(a) => a,
+				Err(e) => {
+					// This should not happen in practice as the validation checks would fail if
+					// the sender didnt include us in the outputs
+					log_info!(self.logger, "Not able to find any ouput directed to us: {}", e);
+					return;
+				},
+			};
+			let mut scheduler = self.channel_scheduler.write().await;
+			let network = self.config.network;
+			if let Some(channel) = scheduler.get_next_channel(amount, network) {
+				log_info!(self.logger, "Found a channel match for incoming Payjoin request");
+				let (channel_id, funding_tx_address, temporary_channel_id, _, counterparty_node_id) =
+					channel;
+				let mut channel_provisional_proposal = provisional_proposal.clone();
+				channel_provisional_proposal.substitute_output_address(funding_tx_address);
+				let payjoin_proposal = match channel_provisional_proposal
+					.finalize_proposal(|psbt| Ok(psbt.clone()), None)
+				{
+					Ok(proposal) => proposal,
+					Err(e) => {
+						dbg!(&e);
+						return;
+					},
+				};
+				let (receiver_request, _) = match payjoin_proposal.clone().extract_v2_req() {
+					Ok((req, ctx)) => (req, ctx),
+					Err(e) => {
+						dbg!(&e);
+						return;
+					},
+				};
+				let tx = payjoin_proposal.psbt().clone().extract_tx();
+				scheduler.set_funding_tx_created(
+					channel_id,
+					&receiver_request.url,
+					receiver_request.body,
+				);
+				match self.channel_manager.unsafe_manual_funding_transaction_generated(
+					&ChannelId::from_bytes(temporary_channel_id),
+					&counterparty_node_id,
+					tx.clone(),
+				) {
+					Ok(_) => {
+						// Created Funding Transaction and waiting for `FundingTxBroadcastSafe` event before returning a response
+						log_info!(self.logger, "Created channel funding transaction from Payjoin request and waiting for `FundingTxBroadcastSafe`");
+					},
+					Err(_) => {
+						log_info!(
+							self.logger,
+							"Unable to channel create funding tx from Payjoin request"
+						);
+					},
+				}
+			} else {
+				log_info!(
+					self.logger,
+					"Couldnt match a channel to Payjoin request, accepting normally"
+				);
+				self.accept_payjoin_transaction(provisional_proposal).await;
+			}
 		} else {
 			log_info!(self.logger, "Payjoin Receiver: Unable to get enrolled object");
 		}
@@ -394,6 +475,29 @@ impl PayjoinReceiver {
 	async fn is_enrolled(&self) -> bool {
 		self.enrolled.read().await.deref().is_some()
 			&& self.ohttp_keys.read().await.deref().is_some()
+	}
+
+	/// Schedule a channel to opened upon receiving a Payjoin tranasction value with the same
+	/// channel funding amount.
+	pub(crate) async fn schedule_channel(
+		&self, amount: bitcoin::Amount, counterparty_node_id: bitcoin::secp256k1::PublicKey,
+		channel_id: u128,
+	) {
+		let channel = PayjoinChannel::new(amount, counterparty_node_id, channel_id);
+		self.channel_scheduler.write().await.schedule(
+			channel.channel_value_satoshi(),
+			channel.counterparty_node_id(),
+			channel.channel_id(),
+		);
+	}
+
+	/// This should only be called upon receiving [`Event::FundingTxBroadcastSafe`]
+	///
+	/// [`Event::FundingTxBroadcastSafe`]: lightning::events::Event::FundingTxBroadcastSafe
+	pub(crate) async fn set_funding_tx_signed(
+		&self, funding_tx: Transaction,
+	) -> Option<(payjoin::Url, Vec<u8>)> {
+		self.channel_scheduler.write().await.set_funding_tx_signed(funding_tx)
 	}
 
 	/// Validate an incoming Payjoin request as specified in [BIP78].
