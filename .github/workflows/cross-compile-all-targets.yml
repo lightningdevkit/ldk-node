@@ -1,0 +1,37 @@
+name: Cross-compile all targets
+
+on:
+  push: # TODO: remove after testing, don't run on any push
+  workflow_dispatch:
+
+jobs:
+  cross-compile:
+    runs-on: macos-12
+    steps:
+      - name: Set up Rust
+        run: rustup override set 1.78
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev c87a52a
+
+      - name: Install uniffi-bindgen-go
+        run: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.2.1+v0.25.0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cross compile
+        run: ./scripts/uniffi_bindgen_generate_go.sh
+
+      - name: Archive the artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldk-go
+          path: |
+            ffi/golang/ldk_node/ldk_node.c
+            ffi/golang/ldk_node/ldk_node.h
+            ffi/golang/ldk_node/ldk_node.go
+            ffi/golang/ldk_node/universal-macos/libldk_node.dylib
+            ffi/golang/ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
+            ffi/golang/ldk_node/x86_64-pc-windows-gnu/ldk_node.dll
+            ffi/golang/ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
