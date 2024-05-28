@@ -1,7 +1,10 @@
 name: Cross-compile all targets
 
 on:
-  push: # TODO: remove after testing, don't run on any push
+  push:
+    branches:
+      - 'main'
+
   workflow_dispatch:
 
 env:
