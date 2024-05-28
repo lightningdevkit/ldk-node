@@ -61,19 +61,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ldk-node-x86_64-unknown-linux-gnu
-          path: ffi/golang/ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
+          path: target/x86_64-unknown-linux-gnu/release/libldk_node.so
 
       - name: Archive Linux ARM
         uses: actions/upload-artifact@v4
         with:
           name: ldk-node-arm-unknown-linux-gnueabihf
-          path: ffi/golang/ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
+          path: target/arm-unknown-linux-gnueabihf/release/libldk_node.so
 
       - name: Archive Windows x86_64
         uses: actions/upload-artifact@v4
         with:
           name: ldk-node-x86_64-pc-windows-gnu
-          path: ffi/golang/ldk_node/x86_64-pc-windows-gnu/libldk_node.dll
+          path: target/x86_64-pc-windows-gnu/release/ldk_node.dll
 
   build-macos:
     runs-on: macos-12
@@ -104,3 +104,59 @@ jobs:
         with:
           name: ldk-node-universal-macos
           path: target/universal-macos/release/libldk_node.dylib
+
+  publish-ldk-node-go:
+    needs:
+      - uniffi-bindings
+      - build-linux-windows
+      - build-macos
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout ldk-node-go
+        uses: actions/checkout@v4
+        with:
+          repository: getAlby/ldk-node-go
+          ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
+
+      - name: Download bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-bindings
+          path: ldk_node
+
+      - name: Download Linux x86_64 libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-x86_64-unknown-linux-gnu
+          path: ldk_node/x86_64-unknown-linux-gnu
+
+      - name: Download Linux ARM libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-arm-unknown-linux-gnueabihf
+          path: ldk_node/arm-unknown-linux-gnueabihf
+
+      - name: Download Windows x86_64 libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-x86_64-pc-windows-gnu
+          path: ldk_node/x86_64-pc-windows-gnu
+
+      - name: Download macOS libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-universal-macos
+          path: ldk_node/universal-macos
+
+      - name: Commit and push bindings
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "github-actions"
+          git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
+          git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
+          git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
+          git add ldk_node/x86_64-pc-windows-gnu/ldk_node.dll
+          git add ldk_node/universal-macos/libldk_node.dylib
+          git commit -m "Update bindings."
+          git push
