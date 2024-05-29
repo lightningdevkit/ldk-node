@@ -116,11 +116,20 @@ jobs:
     runs-on: ubuntu-20.04
 
     steps:
-      - name: Checkout ldk-node-go
+      - name: Checkout ldk-node-go master
         uses: actions/checkout@v4
+        if: '${{ env.BRANCH_NAME }}' == 'main'
         with:
           repository: getAlby/ldk-node-go
           ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
+
+      - name: Checkout ldk-node-go branch
+        uses: actions/checkout@v4
+        if: '${{ env.BRANCH_NAME }}' != 'main'
+        with:
+          repository: getAlby/ldk-node-go
+          ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
+          ref: '${{ env.TARGET_BRANCH_PREFIX }}${{ env.BRANCH_NAME }}'
 
       - name: Download bindings
         uses: actions/download-artifact@v4
@@ -157,9 +166,6 @@ jobs:
           git config --global user.email "github-actions@github.com"
           git config --global user.name "github-actions"
           git config --global push.autoSetupRemote true
-          if [ "${{ env.BRANCH_NAME }}" != "main" ]; then
-            git checkout -b "${{ env.TARGET_BRANCH_PREFIX }}${{ env.BRANCH_NAME }}"
-          fi
           git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
           git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
           git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
