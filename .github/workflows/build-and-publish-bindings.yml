@@ -118,14 +118,14 @@ jobs:
     steps:
       - name: Checkout ldk-node-go master
         uses: actions/checkout@v4
-        if: '${{ env.BRANCH_NAME }}' == 'main'
+        if: ${{ env.BRANCH_NAME == 'main' }}
         with:
           repository: getAlby/ldk-node-go
           ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
 
       - name: Checkout ldk-node-go branch
         uses: actions/checkout@v4
-        if: '${{ env.BRANCH_NAME }}' != 'main'
+        if: ${{ env.BRANCH_NAME != 'main' }}
         with:
           repository: getAlby/ldk-node-go
           ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
