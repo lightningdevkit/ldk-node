@@ -8,6 +8,7 @@ on:
 env:
   RUST_VERSION: 1.78
   BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  TARGET_BRANCH_PREFIX: "publish-"
 
 jobs:
   uniffi-bindings:
@@ -155,11 +156,11 @@ jobs:
         run: |
           git config --global user.email "github-actions@github.com"
           git config --global user.name "github-actions"
-          git checkout -b "publish-${{ env.BRANCH_NAME }}"
+          git checkout -b "${{ env.TARGET_BRANCH_PREFIX }}${{ env.BRANCH_NAME }}"
           git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
           git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
           git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
           git add ldk_node/x86_64-pc-windows-gnu/ldk_node.dll
           git add ldk_node/universal-macos/libldk_node.dylib
           git commit -m "Update bindings."
-          git push -u
+          git push -u origin "${{ env.TARGET_BRANCH_PREFIX }}${{ env.BRANCH_NAME }}"
