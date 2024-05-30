@@ -1171,6 +1171,8 @@ impl Node {
 			channel_handshake_config: ChannelHandshakeConfig {
 				announced_channel: announce_channel,
 				negotiate_anchors_zero_fee_htlc_tx: self.config.anchor_channels_config.is_some(),
+				// Alby: always allow receiving 100% of channel size.
+				max_inbound_htlc_value_in_flight_percent_of_channel: 100,
 				..Default::default()
 			},
 			channel_config,
