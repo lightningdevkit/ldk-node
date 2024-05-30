@@ -123,7 +123,7 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	default_user_config, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
@@ -148,7 +148,6 @@ use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
 use lightning::ln::msgs::SocketAddress;
 
-use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
 
 use lightning_background_processor::process_events_async;
@@ -1087,17 +1086,9 @@ impl Node {
 			return Err(Error::InsufficientFunds);
 		}
 
-		let channel_config = (*(channel_config.unwrap_or_default())).clone().into();
-		let user_config = UserConfig {
-			channel_handshake_limits: Default::default(),
-			channel_handshake_config: ChannelHandshakeConfig {
-				announced_channel: announce_channel,
-				negotiate_anchors_zero_fee_htlc_tx: self.config.anchor_channels_config.is_some(),
-				..Default::default()
-			},
-			channel_config,
-			..Default::default()
-		};
+		let mut user_config = default_user_config(&self.config);
+		user_config.channel_handshake_config.announced_channel = announce_channel;
+		user_config.channel_config = (*(channel_config.unwrap_or_default())).clone().into();
 
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
 		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
