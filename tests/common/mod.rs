@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentStatus};
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{Builder, Config, Event, LogLevel, Node, NodeError};
 
 use lightning::ln::msgs::SocketAddress;
@@ -447,9 +447,11 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert!(matches!(node_a.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
 	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice));
@@ -492,9 +494,11 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
+	assert!(matches!(node_a.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
+	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 
 	// Test "zero-amount" invoice payment
 	println!("\nB receive_variable_amount_payment");
@@ -526,9 +530,11 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
+	assert!(matches!(node_a.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
+	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 
 	// Test spontaneous/keysend payments
 	println!("\nA send_spontaneous_payment");
@@ -550,9 +556,19 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
+	assert!(matches!(
+		node_a.payment(&keysend_payment_id).unwrap().kind,
+		PaymentKind::Spontaneous { .. }
+	));
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
+	assert!(matches!(
+		node_b.payment(&keysend_payment_id).unwrap().kind,
+		PaymentKind::Spontaneous { .. }
+	));
+	assert_eq!(node_a.list_payments().len(), 4);
+	assert_eq!(node_b.list_payments().len(), 5);
 
 	println!("\nB close_channel");
 	node_b.close_channel(&user_channel_id, node_a.node_id()).unwrap();
