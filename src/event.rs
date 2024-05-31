@@ -1,7 +1,10 @@
 use crate::types::{DynStore, Sweeper, Wallet};
+
 use crate::{
 	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
 };
+
+use crate::connection::ConnectionManager;
 
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
@@ -315,6 +318,7 @@ where
 	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
+	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<NetworkGraph>,
 	payment_store: Arc<PaymentStore<L>>,
@@ -330,14 +334,16 @@ where
 {
 	pub fn new(
 		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
-		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
+		connection_manager: Arc<ConnectionManager<L>>, output_sweeper: Arc<Sweeper>,
+		network_graph: Arc<NetworkGraph>, payment_store: Arc<PaymentStore<L>>,
+		peer_store: Arc<PeerStore<L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
 			channel_manager,
+			connection_manager,
 			output_sweeper,
 			network_graph,
 			payment_store,
@@ -429,7 +435,9 @@ where
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				if let Some(info) = self.payment_store.get(&payment_id) {
-					if info.status == PaymentStatus::Succeeded {
+					if info.status == PaymentStatus::Succeeded
+						|| matches!(info.kind, PaymentKind::Spontaneous { .. })
+					{
 						log_info!(
 							self.logger,
 							"Refused duplicate inbound payment from payment hash {} of {}msat",
@@ -477,6 +485,7 @@ where
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
 						let update = PaymentDetailsUpdate {
+							hash: Some(Some(payment_hash)),
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
@@ -495,36 +504,90 @@ where
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, payment_secret } => {
-						if payment_preimage.is_some() {
-							payment_preimage
-						} else {
-							self.channel_manager
-								.get_payment_preimage(payment_hash, payment_secret)
-								.ok()
+					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => {
+						payment_preimage
+					},
+					PaymentPurpose::Bolt12OfferPayment {
+						payment_preimage,
+						payment_secret,
+						payment_context,
+						..
+					} => {
+						let offer_id = payment_context.offer_id;
+						let payment = PaymentDetails {
+							id: payment_id,
+							kind: PaymentKind::Bolt12Offer {
+								hash: Some(payment_hash),
+								preimage: payment_preimage,
+								secret: Some(payment_secret),
+								offer_id,
+							},
+							amount_msat: Some(amount_msat),
+							direction: PaymentDirection::Inbound,
+							status: PaymentStatus::Pending,
+						};
+
+						match self.payment_store.insert(payment) {
+							Ok(false) => (),
+							Ok(true) => {
+								log_error!(
+									self.logger,
+									"Bolt12OfferPayment with ID {} was previously known",
+									payment_id,
+								);
+								debug_assert!(false);
+							},
+							Err(e) => {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								debug_assert!(false);
+							},
 						}
+						payment_preimage
 					},
-					PaymentPurpose::Bolt12OfferPayment { .. } => {
-						// TODO: support BOLT12.
-						log_error!(
-							self.logger,
-							"Failed to claim unsupported BOLT12 payment with hash: {}",
-							payment_hash
-						);
-						self.channel_manager.fail_htlc_backwards(&payment_hash);
-						return;
+					PaymentPurpose::Bolt12RefundPayment { payment_preimage, .. } => {
+						payment_preimage
 					},
-					PaymentPurpose::Bolt12RefundPayment { .. } => {
-						// TODO: support BOLT12.
-						log_error!(
-							self.logger,
-							"Failed to claim unsupported BOLT12 payment with hash: {}",
-							payment_hash
-						);
-						self.channel_manager.fail_htlc_backwards(&payment_hash);
-						return;
+					PaymentPurpose::SpontaneousPayment(preimage) => {
+						// Since it's spontaneous, we insert it now into our store.
+						let payment = PaymentDetails {
+							id: payment_id,
+							kind: PaymentKind::Spontaneous {
+								hash: payment_hash,
+								preimage: Some(preimage),
+							},
+							amount_msat: Some(amount_msat),
+							direction: PaymentDirection::Inbound,
+							status: PaymentStatus::Pending,
+						};
+
+						match self.payment_store.insert(payment) {
+							Ok(false) => (),
+							Ok(true) => {
+								log_error!(
+									self.logger,
+									"Spontaneous payment with ID {} was previously known",
+									payment_id,
+								);
+								debug_assert!(false);
+							},
+							Err(e) => {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								debug_assert!(false);
+							},
+						}
+
+						Some(preimage)
 					},
-					PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
 				};
 
 				if let Some(preimage) = payment_preimage {
@@ -532,12 +595,13 @@ where
 				} else {
 					log_error!(
 						self.logger,
-						"Failed to claim payment with hash {}: preimage unknown.",
-						hex_utils::to_string(&payment_hash.0),
+						"Failed to claim payment with ID {}: preimage unknown.",
+						payment_id,
 					);
 					self.channel_manager.fail_htlc_backwards(&payment_hash);
 
 					let update = PaymentDetailsUpdate {
+						hash: Some(Some(payment_hash)),
 						status: Some(PaymentStatus::Failed),
 						..PaymentDetailsUpdate::new(payment_id)
 					};
@@ -555,99 +619,75 @@ where
 				htlcs: _,
 				sender_intended_total_msat: _,
 			} => {
+				let payment_id = PaymentId(payment_hash.0);
 				log_info!(
 					self.logger,
-					"Claimed payment from payment hash {} of {}msat.",
+					"Claimed payment with ID {} from payment hash {} of {}msat.",
+					payment_id,
 					hex_utils::to_string(&payment_hash.0),
 					amount_msat,
 				);
-				let payment_id = PaymentId(payment_hash.0);
-				match purpose {
+
+				let update = match purpose {
 					PaymentPurpose::Bolt11InvoicePayment {
 						payment_preimage,
 						payment_secret,
 						..
-					} => {
-						let update = PaymentDetailsUpdate {
-							preimage: Some(payment_preimage),
-							secret: Some(Some(payment_secret)),
-							amount_msat: Some(Some(amount_msat)),
-							status: Some(PaymentStatus::Succeeded),
-							..PaymentDetailsUpdate::new(payment_id)
-						};
-						match self.payment_store.update(&update) {
-							Ok(true) => (),
-							Ok(false) => {
-								log_error!(
-									self.logger,
-									"Payment with hash {} couldn't be found in store",
-									hex_utils::to_string(&payment_hash.0)
-								);
-								debug_assert!(false);
-							},
-							Err(e) => {
-								log_error!(
-									self.logger,
-									"Failed to update payment with hash {}: {}",
-									hex_utils::to_string(&payment_hash.0),
-									e
-								);
-								debug_assert!(false);
-							},
-						}
+					} => PaymentDetailsUpdate {
+						preimage: Some(payment_preimage),
+						secret: Some(Some(payment_secret)),
+						amount_msat: Some(Some(amount_msat)),
+						status: Some(PaymentStatus::Succeeded),
+						..PaymentDetailsUpdate::new(payment_id)
 					},
-					PaymentPurpose::Bolt12OfferPayment { .. } => {
-						// TODO: support BOLT12.
-						log_error!(
-							self.logger,
-							"Failed to claim unsupported BOLT12 payment with hash: {}",
-							payment_hash
-						);
-						return;
+					PaymentPurpose::Bolt12OfferPayment {
+						payment_preimage, payment_secret, ..
+					} => PaymentDetailsUpdate {
+						preimage: Some(payment_preimage),
+						secret: Some(Some(payment_secret)),
+						amount_msat: Some(Some(amount_msat)),
+						status: Some(PaymentStatus::Succeeded),
+						..PaymentDetailsUpdate::new(payment_id)
 					},
-					PaymentPurpose::Bolt12RefundPayment { .. } => {
-						// TODO: support BOLT12.
-						log_error!(
-							self.logger,
-							"Failed to claim unsupported BOLT12 payment with hash: {}",
-							payment_hash
-						);
-						return;
+					PaymentPurpose::Bolt12RefundPayment {
+						payment_preimage,
+						payment_secret,
+						..
+					} => PaymentDetailsUpdate {
+						preimage: Some(payment_preimage),
+						secret: Some(Some(payment_secret)),
+						amount_msat: Some(Some(amount_msat)),
+						status: Some(PaymentStatus::Succeeded),
+						..PaymentDetailsUpdate::new(payment_id)
 					},
-					PaymentPurpose::SpontaneousPayment(preimage) => {
-						let payment = PaymentDetails {
-							id: payment_id,
-							kind: PaymentKind::Spontaneous {
-								hash: payment_hash,
-								preimage: Some(preimage),
-							},
-							amount_msat: Some(amount_msat),
-							direction: PaymentDirection::Inbound,
-							status: PaymentStatus::Succeeded,
-						};
-
-						match self.payment_store.insert(payment) {
-							Ok(false) => (),
-							Ok(true) => {
-								log_error!(
-									self.logger,
-									"Spontaneous payment with hash {} was previously known",
-									hex_utils::to_string(&payment_hash.0)
-								);
-								debug_assert!(false);
-							},
-							Err(e) => {
-								log_error!(
-									self.logger,
-									"Failed to insert payment with hash {}: {}",
-									hex_utils::to_string(&payment_hash.0),
-									e
-								);
-								debug_assert!(false);
-							},
-						}
+					PaymentPurpose::SpontaneousPayment(preimage) => PaymentDetailsUpdate {
+						preimage: Some(Some(preimage)),
+						amount_msat: Some(Some(amount_msat)),
+						status: Some(PaymentStatus::Succeeded),
+						..PaymentDetailsUpdate::new(payment_id)
 					},
 				};
+
+				match self.payment_store.update(&update) {
+					Ok(true) => (),
+					Ok(false) => {
+						log_error!(
+							self.logger,
+							"Payment with ID {} couldn't be found in store",
+							payment_id,
+						);
+						debug_assert!(false);
+					},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Failed to update payment with ID {}: {}",
+							payment_id,
+							e
+						);
+						panic!("Failed to access payment store");
+					},
+				}
 
 				self.event_queue
 					.add_event(Event::PaymentReceived {
@@ -675,6 +715,7 @@ where
 				};
 
 				let update = PaymentDetailsUpdate {
+					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
 					status: Some(PaymentStatus::Succeeded),
 					..PaymentDetailsUpdate::new(payment_id)
@@ -721,6 +762,7 @@ where
 				);
 
 				let update = PaymentDetailsUpdate {
+					hash: Some(Some(payment_hash)),
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
@@ -977,8 +1019,49 @@ where
 			LdkEvent::DiscardFunding { .. } => {},
 			LdkEvent::HTLCIntercepted { .. } => {},
 			LdkEvent::BumpTransaction(_) => {},
-			LdkEvent::InvoiceRequestFailed { .. } => {},
-			LdkEvent::ConnectionNeeded { .. } => {},
+			LdkEvent::InvoiceRequestFailed { payment_id } => {
+				log_error!(
+					self.logger,
+					"Failed to request invoice for outbound BOLT12 payment {}",
+					payment_id
+				);
+				let update = PaymentDetailsUpdate {
+					status: Some(PaymentStatus::Failed),
+					..PaymentDetailsUpdate::new(payment_id)
+				};
+				self.payment_store.update(&update).unwrap_or_else(|e| {
+					log_error!(self.logger, "Failed to access payment store: {}", e);
+					panic!("Failed to access payment store");
+				});
+				return;
+			},
+			LdkEvent::ConnectionNeeded { node_id, addresses } => {
+				let runtime_lock = self.runtime.read().unwrap();
+				debug_assert!(runtime_lock.is_some());
+
+				if let Some(runtime) = runtime_lock.as_ref() {
+					let spawn_logger = self.logger.clone();
+					let spawn_cm = Arc::clone(&self.connection_manager);
+					runtime.spawn(async move {
+						for addr in &addresses {
+							match spawn_cm.connect_peer_if_necessary(node_id, addr.clone()).await {
+								Ok(()) => {
+									return;
+								},
+								Err(e) => {
+									log_error!(
+										spawn_logger,
+										"Failed to establish connection to peer {}@{}: {}",
+										node_id,
+										addr,
+										e
+									);
+								},
+							}
+						}
+					});
+				}
+			},
 		}
 	}
 }

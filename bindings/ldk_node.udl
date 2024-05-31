@@ -54,6 +54,7 @@ interface Node {
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
 	Bolt11Payment bolt11_payment();
+	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
 	[Throws=NodeError]
@@ -99,6 +100,21 @@ interface Bolt11Payment {
 	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]string description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
 };
 
+interface Bolt12Payment {
+	[Throws=NodeError]
+	PaymentId send([ByRef]Offer offer, string? payer_note);
+	[Throws=NodeError]
+	PaymentId send_using_amount([ByRef]Offer offer, string? payer_note, u64 amount_msat);
+	[Throws=NodeError]
+	Offer receive(u64 amount_msat, [ByRef]string description);
+	[Throws=NodeError]
+	Offer receive_variable_amount([ByRef]string description);
+	[Throws=NodeError]
+	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
+	[Throws=NodeError]
+	Refund initiate_refund(u64 amount_msat, u32 expiry_secs);
+};
+
 interface SpontaneousPayment {
 	[Throws=NodeError]
 	PaymentId send(u64 amount_msat, PublicKey node_id);
@@ -122,6 +138,9 @@ enum NodeError {
 	"OnchainTxCreationFailed",
 	"ConnectionFailed",
 	"InvoiceCreationFailed",
+	"InvoiceRequestCreationFailed",
+	"OfferCreationFailed",
+	"RefundCreationFailed",
 	"PaymentSendingFailed",
 	"ProbeSendingFailed",
 	"ChannelCreationFailed",
@@ -139,15 +158,19 @@ enum NodeError {
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
 	"InvalidSecretKey",
+	"InvalidOfferId",
 	"InvalidPaymentId",
 	"InvalidPaymentHash",
 	"InvalidPaymentPreimage",
 	"InvalidPaymentSecret",
 	"InvalidAmount",
 	"InvalidInvoice",
+	"InvalidOffer",
+	"InvalidRefund",
 	"InvalidChannelId",
 	"InvalidNetwork",
 	"DuplicatePayment",
+	"UnsupportedCurrency",
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
@@ -225,6 +248,8 @@ interface PaymentKind {
 	Onchain();
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
+	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id);
+	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
 };
 
@@ -370,6 +395,18 @@ typedef string Address;
 
 [Custom]
 typedef string Bolt11Invoice;
+
+[Custom]
+typedef string Offer;
+
+[Custom]
+typedef string Refund;
+
+[Custom]
+typedef string Bolt12Invoice;
+
+[Custom]
+typedef string OfferId;
 
 [Custom]
 typedef string PaymentId;
