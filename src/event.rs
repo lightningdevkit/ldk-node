@@ -39,7 +39,7 @@ use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{self, Duration};
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -630,7 +630,10 @@ where
 							amount_msat: Some(amount_msat),
 							direction: PaymentDirection::Inbound,
 							status: PaymentStatus::Succeeded,
-							last_update: 0,
+							last_update: time::SystemTime::now()
+								.duration_since(time::UNIX_EPOCH)
+								.unwrap_or(time::Duration::ZERO)
+								.as_secs(),
 							fee_msat: None,
 						};
 
