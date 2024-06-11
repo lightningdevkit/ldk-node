@@ -1124,7 +1124,8 @@ impl Node {
 		}
 	}
 
-	/// Manually sync the LDK and BDK wallets with the current chain state.
+	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
+	/// cache.
 	///
 	/// **Note:** The wallets are regularly synced in the background, which is configurable via
 	/// [`Config::onchain_wallet_sync_interval_secs`] and [`Config::wallet_sync_interval_secs`].
@@ -1142,6 +1143,7 @@ impl Node {
 		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let archive_cmon = Arc::clone(&self.chain_monitor);
+		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
 		let confirmables = vec![
@@ -1150,6 +1152,8 @@ impl Node {
 			&*sync_sweeper as &(dyn Confirm + Sync + Send),
 		];
 		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+		let sync_fee_rate_update_timestamp =
+			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
 		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
 		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
 
@@ -1175,6 +1179,26 @@ impl Node {
 							return Err(e);
 						},
 					};
+
+					let now = Instant::now();
+					match fee_estimator.update_fee_estimates().await {
+						Ok(()) => {
+							log_info!(
+								sync_logger,
+								"Fee rate cache update finished in {}ms.",
+								now.elapsed().as_millis()
+							);
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
+						},
+						Err(e) => {
+							log_error!(sync_logger, "Fee rate cache update failed: {}", e,);
+							return Err(e);
+						},
+					}
 
 					let now = Instant::now();
 					match tx_sync.sync(confirmables).await {
