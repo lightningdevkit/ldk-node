@@ -102,3 +102,8 @@ panic = "abort"
 
 [profile.dev]
 panic = "abort"
+
+[[example]]
+name = "ldk-node-with-payjoin-support"
+path = "examples/ldk-node-with-payjoin-support.rs"
+

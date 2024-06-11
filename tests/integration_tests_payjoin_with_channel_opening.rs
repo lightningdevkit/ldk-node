@@ -39,7 +39,8 @@ fn send_receive_payjoin_transaction_with_channel_opening() {
 			false,
 			node_b_pj_sender.node_id(),
 			node_b_listening_address,
-		).unwrap();
+		)
+		.unwrap();
 	let payjoin_uri = payjoin_uri.to_string();
 	let sender_payjoin_payment = node_b_pj_sender.payjoin_payment();
 	assert!(sender_payjoin_payment.send(payjoin_uri).is_ok());
