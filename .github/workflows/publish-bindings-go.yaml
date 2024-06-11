@@ -2,6 +2,9 @@ name: Build libraries for all targets
 
 on:
   workflow_call:
+    secrets:
+      LDK_NODE_GO_DEPLOY_KEY:
+        required: true
 
 env:
   LDK_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
