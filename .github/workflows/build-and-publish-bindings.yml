@@ -78,6 +78,27 @@ jobs:
           name: ldk-node-x86_64-pc-windows-gnu
           path: target/x86_64-pc-windows-gnu/release/ldk_node.dll
 
+  build-windows-msvc:
+    runs-on: windows-2019
+    steps:
+      - name: Set up Rust
+        run: |
+          rustup toolchain install ${{ env.RUST_VERSION }}
+          rustup target add x86_64-pc-windows-msvc
+          rustup default ${{ env.RUST_VERSION }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Windows x64_64
+        run: cargo build --release --target x86_64-pc-windows-msvc --features uniffi
+
+      - name: Archive Windows x86_64
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldk-node-x86_64-pc-windows-msvc
+          path: target/x86_64-pc-windows-msvc/release/ldk_node.dll
+
   build-macos:
     runs-on: macos-12
     steps:
