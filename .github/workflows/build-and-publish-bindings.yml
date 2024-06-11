@@ -7,197 +7,22 @@ on:
 
 env:
   RUST_VERSION: 1.78
-  LDK_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
-  TARGET_BRANCH_PREFIX: "publish-"
 
 jobs:
-  uniffi-bindings:
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Set up Rust
-        run: |
-          rustup toolchain install ${{ env.RUST_VERSION }}
-          rustup default ${{ env.RUST_VERSION }}
+  generate-bindings:
+    uses: ./.github/workflows/gen-bindings-go.yaml
+    with:
+      rust_version: ${{ env.RUST_VERSION }}
 
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install uniffi-bindgen-go
-        run: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.2.1+v0.25.0
-
-      - name: Generate bindings
-        run: uniffi-bindgen-go bindings/ldk_node.udl -o ffi/golang -c ./uniffi.toml
-
-      - name: Archive bindings
-        uses: actions/upload-artifact@v4
-        with:
-          name: ldk-node-bindings
-          path: |
-            ffi/golang/ldk_node/ldk_node.go
-            ffi/golang/ldk_node/ldk_node.h
-            ffi/golang/ldk_node/ldk_node.c
-
-  build-linux-windows:
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Set up Rust
-        run: |
-          rustup toolchain install ${{ env.RUST_VERSION }}
-          rustup default ${{ env.RUST_VERSION }}
-
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --rev c87a52a
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build Linux x86_64
-        run: cross build --release --target x86_64-unknown-linux-gnu --features uniffi
-
-      - name: Build Linux ARM
-        run: cross build --release --target arm-unknown-linux-gnueabihf --features uniffi
-
-      - name: Build Windows x64_64
-        run: cross build --release --target x86_64-pc-windows-gnu --features uniffi
-
-      - name: Archive Linux x86_64
-        uses: actions/upload-artifact@v4
-        with:
-          name: ldk-node-x86_64-unknown-linux-gnu
-          path: target/x86_64-unknown-linux-gnu/release/libldk_node.so
-
-      - name: Archive Linux ARM
-        uses: actions/upload-artifact@v4
-        with:
-          name: ldk-node-arm-unknown-linux-gnueabihf
-          path: target/arm-unknown-linux-gnueabihf/release/libldk_node.so
-
-      - name: Archive Windows x86_64
-        uses: actions/upload-artifact@v4
-        with:
-          name: ldk-node-x86_64-pc-windows-gnu
-          path: target/x86_64-pc-windows-gnu/release/ldk_node.dll
-
-  build-windows-msvc:
-    runs-on: windows-2019
-    steps:
-      - name: Set up Rust
-        run: |
-          rustup toolchain install ${{ env.RUST_VERSION }}
-          rustup target add x86_64-pc-windows-msvc
-          rustup default ${{ env.RUST_VERSION }}
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build Windows x64_64
-        run: cargo build --release --target x86_64-pc-windows-msvc --features uniffi
-
-      - name: Archive Windows x86_64
-        uses: actions/upload-artifact@v4
-        with:
-          name: ldk-node-x86_64-pc-windows-msvc
-          path: target/x86_64-pc-windows-msvc/release/ldk_node.dll
-
-  build-macos:
-    runs-on: macos-12
-    steps:
-      - name: Set up Rust
-        run: |
-          rustup toolchain install ${{ env.RUST_VERSION }}
-          rustup default ${{ env.RUST_VERSION }}
-          rustup target add aarch64-apple-darwin
-          rustup target add x86_64-apple-darwin
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build macOS x86_64
-        run: cargo build --release --target x86_64-apple-darwin --features uniffi
-
-      - name: Build macOS ARM64
-        run: cargo build --release --target aarch64-apple-darwin --features uniffi
-
-      - name: Make universal macOS library
-        run: |
-          mkdir -p target/universal-macos/release
-          lipo -create -output "target/universal-macos/release/libldk_node.dylib" "target/aarch64-apple-darwin/release/libldk_node.dylib" "target/x86_64-apple-darwin/release/libldk_node.dylib"
-
-      - name: Archive macOS
-        uses: actions/upload-artifact@v4
-        with:
-          name: ldk-node-universal-macos
-          path: target/universal-macos/release/libldk_node.dylib
+  build-libraries:
+    uses: ./.github/workflows/build-libraries.yaml
+    with:
+      rust_version: ${{ env.RUST_VERSION }}
 
   publish-ldk-node-go:
     needs:
-      - uniffi-bindings
-      - build-linux-windows
-      - build-macos
-    runs-on: ubuntu-20.04
-
-    steps:
-      - name: Checkout ldk-node-go
-        uses: actions/checkout@v4
-        with:
-          repository: getAlby/ldk-node-go
-          ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
-
-      - name: Download bindings
-        uses: actions/download-artifact@v4
-        with:
-          name: ldk-node-bindings
-          path: ldk_node
-
-      - name: Download Linux x86_64 libs
-        uses: actions/download-artifact@v4
-        with:
-          name: ldk-node-x86_64-unknown-linux-gnu
-          path: ldk_node/x86_64-unknown-linux-gnu
-
-      - name: Download Linux ARM libs
-        uses: actions/download-artifact@v4
-        with:
-          name: ldk-node-arm-unknown-linux-gnueabihf
-          path: ldk_node/arm-unknown-linux-gnueabihf
-
-      - name: Download Windows x86_64 GNU libs
-        uses: actions/download-artifact@v4
-        with:
-          name: ldk-node-x86_64-pc-windows-gnu
-          path: ldk_node/x86_64-pc-windows-gnu
-
-      - name: Download Windows x86_64 MSVC libs
-        uses: actions/download-artifact@v4
-        with:
-          name: ldk-node-x86_64-pc-windows-msvc
-          path: ldk_node/x86_64-pc-windows-msvc
-
-      - name: Download macOS libs
-        uses: actions/download-artifact@v4
-        with:
-          name: ldk-node-universal-macos
-          path: ldk_node/universal-macos
-
-      - name: Commit and push bindings
-        run: |
-          git config --global user.email "github-actions@github.com"
-          git config --global user.name "github-actions"
-          git config --global push.autoSetupRemote true
-          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
-            git checkout -b ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
-          fi
-          git pull origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }} || true
-          git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
-          git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
-          git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
-          git add ldk_node/x86_64-pc-windows-gnu/ldk_node.dll
-          git add ldk_node/x86_64-pc-windows-msvc/ldk_node.dll
-          git add ldk_node/universal-macos/libldk_node.dylib
-          git commit -m "Update bindings."
-
-          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
-            git push origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
-          else
-            git push origin master
-          fi
+      - generate-bindings
+      - build-libraries
+    uses: ./.github/workflows/publish-bindings-go.yaml
+    secrets:
+      LDK_NODE_GO_DEPLOY_KEY: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}

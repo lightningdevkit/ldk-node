@@ -1,0 +1,75 @@
+name: Build libraries for all targets
+
+on:
+  workflow_call:
+    inputs:
+      rust_version:
+        required: true
+        type: string
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        build: [
+          { host: ubuntu-20.04, tool: cargo, target: x86_64-unknown-linux-gnu,    output: libldk_node.so },
+          { host: ubuntu-20.04, tool: cross, target: arm-unknown-linux-gnueabihf, output: libldk_node.so },
+          { host: windows-2019, tool: cargo, target: x86_64-pc-windows-msvc,      output: ldk_node.dll },
+          { host: macos-12,     tool: cargo, target: x86_64-apple-darwin,         output: libldk_node.dylib },
+          { host: macos-12,     tool: cargo, target: aarch64-apple-darwin,        output: libldk_node.dylib },
+        ]
+    runs-on: ${{ matrix.build.host }}
+    steps:
+      - name: Set up Rust
+        run: |
+          rustup toolchain install ${{ inputs.rust_version }}
+          rustup default ${{ inputs.rust_version }}
+
+      - name: Add target
+        if: '${{ matrix.build.tool }}' == 'cargo'
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        if: '${{ matrix.build.tool }}' == 'cross'
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev c87a52a
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: ${{ matrix.build.tool }} build --release --target ${{ matrix.build.target }} --features uniffi
+
+      - name: Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldk-node-${{ matrix.build.target }}
+          path: target/${{ matrix.build.target }}/release/${{ matrix.build.output }}
+
+  make-macos-universal:
+    runs-on: macos-12
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-x86_64-apple-darwin
+          path: x86_64-apple-darwin/libldk_node.dylib
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-aarch64-apple-darwin
+          path: aarch64-apple-darwin/libldk_node.dylib
+
+      - name: Make universal library
+        run: |
+          lipo -create -output "libldk_node.dylib" "x86_64-apple-darwin/libldk_node.dylib" "aarch64-apple-darwin/libldk_node.dylib"
+
+      - name: Archive universal library
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldk-node-universal-apple-darwin
+          path: libldk_node.dylib

@@ -1,0 +1,78 @@
+name: Build libraries for all targets
+
+on:
+  workflow_call:
+
+env:
+  LDK_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  TARGET_BRANCH_PREFIX: "publish-"
+
+jobs:
+  publish-ldk-node-go:
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout ldk-node-go
+        uses: actions/checkout@v4
+        with:
+          repository: getAlby/ldk-node-go
+          ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
+
+      - name: Download bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-bindings
+          path: ldk_node
+
+      - name: Download Linux x86_64 libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-x86_64-unknown-linux-gnu
+          path: ldk_node/x86_64-unknown-linux-gnu
+
+      - name: Download Linux ARM libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-arm-unknown-linux-gnueabihf
+          path: ldk_node/arm-unknown-linux-gnueabihf
+
+      - name: Download Windows x86_64 GNU libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-x86_64-pc-windows-gnu
+          path: ldk_node/x86_64-pc-windows-gnu
+
+      - name: Download Windows x86_64 MSVC libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-x86_64-pc-windows-msvc
+          path: ldk_node/x86_64-pc-windows-msvc
+
+      - name: Download macOS libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-universal-apple-darwin
+          path: ldk_node/universal-macos
+
+      - name: Commit and push bindings
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "github-actions"
+          git config --global push.autoSetupRemote true
+          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
+            git checkout -b ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
+          fi
+          git pull origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }} || true
+          git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
+          git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
+          git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
+          git add ldk_node/x86_64-pc-windows-gnu/ldk_node.dll
+          git add ldk_node/x86_64-pc-windows-msvc/ldk_node.dll
+          git add ldk_node/universal-macos/libldk_node.dylib
+          git commit -m "Update bindings."
+
+          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
+            git push origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
+          else
+            git push origin master
+          fi

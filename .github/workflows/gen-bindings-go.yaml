@@ -1,0 +1,35 @@
+name: Generate Go bindings
+
+on:
+  workflow_call:
+    inputs:
+      rust_version:
+        required: true
+        type: string
+
+jobs:
+  uniffi-bindings:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Set up Rust
+        run: |
+          rustup toolchain install ${{ inputs.rust_version }}
+          rustup default ${{ inputs.rust_version }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uniffi-bindgen-go
+        run: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.2.1+v0.25.0
+
+      - name: Generate bindings
+        run: uniffi-bindgen-go bindings/ldk_node.udl -o ffi/golang -c ./uniffi.toml
+
+      - name: Archive bindings
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldk-node-bindings
+          path: |
+            ffi/golang/ldk_node/ldk_node.go
+            ffi/golang/ldk_node/ldk_node.h
+            ffi/golang/ldk_node/ldk_node.c
