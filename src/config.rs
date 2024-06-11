@@ -31,7 +31,7 @@ pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/ap
 pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
 // The interval (in block height) after which we retry archiving fully resolved channel monitors.
-pub(crate) const LDK_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
+pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
 
 // The time in-between peer reconnection attempts.
 pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(10);

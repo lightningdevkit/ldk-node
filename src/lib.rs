@@ -122,8 +122,9 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	LDK_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
+	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -1514,7 +1515,7 @@ fn periodically_archive_fully_resolved_monitors(
 	let cur_height = channel_manager.current_best_block().height;
 	let should_archive = latest_archival_height_lock
 		.as_ref()
-		.map_or(true, |h| cur_height >= h + LDK_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
+		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
 
 	if should_archive {
 		chain_monitor.archive_fully_resolved_channel_monitors();
