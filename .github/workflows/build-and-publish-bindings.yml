@@ -9,15 +9,24 @@ env:
   RUST_VERSION: 1.78
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_version: ${{ env.RUST_VERSION }}
+    steps:
+      - run: echo "setting output variables"
+
   generate-bindings:
+    needs: setup
     uses: ./.github/workflows/gen-bindings-go.yaml
     with:
-      rust_version: ${{ env.RUST_VERSION }}
+      rust_version: ${{ needs.setup.outputs.rust_version }}
 
   build-libraries:
+    needs: setup
     uses: ./.github/workflows/build-libraries.yaml
     with:
-      rust_version: ${{ env.RUST_VERSION }}
+      rust_version: ${{ needs.setup.outputs.rust_version }}
 
   publish-ldk-node-go:
     needs:
