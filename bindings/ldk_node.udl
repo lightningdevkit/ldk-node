@@ -209,6 +209,9 @@ enum NodeError {
 	"PayjoinRequestMissingAmount",
 	"PayjoinRequestCreationFailed",
 	"PayjoinResponseProcessingFailed",
+	"PayjoinReceiverUnavailable",
+	"PayjoinReceiverRequestValidationFailed",
+	"PayjoinReceiverEnrollementFailed"
 };
 
 dictionary NodeStatus {

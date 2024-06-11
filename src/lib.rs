@@ -89,6 +89,7 @@ pub mod io;
 mod liquidity;
 mod logger;
 mod message_handler;
+mod payjoin_receiver;
 pub mod payment;
 mod peer_store;
 mod sweep;
@@ -109,6 +110,7 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
+use payjoin_receiver::PayjoinReceiver;
 use payment::payjoin::handler::PayjoinHandler;
 pub use types::ChannelConfig;
 
@@ -190,6 +192,7 @@ pub struct Node {
 	peer_manager: Arc<PeerManager>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	payjoin_handler: Option<Arc<PayjoinHandler>>,
+	payjoin_receiver: Option<Arc<PayjoinReceiver>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
@@ -690,6 +693,30 @@ impl Node {
 			Arc::clone(&self.logger),
 		));
 
+		// Check every 5 seconds if we have received a payjoin transaction to our enrolled
+		// subdirectory with the configured Payjoin directory.
+		if let Some(payjoin_receiver) = &self.payjoin_receiver {
+			let mut stop_payjoin_server = self.stop_sender.subscribe();
+			let payjoin_receiver = Arc::clone(&payjoin_receiver);
+			let payjoin_check_interval = 5;
+			runtime.spawn(async move {
+				let mut payjoin_interval =
+					tokio::time::interval(Duration::from_secs(payjoin_check_interval));
+				payjoin_interval.reset();
+				payjoin_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				loop {
+					tokio::select! {
+						_ = stop_payjoin_server.changed() => {
+							return;
+						}
+						_ = payjoin_interval.tick() => {
+							let _ = payjoin_receiver.process_payjoin_request().await;
+						}
+					}
+				}
+			});
+		}
+
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
@@ -1077,9 +1104,11 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn payjoin_payment(&self) -> PayjoinPayment {
 		let payjoin_handler = self.payjoin_handler.as_ref();
+		let payjoin_receiver = self.payjoin_receiver.as_ref();
 		PayjoinPayment::new(
 			Arc::clone(&self.runtime),
 			payjoin_handler.map(Arc::clone),
+			payjoin_receiver.map(Arc::clone),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.wallet),
@@ -1095,9 +1124,11 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn payjoin_payment(&self) -> Arc<PayjoinPayment> {
 		let payjoin_handler = self.payjoin_handler.as_ref();
+		let payjoin_receiver = self.payjoin_receiver.as_ref();
 		Arc::new(PayjoinPayment::new(
 			Arc::clone(&self.runtime),
-			payjoin_handler.map(Arc::clone),
+			payjoin_sender.map(Arc::clone),
+			payjoin_receiver.map(Arc::clone),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.wallet),

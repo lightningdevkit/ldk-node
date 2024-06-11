@@ -105,6 +105,12 @@ pub enum Error {
 	PayjoinRequestCreationFailed,
 	/// Payjoin response processing failed.
 	PayjoinResponseProcessingFailed,
+	/// Failed to access payjoin receiver object.
+	PayjoinReceiverUnavailable,
+	/// Failed to enroll payjoin receiver.
+	PayjoinReceiverEnrollementFailed,
+	/// Failed to validate an incoming payjoin request.
+	PayjoinReceiverRequestValidationFailed,
 }
 
 impl fmt::Display for Error {
@@ -186,6 +192,15 @@ impl fmt::Display for Error {
 			},
 			Self::PayjoinResponseProcessingFailed => {
 				write!(f, "Payjoin receiver responded to our request with an invalid response that was ignored")
+			},
+			Self::PayjoinReceiverUnavailable => {
+				write!(f, "Failed to access payjoin receiver object. Make sure you have enabled Payjoin receiving support.")
+			},
+			Self::PayjoinReceiverRequestValidationFailed => {
+				write!(f, "Failed to validate an incoming payjoin request. Payjoin sender request didnt pass the payjoin validation steps.")
+			},
+			Self::PayjoinReceiverEnrollementFailed => {
+				write!(f, "Failed to enroll payjoin receiver. Make sure the configured Payjoin directory & Payjoin relay are available.")
 			},
 		}
 	}
