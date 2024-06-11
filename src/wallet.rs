@@ -4,6 +4,7 @@ use crate::Error;
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
+use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
@@ -19,8 +20,14 @@ use bdk::wallet::AddressIndex;
 use bdk::FeeRate;
 use bdk::{SignOptions, SyncOptions};
 
+use bitcoin::address::{Payload, WitnessVersion};
 use bitcoin::bech32::u5;
+use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
+use bitcoin::hash_types::WPubkeyHash;
+use bitcoin::hashes::Hash;
+use bitcoin::key::XOnlyPublicKey;
+use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
@@ -159,8 +166,29 @@ where
 		Ok(address_info.address)
 	}
 
-	pub(crate) fn get_balance(&self) -> Result<bdk::Balance, Error> {
-		Ok(self.inner.lock().unwrap().get_balance()?)
+	fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
+		let address_info =
+			self.inner.lock().unwrap().get_internal_address(AddressIndex::LastUnused)?;
+		Ok(address_info.address)
+	}
+
+	pub(crate) fn get_balances(
+		&self, total_anchor_channels_reserve_sats: u64,
+	) -> Result<(u64, u64), Error> {
+		let wallet_lock = self.inner.lock().unwrap();
+		let (total, spendable) = wallet_lock.get_balance().map(|bal| {
+			(
+				bal.get_total(),
+				bal.get_spendable().saturating_sub(total_anchor_channels_reserve_sats),
+			)
+		})?;
+		Ok((total, spendable))
+	}
+
+	pub(crate) fn get_spendable_amount_sats(
+		&self, total_anchor_channels_reserve_sats: u64,
+	) -> Result<u64, Error> {
+		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
 	/// Send funds to the given address.
@@ -239,6 +267,124 @@ where
 		}
 
 		Ok(txid)
+	}
+}
+
+impl<D, B: Deref, E: Deref, L: Deref> WalletSource for Wallet<D, B, E, L>
+where
+	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut utxos = Vec::new();
+		let confirmed_txs: Vec<bdk::TransactionDetails> = locked_wallet
+			.list_transactions(false)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve transactions from wallet: {}", e);
+			})?
+			.into_iter()
+			.filter(|t| t.confirmation_time.is_some())
+			.collect();
+		let unspent_confirmed_utxos = locked_wallet
+			.list_unspent()
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to retrieve unspent transactions from wallet: {}",
+					e
+				);
+			})?
+			.into_iter()
+			.filter(|u| confirmed_txs.iter().find(|t| t.txid == u.outpoint.txid).is_some());
+
+		for u in unspent_confirmed_utxos {
+			let payload = Payload::from_script(&u.txout.script_pubkey).map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+			})?;
+
+			match payload {
+				Payload::WitnessProgram(program) => match program.version() {
+					WitnessVersion::V0 if program.program().len() == 20 => {
+						let wpkh =
+							WPubkeyHash::from_slice(program.program().as_bytes()).map_err(|e| {
+								log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							})?;
+						let utxo = Utxo::new_v0_p2wpkh(u.outpoint, u.txout.value, &wpkh);
+						utxos.push(utxo);
+					},
+					WitnessVersion::V1 => {
+						XOnlyPublicKey::from_slice(program.program().as_bytes()).map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+						})?;
+
+						let utxo = Utxo {
+							outpoint: u.outpoint,
+							output: TxOut {
+								value: u.txout.value,
+								script_pubkey: ScriptBuf::new_witness_program(&program),
+							},
+							satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
+								1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
+						};
+						utxos.push(utxo);
+					},
+					_ => {
+						log_error!(
+							self.logger,
+							"Unexpected witness version or length. Version: {}, Length: {}",
+							program.version(),
+							program.program().len()
+						);
+					},
+				},
+				_ => {
+					log_error!(
+						self.logger,
+						"Tried to use a non-witness script. This must never happen."
+					);
+					panic!("Tried to use a non-witness script. This must never happen.");
+				},
+			}
+		}
+
+		Ok(utxos)
+	}
+
+	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let address_info =
+			locked_wallet.get_internal_address(AddressIndex::LastUnused).map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			})?;
+
+		Ok(address_info.address.script_pubkey())
+	}
+
+	fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		// While BDK populates both `witness_utxo` and `non_witness_utxo` fields, LDK does not. As
+		// BDK by default doesn't trust the witness UTXO to account for the Segwit bug, we must
+		// disable it here as otherwise we fail to sign.
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		match locked_wallet.sign(&mut psbt, sign_options) {
+			Ok(_finalized) => {
+				// BDK will fail to finalize for all LDK-provided inputs of the PSBT. Unfortunately
+				// we can't check more fine grained if it succeeded for all the other inputs here,
+				// so we just ignore the returned `finalized` bool.
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to sign transaction: {}", err);
+				return Err(());
+			},
+		}
+
+		Ok(psbt.extract_tx())
 	}
 }
 
@@ -407,11 +553,10 @@ where
 		})?;
 
 		match address.payload {
-			bitcoin::address::Payload::WitnessProgram(program) => {
-				ShutdownScript::new_witness_program(&program).map_err(|e| {
+			Payload::WitnessProgram(program) => ShutdownScript::new_witness_program(&program)
+				.map_err(|e| {
 					log_error!(self.logger, "Invalid shutdown script: {:?}", e);
-				})
-			},
+				}),
 			_ => {
 				log_error!(
 					self.logger,
@@ -431,7 +576,7 @@ where
 	L::Target: Logger,
 {
 	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.get_new_address().map_err(|e| {
+		let address = self.wallet.get_new_internal_address().map_err(|e| {
 			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
 		})?;
 		Ok(address.script_pubkey())

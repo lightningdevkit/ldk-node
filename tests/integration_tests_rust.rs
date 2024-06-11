@@ -22,21 +22,42 @@ use crate::common::expect_channel_ready_event;
 #[test]
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
+}
+
+#[test]
+fn channel_full_cycle_force_close() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
+}
+
+#[test]
+fn channel_full_cycle_force_close_trusted_no_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, true);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
 }
 
 #[test]
 fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, true);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true)
+	let (node_a, node_b) = setup_two_nodes(&electrsd, true, true, false);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true, true, false)
+}
+
+#[test]
+fn channel_full_cycle_legacy_staticremotekey() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, false, false);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false);
 }
 
 #[test]
 fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -76,7 +97,7 @@ fn multi_hop_sending() {
 	// Setup and fund 5 nodes
 	let mut nodes = Vec::new();
 	for _ in 0..5 {
-		let config = random_config();
+		let config = random_config(true);
 		setup_builder!(builder, config);
 		builder.set_esplora_server(esplora_url.clone());
 		let node = builder.build().unwrap();
@@ -147,7 +168,7 @@ fn multi_hop_sending() {
 
 #[test]
 fn connect_to_public_testnet_esplora() {
-	let mut config = random_config();
+	let mut config = random_config(true);
 	config.network = Network::Testnet;
 	setup_builder!(builder, config);
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
@@ -159,7 +180,7 @@ fn connect_to_public_testnet_esplora() {
 #[test]
 fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let config = random_config();
+	let config = random_config(true);
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
@@ -227,7 +248,7 @@ fn start_stop_reinit() {
 #[test]
 fn onchain_spend_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -275,7 +296,7 @@ fn onchain_spend_receive() {
 #[test]
 fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let config = random_config();
+	let config = random_config(true);
 	let node = setup_node(&electrsd, config);
 
 	// Tests arbitrary message signing and later verification
@@ -293,7 +314,7 @@ fn connection_restart_behavior() {
 
 fn do_connection_restart_behavior(persist: bool) {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, false, false);
 
 	let node_id_a = node_a.node_id();
 	let node_id_b = node_b.node_id();
@@ -344,7 +365,7 @@ fn do_connection_restart_behavior(persist: bool) {
 #[test]
 fn concurrent_connections_succeed() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
 
 	let node_a = Arc::new(node_a);
 	let node_b = Arc::new(node_b);
@@ -374,7 +395,7 @@ fn concurrent_connections_succeed() {
 #[test]
 fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;

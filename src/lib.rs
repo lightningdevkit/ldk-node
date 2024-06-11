@@ -103,7 +103,7 @@ pub use lightning;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
-pub use config::{default_config, Config};
+pub use config::{default_config, AnchorChannelsConfig, Config};
 pub use error::Error as NodeError;
 use error::Error;
 
@@ -133,15 +133,16 @@ use payment::store::PaymentStore;
 use payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
-	Broadcaster, ChainMonitor, ChannelManager, DynStore, FeeEstimator, KeysManager, NetworkGraph,
-	PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
+	KeysManager, NetworkGraph, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::{BestBlock, Confirm};
-use lightning::ln::channelmanager::PaymentId;
+use lightning::events::bump_transaction::Wallet as LdkWallet;
+use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
 use lightning::ln::msgs::SocketAddress;
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
@@ -620,9 +621,17 @@ impl Node {
 			}
 		});
 
+		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
+			Arc::clone(&self.tx_broadcaster),
+			Arc::new(LdkWallet::new(Arc::clone(&self.wallet), Arc::clone(&self.logger))),
+			Arc::clone(&self.keys_manager),
+			Arc::clone(&self.logger),
+		));
+
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
+			bump_tx_event_handler,
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
@@ -907,6 +916,8 @@ impl Node {
 		OnchainPayment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -917,6 +928,8 @@ impl Node {
 		Arc::new(OnchainPayment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -992,6 +1005,10 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn connect_open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
@@ -1004,17 +1021,25 @@ impl Node {
 		}
 		let runtime = rt_lock.as_ref().unwrap();
 
-		let cur_balance = self.wallet.get_balance()?;
-		if cur_balance.get_spendable() < channel_amount_sats {
-			log_error!(self.logger, "Unable to create channel due to insufficient funds.");
-			return Err(Error::InsufficientFunds);
-		}
-
 		let peer_info = PeerInfo { node_id, address };
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
+
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let spendable_amount_sats =
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+
+		// Fail early if we have less than the channel value available.
+		if spendable_amount_sats < channel_amount_sats {
+			log_error!(self.logger,
+				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+				spendable_amount_sats, channel_amount_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
@@ -1024,11 +1049,37 @@ impl Node {
 			})
 		})?;
 
+		// Fail if we have less than the channel value + anchor reserve available (if applicable).
+		let init_features = self
+			.peer_manager
+			.peer_by_node_id(&node_id)
+			.ok_or(Error::ConnectionFailed)?
+			.init_features;
+		let required_funds_sats = channel_amount_sats
+			+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
+				if init_features.requires_anchors_zero_fee_htlc_tx()
+					&& !c.trusted_peers_no_reserve.contains(&node_id)
+				{
+					c.per_channel_reserve_sats
+				} else {
+					0
+				}
+			});
+
+		if spendable_amount_sats < required_funds_sats {
+			log_error!(self.logger,
+				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+				spendable_amount_sats, required_funds_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
 		let channel_config = (*(channel_config.unwrap_or_default())).clone().into();
 		let user_config = UserConfig {
 			channel_handshake_limits: Default::default(),
 			channel_handshake_config: ChannelHandshakeConfig {
 				announced_channel: announce_channel,
+				negotiate_anchors_zero_fee_htlc_tx: self.config.anchor_channels_config.is_some(),
 				..Default::default()
 			},
 			channel_config,
@@ -1125,30 +1176,84 @@ impl Node {
 	}
 
 	/// Close a previously opened channel.
+	///
+	/// Will attempt to close a channel coopertively. If this fails, users might need to resort to
+	/// [`Node::force_close_channel`].
 	pub fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		self.close_channel_internal(user_channel_id, counterparty_node_id, false)
+	}
+
+	/// Force-close a previously opened channel.
+	///
+	/// Will force-close the channel, potentially broadcasting our latest state. Note that in
+	/// contrast to cooperative closure, force-closing will have the channel funds time-locked,
+	/// i.e., they will only be available after the counterparty had time to contest our claim.
+	/// Force-closing channels also more costly in terms of on-chain fees. So cooperative closure
+	/// should always be preferred (and tried first).
+	///
+	/// Broadcasting the closing transactions will be omitted for Anchor channels if we trust the
+	/// counterparty to broadcast for us (see [`AnchorChannelsConfig::trusted_peers_no_reserve`]
+	/// for more information).
+	pub fn force_close_channel(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		self.close_channel_internal(user_channel_id, counterparty_node_id, true)
+	}
+
+	fn close_channel_internal(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			match self
-				.channel_manager
-				.close_channel(&channel_details.channel_id, &counterparty_node_id)
-			{
-				Ok(_) => {
-					// Check if this was the last open channel, if so, forget the peer.
-					if open_channels.len() == 1 {
-						self.peer_store.remove_peer(&counterparty_node_id)?;
-					}
-					Ok(())
-				},
-				Err(_) => Err(Error::ChannelClosingFailed),
+			if force {
+				if self.config.anchor_channels_config.as_ref().map_or(false, |acc| {
+					acc.trusted_peers_no_reserve.contains(&counterparty_node_id)
+				}) {
+					self.channel_manager
+						.force_close_without_broadcasting_txn(
+							&channel_details.channel_id,
+							&counterparty_node_id,
+						)
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to force-close channel to trusted peer: {:?}",
+								e
+							);
+							Error::ChannelClosingFailed
+						})?;
+				} else {
+					self.channel_manager
+						.force_close_broadcasting_latest_txn(
+							&channel_details.channel_id,
+							&counterparty_node_id,
+						)
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to force-close channel: {:?}", e);
+							Error::ChannelClosingFailed
+						})?;
+				}
+			} else {
+				self.channel_manager
+					.close_channel(&channel_details.channel_id, &counterparty_node_id)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to close channel: {:?}", e);
+						Error::ChannelClosingFailed
+					})?;
 			}
-		} else {
-			Ok(())
+
+			// Check if this was the last open channel, if so, forget the peer.
+			if open_channels.len() == 1 {
+				self.peer_store.remove_peer(&counterparty_node_id)?;
+			}
 		}
+
+		Ok(())
 	}
 
 	/// Update the config for a previously opened channel.
@@ -1187,11 +1292,13 @@ impl Node {
 
 	/// Retrieves an overview of all known balances.
 	pub fn list_balances(&self) -> BalanceDetails {
-		let (total_onchain_balance_sats, spendable_onchain_balance_sats) = self
-			.wallet
-			.get_balance()
-			.map(|bal| (bal.get_total(), bal.get_spendable()))
-			.unwrap_or((0, 0));
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let (total_onchain_balance_sats, spendable_onchain_balance_sats) =
+			self.wallet.get_balances(cur_anchor_reserve_sats).unwrap_or((0, 0));
+
+		let total_anchor_channels_reserve_sats =
+			std::cmp::min(cur_anchor_reserve_sats, total_onchain_balance_sats);
 
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
@@ -1226,6 +1333,7 @@ impl Node {
 		BalanceDetails {
 			total_onchain_balance_sats,
 			spendable_onchain_balance_sats,
+			total_anchor_channels_reserve_sats,
 			total_lightning_balance_sats,
 			lightning_balances,
 			pending_balances_from_channel_closures,
@@ -1357,4 +1465,24 @@ pub struct NodeStatus {
 	///
 	/// Will be `None` if we have no public channels or we haven't broadcasted since the [`Node`] was initialized.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
+}
+
+pub(crate) fn total_anchor_channels_reserve_sats(
+	channel_manager: &ChannelManager, config: &Config,
+) -> u64 {
+	config.anchor_channels_config.as_ref().map_or(0, |anchor_channels_config| {
+		channel_manager
+			.list_channels()
+			.into_iter()
+			.filter(|c| {
+				!anchor_channels_config.trusted_peers_no_reserve.contains(&c.counterparty.node_id)
+					&& c.channel_shutdown_state
+						.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
+					&& c.channel_type
+						.as_ref()
+						.map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
+			})
+			.count() as u64
+			* anchor_channels_config.per_channel_reserve_sats
+	})
 }

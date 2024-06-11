@@ -36,7 +36,7 @@ fn test_cln() {
 	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1);
 
 	// Setup LDK Node
-	let config = common::random_config();
+	let config = common::random_config(true);
 	let mut builder = Builder::from_config(config);
 	builder.set_esplora_server("http://127.0.0.1:3002".to_string());
 
@@ -88,6 +88,7 @@ fn test_cln() {
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
 	common::wait_for_tx(&electrs_client, funding_txo.txid);
 	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6);
+	node.sync_wallets().unwrap();
 	let user_channel_id = common::expect_channel_ready_event!(node, cln_node_id);
 
 	// Send a payment to CLN

@@ -1,7 +1,8 @@
 use crate::types::{DynStore, Sweeper, Wallet};
 
 use crate::{
-	hex_utils, ChannelManager, Config, Error, NetworkGraph, PeerInfo, PeerStore, UserChannelId,
+	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, NetworkGraph, PeerInfo,
+	PeerStore, UserChannelId,
 };
 
 use crate::connection::ConnectionManager;
@@ -15,9 +16,10 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, log_info, Logger};
+use crate::logger::{log_debug, log_error, log_info, Logger};
 
 use lightning::chain::chaininterface::ConfirmationTarget;
+use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
@@ -317,6 +319,7 @@ where
 {
 	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
+	bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
@@ -333,15 +336,17 @@ where
 	L::Target: Logger,
 {
 	pub fn new(
-		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		connection_manager: Arc<ConnectionManager<L>>, output_sweeper: Arc<Sweeper>,
-		network_graph: Arc<NetworkGraph>, payment_store: Arc<PaymentStore<L>>,
-		peer_store: Arc<PeerStore<L>>, runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
-		logger: L, config: Arc<Config>,
+		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>,
+		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
+		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
+		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
+		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
+		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
+			bump_tx_event_handler,
 			channel_manager,
 			connection_manager,
 			output_sweeper,
@@ -815,9 +820,67 @@ where
 				temporary_channel_id,
 				counterparty_node_id,
 				funding_satoshis,
-				channel_type: _,
+				channel_type,
 				push_msat: _,
 			} => {
+				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
+
+				if anchor_channel {
+					if let Some(anchor_channels_config) =
+						self.config.anchor_channels_config.as_ref()
+					{
+						let cur_anchor_reserve_sats = crate::total_anchor_channels_reserve_sats(
+							&self.channel_manager,
+							&self.config,
+						);
+						let spendable_amount_sats = self
+							.wallet
+							.get_spendable_amount_sats(cur_anchor_reserve_sats)
+							.unwrap_or(0);
+
+						let required_amount_sats = if anchor_channels_config
+							.trusted_peers_no_reserve
+							.contains(&counterparty_node_id)
+						{
+							0
+						} else {
+							anchor_channels_config.per_channel_reserve_sats
+						};
+
+						if spendable_amount_sats < required_amount_sats {
+							log_error!(
+								self.logger,
+								"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves.",
+								counterparty_node_id,
+							);
+							self.channel_manager
+								.force_close_without_broadcasting_txn(
+									&temporary_channel_id,
+									&counterparty_node_id,
+								)
+								.unwrap_or_else(|e| {
+									log_error!(self.logger, "Failed to reject channel: {:?}", e)
+								});
+							return;
+						}
+					} else {
+						log_error!(
+							self.logger,
+							"Rejecting inbound channel from peer {} due to Anchor channels being disabled.",
+							counterparty_node_id,
+						);
+						self.channel_manager
+							.force_close_without_broadcasting_txn(
+								&temporary_channel_id,
+								&counterparty_node_id,
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to reject channel: {:?}", e)
+							});
+						return;
+					}
+				}
+
 				let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let res = if allow_0conf {
@@ -838,8 +901,9 @@ where
 					Ok(()) => {
 						log_info!(
 							self.logger,
-							"Accepting inbound{} channel of {}sats from{} peer {}",
+							"Accepting inbound{}{} channel of {}sats from{} peer {}",
 							if allow_0conf { " 0conf" } else { "" },
+							if anchor_channel { " Anchor" } else { "" },
 							funding_satoshis,
 							if allow_0conf { " trusted" } else { "" },
 							counterparty_node_id,
@@ -848,8 +912,9 @@ where
 					Err(e) => {
 						log_error!(
 							self.logger,
-							"Error while accepting inbound{} channel from{} peer {}: {:?}",
+							"Error while accepting inbound{}{} channel from{} peer {}: {:?}",
 							if allow_0conf { " 0conf" } else { "" },
+							if anchor_channel { " Anchor" } else { "" },
 							counterparty_node_id,
 							if allow_0conf { " trusted" } else { "" },
 							e,
@@ -1018,7 +1083,6 @@ where
 			},
 			LdkEvent::DiscardFunding { .. } => {},
 			LdkEvent::HTLCIntercepted { .. } => {},
-			LdkEvent::BumpTransaction(_) => {},
 			LdkEvent::InvoiceRequestFailed { payment_id } => {
 				log_error!(
 					self.logger,
@@ -1061,6 +1125,35 @@ where
 						}
 					});
 				}
+			},
+			LdkEvent::BumpTransaction(bte) => {
+				let (channel_id, counterparty_node_id) = match bte {
+					BumpTransactionEvent::ChannelClose {
+						ref channel_id,
+						ref counterparty_node_id,
+						..
+					} => (channel_id, counterparty_node_id),
+					BumpTransactionEvent::HTLCResolution {
+						ref channel_id,
+						ref counterparty_node_id,
+						..
+					} => (channel_id, counterparty_node_id),
+				};
+
+				if let Some(anchor_channels_config) = self.config.anchor_channels_config.as_ref() {
+					if anchor_channels_config
+						.trusted_peers_no_reserve
+						.contains(counterparty_node_id)
+					{
+						log_debug!(self.logger,
+							"Ignoring BumpTransactionEvent for channel {} due to trusted counterparty {}",
+							channel_id, counterparty_node_id
+						);
+						return;
+					}
+				}
+
+				self.bump_tx_event_handler.handle_event(&bte);
 			},
 		}
 	}
