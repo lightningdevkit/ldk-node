@@ -979,6 +979,7 @@ fn build_with_store_internal(
 	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
 	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
 	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
+	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
 
 	Ok(Node {
 		runtime,
@@ -1010,6 +1011,7 @@ fn build_with_store_internal(
 		latest_fee_rate_cache_update_timestamp,
 		latest_rgs_snapshot_timestamp,
 		latest_node_announcement_broadcast_timestamp,
+		latest_channel_monitor_archival_height,
 	})
 }
 
