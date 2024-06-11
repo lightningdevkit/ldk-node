@@ -1149,6 +1149,8 @@ impl Node {
 			&*sync_cmon as &(dyn Confirm + Sync + Send),
 			&*sync_sweeper as &(dyn Confirm + Sync + Send),
 		];
+		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
 		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
 
 		tokio::task::block_in_place(move || {
@@ -1162,6 +1164,11 @@ impl Node {
 								"Sync of on-chain wallet finished in {}ms.",
 								now.elapsed().as_millis()
 							);
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
 						},
 						Err(e) => {
 							log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
@@ -1177,6 +1184,12 @@ impl Node {
 								"Sync of Lightning wallet finished in {}ms.",
 								now.elapsed().as_millis()
 							);
+
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
 
 							periodically_archive_fully_resolved_monitors(
 								archive_cman,
