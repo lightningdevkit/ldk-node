@@ -1,3 +1,4 @@
+pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus};
 
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
@@ -5,6 +6,7 @@ pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::{Offer, OfferId};
 pub use lightning::offers::refund::Refund;
+pub use lightning::routing::gossip::{NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
 
 pub use lightning_invoice::Bolt11Invoice;
@@ -38,6 +40,22 @@ impl UniffiCustomTypeConverter for PublicKey {
 		}
 
 		Err(Error::InvalidPublicKey.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for NodeId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Ok(key) = NodeId::from_str(&val) {
+			return Ok(key);
+		}
+
+		Err(Error::InvalidNodeId.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {

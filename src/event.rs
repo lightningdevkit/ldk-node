@@ -1,7 +1,7 @@
 use crate::types::{DynStore, Sweeper, Wallet};
 
 use crate::{
-	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, NetworkGraph, PeerInfo,
+	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, Graph, PeerInfo,
 	PeerStore, UserChannelId,
 };
 
@@ -323,7 +323,7 @@ where
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
-	network_graph: Arc<NetworkGraph>,
+	network_graph: Arc<Graph>,
 	payment_store: Arc<PaymentStore<L>>,
 	peer_store: Arc<PeerStore<L>>,
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
@@ -339,7 +339,7 @@ where
 		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>,
 		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
-		output_sweeper: Arc<Sweeper>, network_graph: Arc<NetworkGraph>,
+		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
 		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, logger: L, config: Arc<Config>,
 	) -> Self {

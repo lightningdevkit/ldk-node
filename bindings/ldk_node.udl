@@ -84,6 +84,7 @@ interface Node {
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
+	NetworkGraph network_graph();
 	[Throws=NodeError]
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
@@ -167,6 +168,7 @@ enum NodeError {
 	"InvalidPublicKey",
 	"InvalidSecretKey",
 	"InvalidOfferId",
+	"InvalidNodeId",
 	"InvalidPaymentId",
 	"InvalidPaymentHash",
 	"InvalidPaymentPreimage",
@@ -387,6 +389,46 @@ enum LogLevel {
 	"Error",
 };
 
+interface NetworkGraph {
+	sequence<u64> list_channels();
+	ChannelInfo? channel(u64 short_channel_id);
+	sequence<NodeId> list_nodes();
+	NodeInfo? node([ByRef]NodeId node_id);
+};
+
+dictionary ChannelInfo {
+	NodeId node_one;
+	ChannelUpdateInfo? one_to_two;
+	NodeId node_two;
+	ChannelUpdateInfo? two_to_one;
+	u64? capacity_sats;
+};
+
+dictionary ChannelUpdateInfo {
+	u32 last_update;
+	boolean enabled;
+	u16 cltv_expiry_delta;
+	u64 htlc_minimum_msat;
+	u64 htlc_maximum_msat;
+	RoutingFees fees;
+};
+
+dictionary RoutingFees {
+	u32 base_msat;
+	u32 proportional_millionths;
+};
+
+dictionary NodeInfo {
+	sequence<u64> channels;
+	NodeAnnouncementInfo? announcement_info;
+};
+
+dictionary NodeAnnouncementInfo {
+	u32 last_update;
+	string alias;
+	sequence<SocketAddress> addresses;
+};
+
 [Custom]
 typedef string Txid;
 
@@ -398,6 +440,9 @@ typedef string SocketAddress;
 
 [Custom]
 typedef string PublicKey;
+
+[Custom]
+typedef string NodeId;
 
 [Custom]
 typedef string Address;

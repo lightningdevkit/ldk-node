@@ -83,6 +83,7 @@ mod error;
 mod event;
 mod fee_estimator;
 mod gossip;
+pub mod graph;
 mod hex_utils;
 pub mod io;
 mod liquidity;
@@ -128,13 +129,14 @@ use config::{
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
+use graph::NetworkGraph;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
 use payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
-	KeysManager, NetworkGraph, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Graph, KeysManager, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
@@ -183,7 +185,7 @@ pub struct Node {
 	peer_manager: Arc<PeerManager>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	keys_manager: Arc<KeysManager>,
-	network_graph: Arc<NetworkGraph>,
+	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
 	kv_store: Arc<DynStore>,
@@ -1405,6 +1407,18 @@ impl Node {
 		}
 
 		peers
+	}
+
+	/// Returns a handler allowing to query the network graph.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn network_graph(&self) -> NetworkGraph {
+		NetworkGraph::new(Arc::clone(&self.network_graph))
+	}
+
+	/// Returns a handler allowing to query the network graph.
+	#[cfg(feature = "uniffi")]
+	pub fn network_graph(&self) -> Arc<NetworkGraph> {
+		Arc::new(NetworkGraph::new(Arc::clone(&self.network_graph)))
 	}
 
 	/// Creates a digital ECDSA signature of a message with the node's secret key.
