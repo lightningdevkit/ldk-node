@@ -21,6 +21,16 @@ jobs:
           repository: getAlby/ldk-node-go
           ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
 
+      - name: Prepare git
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "github-actions"
+          git config --global push.autoSetupRemote true
+          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
+            git checkout -b ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
+            git pull origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }} || true
+          fi
+
       - name: Download bindings
         uses: actions/download-artifact@v4
         with:
@@ -53,13 +63,6 @@ jobs:
 
       - name: Commit and push bindings
         run: |
-          git config --global user.email "github-actions@github.com"
-          git config --global user.name "github-actions"
-          git config --global push.autoSetupRemote true
-          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
-            git checkout -b ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
-          fi
-          git pull origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }} || true
           git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
           git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
           git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
@@ -68,7 +71,7 @@ jobs:
           git commit -m "Update bindings."
 
           if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
-            git push origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
+          git push origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
           else
-            git push origin master
+          git push origin master
           fi
