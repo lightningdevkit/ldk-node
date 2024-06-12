@@ -49,20 +49,17 @@ jobs:
     runs-on: macos-12
     needs: build
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
         with:
           name: ldk-node-x86_64-apple-darwin
-          path: x86_64-apple-darwin/libldk_node.dylib
+          path: x86_64-apple-darwin
 
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
         with:
           name: ldk-node-aarch64-apple-darwin
-          path: aarch64-apple-darwin/libldk_node.dylib
+          path: aarch64-apple-darwin
 
       - name: Make universal library
         run: |
