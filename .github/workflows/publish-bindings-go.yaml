@@ -39,12 +39,6 @@ jobs:
           name: ldk-node-arm-unknown-linux-gnueabihf
           path: ldk_node/arm-unknown-linux-gnueabihf
 
-      - name: Download Windows x86_64 GNU libs
-        uses: actions/download-artifact@v4
-        with:
-          name: ldk-node-x86_64-pc-windows-gnu
-          path: ldk_node/x86_64-pc-windows-gnu
-
       - name: Download Windows x86_64 MSVC libs
         uses: actions/download-artifact@v4
         with:
@@ -69,7 +63,6 @@ jobs:
           git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
           git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
           git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
-          git add ldk_node/x86_64-pc-windows-gnu/ldk_node.dll
           git add ldk_node/x86_64-pc-windows-msvc/ldk_node.dll
           git add ldk_node/universal-macos/libldk_node.dylib
           git commit -m "Update bindings."
