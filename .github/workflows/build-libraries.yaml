@@ -27,7 +27,7 @@ jobs:
 
       - name: Add target
         if: ${{ matrix.build.tool == 'cargo' }}
-        run: rustup target add ${{ matrix.target }}
+        run: rustup target add ${{ matrix.build.target }}
 
       - name: Install cross
         if: ${{ matrix.build.tool == 'cross' }}
