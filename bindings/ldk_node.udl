@@ -237,8 +237,7 @@ interface PaymentKind {
 	Onchain();
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, string? bolt11_invoice);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
-	// TODO: add custom_tlvs here as sequence<TlvEntry> custom_tlvs
-	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
+	Spontaneous(PaymentHash hash, PaymentPreimage? preimage, sequence<TlvEntry> custom_tlvs);
 };
 
 enum PaymentDirection {
