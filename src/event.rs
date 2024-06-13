@@ -38,6 +38,7 @@ use core::future::Future;
 use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{self, Duration};
 
@@ -847,8 +848,49 @@ where
 					}
 				}
 
+				// fix for LND nodes which support both 0-conf and non-0conf
+				// remove when https://github.com/lightningnetwork/lnd/pull/8796 is in LND
+				let mut lnd_0conf_non0conf_fix: Vec<PublicKey> = Vec::new();
+				// Olympus
+				lnd_0conf_non0conf_fix.push(
+					PublicKey::from_str(
+						"031b301307574bbe9b9ac7b79cbe1700e31e544513eae0b5d7497483083f99e581",
+					)
+					.unwrap(),
+				);
+				// Olympus (mutinynet)
+				lnd_0conf_non0conf_fix.push(
+					PublicKey::from_str(
+						"032ae843e4d7d177f151d021ac8044b0636ec72b1ce3ffcde5c04748db2517ab03",
+					)
+					.unwrap(),
+				);
+				// Megalith
+				lnd_0conf_non0conf_fix.push(
+					PublicKey::from_str(
+						"038a9e56512ec98da2b5789761f7af8f280baf98a09282360cd6ff1381b5e889bf",
+					)
+					.unwrap(),
+				);
+				// Megalith (mutinynet)
+				lnd_0conf_non0conf_fix.push(
+					PublicKey::from_str(
+						"03e30fda71887a916ef5548a4d02b06fe04aaa1a8de9e24134ce7f139cf79d7579",
+					)
+					.unwrap(),
+				);
+
+				log_info!(
+					self.logger,
+					"new channel with peer {} requires 0 conf: {}",
+					counterparty_node_id,
+					channel_type.requires_zero_conf()
+				);
+
 				let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
-				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
+				let allow_0conf = (channel_type.requires_zero_conf()
+					|| !lnd_0conf_non0conf_fix.contains(&counterparty_node_id))
+					&& self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let res = if allow_0conf {
 					self.channel_manager.accept_inbound_channel_from_trusted_peer_0conf(
 						&temporary_channel_id,
