@@ -431,7 +431,7 @@ where
 				via_channel_id: _,
 				via_user_channel_id: _,
 				claim_deadline: _,
-				onion_fields: _,
+				onion_fields,
 				counterparty_skimmed_fee_msat,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
@@ -553,6 +553,18 @@ where
 						panic!("Failed to access payment store");
 					});
 				}
+				if let PaymentPurpose::SpontaneousPayment(preimage) = purpose {
+					// TODO: fix unwrap to have proper error handling and log error
+					let custom_tlvs = onion_fields.unwrap().custom_tlvs();
+					log_info!(
+						self.logger,
+						"Saving spontaneous payment with custom TLVs for payment hash {} of {}msat",
+						// custom_tlvs, // TODO: log the custom TLVs
+						hex_utils::to_string(&payment_hash.0),
+						amount_msat,
+					);
+					// TODO: create payment in pending status and save TLVs as a new field on spontaneous payment in PaymentKind::Spontaneous
+				}
 			},
 			LdkEvent::PaymentClaimed {
 				payment_hash,
@@ -622,6 +634,8 @@ where
 						return;
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
+						// TODO: change to updating the payment instead of creating it
+						// since it now has to be created when checking if the payment is claimable in order to store the custom tlvs
 						let payment = PaymentDetails {
 							id: payment_id,
 							kind: PaymentKind::Spontaneous {

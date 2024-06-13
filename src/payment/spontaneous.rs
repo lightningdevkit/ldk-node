@@ -89,6 +89,7 @@ impl SpontaneousPayment {
 					kind: PaymentKind::Spontaneous {
 						hash: payment_hash,
 						preimage: Some(payment_preimage),
+						// TODO: save custom TLVs here from recipient_fields.custom_tlvs()
 					},
 					status: PaymentStatus::Pending,
 					direction: PaymentDirection::Outbound,
