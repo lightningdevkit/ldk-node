@@ -26,9 +26,11 @@ jobs:
           git config --global user.email "github-actions@github.com"
           git config --global user.name "github-actions"
           git config --global push.autoSetupRemote true
+          git config --global pull.ff only
           if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
             git fetch
             git checkout -b ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
+            git pull origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }} || true
           fi
 
       - name: Download bindings
