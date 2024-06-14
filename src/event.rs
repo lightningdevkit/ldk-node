@@ -468,6 +468,25 @@ where
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				if let Some(info) = self.payment_store.get(&payment_id) {
+					if info.direction == PaymentDirection::Outbound {
+						log_info!(
+							self.logger,
+							"Refused inbound payment with ID {}: circular payments are unsupported.",
+							payment_id
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+
+						let update = PaymentDetailsUpdate {
+							status: Some(PaymentStatus::Failed),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						self.payment_store.update(&update).unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to access payment store: {}", e);
+							panic!("Failed to access payment store");
+						});
+						return;
+					}
+
 					if info.status == PaymentStatus::Succeeded
 						|| matches!(info.kind, PaymentKind::Spontaneous { .. })
 					{
