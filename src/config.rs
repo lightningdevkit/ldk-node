@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use lightning::ln::msgs::SocketAddress;
+use lightning::util::config::UserConfig;
 use lightning::util::logger::Level as LogLevel;
 
 use bitcoin::secp256k1::PublicKey;
@@ -228,4 +229,19 @@ impl Default for AnchorChannelsConfig {
 /// [`Config::default()`].
 pub fn default_config() -> Config {
 	Config::default()
+}
+
+pub(crate) fn default_user_config(config: &Config) -> UserConfig {
+	// Initialize the default config values.
+	//
+	// Note that methods such as Node::connect_open_channel might override some of the values set
+	// here, e.g. the ChannelHandshakeConfig, meaning these default values will mostly be relevant
+	// for inbound channels.
+	let mut user_config = UserConfig::default();
+	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.manually_accept_inbound_channels = true;
+	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
+		config.anchor_channels_config.is_some();
+
+	user_config
 }
