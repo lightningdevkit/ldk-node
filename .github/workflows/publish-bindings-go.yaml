@@ -29,7 +29,6 @@ jobs:
           if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
             git fetch
             git checkout -b ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
-            git pull origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }} || true
           fi
 
       - name: Download bindings
