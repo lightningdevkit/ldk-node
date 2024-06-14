@@ -123,7 +123,8 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
@@ -200,6 +201,7 @@ pub struct Node {
 	latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_rgs_snapshot_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_node_announcement_broadcast_timestamp: Arc<RwLock<Option<u64>>>,
+	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
 }
 
 impl Node {
@@ -345,10 +347,13 @@ impl Node {
 
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
+		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
+		let archive_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
 		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
 		let mut stop_sync = self.stop_sender.subscribe();
 		let wallet_sync_interval_secs =
 			self.config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
@@ -378,6 +383,12 @@ impl Node {
 								let unix_time_secs_opt =
 									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
 								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+
+								periodically_archive_fully_resolved_monitors(
+									Arc::clone(&archive_cman),
+									Arc::clone(&archive_cmon),
+									Arc::clone(&sync_monitor_archival_height)
+								);
 							}
 							Err(e) => {
 								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
@@ -1115,7 +1126,8 @@ impl Node {
 		}
 	}
 
-	/// Manually sync the LDK and BDK wallets with the current chain state.
+	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
+	/// cache.
 	///
 	/// **Note:** The wallets are regularly synced in the background, which is configurable via
 	/// [`Config::onchain_wallet_sync_interval_secs`] and [`Config::wallet_sync_interval_secs`].
@@ -1130,7 +1142,10 @@ impl Node {
 		let wallet = Arc::clone(&self.wallet);
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
+		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
+		let archive_cmon = Arc::clone(&self.chain_monitor);
+		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
 		let confirmables = vec![
@@ -1138,6 +1153,11 @@ impl Node {
 			&*sync_cmon as &(dyn Confirm + Sync + Send),
 			&*sync_sweeper as &(dyn Confirm + Sync + Send),
 		];
+		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+		let sync_fee_rate_update_timestamp =
+			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
+		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
+		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
 
 		tokio::task::block_in_place(move || {
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
@@ -1150,6 +1170,11 @@ impl Node {
 								"Sync of on-chain wallet finished in {}ms.",
 								now.elapsed().as_millis()
 							);
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
 						},
 						Err(e) => {
 							log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
@@ -1158,12 +1183,44 @@ impl Node {
 					};
 
 					let now = Instant::now();
+					match fee_estimator.update_fee_estimates().await {
+						Ok(()) => {
+							log_info!(
+								sync_logger,
+								"Fee rate cache update finished in {}ms.",
+								now.elapsed().as_millis()
+							);
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
+						},
+						Err(e) => {
+							log_error!(sync_logger, "Fee rate cache update failed: {}", e,);
+							return Err(e);
+						},
+					}
+
+					let now = Instant::now();
 					match tx_sync.sync(confirmables).await {
 						Ok(()) => {
 							log_info!(
 								sync_logger,
 								"Sync of Lightning wallet finished in {}ms.",
 								now.elapsed().as_millis()
+							);
+
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+
+							periodically_archive_fully_resolved_monitors(
+								archive_cman,
+								archive_cmon,
+								sync_monitor_archival_height,
 							);
 							Ok(())
 						},
@@ -1499,4 +1556,20 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
+}
+
+fn periodically_archive_fully_resolved_monitors(
+	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
+) {
+	let mut latest_archival_height_lock = latest_channel_monitor_archival_height.write().unwrap();
+	let cur_height = channel_manager.current_best_block().height;
+	let should_archive = latest_archival_height_lock
+		.as_ref()
+		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
+
+	if should_archive {
+		chain_monitor.archive_fully_resolved_channel_monitors();
+		*latest_archival_height_lock = Some(cur_height);
+	}
 }
