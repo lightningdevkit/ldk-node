@@ -8,6 +8,7 @@ on:
 # Dummy comment to commit and test concurrency.
 concurrency:
   group: ${{ github.head_ref ||  github.ref }}
+  cancel-in-progress: true
 
 env:
   RUST_VERSION: 1.78
