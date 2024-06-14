@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +35,21 @@ pub struct PaymentDetails {
 	pub direction: PaymentDirection,
 	/// The status of the payment.
 	pub status: PaymentStatus,
+	/// The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+	pub latest_update_timestamp: u64,
+}
+
+impl PaymentDetails {
+	pub(crate) fn new(
+		id: PaymentId, kind: PaymentKind, amount_msat: Option<u64>, direction: PaymentDirection,
+		status: PaymentStatus,
+	) -> Self {
+		let latest_update_timestamp = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
+		Self { id, kind, amount_msat, direction, status, latest_update_timestamp }
+	}
 }
 
 impl Writeable for PaymentDetails {
@@ -48,6 +64,7 @@ impl Writeable for PaymentDetails {
 			(3, self.kind, required),
 			// 4 used to be `secret` before it was moved to `kind` in v0.3.0
 			(4, None::<Option<PaymentSecret>>, required),
+			(5, self.latest_update_timestamp, required),
 			(6, self.amount_msat, required),
 			(8, self.direction, required),
 			(10, self.status, required)
@@ -58,12 +75,17 @@ impl Writeable for PaymentDetails {
 
 impl Readable for PaymentDetails {
 	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<PaymentDetails, DecodeError> {
+		let unix_time_secs = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
 		_init_and_read_len_prefixed_tlv_fields!(reader, {
 			(0, id, required), // Used to be `hash`
 			(1, lsp_fee_limits, option),
 			(2, preimage, required),
 			(3, kind_opt, option),
 			(4, secret, required),
+			(5, latest_update_timestamp, (default_value, unix_time_secs)),
 			(6, amount_msat, required),
 			(8, direction, required),
 			(10, status, required)
@@ -72,6 +94,8 @@ impl Readable for PaymentDetails {
 		let id: PaymentId = id.0.ok_or(DecodeError::InvalidValue)?;
 		let preimage: Option<PaymentPreimage> = preimage.0.ok_or(DecodeError::InvalidValue)?;
 		let secret: Option<PaymentSecret> = secret.0.ok_or(DecodeError::InvalidValue)?;
+		let latest_update_timestamp: u64 =
+			latest_update_timestamp.0.ok_or(DecodeError::InvalidValue)?;
 		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
@@ -103,7 +127,7 @@ impl Readable for PaymentDetails {
 			}
 		};
 
-		Ok(PaymentDetails { id, kind, amount_msat, direction, status })
+		Ok(PaymentDetails { id, kind, amount_msat, direction, status, latest_update_timestamp })
 	}
 }
 
@@ -391,6 +415,11 @@ where
 				payment.status = status;
 			}
 
+			payment.latest_update_timestamp = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs();
+
 			self.persist_info(&update.id, payment)?;
 			updated = true;
 		}
@@ -487,13 +516,9 @@ mod tests {
 			)
 			.is_err());
 
-		let payment = PaymentDetails {
-			id,
-			kind: PaymentKind::Bolt11 { hash, preimage: None, secret: None },
-			amount_msat: None,
-			direction: PaymentDirection::Inbound,
-			status: PaymentStatus::Pending,
-		};
+		let kind = PaymentKind::Bolt11 { hash, preimage: None, secret: None };
+		let payment =
+			PaymentDetails::new(id, kind, None, PaymentDirection::Inbound, PaymentStatus::Pending);
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
 		assert!(payment_store.get(&id).is_some());

@@ -598,18 +598,20 @@ where
 						..
 					} => {
 						let offer_id = payment_context.offer_id;
-						let payment = PaymentDetails {
-							id: payment_id,
-							kind: PaymentKind::Bolt12Offer {
-								hash: Some(payment_hash),
-								preimage: payment_preimage,
-								secret: Some(payment_secret),
-								offer_id,
-							},
-							amount_msat: Some(amount_msat),
-							direction: PaymentDirection::Inbound,
-							status: PaymentStatus::Pending,
+						let kind = PaymentKind::Bolt12Offer {
+							hash: Some(payment_hash),
+							preimage: payment_preimage,
+							secret: Some(payment_secret),
+							offer_id,
 						};
+
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(amount_msat),
+							PaymentDirection::Inbound,
+							PaymentStatus::Pending,
+						);
 
 						match self.payment_store.insert(payment) {
 							Ok(false) => (),
@@ -638,16 +640,18 @@ where
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
 						// Since it's spontaneous, we insert it now into our store.
-						let payment = PaymentDetails {
-							id: payment_id,
-							kind: PaymentKind::Spontaneous {
-								hash: payment_hash,
-								preimage: Some(preimage),
-							},
-							amount_msat: Some(amount_msat),
-							direction: PaymentDirection::Inbound,
-							status: PaymentStatus::Pending,
+						let kind = PaymentKind::Spontaneous {
+							hash: payment_hash,
+							preimage: Some(preimage),
 						};
+
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(amount_msat),
+							PaymentDirection::Inbound,
+							PaymentStatus::Pending,
+						);
 
 						match self.payment_store.insert(payment) {
 							Ok(false) => (),

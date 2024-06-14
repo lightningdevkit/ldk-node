@@ -105,17 +105,18 @@ impl Bolt11Payment {
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
 
-				let payment = PaymentDetails {
-					id: payment_id,
-					kind: PaymentKind::Bolt11 {
-						hash: payment_hash,
-						preimage: None,
-						secret: payment_secret,
-					},
-					amount_msat: invoice.amount_milli_satoshis(),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Pending,
+				let kind = PaymentKind::Bolt11 {
+					hash: payment_hash,
+					preimage: None,
+					secret: payment_secret,
 				};
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					invoice.amount_milli_satoshis(),
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
 
 				self.payment_store.insert(payment)?;
 
@@ -126,17 +127,18 @@ impl Bolt11Payment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let payment = PaymentDetails {
-							id: payment_id,
-							kind: PaymentKind::Bolt11 {
-								hash: payment_hash,
-								preimage: None,
-								secret: payment_secret,
-							},
-							amount_msat: invoice.amount_milli_satoshis(),
-							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::Failed,
+						let kind = PaymentKind::Bolt11 {
+							hash: payment_hash,
+							preimage: None,
+							secret: payment_secret,
 						};
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							invoice.amount_milli_satoshis(),
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
 
 						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)
@@ -216,17 +218,19 @@ impl Bolt11Payment {
 					payee_pubkey
 				);
 
-				let payment = PaymentDetails {
-					id: payment_id,
-					kind: PaymentKind::Bolt11 {
-						hash: payment_hash,
-						preimage: None,
-						secret: Some(*payment_secret),
-					},
-					amount_msat: Some(amount_msat),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Pending,
+				let kind = PaymentKind::Bolt11 {
+					hash: payment_hash,
+					preimage: None,
+					secret: Some(*payment_secret),
 				};
+
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					Some(amount_msat),
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_id)
@@ -237,17 +241,18 @@ impl Bolt11Payment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let payment = PaymentDetails {
-							id: payment_id,
-							kind: PaymentKind::Bolt11 {
-								hash: payment_hash,
-								preimage: None,
-								secret: Some(*payment_secret),
-							},
-							amount_msat: Some(amount_msat),
-							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::Failed,
+						let kind = PaymentKind::Bolt11 {
+							hash: payment_hash,
+							preimage: None,
+							secret: Some(*payment_secret),
 						};
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(amount_msat),
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
 						self.payment_store.insert(payment)?;
 
 						Err(Error::PaymentSendingFailed)
@@ -472,19 +477,18 @@ impl Bolt11Payment {
 		} else {
 			None
 		};
-		let payment = PaymentDetails {
-			id,
-			kind: PaymentKind::Bolt11 {
-				hash: payment_hash,
-				preimage,
-				secret: Some(payment_secret.clone()),
-			},
-
-			amount_msat,
-			direction: PaymentDirection::Inbound,
-			status: PaymentStatus::Pending,
+		let kind = PaymentKind::Bolt11 {
+			hash: payment_hash,
+			preimage,
+			secret: Some(payment_secret.clone()),
 		};
-
+		let payment = PaymentDetails::new(
+			id,
+			kind,
+			amount_msat,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
 		self.payment_store.insert(payment)?;
 
 		Ok(invoice)
@@ -605,19 +609,19 @@ impl Bolt11Payment {
 		let id = PaymentId(payment_hash.0);
 		let preimage =
 			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
-		let payment = PaymentDetails {
-			id,
-			kind: PaymentKind::Bolt11Jit {
-				hash: payment_hash,
-				preimage,
-				secret: Some(payment_secret.clone()),
-				lsp_fee_limits,
-			},
-			amount_msat,
-			direction: PaymentDirection::Inbound,
-			status: PaymentStatus::Pending,
+		let kind = PaymentKind::Bolt11Jit {
+			hash: payment_hash,
+			preimage,
+			secret: Some(payment_secret.clone()),
+			lsp_fee_limits,
 		};
-
+		let payment = PaymentDetails::new(
+			id,
+			kind,
+			amount_msat,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
 		self.payment_store.insert(payment)?;
 
 		// Persist LSP peer to make sure we reconnect on restart.

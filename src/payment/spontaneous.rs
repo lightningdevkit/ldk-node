@@ -77,16 +77,17 @@ impl SpontaneousPayment {
 			Ok(_hash) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
 
-				let payment = PaymentDetails {
-					id: payment_id,
-					kind: PaymentKind::Spontaneous {
-						hash: payment_hash,
-						preimage: Some(payment_preimage),
-					},
-					status: PaymentStatus::Pending,
-					direction: PaymentDirection::Outbound,
-					amount_msat: Some(amount_msat),
+				let kind = PaymentKind::Spontaneous {
+					hash: payment_hash,
+					preimage: Some(payment_preimage),
 				};
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					Some(amount_msat),
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_id)
@@ -97,17 +98,17 @@ impl SpontaneousPayment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
-						let payment = PaymentDetails {
-							id: payment_id,
-							kind: PaymentKind::Spontaneous {
-								hash: payment_hash,
-								preimage: Some(payment_preimage),
-							},
-
-							status: PaymentStatus::Failed,
-							direction: PaymentDirection::Outbound,
-							amount_msat: Some(amount_msat),
+						let kind = PaymentKind::Spontaneous {
+							hash: payment_hash,
+							preimage: Some(payment_preimage),
 						};
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(amount_msat),
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
 
 						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)

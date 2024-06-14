@@ -294,6 +294,7 @@ dictionary PaymentDetails {
 	u64? amount_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
+	u64 latest_update_timestamp;
 };
 
 [NonExhaustive]
