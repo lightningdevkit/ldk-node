@@ -5,9 +5,8 @@ on:
 
   workflow_dispatch:
 
-# Dummy comment to commit and test concurrency.
 concurrency:
-  group: ${{ github.head_ref ||  github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref ||  github.ref }}
   cancel-in-progress: true
 
 env:
