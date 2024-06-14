@@ -605,7 +605,7 @@ mod tests {
 			);
 
 			match spontaneous_decoded.kind {
-				PaymentKind::Spontaneous { hash: h, preimage: p } => {
+				PaymentKind::Spontaneous { hash: h, preimage: p, custom_tlvs: _ } => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 				},
