@@ -1,7 +1,7 @@
 use crate::types::{DynStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, Graph, PeerInfo,
-	PeerStore, UserChannelId,
+	PeerStore, TlvEntry, UserChannelId,
 };
 
 use crate::payment::store::{
@@ -431,7 +431,7 @@ where
 				via_channel_id: _,
 				via_user_channel_id: _,
 				claim_deadline: _,
-				onion_fields: _,
+				onion_fields,
 				counterparty_skimmed_fee_msat,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
@@ -553,6 +553,62 @@ where
 						panic!("Failed to access payment store");
 					});
 				}
+
+				if let PaymentPurpose::SpontaneousPayment(preimage) = purpose {
+					let custom_tlvs = onion_fields
+						.map(|of| {
+							of.custom_tlvs()
+								.iter()
+								.map(|(t, v)| TlvEntry { r#type: *t, value: v.clone() })
+								.collect()
+						})
+						.unwrap_or_default();
+					log_info!(
+						self.logger,
+						"Saving spontaneous payment with custom TLVs {:?} for payment hash {} of {}msat",
+						custom_tlvs,
+						hex_utils::to_string(&payment_hash.0),
+						amount_msat,
+					);
+
+					let payment = PaymentDetails {
+						id: payment_id,
+						kind: PaymentKind::Spontaneous {
+							hash: payment_hash,
+							preimage: Some(preimage),
+							custom_tlvs,
+						},
+						amount_msat: Some(amount_msat),
+						direction: PaymentDirection::Inbound,
+						status: PaymentStatus::Pending,
+						last_update: time::SystemTime::now()
+							.duration_since(time::UNIX_EPOCH)
+							.unwrap_or(time::Duration::ZERO)
+							.as_secs(),
+						fee_msat: None,
+					};
+
+					match self.payment_store.insert(payment) {
+						Ok(false) => (),
+						Ok(true) => {
+							log_error!(
+								self.logger,
+								"Spontaneous payment with hash {} was previously known",
+								hex_utils::to_string(&payment_hash.0)
+							);
+							debug_assert!(false);
+						},
+						Err(e) => {
+							log_error!(
+								self.logger,
+								"Failed to insert spontaneous payment with hash {}: {}",
+								hex_utils::to_string(&payment_hash.0),
+								e
+							);
+							debug_assert!(false);
+						},
+					};
+				}
 			},
 			LdkEvent::PaymentClaimed {
 				payment_hash,
@@ -621,29 +677,18 @@ where
 						);
 						return;
 					},
-					PaymentPurpose::SpontaneousPayment(preimage) => {
-						let payment = PaymentDetails {
-							id: payment_id,
-							kind: PaymentKind::Spontaneous {
-								hash: payment_hash,
-								preimage: Some(preimage),
-							},
-							amount_msat: Some(amount_msat),
-							direction: PaymentDirection::Inbound,
-							status: PaymentStatus::Succeeded,
-							last_update: time::SystemTime::now()
-								.duration_since(time::UNIX_EPOCH)
-								.unwrap_or(time::Duration::ZERO)
-								.as_secs(),
-							fee_msat: None,
+					PaymentPurpose::SpontaneousPayment(_) => {
+						let update = PaymentDetailsUpdate {
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
 						};
 
-						match self.payment_store.insert(payment) {
-							Ok(false) => (),
-							Ok(true) => {
+						match self.payment_store.update(&update) {
+							Ok(true) => (),
+							Ok(false) => {
 								log_error!(
 									self.logger,
-									"Spontaneous payment with hash {} was previously known",
+									"Spontaneous payment with hash {} couldn't be found in store",
 									hex_utils::to_string(&payment_hash.0)
 								);
 								debug_assert!(false);
@@ -651,7 +696,7 @@ where
 							Err(e) => {
 								log_error!(
 									self.logger,
-									"Failed to insert payment with hash {}: {}",
+									"Failed to update payment with hash {}: {}",
 									hex_utils::to_string(&payment_hash.0),
 									e
 								);

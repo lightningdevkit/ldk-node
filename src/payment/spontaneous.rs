@@ -68,7 +68,9 @@ impl SpontaneousPayment {
 			amount_msat,
 		);
 		let recipient_fields = RecipientOnionFields::spontaneous_empty()
-			.with_custom_tlvs(custom_tlvs.into_iter().map(|tlv| (tlv.r#type, tlv.value)).collect())
+			.with_custom_tlvs(
+				custom_tlvs.iter().map(|tlv| (tlv.r#type, tlv.value.clone())).collect(),
+			)
 			.map_err(|_| {
 				log_error!(self.logger, "Payment error: invalid custom TLVs.");
 				Error::InvalidCustomTlv
@@ -89,6 +91,7 @@ impl SpontaneousPayment {
 					kind: PaymentKind::Spontaneous {
 						hash: payment_hash,
 						preimage: Some(payment_preimage),
+						custom_tlvs,
 					},
 					status: PaymentStatus::Pending,
 					direction: PaymentDirection::Outbound,
@@ -111,6 +114,7 @@ impl SpontaneousPayment {
 							kind: PaymentKind::Spontaneous {
 								hash: payment_hash,
 								preimage: Some(payment_preimage),
+								custom_tlvs,
 							},
 
 							status: PaymentStatus::Failed,

@@ -3,7 +3,7 @@ use crate::io::{
 	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, Logger};
-use crate::types::DynStore;
+use crate::types::{DynStore, TlvEntry};
 use crate::Error;
 
 use lightning::ln::channelmanager::PaymentId;
@@ -108,7 +108,7 @@ impl Readable for PaymentDetails {
 					PaymentKind::Bolt11 { hash, preimage, secret, bolt11_invoice: None }
 				}
 			} else {
-				PaymentKind::Spontaneous { hash, preimage }
+				PaymentKind::Spontaneous { hash, preimage, custom_tlvs: Vec::new() }
 			}
 		};
 
@@ -194,6 +194,8 @@ pub enum PaymentKind {
 		hash: PaymentHash,
 		/// The pre-image used by the payment.
 		preimage: Option<PaymentPreimage>,
+		/// Custom TLVs.
+		custom_tlvs: Vec<TlvEntry>,
 	},
 }
 
@@ -214,6 +216,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 	(8, Spontaneous) => {
 		(0, hash, required),
 		(2, preimage, option),
+		(131072, custom_tlvs, optional_vec),
 	};
 );
 
@@ -602,7 +605,7 @@ mod tests {
 			);
 
 			match spontaneous_decoded.kind {
-				PaymentKind::Spontaneous { hash: h, preimage: p } => {
+				PaymentKind::Spontaneous { hash: h, preimage: p, custom_tlvs: _ } => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 				},
