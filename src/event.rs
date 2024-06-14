@@ -601,7 +601,7 @@ where
 						Err(e) => {
 							log_error!(
 								self.logger,
-								"Failed to insert payment with hash {}: {}",
+								"Failed to insert spontaneous payment with hash {}: {}",
 								hex_utils::to_string(&payment_hash.0),
 								e
 							);
@@ -677,9 +677,8 @@ where
 						);
 						return;
 					},
-					PaymentPurpose::SpontaneousPayment(preimage) => {
+					PaymentPurpose::SpontaneousPayment(_) => {
 						let update = PaymentDetailsUpdate {
-							preimage: Some(Some(preimage)),
 							status: Some(PaymentStatus::Succeeded),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
