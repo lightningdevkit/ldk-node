@@ -688,7 +688,7 @@ where
 							Ok(false) => {
 								log_error!(
 									self.logger,
-									"Payment with hash {} couldn't be found in store",
+									"Spontaneous payment with hash {} couldn't be found in store",
 									hex_utils::to_string(&payment_hash.0)
 								);
 								debug_assert!(false);
