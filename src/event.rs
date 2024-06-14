@@ -84,6 +84,28 @@ pub enum Event {
 		/// The value, in thousandths of a satoshi, that has been received.
 		amount_msat: u64,
 	},
+	/// A payment for a previously-registered payment hash has been received.
+	///
+	/// This needs to be manually claimed by supplying the correct preimage to [`claim_for_hash`].
+	///
+	/// If the the provided parameters don't match the expectations or the preimage can't be
+	/// retrieved in time, should be failed-back via [`fail_for_hash`].
+	///
+	/// Note claiming will necessarily fail after the `claim_deadline` has been reached.
+	///
+	/// [`claim_for_hash`]: crate::payment::Bolt11Payment::claim_for_hash
+	/// [`fail_for_hash`]: crate::payment::Bolt11Payment::fail_for_hash
+	PaymentClaimable {
+		/// A local identifier used to track the payment.
+		payment_id: PaymentId,
+		/// The hash of the payment.
+		payment_hash: PaymentHash,
+		/// The value, in thousandths of a satoshi, that is claimable.
+		claimable_amount_msat: u64,
+		/// The block height at which this payment will be failed back and will no longer be
+		/// eligible for claiming.
+		claim_deadline: Option<u32>,
+	},
 	/// A channel has been created and is pending confirmation on-chain.
 	ChannelPending {
 		/// The `channel_id` of the channel.
@@ -156,6 +178,12 @@ impl_writeable_tlv_based_enum!(Event,
 		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
 		(3, reason, upgradable_option),
+	},
+	(6, PaymentClaimable) => {
+		(0, payment_hash, required),
+		(2, payment_id, required),
+		(4, claimable_amount_msat, required),
+		(6, claim_deadline, option),
 	};
 );
 
@@ -434,7 +462,7 @@ where
 				receiver_node_id: _,
 				via_channel_id: _,
 				via_user_channel_id: _,
-				claim_deadline: _,
+				claim_deadline,
 				onion_fields: _,
 				counterparty_skimmed_fee_msat,
 			} => {
@@ -499,6 +527,38 @@ where
 							panic!("Failed to access payment store");
 						});
 						return;
+					}
+
+					// If this is known by the store but ChannelManager doesn't know the preimage,
+					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
+					// user interaction.
+					match info.kind {
+						PaymentKind::Bolt11 { preimage, .. } => {
+							if purpose.preimage().is_none() {
+								debug_assert!(
+									preimage.is_none(),
+									"We would have registered the preimage if we knew"
+								);
+
+								self.event_queue
+									.add_event(Event::PaymentClaimable {
+										payment_id,
+										payment_hash,
+										claimable_amount_msat: amount_msat,
+										claim_deadline,
+									})
+									.unwrap_or_else(|e| {
+										log_error!(
+											self.logger,
+											"Failed to push to event queue: {}",
+											e
+										);
+										panic!("Failed to push to event queue");
+									});
+								return;
+							}
+						},
+						_ => {},
 					}
 				}
 
