@@ -15,23 +15,20 @@ jobs:
     runs-on: ubuntu-20.04
 
     steps:
+      - name: Set target branch name
+        run: |
+          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
+            echo "TARGET_BRANCH=${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}" >> $GITHUB_ENV
+          else
+            echo "TARGET_BRANCH=master" >> $GITHUB_ENV
+          fi
+
       - name: Checkout ldk-node-go
         uses: actions/checkout@v4
         with:
           repository: getAlby/ldk-node-go
           ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
-
-      - name: Prepare git
-        run: |
-          git config --global user.email "github-actions@github.com"
-          git config --global user.name "github-actions"
-          git config --global push.autoSetupRemote true
-          git config --global pull.ff only
-          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
-            git fetch
-            git checkout -b ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
-            git pull origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }} || true
-          fi
+          ref: ${{ env.TARGET_BRANCH }}
 
       - name: Download bindings
         uses: actions/download-artifact@v4
@@ -65,15 +62,14 @@ jobs:
 
       - name: Commit and push bindings
         run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "github-actions"
+          git config --global push.autoSetupRemote true
+
           git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
           git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
           git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
           git add ldk_node/x86_64-pc-windows-msvc/ldk_node.dll
           git add ldk_node/universal-macos/libldk_node.dylib
           git commit -m "Update bindings."
-
-          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
-            git push origin ${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}
-          else
-            git push origin master
-          fi
+          git push origin ${{ env.TARGET_BRANCH }}
