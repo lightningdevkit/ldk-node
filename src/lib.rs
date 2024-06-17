@@ -580,8 +580,8 @@ impl Node {
 								continue;
 							}
 
-							if !bcast_cm.list_channels().iter().any(|chan| chan.is_public) {
-								// Skip if we don't have any public channels.
+							if !bcast_cm.list_channels().iter().any(|chan| chan.is_public && chan.is_channel_ready) {
+								// Skip if we don't have any public channels that are ready.
 								continue;
 							}
 
