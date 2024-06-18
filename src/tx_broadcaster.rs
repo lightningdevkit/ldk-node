@@ -1,4 +1,4 @@
-use crate::logger::{log_bytes, log_debug, log_error, log_trace, Logger};
+use crate::logger::{log_bytes, log_error, log_trace, Logger};
 
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::util::ser::Writeable;
@@ -7,11 +7,11 @@ use esplora_client::AsyncClient as EsploraClient;
 
 use bitcoin::Transaction;
 
+use reqwest::StatusCode;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 use std::ops::Deref;
-use std::time::Duration;
 
 const BCAST_PACKAGE_QUEUE_SIZE: usize = 50;
 
@@ -43,36 +43,24 @@ where
 						log_trace!(self.logger, "Successfully broadcast transaction {}", tx.txid());
 					},
 					Err(e) => match e {
-						esplora_client::Error::Reqwest(_) => {
-							// Wait 500 ms and retry in case we get a `Reqwest` error (typically
-							// 429)
-							tokio::time::sleep(Duration::from_millis(500)).await;
-							log_error!(
-								self.logger,
-								"Sync failed due to HTTP connection error, retrying: {}",
-								e
-							);
-							match self.esplora_client.broadcast(tx).await {
-								Ok(()) => {
-									log_debug!(
-										self.logger,
-										"Successfully broadcast transaction {}",
-										tx.txid()
-									);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to broadcast transaction {}: {}",
-										tx.txid(),
-										e
-									);
-									log_trace!(
-										self.logger,
-										"Failed broadcast transaction bytes: {}",
-										log_bytes!(tx.encode())
-									);
-								},
+						esplora_client::Error::Reqwest(err) => {
+							if err.status() == StatusCode::from_u16(400).ok() {
+								// Ignore 400, as this just means bitcoind already knows the
+								// transaction.
+								// FIXME: We can further differentiate here based on the error
+								// message which will be available with rust-esplora-client 0.7 and
+								// later.
+							} else {
+								log_error!(
+									self.logger,
+									"Failed to broadcast due to HTTP connection error: {}",
+									err
+								);
+								log_trace!(
+									self.logger,
+									"Failed broadcast transaction bytes: {}",
+									log_bytes!(tx.encode())
+								);
 							}
 						},
 						_ => {
