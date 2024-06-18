@@ -217,7 +217,12 @@ impl Node {
 			return Err(Error::AlreadyRunning);
 		}
 
-		log_info!(self.logger, "Starting up LDK Node on network: {}", self.config.network);
+		log_info!(
+			self.logger,
+			"Starting up LDK Node with node ID {} on network: {}",
+			self.node_id(),
+			self.config.network
+		);
 
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
@@ -728,7 +733,7 @@ impl Node {
 	pub fn stop(&self) -> Result<(), Error> {
 		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
 
-		log_info!(self.logger, "Shutting down LDK Node...");
+		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
 		// Stop the runtime.
 		match self.stop_sender.send(()) {
