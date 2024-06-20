@@ -13,6 +13,7 @@ jobs:
       matrix:
         build: [
           { host: ubuntu-20.04, tool: cargo, target: x86_64-unknown-linux-gnu,    output: libldk_node.so },
+          { host: ubuntu-20.04, tool: cross, target: aarch64-unknown-linux-gnu,   output: libldk_node.so },
           { host: ubuntu-20.04, tool: cross, target: arm-unknown-linux-gnueabihf, output: libldk_node.so },
           { host: windows-2019, tool: cargo, target: x86_64-pc-windows-msvc,      output: ldk_node.dll },
           { host: macos-12,     tool: cargo, target: x86_64-apple-darwin,         output: libldk_node.dylib },
