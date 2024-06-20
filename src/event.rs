@@ -586,6 +586,7 @@ where
 							.unwrap_or(time::Duration::ZERO)
 							.as_secs(),
 						fee_msat: None,
+						created_at: 0,
 					};
 
 					match self.payment_store.insert(payment) {
