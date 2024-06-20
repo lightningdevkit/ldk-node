@@ -33,16 +33,24 @@ pub enum Error {
 	PersistenceFailed,
 	/// A fee rate estimation update failed.
 	FeerateEstimationUpdateFailed,
+	/// A fee rate estimation update timed out.
+	FeerateEstimationUpdateTimeout,
 	/// A wallet operation failed.
 	WalletOperationFailed,
+	/// A wallet operation timed out.
+	WalletOperationTimeout,
 	/// A signing operation for transaction failed.
 	OnchainTxSigningFailed,
 	/// A signing operation for message failed.
 	MessageSigningFailed,
 	/// A transaction sync operation failed.
 	TxSyncFailed,
+	/// A transaction sync operation timed out.
+	TxSyncTimeout,
 	/// A gossip updating operation failed.
 	GossipUpdateFailed,
+	/// A gossip updating operation timed out.
+	GossipUpdateTimeout,
 	/// A liquidity request operation failed.
 	LiquidityRequestFailed,
 	/// The given address is invalid.
@@ -111,11 +119,17 @@ impl fmt::Display for Error {
 			Self::FeerateEstimationUpdateFailed => {
 				write!(f, "Failed to update fee rate estimates.")
 			},
+			Self::FeerateEstimationUpdateTimeout => {
+				write!(f, "Updating fee rate estimates timed out.")
+			},
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
+			Self::WalletOperationTimeout => write!(f, "A wallet operation timed out."),
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::MessageSigningFailed => write!(f, "Failed to sign given message."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
+			Self::TxSyncTimeout => write!(f, "Syncing transactions timed out."),
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
+			Self::GossipUpdateTimeout => write!(f, "Updating gossip data timed out."),
 			Self::LiquidityRequestFailed => write!(f, "Failed to request inbound liquidity."),
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
 			Self::InvalidSocketAddress => write!(f, "The given network address is invalid."),

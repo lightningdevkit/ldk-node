@@ -28,6 +28,9 @@ pub(crate) const BDK_CLIENT_CONCURRENCY: u8 = 4;
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
+// The default Esplora client timeout we're using.
+pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
+
 // The timeout after which we abandon retrying failed payments.
 pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -45,6 +48,21 @@ pub(crate) const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60
 
 // The lower limit which we apply to any configured wallet sync intervals.
 pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
+
+// The timeout after which we abort a wallet syncing operation.
+pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90;
+
+// The timeout after which we abort a wallet syncing operation.
+pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 30;
+
+// The timeout after which we abort a fee rate cache update operation.
+pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
+
+// The timeout after which we abort a transaction broadcast operation.
+pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
+
+// The timeout after which we abort a RGS sync operation.
+pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
 
 // The length in bytes of our wallets' keys seed.
 pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;

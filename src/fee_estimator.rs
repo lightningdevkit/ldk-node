@@ -1,3 +1,4 @@
+use crate::config::FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS;
 use crate::logger::{log_error, log_trace, Logger};
 use crate::{Config, Error};
 
@@ -14,6 +15,7 @@ use bitcoin::Network;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 pub(crate) struct OnchainFeeEstimator<L: Deref>
 where
@@ -55,7 +57,21 @@ where
 				ConfirmationTarget::OutputSpendingFee => 12,
 			};
 
-			let estimates = self.esplora_client.get_fee_estimates().await.map_err(|e| {
+			let estimates = tokio::time::timeout(
+				Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+				self.esplora_client.get_fee_estimates(),
+			)
+			.await
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Updating fee rate estimates for {:?} timed out: {}",
+					target,
+					e
+				);
+				Error::FeerateEstimationUpdateTimeout
+			})?
+			.map_err(|e| {
 				log_error!(
 					self.logger,
 					"Failed to retrieve fee rate estimates for {:?}: {}",
