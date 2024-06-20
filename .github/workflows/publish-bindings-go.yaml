@@ -42,6 +42,12 @@ jobs:
           name: ldk-node-x86_64-unknown-linux-gnu
           path: ldk_node/x86_64-unknown-linux-gnu
 
+      - name: Download Linux aarch64 libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-aarch64-unknown-linux-gnu
+          path: ldk_node/aarch64-unknown-linux-gnu
+
       - name: Download Linux ARM libs
         uses: actions/download-artifact@v4
         with:
@@ -68,6 +74,7 @@ jobs:
 
           git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
           git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
+          git add ldk_node/aarch64-unknown-linux-gnu/libldk_node.so
           git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
           git add ldk_node/x86_64-pc-windows-msvc/ldk_node.dll
           git add ldk_node/universal-macos/libldk_node.dylib
