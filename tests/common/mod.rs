@@ -8,10 +8,13 @@ use ldk_node::{
 };
 
 use lightning::ln::msgs::SocketAddress;
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::util::persist::KVStore;
 use lightning::util::test_utils::TestStore;
 use lightning_persister::fs_store::FilesystemStore;
 
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Network, OutPoint, Txid};
 
 use bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
@@ -98,6 +101,31 @@ macro_rules! expect_payment_received_event {
 }
 
 pub(crate) use expect_payment_received_event;
+
+macro_rules! expect_payment_claimable_event {
+	($node: expr, $payment_id: expr, $payment_hash: expr, $claimable_amount_msat: expr) => {{
+		match $node.wait_next_event() {
+			ref e @ Event::PaymentClaimable {
+				payment_id,
+				payment_hash,
+				claimable_amount_msat,
+				..
+			} => {
+				println!("{} got event {:?}", std::stringify!($node), e);
+				assert_eq!(payment_hash, $payment_hash);
+				assert_eq!(payment_id, $payment_id);
+				assert_eq!(claimable_amount_msat, $claimable_amount_msat);
+				$node.event_handled();
+				claimable_amount_msat
+			},
+			ref e => {
+				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+			},
+		}
+	}};
+}
+
+pub(crate) use expect_payment_claimable_event;
 
 macro_rules! expect_payment_successful_event {
 	($node: expr, $payment_id: expr, $fee_paid_msat: expr) => {{
@@ -378,7 +406,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
-	let premine_amount_sat = if expect_anchor_channel { 125_000 } else { 100_000 };
+	let premine_amount_sat = if expect_anchor_channel { 2_125_000 } else { 2_100_000 };
 
 	premine_and_distribute_funds(
 		&bitcoind,
@@ -396,7 +424,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_b.next_event(), None);
 
 	println!("\nA -- connect_open_channel -> B");
-	let funding_amount_sat = 80_000;
+	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
 	node_a
 		.connect_open_channel(
@@ -580,6 +608,89 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
 	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 
+	// Test claiming manually registered payments.
+	let invoice_amount_3_msat = 5_532_000;
+	let manual_preimage = PaymentPreimage([42u8; 32]);
+	let manual_payment_hash = PaymentHash(Sha256::hash(&manual_preimage.0).to_byte_array());
+	let manual_invoice = node_b
+		.bolt11_payment()
+		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_payment_hash)
+		.unwrap();
+	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice).unwrap();
+
+	let claimable_amount_msat = expect_payment_claimable_event!(
+		node_b,
+		manual_payment_id,
+		manual_payment_hash,
+		invoice_amount_3_msat
+	);
+	node_b
+		.bolt11_payment()
+		.claim_for_hash(manual_payment_hash, claimable_amount_msat, manual_preimage)
+		.unwrap();
+	expect_payment_received_event!(node_b, claimable_amount_msat);
+	expect_payment_successful_event!(node_a, Some(manual_payment_id), None);
+	assert_eq!(node_a.payment(&manual_payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&manual_payment_id).unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(
+		node_a.payment(&manual_payment_id).unwrap().amount_msat,
+		Some(invoice_amount_3_msat)
+	);
+	assert!(matches!(node_a.payment(&manual_payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
+	assert_eq!(node_b.payment(&manual_payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&manual_payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&manual_payment_id).unwrap().amount_msat,
+		Some(invoice_amount_3_msat)
+	);
+	assert!(matches!(node_b.payment(&manual_payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
+
+	// Test failing manually registered payments.
+	let invoice_amount_4_msat = 5_532_000;
+	let manual_fail_preimage = PaymentPreimage([43u8; 32]);
+	let manual_fail_payment_hash =
+		PaymentHash(Sha256::hash(&manual_fail_preimage.0).to_byte_array());
+	let manual_fail_invoice = node_b
+		.bolt11_payment()
+		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_fail_payment_hash)
+		.unwrap();
+	let manual_fail_payment_id = node_a.bolt11_payment().send(&manual_fail_invoice).unwrap();
+
+	expect_payment_claimable_event!(
+		node_b,
+		manual_fail_payment_id,
+		manual_fail_payment_hash,
+		invoice_amount_4_msat
+	);
+	node_b.bolt11_payment().fail_for_hash(manual_fail_payment_hash).unwrap();
+	expect_event!(node_a, PaymentFailed);
+	assert_eq!(node_a.payment(&manual_fail_payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(
+		node_a.payment(&manual_fail_payment_id).unwrap().direction,
+		PaymentDirection::Outbound
+	);
+	assert_eq!(
+		node_a.payment(&manual_fail_payment_id).unwrap().amount_msat,
+		Some(invoice_amount_4_msat)
+	);
+	assert!(matches!(
+		node_a.payment(&manual_fail_payment_id).unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
+	assert_eq!(node_b.payment(&manual_fail_payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(
+		node_b.payment(&manual_fail_payment_id).unwrap().direction,
+		PaymentDirection::Inbound
+	);
+	assert_eq!(
+		node_b.payment(&manual_fail_payment_id).unwrap().amount_msat,
+		Some(invoice_amount_4_msat)
+	);
+	assert!(matches!(
+		node_b.payment(&manual_fail_payment_id).unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
+
 	// Test spontaneous/keysend payments
 	println!("\nA send_spontaneous_payment");
 	let keysend_amount_msat = 2500_000;
@@ -611,8 +722,8 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_b.payment(&keysend_payment_id).unwrap().kind,
 		PaymentKind::Spontaneous { .. }
 	));
-	assert_eq!(node_a.list_payments().len(), 4);
-	assert_eq!(node_b.list_payments().len(), 5);
+	assert_eq!(node_a.list_payments().len(), 6);
+	assert_eq!(node_b.list_payments().len(), 7);
 
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
@@ -715,6 +826,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let sum_of_all_payments_sat = (push_msat
 		+ invoice_amount_1_msat
 		+ overpaid_amount_msat
+		+ invoice_amount_3_msat
 		+ determined_amount_msat
 		+ keysend_amount_msat)
 		/ 1000;

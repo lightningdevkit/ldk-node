@@ -96,13 +96,13 @@ impl Bolt12Payment {
 					secret: None,
 					offer_id: offer.id(),
 				};
-				let payment = PaymentDetails {
-					id: payment_id,
+				let payment = PaymentDetails::new(
+					payment_id,
 					kind,
-					amount_msat: Some(*offer_amount_msat),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Pending,
-				};
+					Some(*offer_amount_msat),
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_id)
@@ -118,13 +118,13 @@ impl Bolt12Payment {
 							secret: None,
 							offer_id: offer.id(),
 						};
-						let payment = PaymentDetails {
-							id: payment_id,
+						let payment = PaymentDetails::new(
+							payment_id,
 							kind,
-							amount_msat: Some(*offer_amount_msat),
-							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::Failed,
-						};
+							Some(*offer_amount_msat),
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
 						self.payment_store.insert(payment)?;
 						Err(Error::InvoiceRequestCreationFailed)
 					},
@@ -197,13 +197,13 @@ impl Bolt12Payment {
 					secret: None,
 					offer_id: offer.id(),
 				};
-				let payment = PaymentDetails {
-					id: payment_id,
+				let payment = PaymentDetails::new(
+					payment_id,
 					kind,
-					amount_msat: Some(amount_msat),
-					direction: PaymentDirection::Outbound,
-					status: PaymentStatus::Pending,
-				};
+					Some(amount_msat),
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
 				self.payment_store.insert(payment)?;
 
 				Ok(payment_id)
@@ -219,13 +219,13 @@ impl Bolt12Payment {
 							secret: None,
 							offer_id: offer.id(),
 						};
-						let payment = PaymentDetails {
-							id: payment_id,
+						let payment = PaymentDetails::new(
+							payment_id,
 							kind,
-							amount_msat: Some(amount_msat),
-							direction: PaymentDirection::Outbound,
-							status: PaymentStatus::Failed,
-						};
+							Some(amount_msat),
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
 						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)
 					},
@@ -281,17 +281,16 @@ impl Bolt12Payment {
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(payment_hash.0);
 
-		let payment = PaymentDetails {
-			id: payment_id,
-			kind: PaymentKind::Bolt12Refund {
-				hash: Some(payment_hash),
-				preimage: None,
-				secret: None,
-			},
-			amount_msat: Some(refund.amount_msats()),
-			direction: PaymentDirection::Inbound,
-			status: PaymentStatus::Pending,
-		};
+		let kind =
+			PaymentKind::Bolt12Refund { hash: Some(payment_hash), preimage: None, secret: None };
+
+		let payment = PaymentDetails::new(
+			payment_id,
+			kind,
+			Some(refund.amount_msats()),
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
 
 		self.payment_store.insert(payment)?;
 
@@ -333,13 +332,13 @@ impl Bolt12Payment {
 
 		let kind = PaymentKind::Bolt12Refund { hash: None, preimage: None, secret: None };
 
-		let payment = PaymentDetails {
-			id: payment_id,
+		let payment = PaymentDetails::new(
+			payment_id,
 			kind,
-			amount_msat: Some(amount_msat),
-			direction: PaymentDirection::Outbound,
-			status: PaymentStatus::Pending,
-		};
+			Some(amount_msat),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
 
 		self.payment_store.insert(payment)?;
 

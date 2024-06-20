@@ -100,9 +100,17 @@ interface Bolt11Payment {
 	[Throws=NodeError]
 	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
 	[Throws=NodeError]
+	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
+	[Throws=NodeError]
+	void fail_for_hash(PaymentHash payment_hash);
+	[Throws=NodeError]
 	Bolt11Invoice receive(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
 	[Throws=NodeError]
+	Bolt11Invoice receive_for_hash(u64 amount_msat, [ByRef]string description, u32 expiry_secs, PaymentHash payment_hash);
+	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount([ByRef]string description, u32 expiry_secs);
+	[Throws=NodeError]
+	Bolt11Invoice receive_variable_amount_for_hash([ByRef]string description, u32 expiry_secs, PaymentHash payment_hash);
 	[Throws=NodeError]
 	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]string description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
 	[Throws=NodeError]
@@ -222,6 +230,7 @@ interface Event {
 	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, u64? fee_paid_msat);
 	PaymentFailed(PaymentId? payment_id, PaymentHash payment_hash, PaymentFailureReason? reason);
 	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat);
+	PaymentClaimable(PaymentId payment_id, PaymentHash payment_hash, u64 claimable_amount_msat, u32? claim_deadline);
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
@@ -285,6 +294,7 @@ dictionary PaymentDetails {
 	u64? amount_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
+	u64 latest_update_timestamp;
 };
 
 [NonExhaustive]
