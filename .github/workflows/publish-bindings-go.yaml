@@ -6,29 +6,18 @@ on:
       LDK_NODE_GO_DEPLOY_KEY:
         required: true
 
-env:
-  LDK_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
-  TARGET_BRANCH_PREFIX: "publish-"
-
 jobs:
   publish-ldk-node-go:
     runs-on: ubuntu-20.04
 
-    steps:
-      - name: Set target branch name
-        run: |
-          if [ "${{ env.LDK_BRANCH_NAME }}" != "main" ]; then
-            echo "TARGET_BRANCH=${{ env.TARGET_BRANCH_PREFIX }}${{ env.LDK_BRANCH_NAME }}" >> $GITHUB_ENV
-          else
-            echo "TARGET_BRANCH=master" >> $GITHUB_ENV
-          fi
+    if: github.ref_name == 'main' || github.head_ref == 'main'
 
+    steps:
       - name: Checkout ldk-node-go
         uses: actions/checkout@v4
         with:
           repository: getAlby/ldk-node-go
           ssh-key: ${{ secrets.LDK_NODE_GO_DEPLOY_KEY }}
-          ref: ${{ env.TARGET_BRANCH }}
 
       - name: Download bindings
         uses: actions/download-artifact@v4
@@ -41,6 +30,12 @@ jobs:
         with:
           name: ldk-node-x86_64-unknown-linux-gnu
           path: ldk_node/x86_64-unknown-linux-gnu
+
+      - name: Download Linux aarch64 libs
+        uses: actions/download-artifact@v4
+        with:
+          name: ldk-node-aarch64-unknown-linux-gnu
+          path: ldk_node/aarch64-unknown-linux-gnu
 
       - name: Download Linux ARM libs
         uses: actions/download-artifact@v4
@@ -68,8 +63,9 @@ jobs:
 
           git add ldk_node/ldk_node.go ldk_node/ldk_node.h ldk_node/ldk_node.c
           git add ldk_node/x86_64-unknown-linux-gnu/libldk_node.so
+          git add ldk_node/aarch64-unknown-linux-gnu/libldk_node.so
           git add ldk_node/arm-unknown-linux-gnueabihf/libldk_node.so
           git add ldk_node/x86_64-pc-windows-msvc/ldk_node.dll
           git add ldk_node/universal-macos/libldk_node.dylib
           git commit -m "Update bindings."
-          git push origin ${{ env.TARGET_BRANCH }}
+          git push

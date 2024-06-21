@@ -33,6 +33,7 @@ jobs:
       rust_version: ${{ needs.setup.outputs.rust_version }}
 
   publish-ldk-node-go:
+    if: github.ref_name == 'main' || github.head_ref == 'main'
     needs:
       - generate-bindings
       - build-libraries
