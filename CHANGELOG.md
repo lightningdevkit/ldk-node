@@ -1,3 +1,41 @@
+# 0.3.0 - June 21, 2024
+
+This third minor release notably adds support for BOLT12 payments, Anchor
+channels, and sourcing inbound liquidity via LSPS2 just-in-time channels.
+
+## Feature and API updates
+- Support for creating and paying BOLT12 offers and refunds has been added (#265).
+- Support for Anchor channels has been added (#141).
+- Support for sourcing inbound liquidity via LSPS2 just-in-time (JIT) channels has been added (#223).
+- The node's local view of the network graph can now be accessed via interface methods (#293).
+- A new `next_event_async` method was added that allows polling the event queue asynchronously (#224).
+- A `default_config` method was introduced that allows to retrieve sane default values, also in bindings (#242).
+- The `PaymentFailed` and `ChannelClosed` events now include `reason` fields (#260).
+- All available balances outside of channel balances are now exposed via a unified `list_balances` interface method (#250).
+- The maximum in-flight HTLC value has been bumped to 100% of the channel capacity for private outbound channels (#303) and, if JIT channel support is enabled, for inbound channels (#262).
+- The fee paid is now exposed via the `PaymentSuccessful` event (#271).
+- A `status` method has been added allowing to retrieve information about the `Node`'s status (#272).
+- `Node` no longer takes a `KVStore` type parameter, allowing to use the filesystem storage backend in bindings (#244).
+- The payment APIs have been restructured to use per-type (`bolt11`, `onchain`, `bolt12`, ..) payment handlers which can be accessed via corresponding `Node::{type}_payment` methods (#270).
+- Fully resolved channel monitors are now eventually moved to an archive location (#307).
+- The ability to register and claim from custom payment hashes generated outside of LDK Node has been added (#308).
+
+## Bug Fixes
+- Node announcements are now correctly only broadcast if we have any public, sufficiently confirmed channels (#248, #314).
+- Falling back to default fee values is now disallowed on mainnet, ensuring we won't startup without a successful fee cache update (#249).
+- Persisted peers are now correctly reconnected after startup (#265).
+- Concurrent connection attempts to the same peer are no longer overriding each other (#266).
+- Several steps have been taken to reduce the risk of blocking node operation on wallet syncing in the face of unresponsive Esplora services (#281).
+
+## Compatibility Notes
+- LDK has been updated to version 0.0.123 (#291).
+
+In total, this release features 54 files changed, 7282 insertions, 2410 deletions in 165 commits from 3 authors, in alphabetical order:
+
+- Elias Rohrer
+- jbesraa
+- Srikanth Iyengar
+
 # 0.2.2 - May 21, 2024
 
 This is a bugfix release that reestablishes compatibility of Swift packages
