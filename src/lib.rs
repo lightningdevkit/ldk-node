@@ -133,7 +133,10 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
-use payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
+use payment::{
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
+	UnifiedQrPayment,
+};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
@@ -1068,6 +1071,36 @@ impl Node {
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain and [BOLT 11]
+	/// payment option.
+	///
+	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	#[cfg(not(feature = "uniffi"))]
+	pub fn unified_qr_payment(&self) -> UnifiedQrPayment {
+		UnifiedQrPayment::new(
+			self.onchain_payment().into(),
+			self.bolt11_payment().into(),
+			self.bolt12_payment().into(),
+			Arc::clone(&self.logger),
+		)
+	}
+
+	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain and [BOLT 11]
+	/// payment option.
+	///
+	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	#[cfg(feature = "uniffi")]
+	pub fn unified_qr_payment(&self) -> Arc<UnifiedQrPayment> {
+		Arc::new(UnifiedQrPayment::new(
+			self.onchain_payment(),
+			self.bolt11_payment(),
+			self.bolt12_payment(),
 			Arc::clone(&self.logger),
 		))
 	}
