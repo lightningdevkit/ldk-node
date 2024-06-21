@@ -53,6 +53,8 @@ pub enum Error {
 	GossipUpdateTimeout,
 	/// A liquidity request operation failed.
 	LiquidityRequestFailed,
+	/// Converting a URI parameter has failed.
+	UriParameterFailed,
 	/// The given address is invalid.
 	InvalidAddress,
 	/// The given network address is invalid.
@@ -85,6 +87,8 @@ pub enum Error {
 	InvalidChannelId,
 	/// The given network is invalid.
 	InvalidNetwork,
+	/// The given URI is invalid.
+	InvalidUri,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
 	/// The provided offer was denonminated in an unsupported currency.
@@ -131,6 +135,7 @@ impl fmt::Display for Error {
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::GossipUpdateTimeout => write!(f, "Updating gossip data timed out."),
 			Self::LiquidityRequestFailed => write!(f, "Failed to request inbound liquidity."),
+			Self::UriParameterFailed => write!(f, "Failed to convert URI param to string."),
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
 			Self::InvalidSocketAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
@@ -147,6 +152,7 @@ impl fmt::Display for Error {
 			Self::InvalidRefund => write!(f, "The given refund is invalid."),
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
+			Self::InvalidUri => write!(f, "The given URI is invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
 			},
