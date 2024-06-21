@@ -61,6 +61,7 @@ reqwest = { version = "0.11", default-features = false, features = ["json", "rus
 rusqlite = { version = "0.28.0", features = ["bundled"] }
 bitcoin = "0.30.2"
 bip39 = "2.0.0"
+bip21 = "0.3.1"
 
 rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
