@@ -98,6 +98,7 @@ impl SpontaneousPayment {
 					amount_msat: Some(amount_msat),
 					last_update: 0,
 					fee_msat: None,
+					created_at: 0,
 				};
 				self.payment_store.insert(payment)?;
 
@@ -122,6 +123,7 @@ impl SpontaneousPayment {
 							amount_msat: Some(amount_msat),
 							last_update: 0,
 							fee_msat: None,
+							created_at: 0,
 						};
 
 						self.payment_store.insert(payment)?;

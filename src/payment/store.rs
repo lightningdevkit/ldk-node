@@ -38,6 +38,8 @@ pub struct PaymentDetails {
 	pub last_update: u64,
 	/// Fee paid.
 	pub fee_msat: Option<u64>,
+	/// Payment creation timestamp, as seconds since Unix epoch.
+	pub created_at: u64,
 }
 
 impl Writeable for PaymentDetails {
@@ -57,6 +59,7 @@ impl Writeable for PaymentDetails {
 			(10, self.status, required),
 			(131074, Some(self.last_update), option),
 			(131076, self.fee_msat, option),
+			(131078, Some(self.created_at), option),
 		});
 		Ok(())
 	}
@@ -75,6 +78,7 @@ impl Readable for PaymentDetails {
 			(10, status, required),
 			(131074, last_update, option),
 			(131076, fee_msat, option),
+			(131078, created_at, option),
 		});
 
 		let id: PaymentId = id.0.ok_or(DecodeError::InvalidValue)?;
@@ -84,6 +88,7 @@ impl Readable for PaymentDetails {
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
 		let last_update: u64 = last_update.unwrap_or(0);
+		let created_at: u64 = created_at.unwrap_or(0);
 
 		let kind = if let Some(kind) = kind_opt {
 			// If we serialized the payment kind, use it.
@@ -112,7 +117,16 @@ impl Readable for PaymentDetails {
 			}
 		};
 
-		Ok(PaymentDetails { id, kind, amount_msat, direction, status, last_update, fee_msat })
+		Ok(PaymentDetails {
+			id,
+			kind,
+			amount_msat,
+			direction,
+			status,
+			last_update,
+			fee_msat,
+			created_at,
+		})
 	}
 }
 
@@ -287,6 +301,19 @@ where
 
 	pub(crate) fn insert(&self, payment: PaymentDetails) -> Result<bool, Error> {
 		let mut locked_payments = self.payments.lock().unwrap();
+
+		// If the payment already exists, reuse its timestamp instead of overwriting it.
+		let created_at = locked_payments.get(&payment.id).map_or_else(
+			|| {
+				time::SystemTime::now()
+					.duration_since(time::UNIX_EPOCH)
+					.unwrap_or(time::Duration::ZERO)
+					.as_secs()
+			},
+			|p| p.created_at,
+		);
+
+		let payment = PaymentDetails { created_at, ..payment };
 
 		let updated = locked_payments.insert(payment.id, payment.clone()).is_some();
 		self.persist_info(&payment.id, &payment)?;
@@ -464,6 +491,7 @@ mod tests {
 			status: PaymentStatus::Pending,
 			last_update: 0,
 			fee_msat: None,
+			created_at: 0,
 		};
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
