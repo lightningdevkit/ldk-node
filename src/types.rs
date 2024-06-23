@@ -200,11 +200,11 @@ pub struct ChannelDetails {
 	/// balance is not available for inclusion in new outbound HTLCs). This further does not include
 	/// any pending outgoing HTLCs which are awaiting some other resolution to be sent.
 	pub outbound_capacity_msat: u64,
-	/// The available outbound capacity for sending HTLCs to the remote peer.
+	/// The available inbound capacity for receiving HTLCs from the remote peer.
 	///
 	/// The amount does not include any pending HTLCs which are not yet resolved
 	/// (and, thus, whose balance is not available for inclusion in new inbound HTLCs). This further
-	/// does not include any pending outgoing HTLCs which are awaiting some other resolution to be
+	/// does not include any pending incoming HTLCs which are awaiting some other resolution to be
 	/// sent.
 	pub inbound_capacity_msat: u64,
 	/// The number of required confirmations on the funding transactions before the funding is
