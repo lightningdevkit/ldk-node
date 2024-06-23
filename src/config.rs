@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use lightning::ln::msgs::SocketAddress;
+use lightning::util::config::UserConfig;
 use lightning::util::logger::Level as LogLevel;
 
 use bitcoin::secp256k1::PublicKey;
@@ -30,8 +31,14 @@ pub(crate) const BDK_CLIENT_CONCURRENCY: u8 = 4;
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
+// The default Esplora client timeout we're using.
+pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
+
 // The timeout after which we abandon retrying failed payments.
 pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+
+// The interval (in block height) after which we retry archiving fully resolved channel monitors.
+pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
 
 // The time in-between peer reconnection attempts.
 pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(10);
@@ -53,6 +60,9 @@ pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90; // 30
 
 // The timeout after which we abort a fee rate cache update operation.
 pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
+
+// The timeout after which we abort a transaction broadcast operation.
+pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
 
 // The timeout after which we abort a RGS sync operation.
 pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
@@ -128,11 +138,13 @@ pub struct Config {
 	///
 	/// Please refer to [`AnchorChannelsConfig`] for further information on Anchor channels.
 	///
-	/// If set to `Some`, new channels will have Anchors enabled, i.e., will be negotiated with the
-	/// `option_anchors_zero_fee_htlc_tx` channel type. If set to `None`, new channels will be
-	/// negotiated with the legacy `option_static_remotekey` channel type.
+	/// If set to `Some`, we'll try to open new channels with Anchors enabled, i.e., new channels
+	/// will be negotiated with the `option_anchors_zero_fee_htlc_tx` channel type if supported by
+	/// the counterparty. Note that this won't prevent us from opening non-Anchor channels if the
+	/// counterparty doesn't support `option_anchors_zero_fee_htlc_tx`. If set to `None`, new
+	/// channels will be negotiated with the legacy `option_static_remotekey` channel type only.
 	///
-	/// **Note:** Please note that if set to `None` *after* some Anchor channels have already been
+	/// **Note:** If set to `None` *after* some Anchor channels have already been
 	/// opened, no dedicated emergency on-chain reserve will be maintained for these channels,
 	/// which can be dangerous if only insufficient funds are available at the time of channel
 	/// closure. We *will* however still try to get the Anchor spending transactions confirmed
@@ -167,11 +179,12 @@ impl Default for Config {
 /// opening. This required to estimate what fee rate would be sufficient to still have the
 /// closing transactions be spendable on-chain (i.e., not be considered dust). This legacy
 /// design of pre-anchor channels proved inadequate in the unpredictable, often turbulent, fee
-/// markets we experience today. In contrast, Anchor channels allow to determine an adequate
-/// fee rate *at the time of channel closure*, making them much more robust in the face of fee
-/// spikes. In turn, they require to maintain a reserve of on-chain funds to be able to get the
-/// channel closure transactions confirmed on-chain, at least if the channel counterparty can't
-/// be trusted to do this for us.
+/// markets we experience today.
+///
+/// In contrast, Anchor channels allow to determine an adequate fee rate *at the time of channel
+/// closure*, making them much more robust in the face of fee spikes. In turn, they require to
+/// maintain a reserve of on-chain funds to have the channel closure transactions confirmed
+/// on-chain, at least if the channel counterparty can't be trusted to do this for us.
 ///
 /// See [BOLT 3] for more technical details on Anchor channels.
 ///
@@ -187,7 +200,7 @@ impl Default for Config {
 /// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
 #[derive(Debug, Clone)]
 pub struct AnchorChannelsConfig {
-	/// A list of peers which we trust to get the required channel closing transactions confirmed
+	/// A list of peers that we trust to get the required channel closing transactions confirmed
 	/// on-chain.
 	///
 	/// Channels with these peers won't count towards the retained on-chain reserve and we won't
@@ -199,9 +212,20 @@ pub struct AnchorChannelsConfig {
 	/// funds stuck *or* even allow the counterparty to steal any in-flight funds after the
 	/// corresponding HTLCs time out.
 	pub trusted_peers_no_reserve: Vec<PublicKey>,
-	/// The amount of satoshis we keep as an emergency reserve in our on-chain wallet in order to
-	/// be able to get the required Anchor output spending and HTLC transactions confirmed when the
-	/// channel is closed.
+	/// The amount of satoshis per anchors-negotiated channel with an untrusted peer that we keep
+	/// as an emergency reserve in our on-chain wallet.
+	///
+	/// This allows for having the required Anchor output spending and HTLC transactions confirmed
+	/// when the channel is closed.
+	///
+	/// If the channel peer is not marked as trusted via
+	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`], we will always try to spend the Anchor
+	/// outputs with *any* on-chain funds available, i.e., the total reserve value as well as any
+	/// spendable funds available in the on-chain wallet. Therefore, this per-channel multiplier is
+	/// really a emergencey reserve that we maintain at all time to reduce reduce the risk of
+	/// insufficient funds at time of a channel closure. To this end, we will refuse to open
+	/// outbound or accept inbound channels if we don't have sufficient on-chain funds availble to
+	/// cover the additional reserve requirement.
 	///
 	/// **Note:** Depending on the fee market at the time of closure, this reserve amount might or
 	/// might not suffice to successfully spend the Anchor output and have the HTLC transactions
@@ -226,4 +250,19 @@ impl Default for AnchorChannelsConfig {
 /// [`Config::default()`].
 pub fn default_config() -> Config {
 	Config::default()
+}
+
+pub(crate) fn default_user_config(config: &Config) -> UserConfig {
+	// Initialize the default config values.
+	//
+	// Note that methods such as Node::connect_open_channel might override some of the values set
+	// here, e.g. the ChannelHandshakeConfig, meaning these default values will mostly be relevant
+	// for inbound channels.
+	let mut user_config = UserConfig::default();
+	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.manually_accept_inbound_channels = true;
+	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
+		config.anchor_channels_config.is_some();
+
+	user_config
 }

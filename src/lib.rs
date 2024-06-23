@@ -123,8 +123,10 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	ENABLE_BACKGROUND_SYNC, LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	default_user_config, ENABLE_BACKGROUND_SYNC, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
+	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -132,7 +134,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
-use payment::{Bolt11Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
+use payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
@@ -147,7 +149,6 @@ use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
 use lightning::ln::msgs::SocketAddress;
 
-use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
 
 use lightning_background_processor::process_events_async;
@@ -201,6 +202,7 @@ pub struct Node {
 	latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_rgs_snapshot_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_node_announcement_broadcast_timestamp: Arc<RwLock<Option<u64>>>,
+	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
 }
 
 impl Node {
@@ -217,7 +219,12 @@ impl Node {
 			return Err(Error::AlreadyRunning);
 		}
 
-		log_info!(self.logger, "Starting up LDK Node on network: {}", self.config.network);
+		log_info!(
+			self.logger,
+			"Starting up LDK Node with node ID {} on network: {}",
+			self.node_id(),
+			self.config.network
+		);
 
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
@@ -360,58 +367,68 @@ impl Node {
 
 			let tx_sync = Arc::clone(&self.tx_sync);
 			let sync_cman = Arc::clone(&self.channel_manager);
+			let archive_cman = Arc::clone(&self.channel_manager);
 			let sync_cmon = Arc::clone(&self.chain_monitor);
+			let archive_cmon = Arc::clone(&self.chain_monitor);
 			let sync_sweeper = Arc::clone(&self.output_sweeper);
 			let sync_logger = Arc::clone(&self.logger);
 			let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+			let sync_monitor_archival_height =
+				Arc::clone(&self.latest_channel_monitor_archival_height);
 			let mut stop_sync = self.stop_sender.subscribe();
 			let wallet_sync_interval_secs =
 				self.config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 			runtime.spawn(async move {
-				let mut wallet_sync_interval =
-					tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
-				wallet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-				loop {
-					tokio::select! {
-						_ = stop_sync.changed() => {
-							log_trace!(
-								sync_logger,
-								"Stopping background syncing Lightning wallet.",
-							);
-							return;
-						}
-						_ = wallet_sync_interval.tick() => {
-							let confirmables = vec![
-								&*sync_cman as &(dyn Confirm + Sync + Send),
-								&*sync_cmon as &(dyn Confirm + Sync + Send),
-								&*sync_sweeper as &(dyn Confirm + Sync + Send),
-							];
-							let now = Instant::now();
-							let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
-							match timeout_fut.await {
-								Ok(res) => match res {
-									Ok(()) => {
-										log_trace!(
-											sync_logger,
-											"Background sync of Lightning wallet finished in {}ms.",
-											now.elapsed().as_millis()
-											);
-										let unix_time_secs_opt =
-											SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-										*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-									}
-									Err(e) => {
-										log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
-									}
+			let mut wallet_sync_interval =
+				tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
+			wallet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					_ = stop_sync.changed() => {
+						log_trace!(
+							sync_logger,
+							"Stopping background syncing Lightning wallet.",
+						);
+						return;
+					}
+					_ = wallet_sync_interval.tick() => {
+						let confirmables = vec![
+							&*sync_cman as &(dyn Confirm + Sync + Send),
+							&*sync_cmon as &(dyn Confirm + Sync + Send),
+							&*sync_sweeper as &(dyn Confirm + Sync + Send),
+						];
+						let now = Instant::now();
+						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
+						match timeout_fut.await {
+							Ok(res) => match res {
+								Ok(()) => {
+									log_trace!(
+										sync_logger,
+										"Background sync of Lightning wallet finished in {}ms.",
+										now.elapsed().as_millis()
+										);
+									let unix_time_secs_opt =
+										SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+									*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+
+									periodically_archive_fully_resolved_monitors(
+										Arc::clone(&archive_cman),
+										Arc::clone(&archive_cmon),
+										Arc::clone(&sync_monitor_archival_height)
+									);
 								}
 								Err(e) => {
-									log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
+									log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
 								}
+							}
+							Err(e) => {
+								log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
 							}
 						}
 					}
 				}
-			});
+			}
+		});
 		}
 
 		if self.gossip_source.is_rgs() {
@@ -582,7 +599,10 @@ impl Node {
 		let mut stop_bcast = self.stop_sender.subscribe();
 		runtime.spawn(async move {
 			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
+			#[cfg(not(test))]
 			let mut interval = tokio::time::interval(Duration::from_secs(30));
+			#[cfg(test)]
+			let mut interval = tokio::time::interval(Duration::from_secs(5));
 			loop {
 				tokio::select! {
 						_ = stop_bcast.changed() => {
@@ -609,8 +629,8 @@ impl Node {
 								continue;
 							}
 
-							if !bcast_cm.list_channels().iter().any(|chan| chan.is_public) {
-								// Skip if we don't have any public channels.
+							if !bcast_cm.list_channels().iter().any(|chan| chan.is_public && chan.is_channel_ready) {
+								// Skip if we don't have any public channels that are ready.
 								continue;
 							}
 
@@ -679,6 +699,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			bump_tx_event_handler,
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.payment_store),
@@ -787,7 +808,7 @@ impl Node {
 	pub fn stop(&self) -> Result<(), Error> {
 		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
 
-		log_info!(self.logger, "Shutting down LDK Node...");
+		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
 		// Stop the runtime.
 		match self.stop_sender.send(()) {
@@ -975,6 +996,32 @@ impl Node {
 		))
 	}
 
+	/// Returns a payment handler allowing to create and pay [BOLT 12] offers and refunds.
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	#[cfg(not(feature = "uniffi"))]
+	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
+		Arc::new(Bolt12Payment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a payment handler allowing to create and pay [BOLT 12] offers and refunds.
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	#[cfg(feature = "uniffi")]
+	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
+		Arc::new(Bolt12Payment::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.logger),
+		))
+	}
+
 	/// Returns a payment handler allowing to send spontaneous ("keysend") payments.
 	#[cfg(not(feature = "uniffi"))]
 	pub fn spontaneous_payment(&self) -> SpontaneousPayment {
@@ -1121,7 +1168,7 @@ impl Node {
 		let cur_anchor_reserve_sats =
 			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let spendable_amount_sats =
-			self.wallet.get_balances(cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
 
 		// Fail early if we have less than the channel value available.
 		if spendable_amount_sats < channel_amount_sats {
@@ -1165,19 +1212,23 @@ impl Node {
 			return Err(Error::InsufficientFunds);
 		}
 
-		let channel_config = (*(channel_config.unwrap_or_default())).clone().into();
-		let user_config = UserConfig {
-			channel_handshake_limits: Default::default(),
-			channel_handshake_config: ChannelHandshakeConfig {
-				announced_channel: announce_channel,
-				negotiate_anchors_zero_fee_htlc_tx: self.config.anchor_channels_config.is_some(),
-				// Alby: always allow receiving 100% of channel size.
-				max_inbound_htlc_value_in_flight_percent_of_channel: 100,
-				..Default::default()
-			},
-			channel_config,
-			..Default::default()
-		};
+		let mut user_config = default_user_config(&self.config);
+		user_config.channel_handshake_config.announced_channel = announce_channel;
+		user_config.channel_config = (*(channel_config.unwrap_or_default())).clone().into();
+		// We set the max inflight to 100% for private channels.
+		// FIXME: LDK will default to this behavior soon, too, at which point we should drop this
+		// manual override.
+		if !announce_channel {
+			user_config
+				.channel_handshake_config
+				.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
+		}
+
+		// TODO: this was removed
+		// user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx: self.config.anchor_channels_config.is_some(),
+		// Alby: always allow receiving 100% of channel size.
+		user_config.channel_handshake_config.max_inbound_htlc_value_in_flight_percent_of_channel =
+			100;
 
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
 		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
@@ -1206,7 +1257,8 @@ impl Node {
 		}
 	}
 
-	/// Manually sync the LDK and BDK wallets with the current chain state.
+	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
+	/// cache.
 	///
 	/// **Note:** The wallets are regularly synced in the background, which is configurable via
 	/// [`Config::onchain_wallet_sync_interval_secs`] and [`Config::wallet_sync_interval_secs`].
@@ -1223,7 +1275,10 @@ impl Node {
 		let wallet = Arc::clone(&self.wallet);
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
+		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
+		let archive_cmon = Arc::clone(&self.chain_monitor);
+		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
 		let confirmables = vec![
@@ -1231,38 +1286,18 @@ impl Node {
 			&*sync_cmon as &(dyn Confirm + Sync + Send),
 			&*sync_sweeper as &(dyn Confirm + Sync + Send),
 		];
+		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+		let sync_fee_rate_update_timestamp =
+			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
+		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
+		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
 
 		tokio::task::block_in_place(move || {
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
 				async move {
 					let now = Instant::now();
-					let fee_estimator = Arc::clone(&self.fee_estimator);
-					let fee_update_timestamp =
-						Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
-
-					match fee_estimator.update_fee_estimates().await {
-						Ok(()) => {
-							log_trace!(
-								sync_logger,
-								"Update of fee rate cache finished in {}ms.",
-								now.elapsed().as_millis()
-							);
-							let unix_time_secs_opt = SystemTime::now()
-								.duration_since(UNIX_EPOCH)
-								.ok()
-								.map(|d| d.as_secs());
-							*fee_update_timestamp.write().unwrap() = unix_time_secs_opt;
-						},
-						Err(err) => {
-							log_error!(sync_logger, "Update of fee rate cache failed: {}", err);
-							return Err(err);
-						},
-					}
-
-					let now = Instant::now();
-					let sync_onchain_wallet_timestamp =
-						Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
-
+					// We don't add an additional timeout here, as `Wallet::sync` already returns
+					// after a timeout.
 					match wallet.sync().await {
 						Ok(()) => {
 							log_info!(
@@ -1283,24 +1318,62 @@ impl Node {
 					};
 
 					let now = Instant::now();
-					let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
-					match tx_sync.sync(confirmables).await {
+					// We don't add an additional timeout here, as
+					// `FeeEstimator::update_fee_estimates` already returns after a timeout.
+					match fee_estimator.update_fee_estimates().await {
 						Ok(()) => {
 							log_info!(
 								sync_logger,
-								"Sync of Lightning wallet finished in {}ms.",
+								"Fee rate cache update finished in {}ms.",
 								now.elapsed().as_millis()
 							);
 							let unix_time_secs_opt = SystemTime::now()
 								.duration_since(UNIX_EPOCH)
 								.ok()
 								.map(|d| d.as_secs());
-							*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-							Ok(())
+							*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
 						},
 						Err(e) => {
-							log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
-							Err(e.into())
+							log_error!(sync_logger, "Fee rate cache update failed: {}", e,);
+							return Err(e);
+						},
+					}
+
+					let now = Instant::now();
+					let tx_sync_timeout_fut = tokio::time::timeout(
+						Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
+						tx_sync.sync(confirmables),
+					);
+					match tx_sync_timeout_fut.await {
+						Ok(res) => match res {
+							Ok(()) => {
+								log_info!(
+									sync_logger,
+									"Sync of Lightning wallet finished in {}ms.",
+									now.elapsed().as_millis()
+								);
+
+								let unix_time_secs_opt = SystemTime::now()
+									.duration_since(UNIX_EPOCH)
+									.ok()
+									.map(|d| d.as_secs());
+								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+
+								periodically_archive_fully_resolved_monitors(
+									archive_cman,
+									archive_cmon,
+									sync_monitor_archival_height,
+								);
+								Ok(())
+							},
+							Err(e) => {
+								log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
+								Err(e.into())
+							},
+						},
+						Err(e) => {
+							log_error!(sync_logger, "Sync of Lightning wallet timed out: {}", e);
+							Err(Error::TxSyncTimeout)
 						},
 					}
 				},
@@ -1310,16 +1383,32 @@ impl Node {
 
 	/// Close a previously opened channel.
 	///
-	/// If `force` is set to `true`, we will force-close the channel, potentially broadcasting our
-	/// latest state. Note that in contrast to cooperative closure, force-closing will have the
-	/// channel funds time-locked, i.e., they will only be available after the counterparty had
-	/// time to contest our claim. Force-closing channels also more costly in terms of on-chain
-	/// fees. So cooperative closure should always be preferred (and tried first).
+	/// Will attempt to close a channel coopertively. If this fails, users might need to resort to
+	/// [`Node::force_close_channel`].
+	pub fn close_channel(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		self.close_channel_internal(user_channel_id, counterparty_node_id, false)
+	}
+
+	/// Force-close a previously opened channel.
+	///
+	/// Will force-close the channel, potentially broadcasting our latest state. Note that in
+	/// contrast to cooperative closure, force-closing will have the channel funds time-locked,
+	/// i.e., they will only be available after the counterparty had time to contest our claim.
+	/// Force-closing channels also more costly in terms of on-chain fees. So cooperative closure
+	/// should always be preferred (and tried first).
 	///
 	/// Broadcasting the closing transactions will be omitted for Anchor channels if we trust the
 	/// counterparty to broadcast for us (see [`AnchorChannelsConfig::trusted_peers_no_reserve`]
 	/// for more information).
-	pub fn close_channel(
+	pub fn force_close_channel(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		self.close_channel_internal(user_channel_id, counterparty_node_id, true)
+	}
+
+	fn close_channel_internal(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
 	) -> Result<(), Error> {
 		let open_channels =
@@ -1368,10 +1457,9 @@ impl Node {
 			if open_channels.len() == 1 {
 				self.peer_store.remove_peer(&counterparty_node_id)?;
 			}
-			Ok(())
-		} else {
-			Ok(())
 		}
+
+		Ok(())
 	}
 
 	/// Update the config for a previously opened channel.
@@ -1615,4 +1703,20 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
+}
+
+fn periodically_archive_fully_resolved_monitors(
+	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
+) {
+	let mut latest_archival_height_lock = latest_channel_monitor_archival_height.write().unwrap();
+	let cur_height = channel_manager.current_best_block().height;
+	let should_archive = latest_archival_height_lock
+		.as_ref()
+		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
+
+	if should_archive {
+		chain_monitor.archive_fully_resolved_channel_monitors();
+		*latest_archival_height_lock = Some(cur_height);
+	}
 }

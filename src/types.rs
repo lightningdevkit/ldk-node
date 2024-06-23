@@ -113,7 +113,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<FilesystemLogger>,
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
-	IgnoringMessageHandler,
+	Arc<ChannelManager>,
 	IgnoringMessageHandler,
 >;
 

@@ -60,6 +60,7 @@ interface Node {
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
 	Bolt11Payment bolt11_payment();
+	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
 	[Throws=NodeError]
@@ -69,7 +70,9 @@ interface Node {
 	[Throws=NodeError]
 	UserChannelId connect_open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config, boolean announce_channel);
 	[Throws=NodeError]
-	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, boolean force);
+	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
+	[Throws=NodeError]
+	void force_close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
@@ -97,13 +100,36 @@ interface Bolt11Payment {
 	[Throws=NodeError]
 	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
 	[Throws=NodeError]
+	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
+	[Throws=NodeError]
+	void fail_for_hash(PaymentHash payment_hash);
+	[Throws=NodeError]
 	Bolt11Invoice receive(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
 	[Throws=NodeError]
+	Bolt11Invoice receive_for_hash(u64 amount_msat, [ByRef]string description, u32 expiry_secs, PaymentHash payment_hash);
+	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount([ByRef]string description, u32 expiry_secs);
+	[Throws=NodeError]
+	Bolt11Invoice receive_variable_amount_for_hash([ByRef]string description, u32 expiry_secs, PaymentHash payment_hash);
 	[Throws=NodeError]
 	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]string description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
 	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]string description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
+};
+
+interface Bolt12Payment {
+	[Throws=NodeError]
+	PaymentId send([ByRef]Offer offer, string? payer_note);
+	[Throws=NodeError]
+	PaymentId send_using_amount([ByRef]Offer offer, string? payer_note, u64 amount_msat);
+	[Throws=NodeError]
+	Offer receive(u64 amount_msat, [ByRef]string description);
+	[Throws=NodeError]
+	Offer receive_variable_amount([ByRef]string description);
+	[Throws=NodeError]
+	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
+	[Throws=NodeError]
+	Refund initiate_refund(u64 amount_msat, u32 expiry_secs);
 };
 
 interface SpontaneousPayment {
@@ -129,6 +155,9 @@ enum NodeError {
 	"OnchainTxCreationFailed",
 	"ConnectionFailed",
 	"InvoiceCreationFailed",
+	"InvoiceRequestCreationFailed",
+	"OfferCreationFailed",
+	"RefundCreationFailed",
 	"PaymentSendingFailed",
 	"ProbeSendingFailed",
 	"ChannelCreationFailed",
@@ -142,6 +171,7 @@ enum NodeError {
 	"OnchainTxSigningFailed",
 	"MessageSigningFailed",
 	"TxSyncFailed",
+	"TxSyncTimeout",
 	"GossipUpdateFailed",
 	"GossipUpdateTimeout",
 	"LiquidityRequestFailed",
@@ -149,6 +179,7 @@ enum NodeError {
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
 	"InvalidSecretKey",
+	"InvalidOfferId",
 	"InvalidNodeId",
 	"InvalidPaymentId",
 	"InvalidPaymentHash",
@@ -156,10 +187,13 @@ enum NodeError {
 	"InvalidPaymentSecret",
 	"InvalidAmount",
 	"InvalidInvoice",
+	"InvalidOffer",
+	"InvalidRefund",
 	"InvalidChannelId",
 	"InvalidNetwork",
 	"InvalidCustomTlv",
 	"DuplicatePayment",
+	"UnsupportedCurrency",
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
@@ -201,6 +235,7 @@ interface Event {
 	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, u64? fee_paid_msat);
 	PaymentFailed(PaymentId? payment_id, PaymentHash payment_hash, PaymentFailureReason? reason);
 	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat);
+	PaymentClaimable(PaymentId payment_id, PaymentHash payment_hash, u64 claimable_amount_msat, u32? claim_deadline);
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
@@ -237,6 +272,8 @@ interface PaymentKind {
 	Onchain();
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, string? bolt11_invoice);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
+	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id);
+	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage, sequence<TlvEntry> custom_tlvs);
 };
 
@@ -262,9 +299,11 @@ dictionary PaymentDetails {
 	u64? amount_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
+	// TODO: remove - use latest_update_timestamp
 	u64 last_update;
 	u64? fee_msat;
 	u64 created_at;
+	u64 latest_update_timestamp;
 };
 
 // [NonExhaustive]
@@ -443,6 +482,18 @@ typedef string Address;
 
 [Custom]
 typedef string Bolt11Invoice;
+
+[Custom]
+typedef string Offer;
+
+[Custom]
+typedef string Refund;
+
+[Custom]
+typedef string Bolt12Invoice;
+
+[Custom]
+typedef string OfferId;
 
 [Custom]
 typedef string PaymentId;

@@ -54,7 +54,7 @@ impl OnchainPayment {
 		let cur_anchor_reserve_sats =
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let spendable_amount_sats =
-			self.wallet.get_balances(cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
 
 		if spendable_amount_sats < amount_sats {
 			log_error!(self.logger,

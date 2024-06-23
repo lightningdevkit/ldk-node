@@ -34,14 +34,13 @@ use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
 
-use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 enum WalletSyncStatus {
 	Completed,
-	InProgress { subscribers: Vec<tokio::sync::oneshot::Sender<Result<(), Error>>> },
+	InProgress { subscribers: tokio::sync::broadcast::Sender<Result<(), Error>> },
 }
 
 pub struct Wallet<D, B: Deref, E: Deref, L: Deref>
@@ -90,9 +89,9 @@ where
 	}
 
 	pub(crate) async fn sync(&self) -> Result<(), Error> {
-		if let Some(sync_receiver) = self.register_or_subscribe_pending_sync() {
+		if let Some(mut sync_receiver) = self.register_or_subscribe_pending_sync() {
 			log_info!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.await.map_err(|e| {
+			return sync_receiver.recv().await.map_err(|e| {
 				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
 				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
 				Error::WalletOperationFailed
@@ -100,15 +99,14 @@ where
 		}
 
 		let res = {
-			let sync_options = SyncOptions { progress: None };
 			let wallet_lock = self.inner.lock().unwrap();
 
-			let timeout_fut = tokio::time::timeout(
+			let wallet_sync_timeout_fut = tokio::time::timeout(
 				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
-				wallet_lock.sync(&self.blockchain, sync_options),
+				wallet_lock.sync(&self.blockchain, SyncOptions { progress: None }),
 			);
 
-			match timeout_fut.await {
+			match wallet_sync_timeout_fut.await {
 				Ok(res) => match res {
 					Ok(()) => {
 						// TODO: Drop this workaround after BDK 1.0 upgrade.
@@ -140,12 +138,7 @@ where
 					},
 				},
 				Err(e) => {
-					log_error!(
-						self.logger,
-						"On-chain wallet sync timed out after {}s: {}",
-						BDK_WALLET_SYNC_TIMEOUT_SECS,
-						e
-					);
+					log_error!(self.logger, "On-chain wallet sync timed out: {}", e);
 					Err(Error::WalletOperationTimeout)
 				},
 			}
@@ -237,6 +230,12 @@ where
 		Ok((total, spendable))
 	}
 
+	pub(crate) fn get_spendable_amount_sats(
+		&self, total_anchor_channels_reserve_sats: u64,
+	) -> Result<u64, Error> {
+		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
+	}
+
 	/// Send funds to the given address.
 	///
 	/// If `amount_msat_or_drain` is `None` the wallet will be drained, i.e., all available funds will be
@@ -317,18 +316,18 @@ where
 
 	fn register_or_subscribe_pending_sync(
 		&self,
-	) -> Option<tokio::sync::oneshot::Receiver<Result<(), Error>>> {
+	) -> Option<tokio::sync::broadcast::Receiver<Result<(), Error>>> {
 		let mut sync_status_lock = self.sync_status.lock().unwrap();
 		match sync_status_lock.deref_mut() {
 			WalletSyncStatus::Completed => {
 				// We're first to register for a sync.
-				*sync_status_lock = WalletSyncStatus::InProgress { subscribers: Vec::new() };
+				let (tx, _) = tokio::sync::broadcast::channel(1);
+				*sync_status_lock = WalletSyncStatus::InProgress { subscribers: tx };
 				None
 			},
 			WalletSyncStatus::InProgress { subscribers } => {
 				// A sync is in-progress, we subscribe.
-				let (tx, rx) = tokio::sync::oneshot::channel();
-				subscribers.push(tx);
+				let rx = subscribers.subscribe();
 				Some(rx)
 			},
 		}
@@ -336,7 +335,6 @@ where
 
 	fn propagate_result_to_subscribers(&self, res: Result<(), Error>) {
 		// Send the notification to any other tasks that might be waiting on it by now.
-		let mut waiting_subscribers = Vec::new();
 		{
 			let mut sync_status_lock = self.sync_status.lock().unwrap();
 			match sync_status_lock.deref_mut() {
@@ -346,21 +344,26 @@ where
 				},
 				WalletSyncStatus::InProgress { subscribers } => {
 					// A sync is in-progress, we notify subscribers.
-					mem::swap(&mut waiting_subscribers, subscribers);
+					if subscribers.receiver_count() > 0 {
+						match subscribers.send(res) {
+							Ok(_) => (),
+							Err(e) => {
+								debug_assert!(
+									false,
+									"Failed to send wallet sync result to subscribers: {:?}",
+									e
+								);
+								log_error!(
+									self.logger,
+									"Failed to send wallet sync result to subscribers: {:?}",
+									e
+								);
+							},
+						}
+					}
 					*sync_status_lock = WalletSyncStatus::Completed;
 				},
 			}
-		}
-
-		for sender in waiting_subscribers {
-			sender.send(res).unwrap_or_else(|e| {
-				debug_assert!(false, "Failed to send wallet sync result to subscribers: {:?}", e);
-				log_error!(
-					self.logger,
-					"Failed to send wallet sync result to subscribers: {:?}",
-					e
-				);
-			});
 		}
 	}
 }

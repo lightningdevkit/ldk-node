@@ -1,6 +1,6 @@
 use crate::config::{
-	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, DEFAULT_ESPLORA_SERVER_URL,
-	WALLET_KEYS_SEED_LEN,
+	default_user_config, Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
+	DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS, DEFAULT_ESPLORA_SERVER_URL, WALLET_KEYS_SEED_LEN,
 };
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -31,7 +31,6 @@ use lightning::routing::scoring::{
 };
 use lightning::sign::EntropySource;
 
-use lightning::util::config::UserConfig;
 use lightning::util::persist::{
 	read_channel_monitors, CHANNEL_MANAGER_PERSISTENCE_KEY,
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -559,10 +558,15 @@ fn build_with_store_internal(
 
 	let (blockchain, tx_sync, tx_broadcaster, fee_estimator) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora(server_url)) => {
-			let tx_sync = Arc::new(EsploraSyncClient::new(server_url.clone(), Arc::clone(&logger)));
-			let blockchain =
-				EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
-					.with_concurrency(BDK_CLIENT_CONCURRENCY);
+			let mut client_builder = esplora_client::Builder::new(&server_url.clone());
+			client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+			let esplora_client = client_builder.build_async().unwrap();
+			let tx_sync = Arc::new(EsploraSyncClient::from_client(
+				esplora_client.clone(),
+				Arc::clone(&logger),
+			));
+			let blockchain = EsploraBlockchain::from_client(esplora_client, BDK_CLIENT_STOP_GAP)
+				.with_concurrency(BDK_CLIENT_CONCURRENCY);
 			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
 				tx_sync.client().clone(),
 				Arc::clone(&logger),
@@ -695,19 +699,7 @@ fn build_with_store_internal(
 		},
 	};
 
-	// Initialize the default config values.
-	//
-	// Note that methods such as Node::connect_open_channel might override some of the values set
-	// here, e.g. the ChannelHandshakeConfig, meaning these default values will mostly be relevant
-	// for inbound channels.
-	let mut user_config = UserConfig::default();
-	user_config.channel_handshake_limits.force_announced_channel_preference = false;
-	user_config.manually_accept_inbound_channels = true;
-	// Note the channel_handshake_config will be overwritten in `connect_open_channel`, but we
-	// still set a default here.
-	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
-		config.anchor_channels_config.is_some();
-
+	let mut user_config = default_user_config(&config);
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 		// check that they don't take too much before claiming.
@@ -793,7 +785,7 @@ fn build_with_store_internal(
 		Arc::clone(&logger),
 		Arc::clone(&channel_manager),
 		Arc::new(message_router),
-		IgnoringMessageHandler {},
+		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
 	));
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
@@ -989,6 +981,7 @@ fn build_with_store_internal(
 	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
 	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
 	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
+	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
 
 	Ok(Node {
 		runtime,
@@ -1021,6 +1014,7 @@ fn build_with_store_internal(
 		latest_fee_rate_cache_update_timestamp,
 		latest_rgs_snapshot_timestamp,
 		latest_node_announcement_broadcast_timestamp,
+		latest_channel_monitor_archival_height,
 	})
 }
 

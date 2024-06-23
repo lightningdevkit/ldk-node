@@ -21,7 +21,7 @@ pub struct BalanceDetails {
 	///
 	/// [`total_anchor_channels_reserve_sats`]: Self::total_anchor_channels_reserve_sats
 	pub spendable_onchain_balance_sats: u64,
-	/// The share of our total balance which we retain as an emergency reserve to (hopefully) be
+	/// The share of our total balance that we retain as an emergency reserve to (hopefully) be
 	/// able to spend the Anchor outputs when one of our channels is closed.
 	pub total_anchor_channels_reserve_sats: u64,
 	/// The total balance that we would be able to claim across all our Lightning channels.

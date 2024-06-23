@@ -9,6 +9,7 @@ use crate::Error;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::offers::offer::OfferId;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
 	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
@@ -19,7 +20,7 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use std::time;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,12 +35,43 @@ pub struct PaymentDetails {
 	pub direction: PaymentDirection,
 	/// The status of the payment.
 	pub status: PaymentStatus,
-	/// Last update timestamp, as seconds since Unix epoch.
+	/// The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+	pub latest_update_timestamp: u64,
+
+	/// Last update timestamp, as seconds since Unix epoch. TODO: remove and use latest_update_timestamp
 	pub last_update: u64,
 	/// Fee paid.
 	pub fee_msat: Option<u64>,
 	/// Payment creation timestamp, as seconds since Unix epoch.
 	pub created_at: u64,
+}
+
+impl PaymentDetails {
+	pub(crate) fn new(
+		id: PaymentId, kind: PaymentKind, amount_msat: Option<u64>, direction: PaymentDirection,
+		status: PaymentStatus,
+	) -> Self {
+		let latest_update_timestamp = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
+
+		let last_update = 0;
+		let fee_msat = None;
+		let created_at = 0;
+
+		Self {
+			id,
+			kind,
+			amount_msat,
+			direction,
+			status,
+			latest_update_timestamp,
+			last_update,
+			fee_msat,
+			created_at,
+		}
+	}
 }
 
 impl Writeable for PaymentDetails {
@@ -54,6 +86,7 @@ impl Writeable for PaymentDetails {
 			(3, self.kind, required),
 			// 4 used to be `secret` before it was moved to `kind` in v0.3.0
 			(4, None::<Option<PaymentSecret>>, required),
+			(5, self.latest_update_timestamp, required),
 			(6, self.amount_msat, required),
 			(8, self.direction, required),
 			(10, self.status, required),
@@ -67,12 +100,17 @@ impl Writeable for PaymentDetails {
 
 impl Readable for PaymentDetails {
 	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<PaymentDetails, DecodeError> {
+		let unix_time_secs = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
 		_init_and_read_len_prefixed_tlv_fields!(reader, {
 			(0, id, required), // Used to be `hash`
 			(1, lsp_fee_limits, option),
 			(2, preimage, required),
 			(3, kind_opt, option),
 			(4, secret, required),
+			(5, latest_update_timestamp, (default_value, unix_time_secs)),
 			(6, amount_msat, required),
 			(8, direction, required),
 			(10, status, required),
@@ -84,6 +122,8 @@ impl Readable for PaymentDetails {
 		let id: PaymentId = id.0.ok_or(DecodeError::InvalidValue)?;
 		let preimage: Option<PaymentPreimage> = preimage.0.ok_or(DecodeError::InvalidValue)?;
 		let secret: Option<PaymentSecret> = secret.0.ok_or(DecodeError::InvalidValue)?;
+		let latest_update_timestamp: u64 =
+			latest_update_timestamp.0.ok_or(DecodeError::InvalidValue)?;
 		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
@@ -123,6 +163,7 @@ impl Readable for PaymentDetails {
 			amount_msat,
 			direction,
 			status,
+			latest_update_timestamp,
 			last_update,
 			fee_msat,
 			created_at,
@@ -169,7 +210,6 @@ pub enum PaymentKind {
 	/// A [BOLT 11] payment.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
-	// TODO: Bolt11 { invoice: Option<Bolt11Invoice> },
 	Bolt11 {
 		/// The payment hash, i.e., the hash of the `preimage`.
 		hash: PaymentHash,
@@ -184,7 +224,6 @@ pub enum PaymentKind {
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [LSPS 2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	// TODO: Bolt11Jit { invoice: Option<Bolt11Invoice> },
 	Bolt11Jit {
 		/// The payment hash, i.e., the hash of the `preimage`.
 		hash: PaymentHash,
@@ -201,6 +240,32 @@ pub enum PaymentKind {
 		///
 		/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 		lsp_fee_limits: LSPFeeLimits,
+	},
+	/// A [BOLT 12] 'offer' payment, i.e., a payment for an [`Offer`].
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	/// [`Offer`]: crate::lightning::offers::offer::Offer
+	Bolt12Offer {
+		/// The payment hash, i.e., the hash of the `preimage`.
+		hash: Option<PaymentHash>,
+		/// The pre-image used by the payment.
+		preimage: Option<PaymentPreimage>,
+		/// The secret used by the payment.
+		secret: Option<PaymentSecret>,
+		/// The ID of the offer this payment is for.
+		offer_id: OfferId,
+	},
+	/// A [BOLT 12] 'refund' payment, i.e., a payment for a [`Refund`].
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	/// [`Refund`]: lightning::offers::refund::Refund
+	Bolt12Refund {
+		/// The payment hash, i.e., the hash of the `preimage`.
+		hash: Option<PaymentHash>,
+		/// The pre-image used by the payment.
+		preimage: Option<PaymentPreimage>,
+		/// The secret used by the payment.
+		secret: Option<PaymentSecret>,
 	},
 	/// A spontaneous ("keysend") payment.
 	Spontaneous {
@@ -227,10 +292,21 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(4, secret, option),
 		(6, lsp_fee_limits, required),
 	},
+	(6, Bolt12Offer) => {
+		(0, hash, option),
+		(2, preimage, option),
+		(4, secret, option),
+		(6, offer_id, required),
+	},
 	(8, Spontaneous) => {
 		(0, hash, required),
 		(2, preimage, option),
 		(131072, custom_tlvs, optional_vec),
+	},
+	(10, Bolt12Refund) => {
+		(0, hash, option),
+		(2, preimage, option),
+		(4, secret, option),
 	};
 );
 
@@ -257,6 +333,7 @@ impl_writeable_tlv_based!(LSPFeeLimits, {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaymentDetailsUpdate {
 	pub id: PaymentId,
+	pub hash: Option<Option<PaymentHash>>,
 	pub preimage: Option<Option<PaymentPreimage>>,
 	pub secret: Option<Option<PaymentSecret>>,
 	pub amount_msat: Option<Option<u64>>,
@@ -269,6 +346,7 @@ impl PaymentDetailsUpdate {
 	pub fn new(id: PaymentId) -> Self {
 		Self {
 			id,
+			hash: None,
 			preimage: None,
 			secret: None,
 			amount_msat: None,
@@ -304,12 +382,7 @@ where
 
 		// If the payment already exists, reuse its timestamp instead of overwriting it.
 		let created_at = locked_payments.get(&payment.id).map_or_else(
-			|| {
-				time::SystemTime::now()
-					.duration_since(time::UNIX_EPOCH)
-					.unwrap_or(time::Duration::ZERO)
-					.as_secs()
-			},
+			|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs(),
 			|p| p.created_at,
 		);
 
@@ -351,10 +424,30 @@ where
 		let mut locked_payments = self.payments.lock().unwrap();
 
 		if let Some(payment) = locked_payments.get_mut(&update.id) {
+			if let Some(hash_opt) = update.hash {
+				match payment.kind {
+					PaymentKind::Bolt12Offer { ref mut hash, .. } => {
+						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
+							"We should only ever override payment hash for outbound BOLT 12 payments");
+						*hash = hash_opt
+					},
+					PaymentKind::Bolt12Refund { ref mut hash, .. } => {
+						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
+							"We should only ever override payment hash for outbound BOLT 12 payments");
+						*hash = hash_opt
+					},
+					_ => {
+						// We can omit updating the hash for BOLT11 payments as the payment hash
+						// will always be known from the beginning.
+					},
+				}
+			}
 			if let Some(preimage_opt) = update.preimage {
 				match payment.kind {
 					PaymentKind::Bolt11 { ref mut preimage, .. } => *preimage = preimage_opt,
 					PaymentKind::Bolt11Jit { ref mut preimage, .. } => *preimage = preimage_opt,
+					PaymentKind::Bolt12Offer { ref mut preimage, .. } => *preimage = preimage_opt,
+					PaymentKind::Bolt12Refund { ref mut preimage, .. } => *preimage = preimage_opt,
 					PaymentKind::Spontaneous { ref mut preimage, .. } => *preimage = preimage_opt,
 					_ => {},
 				}
@@ -364,6 +457,8 @@ where
 				match payment.kind {
 					PaymentKind::Bolt11 { ref mut secret, .. } => *secret = secret_opt,
 					PaymentKind::Bolt11Jit { ref mut secret, .. } => *secret = secret_opt,
+					PaymentKind::Bolt12Offer { ref mut secret, .. } => *secret = secret_opt,
+					PaymentKind::Bolt12Refund { ref mut secret, .. } => *secret = secret_opt,
 					_ => {},
 				}
 			}
@@ -380,15 +475,18 @@ where
 				payment.fee_msat = fee_msat;
 			}
 
-			payment.last_update = time::SystemTime::now()
-				.duration_since(time::UNIX_EPOCH)
-				.unwrap_or(time::Duration::ZERO)
+			// TODO: remove
+			payment.last_update =
+				SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs();
+
+			payment.latest_update_timestamp = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
 				.as_secs();
 
 			self.persist_info(&update.id, payment)?;
 			updated = true;
 		}
-
 		Ok(updated)
 	}
 
@@ -483,16 +581,8 @@ mod tests {
 			.is_err());
 
 		let kind = PaymentKind::Bolt11 { hash, preimage: None, secret: None, bolt11_invoice: None };
-		let payment = PaymentDetails {
-			id,
-			kind,
-			amount_msat: None,
-			direction: PaymentDirection::Inbound,
-			status: PaymentStatus::Pending,
-			last_update: 0,
-			fee_msat: None,
-			created_at: 0,
-		};
+		let payment =
+			PaymentDetails::new(id, kind, None, PaymentDirection::Inbound, PaymentStatus::Pending);
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
 		assert!(payment_store.get(&id).is_some());
