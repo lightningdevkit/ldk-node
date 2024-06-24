@@ -1224,8 +1224,6 @@ impl Node {
 				.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
 		}
 
-		// TODO: this was removed
-		// user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx: self.config.anchor_channels_config.is_some(),
 		// Alby: always allow receiving 100% of channel size.
 		user_config.channel_handshake_config.max_inbound_htlc_value_in_flight_percent_of_channel =
 			100;
