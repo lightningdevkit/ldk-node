@@ -1255,6 +1255,48 @@ impl Node {
 		}
 	}
 
+	/// Alby: update fee estimates separately rather than doing a full sync
+	pub fn update_fee_estimates(&self) -> Result<(), Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		let fee_estimator = Arc::clone(&self.fee_estimator);
+		let sync_logger = Arc::clone(&self.logger);
+		let sync_fee_rate_update_timestamp =
+			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
+
+		tokio::task::block_in_place(move || {
+			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
+				async move {
+					let now = Instant::now();
+					// We don't add an additional timeout here, as
+					// `FeeEstimator::update_fee_estimates` already returns after a timeout.
+					match fee_estimator.update_fee_estimates().await {
+						Ok(()) => {
+							log_info!(
+								sync_logger,
+								"Fee rate cache update finished in {}ms.",
+								now.elapsed().as_millis()
+							);
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
+							Ok(())
+						},
+						Err(e) => {
+							log_error!(sync_logger, "Fee rate cache update failed: {}", e,);
+							return Err(e);
+						},
+					}
+				},
+			)
+		})
+	}
+
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
 	/// cache.
 	///
