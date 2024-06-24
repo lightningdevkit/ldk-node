@@ -3,6 +3,9 @@ pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, Pay
 
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
+pub use lightning::offers::invoice::Bolt12Invoice;
+pub use lightning::offers::offer::{Offer, OfferId};
+pub use lightning::offers::refund::Refund;
 pub use lightning::routing::gossip::{NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
 
@@ -22,6 +25,7 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::util::ser::Writeable;
 use lightning_invoice::SignedRawBolt11Invoice;
 
 use std::convert::TryInto;
@@ -90,6 +94,65 @@ impl UniffiCustomTypeConverter for Bolt11Invoice {
 
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for Offer {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Offer::from_str(&val).map_err(|_| Error::InvalidOffer.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for Refund {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Refund::from_str(&val).map_err(|_| Error::InvalidRefund.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for Bolt12Invoice {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
+			if let Ok(invoice) = Bolt12Invoice::try_from(bytes_vec) {
+				return Ok(invoice);
+			}
+		}
+		Err(Error::InvalidInvoice.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&obj.encode())
+	}
+}
+
+impl UniffiCustomTypeConverter for OfferId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
+			let bytes_res = bytes_vec.try_into();
+			if let Ok(bytes) = bytes_res {
+				return Ok(OfferId(bytes));
+			}
+		}
+		Err(Error::InvalidOfferId.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&obj.0)
 	}
 }
 
