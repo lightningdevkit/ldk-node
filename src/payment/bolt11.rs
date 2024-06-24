@@ -33,7 +33,7 @@ use std::time::SystemTime;
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [`Node::bolt11_payment`]: crate::Node::bolt11_payment
 pub struct Bolt11Payment {
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	keys_manager: Arc<KeysManager>,
@@ -46,7 +46,7 @@ pub struct Bolt11Payment {
 
 impl Bolt11Payment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 		keys_manager: Arc<KeysManager>,

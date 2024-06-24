@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 ///
 /// [`Node::spontaneous_payment`]: crate::Node::spontaneous_payment
 pub struct SpontaneousPayment {
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
@@ -33,7 +33,7 @@ pub struct SpontaneousPayment {
 
 impl SpontaneousPayment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
 		payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>, config: Arc<Config>,
 		logger: Arc<FilesystemLogger>,
