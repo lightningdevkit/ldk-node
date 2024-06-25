@@ -2,6 +2,7 @@ use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
 use lightning::chain::chainmonitor;
+use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::msgs::SocketAddress;
@@ -452,6 +453,7 @@ impl Default for ChannelConfig {
 }
 
 /// Custom TLV entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlvEntry {
 	/// Type number.
 	pub r#type: u64,
@@ -459,3 +461,8 @@ pub struct TlvEntry {
 	/// Serialized value.
 	pub value: Vec<u8>,
 }
+
+impl_writeable_tlv_based!(TlvEntry, {
+	(0, r#type, required),
+	(1, value, required),
+});

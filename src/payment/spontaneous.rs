@@ -6,7 +6,7 @@ use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::payment::store::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
-use crate::types::{ChannelManager, KeysManager};
+use crate::types::{ChannelManager, KeysManager, TlvEntry};
 
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -42,7 +42,9 @@ impl SpontaneousPayment {
 	}
 
 	/// Send a spontaneous, aka. "keysend", payment
-	pub fn send(&self, amount_msat: u64, node_id: PublicKey) -> Result<PaymentId, Error> {
+	pub fn send(
+		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<TlvEntry>,
+	) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -65,7 +67,14 @@ impl SpontaneousPayment {
 			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
 			amount_msat,
 		);
-		let recipient_fields = RecipientOnionFields::spontaneous_empty();
+		let recipient_fields = RecipientOnionFields::spontaneous_empty()
+			.with_custom_tlvs(
+				custom_tlvs.iter().map(|tlv| (tlv.r#type, tlv.value.clone())).collect(),
+			)
+			.map_err(|_| {
+				log_error!(self.logger, "Payment error: invalid custom TLVs.");
+				Error::InvalidCustomTlv
+			})?;
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(
 			Some(payment_preimage),
@@ -80,6 +89,7 @@ impl SpontaneousPayment {
 				let kind = PaymentKind::Spontaneous {
 					hash: payment_hash,
 					preimage: Some(payment_preimage),
+					custom_tlvs,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -101,6 +111,7 @@ impl SpontaneousPayment {
 						let kind = PaymentKind::Spontaneous {
 							hash: payment_hash,
 							preimage: Some(payment_preimage),
+							custom_tlvs,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,

@@ -5,6 +5,7 @@ use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance,
+	TlvEntry,
 };
 
 use lightning::ln::msgs::SocketAddress;
@@ -694,8 +695,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	// Test spontaneous/keysend payments
 	println!("\nA send_spontaneous_payment");
 	let keysend_amount_msat = 2500_000;
-	let keysend_payment_id =
-		node_a.spontaneous_payment().send(keysend_amount_msat, node_b.node_id()).unwrap();
+	let tlv1 = TlvEntry { r#type: 131073, value: vec![0x00, 0x11, 0x22, 0x33] };
+	let tlv2 = TlvEntry { r#type: 131075, value: vec![0xaa, 0xbb] };
+	let keysend_payment_id = node_a
+		.spontaneous_payment()
+		.send(keysend_amount_msat, node_b.node_id(), vec![tlv1, tlv2])
+		.unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_keysend_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {

@@ -2,7 +2,7 @@ use crate::types::{DynStore, Sweeper, Wallet};
 
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, Graph, PeerInfo,
-	PeerStore, UserChannelId,
+	PeerStore, TlvEntry, UserChannelId,
 };
 
 use crate::connection::ConnectionManager;
@@ -463,7 +463,7 @@ where
 				via_channel_id: _,
 				via_user_channel_id: _,
 				claim_deadline,
-				onion_fields: _,
+				onion_fields,
 				counterparty_skimmed_fee_msat,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
@@ -639,10 +639,20 @@ where
 						payment_preimage
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
+						let custom_tlvs = onion_fields
+							.map(|of| {
+								of.custom_tlvs()
+									.iter()
+									.map(|(t, v)| TlvEntry { r#type: *t, value: v.clone() })
+									.collect()
+							})
+							.unwrap_or_default();
+
 						// Since it's spontaneous, we insert it now into our store.
 						let kind = PaymentKind::Spontaneous {
 							hash: payment_hash,
 							preimage: Some(preimage),
+							custom_tlvs,
 						};
 
 						let payment = PaymentDetails::new(
