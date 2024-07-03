@@ -151,9 +151,9 @@ interface OnchainPayment {
 
 interface UnifiedQrPayment {
     [Throws=NodeError]
-    string receive(u64 amount_sats, string? message, u32 expiry_sec);
+    string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
     [Throws=NodeError]
-    PaymentResult send([ByRef]string uri_str);
+    QrPaymentResult send([ByRef]string uri_str);
 };
 
 [Error]
@@ -183,7 +183,7 @@ enum NodeError {
 	"GossipUpdateFailed",
 	"GossipUpdateTimeout",
 	"LiquidityRequestFailed",
-	"UriParameterFailed",
+	"UriParameterParsingFailed",
 	"InvalidAddress",
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
@@ -287,7 +287,7 @@ interface PaymentKind {
 };
 
 [Enum]
-interface PaymentResult {
+interface QrPaymentResult {
     Onchain(Txid txid);
     Bolt11(PaymentId payment_id);
     Bolt12(PaymentId payment_id);

@@ -7,7 +7,7 @@ use common::{
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
 
-use ldk_node::payment::{PaymentKind, PaymentResult};
+use ldk_node::payment::{PaymentKind, QrPaymentResult};
 use ldk_node::{Builder, Event, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
@@ -591,24 +591,22 @@ fn unified_qr_send_receive() {
 	let bolt12_offer_param = format!("&lightning={}", offer_str);
 
 	let expected_amount_sats = 100_000;
-	let message = "TestMessage".to_string();
 	let expiry_sec = 4_000;
 
-	let uqr_payment =
-		node_b.unified_qr_payment().receive(expected_amount_sats, Some(message), expiry_sec);
+	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 
 	let uri_str = uqr_payment.clone().unwrap();
 	let uri_with_offer = format!("{}{}", uri_str, bolt12_offer_param);
 
 	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_with_offer) {
-		Ok(PaymentResult::Bolt12 { payment_id }) => {
+		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 			payment_id
 		},
-		Ok(PaymentResult::Bolt11 { payment_id: _ }) => {
+		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
 			panic!("Expected Bolt12 payment but got Bolt11");
 		},
-		Ok(PaymentResult::Onchain { txid: _ }) => {
+		Ok(QrPaymentResult::Onchain { txid: _ }) => {
 			panic!("Expected Bolt12 payment but get On-chain transaction");
 		},
 		Err(e) => {
@@ -621,14 +619,14 @@ fn unified_qr_send_receive() {
 	let uri_with_invalid_offer = format!("{}{}", uri_str, "&lightning=some_invalid_offer");
 	let invoice_payment_id: PaymentId =
 		match node_a.unified_qr_payment().send(&uri_with_invalid_offer) {
-			Ok(PaymentResult::Bolt12 { payment_id: _ }) => {
+			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
-			Ok(PaymentResult::Bolt11 { payment_id }) => {
+			Ok(QrPaymentResult::Bolt11 { payment_id }) => {
 				println!("\nBolt11 payment sent successfully with PaymentID: {:?}", payment_id);
 				payment_id
 			},
-			Ok(PaymentResult::Onchain { txid: _ }) => {
+			Ok(QrPaymentResult::Onchain { txid: _ }) => {
 				panic!("Expected Bolt11 payment but got on-chain transaction");
 			},
 			Err(e) => {
@@ -638,19 +636,17 @@ fn unified_qr_send_receive() {
 	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
 
 	let expect_onchain_amount_sats = 800_000;
-	let onchain_uqr_payment = node_b
-		.unified_qr_payment()
-		.receive(expect_onchain_amount_sats, Some("Different Message".to_string()), 4_000)
-		.unwrap();
+	let onchain_uqr_payment =
+		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
 
 	let txid = match node_a.unified_qr_payment().send(onchain_uqr_payment.as_str()) {
-		Ok(PaymentResult::Bolt12 { payment_id: _ }) => {
+		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},
-		Ok(PaymentResult::Bolt11 { payment_id: _ }) => {
+		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt11");
 		},
-		Ok(PaymentResult::Onchain { txid }) => {
+		Ok(QrPaymentResult::Onchain { txid }) => {
 			println!("\nOn-chain transaction successful with Txid: {}", txid);
 			txid
 		},

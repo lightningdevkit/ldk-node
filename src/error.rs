@@ -53,8 +53,8 @@ pub enum Error {
 	GossipUpdateTimeout,
 	/// A liquidity request operation failed.
 	LiquidityRequestFailed,
-	/// Converting a URI parameter has failed.
-	UriParameterFailed,
+	/// Parsing a URI parameter has failed.
+	UriParameterParsingFailed,
 	/// The given address is invalid.
 	InvalidAddress,
 	/// The given network address is invalid.
@@ -135,7 +135,7 @@ impl fmt::Display for Error {
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::GossipUpdateTimeout => write!(f, "Updating gossip data timed out."),
 			Self::LiquidityRequestFailed => write!(f, "Failed to request inbound liquidity."),
-			Self::UriParameterFailed => write!(f, "Failed to convert URI param to string."),
+			Self::UriParameterParsingFailed => write!(f, "Failed to parse a URI parameter."),
 			Self::InvalidAddress => write!(f, "The given address is invalid."),
 			Self::InvalidSocketAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),

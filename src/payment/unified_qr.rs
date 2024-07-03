@@ -7,12 +7,12 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-//! Holds a payment handler allowing to create [BIP 21] URIs with an on-chain and [BOLT 11] payment
-//! option
+//! Holds a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
+//! options.
 //!
 //! [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
-
+//! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use crate::error::Error;
 use crate::logger::{log_error, FilesystemLogger, Logger};
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
@@ -37,13 +37,14 @@ struct Extras {
 	bolt12_offer: Option<Offer>,
 }
 
-/// A payment handler allowing to create [BIP 21] URIs with an on-chain and [BOLT 11] payment
-/// option
+/// A payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
+/// option.
 ///
 /// Should be retrieved by calling [`Node::unified_qr_payment`]
 ///
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 /// [`Node::unified_qr_payment`]: crate::Node::unified_qr_payment
 pub struct UnifiedQrPayment {
 	onchain_payment: Arc<OnchainPayment>,
@@ -78,20 +79,16 @@ impl UnifiedQrPayment {
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	pub fn receive(
-		&self, amount_sats: u64, message: Option<String>, expiry_sec: u32,
+		&self, amount_sats: u64, message: &str, expiry_sec: u32,
 	) -> Result<String, Error> {
 		let onchain_address = self.onchain_payment.new_address()?;
 
 		let amount_msats = amount_sats * 1_000;
 
-		let bolt11_invoice = match self.bolt11_invoice.receive(
-			amount_msats,
-			message.clone().unwrap().as_str(),
-			expiry_sec,
-		) {
+		let bolt11_invoice = match self.bolt11_invoice.receive(amount_msats, message, expiry_sec) {
 			Ok(invoice) => Some(invoice),
 			Err(e) => {
-				log_error!(self.logger, "Failed to create invoice {:?}", e);
+				log_error!(self.logger, "Failed to create invoice {}", e);
 				None
 			},
 		};
@@ -100,21 +97,12 @@ impl UnifiedQrPayment {
 
 		let mut uri = LnUri::with_extras(onchain_address, extras);
 		uri.amount = Some(Amount::from_sat(amount_sats));
-		uri.message = message.map(|m| m.into());
+		uri.message = Some(message.into());
 
-		let mut uri_string = format!("{:#}", uri);
-
-		if let Some(start) = uri_string.find("lightning=") {
-			let end = uri_string[start..].find('&').map_or(uri_string.len(), |i| start + i);
-			let lighting_value = &uri_string[start + "lightning=".len()..end];
-			let uppercase_lighting_invoice = lighting_value.to_uppercase();
-			uri_string.replace_range(start + "lightning=".len()..end, &uppercase_lighting_invoice);
-		}
-
-		Ok(uri_string)
+		Ok(capitalize_qr_params(uri))
 	}
 
-	/// Sends a payment given a URI.
+	/// Sends a payment given a BIP21 URI.
 	///
 	/// This method parses the provided URI string and attempts to send the payment. If the URI
 	/// has an offer and or invoice, it will try to pay the offer first followed by the invoice.
@@ -123,7 +111,7 @@ impl UnifiedQrPayment {
 	/// Returns a `PaymentId` if the offer or invoice is paid, and a `Txid` if the on-chain
 	/// transaction is paid, or an `Error` if there was an issue with parsing the URI,
 	/// determining the network, or sending the payment.
-	pub fn send(&self, uri_str: &str) -> Result<PaymentResult, Error> {
+	pub fn send(&self, uri_str: &str) -> Result<QrPaymentResult, Error> {
 		let uri: bip21::Uri<NetworkUnchecked, Extras> =
 			uri_str.parse().map_err(|_| Error::InvalidUri)?;
 
@@ -137,14 +125,14 @@ impl UnifiedQrPayment {
 
 		if let Some(offer) = uri.extras.bolt12_offer {
 			match self.bolt12_payment.send(&offer, None) {
-				Ok(payment_id) => return Ok(PaymentResult::Bolt12 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to generate Bolt12 offer: {:?}", e),
+				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
+				Err(e) => log_error!(self.logger, "Failed to generate BOLT12 offer: {:?}", e),
 			}
 		}
 
 		if let Some(invoice) = uri.extras.bolt11_invoice {
 			match self.bolt11_invoice.send(&invoice) {
-				Ok(payment_id) => return Ok(PaymentResult::Bolt11 { payment_id }),
+				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}", e),
 			}
 		}
@@ -152,27 +140,43 @@ impl UnifiedQrPayment {
 		let txid = self
 			.onchain_payment
 			.send_to_address(&uri.address, uri.amount.unwrap_or_default().to_sat())?;
-		Ok(PaymentResult::Onchain { txid })
+		Ok(QrPaymentResult::Onchain { txid })
 	}
 }
 
-/// Represents the PaymentId or Txid while using a bip21 QR code.
-pub enum PaymentResult {
-	/// * txid - The transaction ID of the on-chain payment.
+/// Represents the [`PaymentId`] or [`Txid`] while using a [BIP 21] QR code.
+///
+/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+/// [`PaymentId]: lightning::ln::channelmanager::PaymentId
+/// [`Txid`]: bitcoin::hash_types::Txid
+pub enum QrPaymentResult {
+	/// The transaction ID of the on-chain payment.
 	Onchain {
 		///
 		txid: Txid,
 	},
-	/// * payment_id - The payment ID of the BOLT11 invoice.
+	/// The payment ID for the BOLT11 invoice.
 	Bolt11 {
 		///
 		payment_id: PaymentId,
 	},
-	/// *payment_id - The payment ID of the BOLT12 offer.
+	/// The payment ID for the BOLT12 offer.
 	Bolt12 {
 		///
 		payment_id: PaymentId,
 	},
+}
+
+fn capitalize_qr_params(uri: bip21::Uri<NetworkChecked, Extras>) -> String {
+	let mut uri = format!("{:#}", uri);
+
+	if let Some(start) = uri.find("lightning=") {
+		let end = uri[start..].find('&').map_or(uri.len(), |i| start + i);
+		let lightning_value = &uri[start + "lightning=".len()..end];
+		let uppercase_lighting_value = lightning_value.to_uppercase();
+		uri.replace_range(start + "lightning=".len()..end, &uppercase_lighting_value);
+	}
+	uri
 }
 
 impl<'a> SerializeParams for &'a Extras {
@@ -212,7 +216,8 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
 		&mut self, key: &str, value: Param<'_>,
 	) -> Result<ParamKind, <Self::Value as DeserializationError>::Error> {
 		if key == "lightning" {
-			let lighting_str = String::try_from(value).map_err(|_| Error::UriParameterFailed)?;
+			let lighting_str =
+				String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
 
 			for prefix in lighting_str.split('&') {
 				let prefix_lowercase = prefix.to_lowercase();
@@ -314,10 +319,10 @@ mod tests {
 		let unified_qr_payment = unified_qr_payment_handler();
 
 		let amount_sats = 100_000_000;
-		let message = Some("Test Message".to_string());
+		let message = "Test Message";
 		let expiry_sec = 4000;
 
-		let uqr_payment = unified_qr_payment.receive(amount_sats, message.clone(), expiry_sec);
+		let uqr_payment = unified_qr_payment.receive(amount_sats, message, expiry_sec);
 		match uqr_payment.clone() {
 			Ok(ref uri) => {
 				assert!(uri.contains("BITCOIN:"));
