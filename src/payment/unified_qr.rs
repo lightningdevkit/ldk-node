@@ -61,7 +61,7 @@ impl UnifiedQrPayment {
 		Self { onchain_payment, bolt11_invoice, bolt12_payment, logger }
 	}
 
-	/// Generates a URI with an on-chain address and [BOLT 11] invoice.
+	/// Generates a URI with an on-chain address, [BOLT 11] invoice and [BOLT 12] offer.
 	///
 	/// The URI allows users to send the payment request allowing the wallet to decide
 	/// which payment method to use. This enables a fallback mechanism: older wallets
@@ -78,12 +78,21 @@ impl UnifiedQrPayment {
 	/// The generated URI can then be given to a QR code library.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	pub fn receive(
 		&self, amount_sats: u64, message: &str, expiry_sec: u32,
 	) -> Result<String, Error> {
 		let onchain_address = self.onchain_payment.new_address()?;
 
 		let amount_msats = amount_sats * 1_000;
+
+		let bolt12_offer = match self.bolt12_payment.receive(amount_msats, message) {
+			Ok(offer) => Some(offer),
+			Err(e) => {
+				log_error!(self.logger, "Failed to create offer: {}", e);
+				None
+			},
+		};
 
 		let bolt11_invoice = match self.bolt11_invoice.receive(amount_msats, message, expiry_sec) {
 			Ok(invoice) => Some(invoice),
@@ -93,7 +102,7 @@ impl UnifiedQrPayment {
 			},
 		};
 
-		let extras = Extras { bolt11_invoice, bolt12_offer: None };
+		let extras = Extras { bolt11_invoice, bolt12_offer };
 
 		let mut uri = LnUri::with_extras(onchain_address, extras);
 		uri.amount = Some(Amount::from_sat(amount_sats));
@@ -126,7 +135,7 @@ impl UnifiedQrPayment {
 		if let Some(offer) = uri.extras.bolt12_offer {
 			match self.bolt12_payment.send(&offer, None) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to generate BOLT12 offer: {:?}", e),
+				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}", e),
 			}
 		}
 
@@ -170,11 +179,15 @@ pub enum QrPaymentResult {
 fn capitalize_qr_params(uri: bip21::Uri<NetworkChecked, Extras>) -> String {
 	let mut uri = format!("{:#}", uri);
 
-	if let Some(start) = uri.find("lightning=") {
-		let end = uri[start..].find('&').map_or(uri.len(), |i| start + i);
-		let lightning_value = &uri[start + "lightning=".len()..end];
+	let mut start = 0;
+	while let Some(index) = uri[start..].find("lightning=") {
+		let start_index = start + index;
+		let end_index = uri[start_index..].find('&').map_or(uri.len(), |i| start_index + i);
+		let lightning_value = &uri[start_index + "lightning=".len()..end_index];
 		let uppercase_lighting_value = lightning_value.to_uppercase();
-		uri.replace_range(start + "lightning=".len()..end, &uppercase_lighting_value);
+		uri.replace_range(start_index + "lightning=".len()..end_index, &uppercase_lighting_value);
+
+		start = end_index
 	}
 	uri
 }
@@ -189,6 +202,9 @@ impl<'a> SerializeParams for &'a Extras {
 
 		if let Some(bolt11_invoice) = &self.bolt11_invoice {
 			params.push(("lightning", bolt11_invoice.to_string()));
+		}
+		if let Some(bolt12_offer) = &self.bolt12_offer {
+			params.push(("lightning", bolt12_offer.to_string()));
 		}
 
 		params.into_iter()
@@ -219,19 +235,11 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
 			let lighting_str =
 				String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
 
-			for prefix in lighting_str.split('&') {
-				let prefix_lowercase = prefix.to_lowercase();
-				if prefix_lowercase.starts_with("lnbc")
-					|| prefix_lowercase.starts_with("lntb")
-					|| prefix_lowercase.starts_with("lnbcrt")
-					|| prefix_lowercase.starts_with("lnsb")
-				{
-					let invoice =
-						prefix.parse::<Bolt11Invoice>().map_err(|_| Error::InvalidInvoice)?;
-					self.bolt11_invoice = Some(invoice)
-				} else if prefix_lowercase.starts_with("lno") {
-					let offer = prefix.parse::<Offer>().map_err(|_| Error::InvalidOffer)?;
-					self.bolt12_offer = Some(offer)
+			for param in lighting_str.split('&') {
+				if let Ok(offer) = param.parse::<Offer>() {
+					self.bolt12_offer = Some(offer);
+				} else if let Ok(invoice) = param.parse::<Bolt11Invoice>() {
+					self.bolt11_invoice = Some(invoice);
 				}
 			}
 			Ok(bip21::de::ParamKind::Known)
@@ -252,86 +260,9 @@ impl DeserializationError for Extras {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::builder::NodeBuilder;
-	use crate::config::Config;
 	use crate::payment::unified_qr::Extras;
 	use bitcoin::{Address, Network};
 	use std::str::FromStr;
-	use std::sync::{Arc, RwLock};
-	use tokio::runtime::Runtime;
-
-	fn unified_qr_payment_handler() -> UnifiedQrPayment {
-		let mut config = Config::default();
-		config.network = Network::Bitcoin;
-
-		let builder = NodeBuilder::from_config(config);
-		let node = builder.build().unwrap();
-
-		let liquidity_source = &node.liquidity_source;
-		let peer_store = &node.peer_store;
-		let payment_store = &node.payment_store;
-		let runtime = Arc::new(RwLock::new(Some(Runtime::new().unwrap())));
-		let channel_mgr = &node.channel_manager;
-		let connection_mgr = &node.connection_manager;
-		let key_mgr = &node.keys_manager;
-		let config = &node.config;
-		let logger = &node.logger;
-
-		let bolt11_invoice = Bolt11Payment::new(
-			runtime.clone(),
-			channel_mgr.clone(),
-			connection_mgr.clone(),
-			key_mgr.clone(),
-			liquidity_source.clone(),
-			payment_store.clone(),
-			peer_store.clone(),
-			config.clone(),
-			logger.clone(),
-		);
-
-		let bolt12_offer = Bolt12Payment::new(
-			runtime.clone(),
-			channel_mgr.clone(),
-			payment_store.clone(),
-			logger.clone(),
-		);
-
-		let wallet = &node.wallet;
-		let onchain_payment = OnchainPayment::new(
-			runtime.clone(),
-			wallet.clone(),
-			channel_mgr.clone(),
-			config.clone(),
-			logger.clone(),
-		);
-
-		let unified_qr_payment = UnifiedQrPayment::new(
-			Arc::new(onchain_payment),
-			Arc::new(bolt11_invoice),
-			Arc::new(bolt12_offer),
-			logger.clone(),
-		);
-		unified_qr_payment
-	}
-
-	#[test]
-	fn create_uri() {
-		let unified_qr_payment = unified_qr_payment_handler();
-
-		let amount_sats = 100_000_000;
-		let message = "Test Message";
-		let expiry_sec = 4000;
-
-		let uqr_payment = unified_qr_payment.receive(amount_sats, message, expiry_sec);
-		match uqr_payment.clone() {
-			Ok(ref uri) => {
-				assert!(uri.contains("BITCOIN:"));
-				assert!(uri.contains("lightning="));
-				println!("Generated URI: {}\n", uri);
-			},
-			Err(e) => panic!("Failed to generate URI: {:?}", e),
-		}
-	}
 
 	#[test]
 	fn parse_uri() {

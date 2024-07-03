@@ -552,6 +552,47 @@ fn simple_bolt12_send_receive() {
 }
 
 #[test]
+fn generate_bip21_uri() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premined_sats = 5_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premined_sats),
+	);
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let expected_amount_sats = 100_000;
+	let expiry_sec = 4_000;
+
+	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
+
+	match uqr_payment.clone() {
+		Ok(ref uri) => {
+			println!("Generated URI: {}", uri);
+			assert!(uri.contains("BITCOIN:"));
+			let count = uri.matches("lightning=").count();
+			assert!(count >= 2, "Expected 2 lighting parameters in URI.");
+		},
+		Err(e) => panic!("Failed to generate URI: {:?}", e),
+	}
+}
+
+#[test]
 fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
@@ -584,21 +625,13 @@ fn unified_qr_send_receive() {
 	// Sleep one more sec to make sure the node announcement propagates.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
-	let expected_amount_msats = 100_000_000;
-	let offer = node_b.bolt12_payment().receive(expected_amount_msats, "hi");
-
-	let offer_str = offer.clone().unwrap().to_string();
-	let bolt12_offer_param = format!("&lightning={}", offer_str);
-
 	let expected_amount_sats = 100_000;
 	let expiry_sec = 4_000;
 
 	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
-
 	let uri_str = uqr_payment.clone().unwrap();
-	let uri_with_offer = format!("{}{}", uri_str, bolt12_offer_param);
 
-	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_with_offer) {
+	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str) {
 		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 			payment_id
@@ -616,9 +649,11 @@ fn unified_qr_send_receive() {
 
 	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
 
-	let uri_with_invalid_offer = format!("{}{}", uri_str, "&lightning=some_invalid_offer");
+	// Removed one character from the offer to fall back on to invoice.
+	// Still needs work
+	let uri_str_with_invalid_offer = &uri_str[..uri_str.len() - 1];
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(&uri_with_invalid_offer) {
+		match node_a.unified_qr_payment().send(uri_str_with_invalid_offer) {
 			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -639,7 +674,11 @@ fn unified_qr_send_receive() {
 	let onchain_uqr_payment =
 		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
 
-	let txid = match node_a.unified_qr_payment().send(onchain_uqr_payment.as_str()) {
+	// Removed a character from the offer, so it would move on to the other parameters.
+	let txid = match node_a
+		.unified_qr_payment()
+		.send(&onchain_uqr_payment.as_str()[..onchain_uqr_payment.len() - 1])
+	{
 		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},
