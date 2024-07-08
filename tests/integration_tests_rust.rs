@@ -585,8 +585,8 @@ fn generate_bip21_uri() {
 		Ok(ref uri) => {
 			println!("Generated URI: {}", uri);
 			assert!(uri.contains("BITCOIN:"));
-			let count = uri.matches("lightning=").count();
-			assert!(count >= 2, "Expected 2 lighting parameters in URI.");
+			assert!(uri.contains("lightning="));
+			assert!(uri.contains("lno="));
 		},
 		Err(e) => panic!("Failed to generate URI: {:?}", e),
 	}
@@ -630,7 +630,6 @@ fn unified_qr_send_receive() {
 
 	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 	let uri_str = uqr_payment.clone().unwrap();
-
 	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str) {
 		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
