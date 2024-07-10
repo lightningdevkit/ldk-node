@@ -81,7 +81,17 @@ impl PayjoinPayment {
 		peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>, channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	) -> Self {
-		Self { runtime, handler, receiver, config, logger, wallet, peer_store, channel_manager, connection_manager }
+		Self {
+			runtime,
+			handler,
+			receiver,
+			config,
+			logger,
+			wallet,
+			peer_store,
+			channel_manager,
+			connection_manager,
+		}
 	}
 
 	/// Send a Payjoin transaction to the address specified in the `payjoin_uri`.

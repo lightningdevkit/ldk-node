@@ -150,7 +150,7 @@ pub(crate) use expect_payment_successful_event;
 macro_rules! expect_payjoin_tx_sent_successfully_event {
 	($node: expr) => {{
 		match $node.wait_next_event() {
-			ref e @ Event::PayjoinTxSendSuccess { txid } => {
+			ref e @ Event::PayjoinPaymentSuccess { txid, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				$node.event_handled();
 				txid

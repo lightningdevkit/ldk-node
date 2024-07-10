@@ -64,10 +64,7 @@ fn send_receive_payjoin_transaction_with_channel_opening() {
 
 	assert_eq!(node_a_pj_receiver.list_peers().get(0).unwrap().is_connected, true);
 	assert_eq!(node_a_pj_receiver.list_peers().get(0).unwrap().is_persisted, true);
-	assert_eq!(
-		node_a_pj_receiver.list_peers().get(0).unwrap().node_id,
-		node_b_pj_sender.node_id()
-	);
+	assert_eq!(node_a_pj_receiver.list_peers().get(0).unwrap().node_id, node_b_pj_sender.node_id());
 
 	let invoice_amount_1_msat = 2500_000;
 	let invoice =
