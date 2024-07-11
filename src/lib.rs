@@ -171,7 +171,7 @@ uniffi::include_scaffolding!("ldk_node");
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
 pub struct Node {
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
 	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
@@ -211,6 +211,20 @@ impl Node {
 	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
 	/// a thread-safe manner.
 	pub fn start(&self) -> Result<(), Error> {
+		let runtime =
+			Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
+		self.start_with_runtime(runtime)
+	}
+
+	/// Starts the necessary background tasks (such as handling events coming from user input,
+	/// LDK/BDK, and the peer-to-peer network) on the the given `runtime`.
+	///
+	/// This allows to have LDK Node reuse an outer pre-existing runtime, e.g., to avoid stacking Tokio
+	/// runtime contexts.
+	///
+	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
+	/// a thread-safe manner.
+	pub fn start_with_runtime(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
 		let mut runtime_lock = self.runtime.write().unwrap();
 		if runtime_lock.is_some() {
@@ -224,8 +238,6 @@ impl Node {
 			self.node_id(),
 			self.config.network
 		);
-
-		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
 		// Block to ensure we update our fee rate cache once on startup
 		let fee_estimator = Arc::clone(&self.fee_estimator);
@@ -861,9 +873,6 @@ impl Node {
 				runtime.metrics().active_tasks_count()
 			);
 		}
-
-		// Shutdown our runtime. By now ~no or only very few tasks should be left.
-		runtime.shutdown_timeout(Duration::from_secs(10));
 
 		log_info!(self.logger, "Shutdown complete.");
 		Ok(())

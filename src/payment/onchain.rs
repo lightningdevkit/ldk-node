@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 ///
 /// [`Node::onchain_payment`]: crate::Node::onchain_payment
 pub struct OnchainPayment {
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	config: Arc<Config>,
@@ -24,7 +24,7 @@ pub struct OnchainPayment {
 
 impl OnchainPayment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>, wallet: Arc<Wallet>,
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, wallet: Arc<Wallet>,
 		channel_manager: Arc<ChannelManager>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
 	) -> Self {
 		Self { runtime, wallet, channel_manager, config, logger }

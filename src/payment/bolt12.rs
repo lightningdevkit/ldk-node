@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 /// [`Node::bolt12_payment`]: crate::Node::bolt12_payment
 pub struct Bolt12Payment {
-	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
 	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
 	logger: Arc<FilesystemLogger>,
@@ -36,7 +36,7 @@ pub struct Bolt12Payment {
 
 impl Bolt12Payment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>,
 		payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>, logger: Arc<FilesystemLogger>,
 	) -> Self {
