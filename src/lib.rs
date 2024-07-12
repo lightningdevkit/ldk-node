@@ -1085,6 +1085,7 @@ impl Node {
 			self.onchain_payment().into(),
 			self.bolt11_payment().into(),
 			self.bolt12_payment().into(),
+			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -1099,6 +1100,7 @@ impl Node {
 			self.onchain_payment(),
 			self.bolt11_payment(),
 			self.bolt12_payment(),
+			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 		))
 	}
