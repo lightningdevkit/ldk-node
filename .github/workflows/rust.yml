@@ -49,6 +49,7 @@ jobs:
           cargo update -p proptest --precise "1.2.0" --verbose # proptest 1.3.0 requires rustc 1.64.0
           cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
           cargo update -p home --precise "0.5.5" --verbose # home v0.5.9 requires rustc 1.70 or newer
+          cargo update -p cc --precise "1.0.105" --verbose # cc 1.0.106 requires rustc 1.67 or newer
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
