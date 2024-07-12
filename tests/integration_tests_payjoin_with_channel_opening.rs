@@ -10,6 +10,8 @@ use common::{
 use bitcoin::Amount;
 use ldk_node::Event;
 
+use crate::common::expect_payjoin_tx_pending_event;
+
 #[test]
 fn send_receive_payjoin_transaction_with_channel_opening() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -46,16 +48,18 @@ fn send_receive_payjoin_transaction_with_channel_opening() {
 	assert!(sender_payjoin_payment.send(payjoin_uri).is_ok());
 	expect_channel_pending_event!(node_a_pj_receiver, node_b_pj_sender.node_id());
 	expect_channel_pending_event!(node_b_pj_sender, node_a_pj_receiver.node_id());
-	let txid = expect_payjoin_tx_sent_successfully_event!(node_b_pj_sender);
+	let txid = expect_payjoin_tx_pending_event!(node_b_pj_sender);
 	wait_for_tx(&electrsd.client, txid);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1);
+	node_b_pj_sender.sync_wallets().unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	node_a_pj_receiver.sync_wallets().unwrap();
 	node_b_pj_sender.sync_wallets().unwrap();
 	let node_b_balance = node_b_pj_sender.list_balances();
 	assert!(node_b_balance.total_onchain_balance_sats < premine_amount_sat - 80000);
-
 	expect_channel_ready_event!(node_a_pj_receiver, node_b_pj_sender.node_id());
 	expect_channel_ready_event!(node_b_pj_sender, node_a_pj_receiver.node_id());
+	let _ = expect_payjoin_tx_sent_successfully_event!(node_b_pj_sender);
 	let channels = node_a_pj_receiver.list_channels();
 	let channel = channels.get(0).unwrap();
 	assert_eq!(channel.channel_value_sats, 80_000);

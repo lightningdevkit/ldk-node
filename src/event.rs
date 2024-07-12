@@ -188,6 +188,7 @@ pub enum PayjoinPaymentFailureReason {
 	Timeout,
 	TransactionFinalisationFailed,
 	InvalidReceiverResponse,
+	RequestFailed,
 }
 
 impl Readable for PayjoinPaymentFailureReason {
@@ -196,6 +197,7 @@ impl Readable for PayjoinPaymentFailureReason {
 			0 => Ok(Self::Timeout),
 			1 => Ok(Self::TransactionFinalisationFailed),
 			2 => Ok(Self::InvalidReceiverResponse),
+			3 => Ok(Self::RequestFailed),
 			_ => Err(DecodeError::InvalidValue),
 		}
 	}
@@ -207,6 +209,7 @@ impl Writeable for PayjoinPaymentFailureReason {
 			Self::Timeout => 0u8.write(writer),
 			Self::TransactionFinalisationFailed => 1u8.write(writer),
 			Self::InvalidReceiverResponse => 2u8.write(writer),
+			Self::RequestFailed => 3u8.write(writer),
 		}
 	}
 }

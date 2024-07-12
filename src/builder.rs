@@ -1017,8 +1017,6 @@ fn build_with_store_internal(
 	let mut payjoin_receiver = None;
 	if let Some(pj_config) = payjoin_config {
 		payjoin_handler = Some(Arc::new(PayjoinHandler::new(
-			Arc::clone(&tx_broadcaster),
-			Arc::clone(&logger),
 			pj_config.payjoin_relay.clone(),
 			Arc::clone(&tx_sync),
 			Arc::clone(&event_queue),

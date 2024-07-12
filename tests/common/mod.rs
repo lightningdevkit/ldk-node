@@ -147,6 +147,23 @@ macro_rules! expect_payment_successful_event {
 
 pub(crate) use expect_payment_successful_event;
 
+macro_rules! expect_payjoin_tx_pending_event {
+	($node: expr) => {{
+		match $node.wait_next_event() {
+			ref e @ Event::PayjoinPaymentPending { txid, .. } => {
+				println!("{} got event {:?}", $node.node_id(), e);
+				$node.event_handled();
+				txid
+			},
+			ref e => {
+				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+			},
+		}
+	}};
+}
+
+pub(crate) use expect_payjoin_tx_pending_event;
+
 macro_rules! expect_payjoin_tx_sent_successfully_event {
 	($node: expr) => {{
 		match $node.wait_next_event() {

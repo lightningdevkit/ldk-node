@@ -7,7 +7,12 @@ use common::{
 };
 
 use bitcoin::Amount;
-use ldk_node::Event;
+use ldk_node::{
+	payment::{PaymentDirection, PaymentKind, PaymentStatus},
+	Event,
+};
+
+use crate::common::expect_payjoin_tx_pending_event;
 
 #[test]
 fn send_receive_regular_payjoin_transaction() {
@@ -33,10 +38,22 @@ fn send_receive_regular_payjoin_transaction() {
 	dbg!(&payjoin_uri);
 	let sender_payjoin_payment = node_b_pj_sender.payjoin_payment();
 	assert!(sender_payjoin_payment.send(payjoin_uri).is_ok());
-	let txid = expect_payjoin_tx_sent_successfully_event!(node_b_pj_sender);
+	let txid = expect_payjoin_tx_pending_event!(node_b_pj_sender);
+	let payments = node_b_pj_sender.list_payments();
+	let payment = payments.first().unwrap();
+	assert_eq!(payment.amount_msat, Some(80_000));
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	assert_eq!(payment.direction, PaymentDirection::Outbound);
+	assert_eq!(payment.kind, PaymentKind::Payjoin);
 	wait_for_tx(&electrsd.client, txid);
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 3);
 	node_b_pj_sender.sync_wallets().unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 4);
+	node_b_pj_sender.sync_wallets().unwrap();
+	let payments = node_b_pj_sender.list_payments();
+	let payment = payments.first().unwrap();
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	expect_payjoin_tx_sent_successfully_event!(node_b_pj_sender);
 	let node_b_balance = node_b_pj_sender.list_balances();
 	assert!(node_b_balance.total_onchain_balance_sats < premine_amount_sat - 80000);
 }
@@ -65,10 +82,12 @@ fn send_payjoin_with_amount() {
 	dbg!(&payjoin_uri);
 	let sender_payjoin_payment = node_b_pj_sender.payjoin_payment();
 	assert!(sender_payjoin_payment.send_with_amount(payjoin_uri, 80_000).is_ok());
-	let txid = expect_payjoin_tx_sent_successfully_event!(node_b_pj_sender);
-	wait_for_tx(&electrsd.client, txid);
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	let _txid = expect_payjoin_tx_pending_event!(node_b_pj_sender);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 3);
 	node_b_pj_sender.sync_wallets().unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 4);
+	node_b_pj_sender.sync_wallets().unwrap();
+	let _txid = expect_payjoin_tx_sent_successfully_event!(node_b_pj_sender);
 	let node_b_balance = node_b_pj_sender.list_balances();
 	assert!(node_b_balance.total_onchain_balance_sats < premine_amount_sat - 80000);
 }

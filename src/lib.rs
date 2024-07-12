@@ -374,6 +374,10 @@ impl Node {
 		let archive_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
+		let sync_payjoin = match &self.payjoin_handler {
+			Some(pjh) => Some(Arc::clone(pjh)),
+			None => None,
+		};
 		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
 		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
 		let mut stop_sync = self.stop_sender.subscribe();
@@ -393,11 +397,14 @@ impl Node {
 						return;
 					}
 					_ = wallet_sync_interval.tick() => {
-						let confirmables = vec![
+						let mut confirmables = vec![
 							&*sync_cman as &(dyn Confirm + Sync + Send),
 							&*sync_cmon as &(dyn Confirm + Sync + Send),
 							&*sync_sweeper as &(dyn Confirm + Sync + Send),
 						];
+						if let Some(sync_payjoin) = sync_payjoin.as_ref() {
+							confirmables.push(sync_payjoin.as_ref() as &(dyn Confirm + Sync + Send));
+						}
 						let now = Instant::now();
 						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
 						match timeout_fut.await {
@@ -1114,9 +1121,11 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.wallet),
+			Arc::clone(&self.tx_broadcaster),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
+			Arc::clone(&self.payment_store),
 		)
 	}
 
@@ -1132,14 +1141,16 @@ impl Node {
 		let payjoin_receiver = self.payjoin_receiver.as_ref();
 		Arc::new(PayjoinPayment::new(
 			Arc::clone(&self.runtime),
-			payjoin_sender.map(Arc::clone),
+			payjoin_handler.map(Arc::clone),
 			payjoin_receiver.map(Arc::clone),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.wallet),
+			Arc::clone(&self.tx_broadcaster),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
+			Arc::clone(&self.payment_store),
 		))
 	}
 
@@ -1344,11 +1355,15 @@ impl Node {
 		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
-		let confirmables = vec![
+		let sync_payjoin = &self.payjoin_handler.as_ref();
+		let mut confirmables = vec![
 			&*sync_cman as &(dyn Confirm + Sync + Send),
 			&*sync_cmon as &(dyn Confirm + Sync + Send),
 			&*sync_sweeper as &(dyn Confirm + Sync + Send),
 		];
+		if let Some(sync_payjoin) = sync_payjoin {
+			confirmables.push(sync_payjoin.as_ref() as &(dyn Confirm + Sync + Send));
+		}
 		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
 		let sync_fee_rate_update_timestamp =
 			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);

@@ -114,8 +114,10 @@ where
 {
 	fn broadcast_transactions(&self, txs: &[&Transaction]) {
 		let package = txs.iter().map(|&t| t.clone()).collect::<Vec<Transaction>>();
-		self.queue_sender.try_send(package).unwrap_or_else(|e| {
+		let ret = self.queue_sender.try_send(package).unwrap_or_else(|e| {
+			dbg!(&e);
 			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
 		});
+		dbg!(&ret);
 	}
 }
