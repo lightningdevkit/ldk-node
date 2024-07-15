@@ -89,6 +89,8 @@ pub enum Error {
 	InvalidNetwork,
 	/// The given URI is invalid.
 	InvalidUri,
+	/// The given quantity is invalid.
+	InvalidQuantity,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
 	/// The provided offer was denonminated in an unsupported currency.
@@ -153,6 +155,7 @@ impl fmt::Display for Error {
 			Self::InvalidChannelId => write!(f, "The given channel ID is invalid."),
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
 			Self::InvalidUri => write!(f, "The given URI is invalid."),
+			Self::InvalidQuantity => write!(f, "The given quantity is invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
 			},
