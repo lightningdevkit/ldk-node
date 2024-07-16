@@ -1075,9 +1075,11 @@ impl Node {
 		))
 	}
 
-	/// Returns a payment handler allowing to create [BIP 21] URIs with Lightning and on-chain
-	/// payment options.
+	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
+	/// and [BOLT 12] payment options.
 	///
+	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	#[cfg(not(feature = "uniffi"))]
 	pub fn unified_qr_payment(&self) -> UnifiedQrPayment {
@@ -1090,9 +1092,11 @@ impl Node {
 		)
 	}
 
-	/// Returns a payment handler allowing to create [BIP 21] URIs with Lightning and on-chain
-	/// payment options.
+	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
+	/// and [BOLT 12] payment options.
 	///
+	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	#[cfg(feature = "uniffi")]
 	pub fn unified_qr_payment(&self) -> Arc<UnifiedQrPayment> {
