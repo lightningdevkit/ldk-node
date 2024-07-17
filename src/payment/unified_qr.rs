@@ -76,14 +76,10 @@ impl UnifiedQrPayment {
 	///   This message is visible to the payer and can provide context or details about the payment.
 	/// - `expiry_sec`: The expiration time for the payment, specified in seconds.
 	///
-	/// # Return Value
-	///  **Success**: Returns a URI string.
-	///
-	///  **Error**: Returns an error if there was an issue generating the on-chain address or
-	///    lightning invoice.
-	/// - `Error::WalletOperationFailed` if there is an issue generating the on-chain address.
-	/// - `Error::InvoiceCreationFailed` if there is an issue generating the BOLT11 invoice.
-	/// - `Error::OfferCreationFailed` if there is an issue generating the BOLT12 offer.
+	/// Returns a payable URI that can be used to request and receive a payment of the amount
+	/// given. In case of an error, the function returns `Error::WalletOperationFailed`for on-chain
+	/// address issues, `Error::InvoiceCreationFailed` for BOLT11 invoice issues, or
+	/// `Error::OfferCreationFailed` for BOLT12 offer issues.
 	///
 	/// The generated URI can then be given to a QR code library.
 	///
@@ -128,18 +124,8 @@ impl UnifiedQrPayment {
 	/// has an offer and or invoice, it will try to pay the offer first followed by the invoice.
 	/// If they both fail, the on-chain payment will be paid.
 	///
-	/// # Return Value
-	///
-	/// **Success**: Returns a `QrPaymentResult` indicating the result of the payment.
-	/// * `QrPaymentResult::Bolt12 { payment_id }` if the BOLT12 offer was paid.
-	/// * `QrPaymentResult::Bolt11 { payment_id }` if the BOLT11 invoice was paid.
-	/// * `QrPaymentResult::Onchain { txid }` if the on-chain transaction was paid.
-	///
-	/// **Error**: Returns an `Error` if there was an issue processing the payment.
-	/// * `Error::InvalidUri` if there was an issue parsing the URI.
-	/// * `Error::InvalidNetwork` if there’s an issue determining the network.
-	/// * Various errors if there's an issue sending the payment. For detailed descriptions of
-	/// all possible errors, refer to the [`Error`] enum.
+	/// Returns a `QrPaymentResult` indicating the outcome of the payment. If an error
+	/// occurs, an `Error` is returned detailing the issue encountered.
 	///
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	pub fn send(&self, uri_str: &str) -> Result<QrPaymentResult, Error> {
