@@ -1,5 +1,11 @@
+// Importing these items ensures they are accessible in the uniffi bindings
+// without introducing unused import warnings in lib.rs.
+//
+// Make sure to add any re-exported items that need to be used in uniffi below.
+
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus};
+pub use crate::payment::QrPaymentResult;
 
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};

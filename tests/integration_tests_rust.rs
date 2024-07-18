@@ -1,13 +1,13 @@
 mod common;
 
 use common::{
-	do_channel_full_cycle, expect_event, expect_payment_received_event,
+	do_channel_full_cycle, expect_channel_ready_event, expect_event, expect_payment_received_event,
 	expect_payment_successful_event, generate_blocks_and_wait, open_channel,
 	premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd, setup_builder,
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
 
-use ldk_node::payment::PaymentKind;
+use ldk_node::payment::{PaymentKind, QrPaymentResult};
 use ldk_node::{Builder, Event, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
@@ -16,8 +16,6 @@ use lightning::util::persist::KVStore;
 use bitcoin::{Amount, Network};
 
 use std::sync::Arc;
-
-use crate::common::expect_channel_ready_event;
 
 #[test]
 fn channel_full_cycle() {
@@ -551,4 +549,156 @@ fn simple_bolt12_send_receive() {
 		},
 	}
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(overpaid_amount));
+}
+
+#[test]
+fn generate_bip21_uri() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premined_sats = 5_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premined_sats),
+	);
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let expected_amount_sats = 100_000;
+	let expiry_sec = 4_000;
+
+	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
+
+	match uqr_payment.clone() {
+		Ok(ref uri) => {
+			println!("Generated URI: {}", uri);
+			assert!(uri.contains("BITCOIN:"));
+			assert!(uri.contains("lightning="));
+			assert!(uri.contains("lno="));
+		},
+		Err(e) => panic!("Failed to generate URI: {:?}", e),
+	}
+}
+
+#[test]
+fn unified_qr_send_receive() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premined_sats = 5_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premined_sats),
+	);
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Sleep until we broadcast a node announcement.
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
+	// Sleep one more sec to make sure the node announcement propagates.
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	let expected_amount_sats = 100_000;
+	let expiry_sec = 4_000;
+
+	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
+	let uri_str = uqr_payment.clone().unwrap();
+	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str) {
+		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
+			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
+			payment_id
+		},
+		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
+			panic!("Expected Bolt12 payment but got Bolt11");
+		},
+		Ok(QrPaymentResult::Onchain { txid: _ }) => {
+			panic!("Expected Bolt12 payment but get On-chain transaction");
+		},
+		Err(e) => {
+			panic!("Expected Bolt12 payment but got error: {:?}", e);
+		},
+	};
+
+	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
+
+	// Removed one character from the offer to fall back on to invoice.
+	// Still needs work
+	let uri_str_with_invalid_offer = &uri_str[..uri_str.len() - 1];
+	let invoice_payment_id: PaymentId =
+		match node_a.unified_qr_payment().send(uri_str_with_invalid_offer) {
+			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
+				panic!("Expected Bolt11 payment but got Bolt12");
+			},
+			Ok(QrPaymentResult::Bolt11 { payment_id }) => {
+				println!("\nBolt11 payment sent successfully with PaymentID: {:?}", payment_id);
+				payment_id
+			},
+			Ok(QrPaymentResult::Onchain { txid: _ }) => {
+				panic!("Expected Bolt11 payment but got on-chain transaction");
+			},
+			Err(e) => {
+				panic!("Expected Bolt11 payment but got error: {:?}", e);
+			},
+		};
+	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
+
+	let expect_onchain_amount_sats = 800_000;
+	let onchain_uqr_payment =
+		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
+
+	// Removed a character from the offer, so it would move on to the other parameters.
+	let txid = match node_a
+		.unified_qr_payment()
+		.send(&onchain_uqr_payment.as_str()[..onchain_uqr_payment.len() - 1])
+	{
+		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
+			panic!("Expected on-chain payment but got Bolt12")
+		},
+		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
+			panic!("Expected on-chain payment but got Bolt11");
+		},
+		Ok(QrPaymentResult::Onchain { txid }) => {
+			println!("\nOn-chain transaction successful with Txid: {}", txid);
+			txid
+		},
+		Err(e) => {
+			panic!("Expected on-chain payment but got error: {:?}", e);
+		},
+	};
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	wait_for_tx(&electrsd.client, txid);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
+	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
 }

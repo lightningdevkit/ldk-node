@@ -63,6 +63,7 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
+	UnifiedQrPayment unified_qr_payment();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
@@ -148,6 +149,13 @@ interface OnchainPayment {
 	Txid send_all_to_address([ByRef]Address address);
 };
 
+interface UnifiedQrPayment {
+    [Throws=NodeError]
+    string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
+    [Throws=NodeError]
+    QrPaymentResult send([ByRef]string uri_str);
+};
+
 [Error]
 enum NodeError {
 	"AlreadyRunning",
@@ -175,6 +183,7 @@ enum NodeError {
 	"GossipUpdateFailed",
 	"GossipUpdateTimeout",
 	"LiquidityRequestFailed",
+	"UriParameterParsingFailed",
 	"InvalidAddress",
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
@@ -191,6 +200,7 @@ enum NodeError {
 	"InvalidRefund",
 	"InvalidChannelId",
 	"InvalidNetwork",
+	"InvalidUri",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
@@ -274,6 +284,13 @@ interface PaymentKind {
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id);
 	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
+};
+
+[Enum]
+interface QrPaymentResult {
+    Onchain(Txid txid);
+    Bolt11(PaymentId payment_id);
+    Bolt12(PaymentId payment_id);
 };
 
 enum PaymentDirection {
