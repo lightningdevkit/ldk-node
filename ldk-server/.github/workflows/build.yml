@@ -1,0 +1,31 @@
+name: Continuous Integration Checks
+
+on: [ push, pull_request ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        toolchain: [ stable ]
+        include:
+          - toolchain: stable
+            check-fmt: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+      - name: Install Rust ${{ matrix.toolchain }} toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
+          rustup override set ${{ matrix.toolchain }}
+      - name: Build on Rust ${{ matrix.toolchain }}
+        run: cargo build --verbose --color always
+      - name: Check formatting
+        if: matrix.check-fmt
+        run: rustup component add rustfmt && cargo fmt --all -- --check
+      - name: Test on Rust ${{ matrix.toolchain }}
+        run: cargo test
+      - name: Cargo check release on Rust ${{ matrix.toolchain }}
+        run: cargo check --release
+      - name: Cargo check doc on Rust ${{ matrix.toolchain }}
+        run: cargo doc --release
