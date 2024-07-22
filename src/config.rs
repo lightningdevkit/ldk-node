@@ -163,6 +163,11 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub sending_parameters: Option<SendingParameters>,
+	/// The node alias to be used in announcements.
+	///
+	/// **Note**: This is required if, alongside a valid public socket address, node announcements
+	/// are to be broadcast.
+	pub node_alias: Option<String>,
 }
 
 impl Default for Config {
@@ -180,6 +185,7 @@ impl Default for Config {
 			log_level: DEFAULT_LOG_LEVEL,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
+			node_alias: None,
 		}
 	}
 }

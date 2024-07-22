@@ -109,7 +109,7 @@ impl Default for LiquiditySourceConfig {
 /// An error encountered during building a [`Node`].
 ///
 /// [`Node`]: crate::Node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BuildError {
 	/// The given seed bytes are invalid, e.g., have invalid length.
 	InvalidSeedBytes,
@@ -139,6 +139,8 @@ pub enum BuildError {
 	WalletSetupFailed,
 	/// We failed to setup the logger.
 	LoggerSetupFailed,
+	/// The provided alias is invalid
+	InvalidNodeAlias(String),
 }
 
 impl fmt::Display for BuildError {
@@ -159,6 +161,9 @@ impl fmt::Display for BuildError {
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
+			Self::InvalidNodeAlias(ref reason) => {
+				write!(f, "Given node alias is invalid: {}", reason)
+			},
 		}
 	}
 }
@@ -307,6 +312,17 @@ impl NodeBuilder {
 	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
 		self.config.log_level = level;
 		self
+	}
+
+	/// Sets the alias the [`Node`] will use in its announcement. The provided
+	/// alias must be a valid UTF-8 string.
+	pub fn set_node_alias<T: Into<String>>(
+		&mut self, node_alias: T,
+	) -> Result<&mut Self, BuildError> {
+		let node_alias = sanitize_alias(node_alias).map_err(|e| e)?;
+
+		self.config.node_alias = Some(node_alias);
+		Ok(self)
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1048,5 +1064,70 @@ fn seed_bytes_from_config(
 			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
 		},
+	}
+}
+
+/// Sanitize the user-provided node alias to ensure that it is a valid protocol-specified UTF-8 string.
+fn sanitize_alias<T: Into<String>>(node_alias: T) -> Result<String, BuildError> {
+	// Alias is convertible into UTF-8 encoded string
+	let node_alias: String = node_alias.into();
+	let alias = node_alias.trim();
+
+	// Alias is non-empty
+	if alias.is_empty() {
+		return Err(BuildError::InvalidNodeAlias("Node alias cannot be empty.".to_string()));
+	}
+
+	// Alias valid up to first null byte
+	let first_null = alias.as_bytes().iter().position(|b| *b == 0).unwrap_or(alias.len());
+	let actual_alias = alias.split_at(first_null).0;
+
+	// Alias must be 32-bytes long or less
+	if actual_alias.as_bytes().len() > 32 {
+		return Err(BuildError::InvalidNodeAlias("Node alias cannot exceed 32 bytes.".to_string()));
+	}
+
+	Ok(actual_alias.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::{BuildError, Node};
+
+	use super::NodeBuilder;
+
+	fn create_node_with_alias<T: Into<String>>(alias: T) -> Result<Node, BuildError> {
+		NodeBuilder::new().set_node_alias(&alias.into())?.build()
+	}
+
+	#[test]
+	fn empty_node_alias() {
+		// Empty node alias
+		let alias = "";
+		let node = create_node_with_alias(alias);
+		assert_eq!(
+			node.err().unwrap(),
+			BuildError::InvalidNodeAlias("Node alias cannot be empty.".to_string())
+		);
+	}
+
+	#[test]
+	fn node_alias_with_sandwiched_null() {
+		// Alias with emojis
+		let expected_alias = "I\u{1F496}LDK-Node!";
+		let user_provided_alias = "I\u{1F496}LDK-Node!\0\u{26A1}";
+		let node = create_node_with_alias(user_provided_alias).unwrap();
+
+		assert_eq!(expected_alias, node.config().node_alias.unwrap());
+	}
+
+	#[test]
+	fn node_alias_longer_than_32_bytes() {
+		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
+		let node = create_node_with_alias(alias);
+		assert_eq!(
+			node.err().unwrap(),
+			BuildError::InvalidNodeAlias("Node alias cannot exceed 32 bytes.".to_string())
+		);
 	}
 }
