@@ -78,6 +78,7 @@ interface Node {
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
 	UnifiedQrPayment unified_qr_payment();
+	PayjoinPayment payjoin_payment();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
@@ -171,6 +172,13 @@ interface UnifiedQrPayment {
 	QrPaymentResult send([ByRef]string uri_str);
 };
 
+interface PayjoinPayment {
+	[Throws=NodeError]
+	void send(string payjoin_uri);
+	[Throws=NodeError]
+	void send_with_amount(string payjoin_uri, u64 amount_sats);
+};
+
 [Error]
 enum NodeError {
 	"AlreadyRunning",
@@ -222,6 +230,12 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+	"PayjoinUnavailable",
+	"PayjoinUriInvalid",
+	"PayjoinRequestMissingAmount",
+	"PayjoinRequestCreationFailed",
+	"PayjoinRequestSendingFailed",
+	"PayjoinResponseProcessingFailed",
 };
 
 dictionary NodeStatus {
@@ -249,6 +263,7 @@ enum BuildError {
 	"InvalidChannelMonitor",
 	"InvalidListeningAddresses",
 	"InvalidNodeAlias",
+	"InvalidPayjoinConfig",
 	"ReadFailed",
 	"WriteFailed",
 	"StoragePathAccessFailed",
@@ -281,6 +296,9 @@ interface Event {
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
+	PayjoinPaymentAwaitingConfirmation(Txid txid, u64 amount_sats);
+	PayjoinPaymentSuccessful(Txid txid, u64 amount_sats, boolean is_original_psbt_modified);
+	PayjoinPaymentFailed(Txid txid, u64 amount_sats, PayjoinPaymentFailureReason reason);
 };
 
 enum PaymentFailureReason {
@@ -293,6 +311,12 @@ enum PaymentFailureReason {
 	"UnknownRequiredFeatures",
 	"InvoiceRequestExpired",
 	"InvoiceRequestRejected",
+};
+
+enum PayjoinPaymentFailureReason {
+	"Timeout",
+	"RequestSendingFailed",
+	"ResponseProcessingFailed",
 };
 
 [Enum]
@@ -321,6 +345,7 @@ interface PaymentKind {
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
 	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, UntrustedString? payer_note, u64? quantity);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
+	Payjoin();
 };
 
 [Enum]
@@ -353,6 +378,8 @@ dictionary PaymentDetails {
 	PaymentDirection direction;
 	PaymentStatus status;
 	u64 latest_update_timestamp;
+	Txid? txid;
+	BestBlock? best_block;
 };
 
 dictionary SendingParameters {

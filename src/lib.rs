@@ -106,7 +106,10 @@ pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use error::Error as NodeError;
 use error::Error;
 
+#[cfg(feature = "uniffi")]
+use crate::event::PayjoinPaymentFailureReason;
 pub use event::Event;
+use payment::payjoin::handler::PayjoinHandler;
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -132,8 +135,8 @@ use io::utils::write_node_metrics;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedQrPayment,
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PayjoinPayment, PaymentDetails,
+	SpontaneousPayment, UnifiedQrPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
 use types::{
@@ -187,6 +190,7 @@ pub struct Node {
 	peer_manager: Arc<PeerManager>,
 	onion_messenger: Arc<OnionMessenger>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
+	payjoin_handler: Option<Arc<PayjoinHandler>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
@@ -253,6 +257,68 @@ impl Node {
 			chain_source
 				.continuously_sync_wallets(stop_sync_receiver, sync_cman, sync_cmon, sync_sweeper)
 				.await;
+		});
+		let sync_logger = Arc::clone(&self.logger);
+		let sync_payjoin = &self.payjoin_handler.as_ref();
+		let sync_payjoin = sync_payjoin.map(Arc::clone);
+		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
+		let mut stop_sync = self.stop_sender.subscribe();
+		let wallet_sync_interval_secs =
+			self.config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+		runtime.spawn(async move {
+			let mut wallet_sync_interval =
+				tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
+			wallet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					_ = stop_sync.changed() => {
+						log_trace!(
+							sync_logger,
+							"Stopping background syncing Lightning wallet.",
+						);
+						return;
+					}
+					_ = wallet_sync_interval.tick() => {
+						let mut confirmables = vec![
+							&*sync_cman as &(dyn Confirm + Sync + Send),
+							&*sync_cmon as &(dyn Confirm + Sync + Send),
+							&*sync_sweeper as &(dyn Confirm + Sync + Send),
+						];
+						if let Some(sync_payjoin) = sync_payjoin.as_ref() {
+							confirmables.push(sync_payjoin.as_ref() as &(dyn Confirm + Sync + Send));
+						}
+						let now = Instant::now();
+						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
+						match timeout_fut.await {
+							Ok(res) => match res {
+								Ok(()) => {
+									log_trace!(
+										sync_logger,
+										"Background sync of Lightning wallet finished in {}ms.",
+										now.elapsed().as_millis()
+										);
+									let unix_time_secs_opt =
+										SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+									*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+
+									periodically_archive_fully_resolved_monitors(
+										Arc::clone(&archive_cman),
+										Arc::clone(&archive_cmon),
+										Arc::clone(&sync_monitor_archival_height)
+									);
+								}
+								Err(e) => {
+									log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
+								}
+							}
+							Err(e) => {
+								log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
+							}
+						}
+					}
+				}
+			}
 		});
 
 		if self.gossip_source.is_rgs() {
@@ -960,6 +1026,42 @@ impl Node {
 		))
 	}
 
+	/// Returns a Payjoin payment handler allowing to send Payjoin transactions
+	///
+	/// in order to utilize Payjoin functionality, it is necessary to configure a Payjoin relay
+	/// using [`set_payjoin_config`].
+	///
+	/// [`set_payjoin_config`]: crate::builder::NodeBuilder::set_payjoin_config
+	#[cfg(not(feature = "uniffi"))]
+	pub fn payjoin_payment(&self) -> PayjoinPayment {
+		let payjoin_handler = self.payjoin_handler.as_ref();
+		PayjoinPayment::new(
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+			payjoin_handler.map(Arc::clone),
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.tx_broadcaster),
+		)
+	}
+
+	/// Returns a Payjoin payment handler allowing to send Payjoin transactions.
+	///
+	/// in order to utilize Payjoin functionality, it is necessary to configure a Payjoin relay
+	/// using [`set_payjoin_config`].
+	///
+	/// [`set_payjoin_config`]: crate::builder::NodeBuilder::set_payjoin_config
+	#[cfg(feature = "uniffi")]
+	pub fn payjoin_payment(&self) -> Arc<PayjoinPayment> {
+		let payjoin_handler = self.payjoin_handler.as_ref();
+		Arc::new(PayjoinPayment::new(
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+			payjoin_handler.map(Arc::clone),
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.tx_broadcaster),
+		))
+	}
+
 	/// Retrieve a list of known channels.
 	pub fn list_channels(&self) -> Vec<ChannelDetails> {
 		self.channel_manager.list_channels().into_iter().map(|c| c.into()).collect()
@@ -1218,6 +1320,22 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
+		let sync_logger = Arc::clone(&self.logger);
+		let sync_payjoin = &self.payjoin_handler.as_ref();
+		let mut confirmables = vec![
+			&*sync_cman as &(dyn Confirm + Sync + Send),
+			&*sync_cmon as &(dyn Confirm + Sync + Send),
+			&*sync_sweeper as &(dyn Confirm + Sync + Send),
+		];
+		if let Some(sync_payjoin) = sync_payjoin {
+			confirmables.push(sync_payjoin.as_ref() as &(dyn Confirm + Sync + Send));
+		}
+		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
+		let sync_fee_rate_update_timestamp =
+			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
+		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
+		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
+
 		tokio::task::block_in_place(move || {
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
 				async move {

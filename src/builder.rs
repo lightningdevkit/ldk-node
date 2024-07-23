@@ -28,6 +28,7 @@ use crate::types::{
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
 use crate::{io, NodeMetrics};
+use crate::PayjoinHandler;
 use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
@@ -1231,6 +1232,25 @@ fn build_with_store_internal(
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
 
+	let payjoin_handler = payjoin_config.map(|pj_config| {
+		Arc::new(PayjoinHandler::new(
+			Arc::clone(&tx_sync),
+			Arc::clone(&event_queue),
+			Arc::clone(&logger),
+			pj_config.payjoin_relay.clone(),
+			Arc::clone(&payment_store),
+			Arc::clone(&wallet),
+		))
+	});
+
+	let is_listening = Arc::new(AtomicBool::new(false));
+	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
+	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
+	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
+	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1243,6 +1263,7 @@ fn build_with_store_internal(
 		channel_manager,
 		chain_monitor,
 		output_sweeper,
+		payjoin_handler,
 		peer_manager,
 		onion_messenger,
 		connection_manager,
