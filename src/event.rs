@@ -206,6 +206,66 @@ pub enum Event {
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
+	/// This event is emitted when we have successfully negotiated a Payjoin transaction with the
+	/// receiver and are waiting for the transaction to be confirmed onchain.
+	PayjoinPaymentAwaitingConfirmation {
+		/// Transaction ID of the finalised Payjoin transaction. i.e., the final transaction after
+		/// we have successfully negotiated with the receiver.
+		txid: bitcoin::Txid,
+		/// Transaction amount as specified in the Payjoin URI in case of using
+		/// [`PayjoinPayment::send`] or as specified by the user if using
+		/// [`PayjoinPayment::send_with_amount`].
+		///
+		/// [`PayjoinPayment::send`]: crate::PayjoinPayment::send
+		/// [`PayjoinPayment::send_with_amount`]: crate::PayjoinPayment::send_with_amount
+		amount_sats: u64,
+	},
+	/// This event is emitted when a Payjoin transaction has been successfully confirmed onchain.
+	///
+	/// This event is emitted only after one onchain confirmation. To determine the current number
+	/// of confirmations, refer to [`PaymentStore::best_block`]:.
+	///
+	/// [`PaymentStore::best_block`]: crate::payment::store::PaymentStore::best_block
+	PayjoinPaymentSuccessful {
+		/// This can refer to the original PSBT or to the finalised Payjoin transaction.
+		///
+		/// If [`is_original_psbt_modified`] field is `true`, this refers to the finalised Payjoin
+		/// transaction. Otherwise, it refers to the original PSBT.
+		///
+		/// In case of this being the original PSBT, the transaction will be a regular transaction
+		/// and not a Payjoin transaction but will be considered successful as the receiver decided
+		/// to broadcast the original PSBT or to respond with a Payjoin proposal that was identical
+		/// to the original PSBT, and they have successfully received the funds.
+		txid: bitcoin::Txid,
+		/// Transaction amount as specified in the Payjoin URI in case of using
+		/// [`PayjoinPayment::send`] or as specified by the user if using
+		/// [`PayjoinPayment::send_with_amount`].
+		///
+		/// [`PayjoinPayment::send`]: crate::PayjoinPayment::send
+		/// [`PayjoinPayment::send_with_amount`]: crate::PayjoinPayment::send_with_amount
+		amount_sats: u64,
+		/// Indicates whether the Payjoin negotiation was successful or the receiver decided to
+		/// broadcast the original PSBT.
+		is_original_psbt_modified: bool,
+	},
+	/// Failed to send a Payjoin transaction.
+	///
+	/// Payjoin payment can fail in different stages due to various reasons, such as network
+	/// issues, insufficient funds, irresponsive receiver, etc.
+	PayjoinPaymentFailed {
+		/// This can refer to the original PSBT or to the finalised Payjoin transaction. Depending
+		/// on the stage of the Payjoin process when the failure occurred.
+		txid: bitcoin::Txid,
+		/// Transaction amount as specified in the Payjoin URI in case of using
+		/// [`PayjoinPayment::send`] or as specified by the user if using
+		/// [`PayjoinPayment::send_with_amount`].
+		///
+		/// [`PayjoinPayment::send`]: crate::PayjoinPayment::send
+		/// [`PayjoinPayment::send_with_amount`]: crate::PayjoinPayment::send_with_amount
+		amount_sats: u64,
+		/// Failure reason.
+		reason: PayjoinPaymentFailureReason,
+	},
 }
 
 impl_writeable_tlv_based_enum!(Event,
@@ -258,7 +318,51 @@ impl_writeable_tlv_based_enum!(Event,
 		(10, skimmed_fee_msat, option),
 		(12, claim_from_onchain_tx, required),
 		(14, outbound_amount_forwarded_msat, option),
-	}
+	},
+	(8, PayjoinPaymentAwaitingConfirmation) => {
+		(0, txid, required),
+		(2, amount_sats, required),
+	},
+	(9, PayjoinPaymentSuccessful) => {
+		(0, txid, required),
+		(2, amount_sats, required),
+		(4, is_original_psbt_modified, required),
+	},
+	(10, PayjoinPaymentFailed) => {
+		(0, amount_sats, required),
+		(2, txid, required),
+		(4, reason, required),
+	};
+);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayjoinPaymentFailureReason {
+	/// The request failed in the sending process, i.e., either no funds were available to send or
+	/// the provided Payjoin URI is invalid or network problem encountered while communicating with
+	/// the Payjoin relay/directory.  The exact reason can be determined by inspecting the logs.
+	RequestSendingFailed,
+	/// The received response was invalid, i.e., the receiver responded with an invalid Payjoin
+	/// proposal that does not adhere to the [`BIP78`] specification.
+	///
+	/// This is considered a failure but the receiver can still broadcast the original PSBT, in
+	/// which case a `PayjoinPaymentSuccessful` event will be emitted with
+	/// `is_original_psbt_modified` set to `false` and the `txid` of the original PSBT.
+	///
+	/// [`BIP78`]: https://github.com/bitcoin/bips/blob/master/bip-0078.mediawiki
+	ResponseProcessingFailed,
+	/// The request failed as we did not receive a response in time.
+	///
+	/// This is considered a failure but the receiver can still broadcast the original PSBT, in
+	/// which case a `PayjoinPaymentSuccessful` event will be emitted with
+	/// `is_original_psbt_modified` set to `false` and the `txid` of the original PSBT.
+	Timeout,
+}
+
+impl_writeable_tlv_based_enum!(PayjoinPaymentFailureReason,
+	(0, Timeout) => {},
+	(1, RequestSendingFailed) => {},
+	(2, ResponseProcessingFailed) => {};
+>>>>>>> 1136aa4 (Implement `PayjoinPayment` ..)
 );
 
 pub struct EventQueue<L: Deref>

@@ -260,6 +260,8 @@ pub enum PaymentKind {
 		/// The pre-image used by the payment.
 		preimage: Option<PaymentPreimage>,
 	},
+	/// A Payjoin payment.
+	Payjoin,
 }
 
 impl_writeable_tlv_based_enum!(PaymentKind,
@@ -293,7 +295,8 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(3, quantity, option),
 		(4, secret, option),
-	}
+	},
+	(12, Payjoin) => { };
 );
 
 /// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
