@@ -597,7 +597,7 @@ impl Bolt11Payment {
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let (node_id, address) = liquidity_source
-			.get_liquidity_source_details()
+			.get_lsps2_service_details()
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let rt_lock = self.runtime.read().unwrap();

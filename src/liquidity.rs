@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use crate::chain::ChainSource;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager};
 use crate::{Config, Error};
@@ -15,9 +16,12 @@ use lightning::routing::router::{RouteHint, RouteHintHop};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::Event;
 use lightning_liquidity::lsps0::ser::RequestId;
+use lightning_liquidity::lsps1::client::LSPS1ClientConfig;
+use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
+use lightning_liquidity::LiquidityClientConfig;
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
@@ -31,18 +35,114 @@ use std::time::Duration;
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
+struct LSPS1Service {
+	node_id: PublicKey,
+	address: SocketAddress,
+	token: Option<String>,
+	client_config: LSPS1ClientConfig,
+}
+
 struct LSPS2Service {
 	node_id: PublicKey,
 	address: SocketAddress,
 	token: Option<String>,
+	client_config: LSPS2ClientConfig,
 	pending_fee_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2FeeResponse>>>,
 	pending_buy_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2BuyResponse>>>,
+}
+
+pub(crate) struct LiquiditySourceBuilder<L: Deref>
+where
+	L::Target: LdkLogger,
+{
+	lsps1_service: Option<LSPS1Service>,
+	lsps2_service: Option<LSPS2Service>,
+	channel_manager: Arc<ChannelManager>,
+	keys_manager: Arc<KeysManager>,
+	chain_source: Arc<ChainSource>,
+	config: Arc<Config>,
+	logger: L,
+}
+
+impl<L: Deref> LiquiditySourceBuilder<L>
+where
+	L::Target: LdkLogger,
+{
+	pub(crate) fn new(
+		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
+		chain_source: Arc<ChainSource>, config: Arc<Config>, logger: L,
+	) -> Self {
+		let lsps1_service = None;
+		let lsps2_service = None;
+		Self {
+			lsps1_service,
+			lsps2_service,
+			channel_manager,
+			keys_manager,
+			chain_source,
+			config,
+			logger,
+		}
+	}
+
+	pub(crate) fn lsps1_service(
+		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+	) -> &mut Self {
+		// TODO: allow to set max_channel_fees_msat
+		let client_config = LSPS1ClientConfig { max_channel_fees_msat: None };
+		self.lsps1_service = Some(LSPS1Service { node_id, address, token, client_config });
+		self
+	}
+
+	pub(crate) fn lsps2_service(
+		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+	) -> &mut Self {
+		let client_config = LSPS2ClientConfig {};
+		let pending_fee_requests = Mutex::new(HashMap::new());
+		let pending_buy_requests = Mutex::new(HashMap::new());
+		self.lsps2_service = Some(LSPS2Service {
+			node_id,
+			address,
+			token,
+			client_config,
+			pending_fee_requests,
+			pending_buy_requests,
+		});
+		self
+	}
+
+	pub(crate) fn build(self) -> LiquiditySource<L> {
+		let lsps1_client_config = self.lsps1_service.as_ref().map(|s| s.client_config.clone());
+		let lsps2_client_config = self.lsps2_service.as_ref().map(|s| s.client_config.clone());
+		let liquidity_client_config =
+			Some(LiquidityClientConfig { lsps1_client_config, lsps2_client_config });
+
+		let liquidity_manager = Arc::new(LiquidityManager::new(
+			Arc::clone(&self.keys_manager),
+			Arc::clone(&self.channel_manager),
+			Some(Arc::clone(&self.chain_source)),
+			None,
+			None,
+			liquidity_client_config,
+		));
+
+		LiquiditySource {
+			lsps1_service: self.lsps1_service,
+			lsps2_service: self.lsps2_service,
+			channel_manager: self.channel_manager,
+			keys_manager: self.keys_manager,
+			liquidity_manager,
+			config: self.config,
+			logger: self.logger,
+		}
+	}
 }
 
 pub(crate) struct LiquiditySource<L: Deref>
 where
 	L::Target: LdkLogger,
 {
+	lsps1_service: Option<LSPS1Service>,
 	lsps2_service: Option<LSPS2Service>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
@@ -55,23 +155,6 @@ impl<L: Deref> LiquiditySource<L>
 where
 	L::Target: LdkLogger,
 {
-	pub(crate) fn new_lsps2(
-		node_id: PublicKey, address: SocketAddress, token: Option<String>,
-		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		liquidity_manager: Arc<LiquidityManager>, config: Arc<Config>, logger: L,
-	) -> Self {
-		let pending_fee_requests = Mutex::new(HashMap::new());
-		let pending_buy_requests = Mutex::new(HashMap::new());
-		let lsps2_service = Some(LSPS2Service {
-			node_id,
-			address,
-			token,
-			pending_fee_requests,
-			pending_buy_requests,
-		});
-		Self { lsps2_service, channel_manager, keys_manager, liquidity_manager, config, logger }
-	}
-
 	pub(crate) fn set_peer_manager(&self, peer_manager: Arc<PeerManager>) {
 		let process_msgs_callback = move || peer_manager.process_events();
 		self.liquidity_manager.set_process_msgs_callback(process_msgs_callback);
@@ -81,7 +164,11 @@ where
 		self.liquidity_manager.as_ref()
 	}
 
-	pub(crate) fn get_liquidity_source_details(&self) -> Option<(PublicKey, SocketAddress)> {
+	pub(crate) fn get_lsps1_service_details(&self) -> Option<(PublicKey, SocketAddress)> {
+		self.lsps1_service.as_ref().map(|s| (s.node_id, s.address.clone()))
+	}
+
+	pub(crate) fn get_lsps2_service_details(&self) -> Option<(PublicKey, SocketAddress)> {
 		self.lsps2_service.as_ref().map(|s| (s.node_id, s.address.clone()))
 	}
 
