@@ -32,8 +32,8 @@ use std::time::Duration;
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 struct LSPS2Service {
-	address: SocketAddress,
 	node_id: PublicKey,
+	address: SocketAddress,
 	token: Option<String>,
 	pending_fee_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2FeeResponse>>>,
 	pending_buy_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2BuyResponse>>>,
@@ -56,15 +56,15 @@ where
 	L::Target: LdkLogger,
 {
 	pub(crate) fn new_lsps2(
-		address: SocketAddress, node_id: PublicKey, token: Option<String>,
+		node_id: PublicKey, address: SocketAddress, token: Option<String>,
 		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
 		liquidity_manager: Arc<LiquidityManager>, config: Arc<Config>, logger: L,
 	) -> Self {
 		let pending_fee_requests = Mutex::new(HashMap::new());
 		let pending_buy_requests = Mutex::new(HashMap::new());
 		let lsps2_service = Some(LSPS2Service {
-			address,
 			node_id,
+			address,
 			token,
 			pending_fee_requests,
 			pending_buy_requests,

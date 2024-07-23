@@ -99,8 +99,8 @@ enum GossipSourceConfig {
 
 #[derive(Debug, Clone)]
 struct LiquiditySourceConfig {
-	// LSPS2 service's (address, node_id, token)
-	lsps2_service: Option<(SocketAddress, PublicKey, Option<String>)>,
+	// LSPS2 service's (node_id, address, token)
+	lsps2_service: Option<(PublicKey, SocketAddress, Option<String>)>,
 }
 
 impl Default for LiquiditySourceConfig {
@@ -310,14 +310,14 @@ impl NodeBuilder {
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
 	pub fn set_liquidity_source_lsps2(
-		&mut self, address: SocketAddress, node_id: PublicKey, token: Option<String>,
+		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 	) -> &mut Self {
 		// Mark the LSP as trusted for 0conf
 		self.config.trusted_peers_0conf.push(node_id.clone());
 
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps2_service = Some((address, node_id, token));
+		liquidity_source_config.lsps2_service = Some((node_id, address, token));
 		self
 	}
 
@@ -644,9 +644,9 @@ impl ArcedNodeBuilder {
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
 	pub fn set_liquidity_source_lsps2(
-		&self, address: SocketAddress, node_id: PublicKey, token: Option<String>,
+		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 	) {
-		self.inner.write().unwrap().set_liquidity_source_lsps2(address, node_id, token);
+		self.inner.write().unwrap().set_liquidity_source_lsps2(node_id, address, token);
 	}
 
 	/// Sets the used storage directory path.
@@ -1125,7 +1125,7 @@ fn build_with_store_internal(
 	};
 
 	let liquidity_source = liquidity_source_config.as_ref().and_then(|lsc| {
-		lsc.lsps2_service.as_ref().map(|(address, node_id, token)| {
+		lsc.lsps2_service.as_ref().map(|(node_id, address, token)| {
 			let lsps2_client_config = Some(LSPS2ClientConfig {});
 			let liquidity_client_config =
 				Some(LiquidityClientConfig { lsps1_client_config: None, lsps2_client_config });
@@ -1138,8 +1138,8 @@ fn build_with_store_internal(
 				liquidity_client_config,
 			));
 			Arc::new(LiquiditySource::new_lsps2(
-				address.clone(),
 				*node_id,
+				address.clone(),
 				token.clone(),
 				Arc::clone(&channel_manager),
 				Arc::clone(&keys_manager),

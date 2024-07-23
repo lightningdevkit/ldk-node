@@ -58,7 +58,7 @@ interface Builder {
 	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
-	void set_liquidity_source_lsps2(SocketAddress address, PublicKey node_id, string? token);
+	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(string? log_file_path, LogLevel? log_level);
 	void set_log_facade_logger(LogLevel log_level);
