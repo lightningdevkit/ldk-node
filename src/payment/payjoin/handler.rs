@@ -1,6 +1,8 @@
 use bitcoin::address::NetworkChecked;
+use bitcoin::block::Header;
 use bitcoin::psbt::Psbt;
-use bitcoin::{Script, Transaction, Txid};
+use bitcoin::{BlockHash, Script, Transaction, Txid};
+use lightning::chain::transaction::TransactionData;
 
 use crate::config::PAYJOIN_REQUEST_TIMEOUT;
 use crate::error::Error;
@@ -13,7 +15,7 @@ use crate::types::{ChainSource, EventQueue, PaymentStore, Wallet};
 use crate::Event;
 use crate::PaymentDetails;
 
-use lightning::chain::Filter;
+use lightning::chain::{BestBlock, Confirm, Filter};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::log_error;
 use lightning::util::logger::Logger;
@@ -165,4 +167,99 @@ impl PayjoinHandler {
 			Err(Error::PayjoinRequestSendingFailed)
 		}
 	}
+
+	fn internal_transactions_confirmed(
+		&self, header: &Header, txdata: &TransactionData, height: u32,
+	) {
+		for (_, tx) in txdata {
+			let confirmed_tx_txid = tx.txid();
+			let payment_store = self.payment_store.clone();
+			let payment_id = self.payment_id(&confirmed_tx_txid);
+			let payjoin_tx_filter = |payment_details: &&PaymentDetails| {
+				payment_details.txid == Some(confirmed_tx_txid)
+					&& payment_details.amount_msat.is_some()
+			};
+			let payjoin_tx_details = payment_store.list_filter(payjoin_tx_filter);
+			if let Some(payjoin_tx_details) = payjoin_tx_details.get(0) {
+				let mut payment_update = PaymentDetailsUpdate::new(payjoin_tx_details.id);
+				payment_update.status = Some(PaymentStatus::Succeeded);
+				payment_update.best_block = Some(BestBlock::new(header.block_hash(), height));
+				let _ = payment_store.update(&payment_update);
+				let _ = self.event_queue.add_event(Event::PayjoinPaymentSuccessful {
+					txid: confirmed_tx_txid,
+					amount_sats: payjoin_tx_details
+						.amount_msat
+						.expect("Unreachable, asserted in `payjoin_tx_filter`"),
+					is_original_psbt_modified: if payment_id == payjoin_tx_details.id {
+						false
+					} else {
+						true
+					},
+				});
+			// check if this is the original psbt transaction
+			} else if let Some(payment_details) = payment_store.get(&payment_id) {
+				let mut payment_update = PaymentDetailsUpdate::new(payment_id);
+				payment_update.status = Some(PaymentStatus::Succeeded);
+				let _ = payment_store.update(&payment_update);
+				payment_update.best_block = Some(BestBlock::new(header.block_hash(), height));
+				payment_update.txid = Some(confirmed_tx_txid);
+				let _ = self.event_queue.add_event(Event::PayjoinPaymentSuccessful {
+					txid: confirmed_tx_txid,
+					amount_sats: payment_details
+						.amount_msat
+						.expect("Unreachable, payjoin transactions must have amount"),
+					is_original_psbt_modified: false,
+				});
+			}
+		}
+	}
+
+	fn internal_get_relevant_txids(&self) -> Vec<(Txid, u32, Option<BlockHash>)> {
+		let payjoin_tx_filter = |payment_details: &&PaymentDetails| {
+			payment_details.txid.is_some()
+				&& payment_details.status == PaymentStatus::Succeeded
+				&& payment_details.kind == PaymentKind::Payjoin
+		};
+		let payjoin_tx_details = self.payment_store.list_filter(payjoin_tx_filter);
+		let mut ret = Vec::new();
+		for payjoin_tx_details in payjoin_tx_details {
+			if let (Some(txid), Some(best_block)) =
+				(payjoin_tx_details.txid, payjoin_tx_details.best_block)
+			{
+				ret.push((txid, best_block.height, Some(best_block.block_hash)));
+			}
+		}
+		ret
+	}
+
+	fn internal_best_block_updated(&self, height: u32, block_hash: BlockHash) {
+		let payment_store = self.payment_store.clone();
+		let payjoin_tx_filter = |payment_details: &&PaymentDetails| {
+			payment_details.kind == PaymentKind::Payjoin
+				&& payment_details.status == PaymentStatus::Succeeded
+		};
+		let payjoin_tx_details = payment_store.list_filter(payjoin_tx_filter);
+		for payjoin_tx_details in payjoin_tx_details {
+			let mut payment_update = PaymentDetailsUpdate::new(payjoin_tx_details.id);
+			payment_update.best_block = Some(BestBlock::new(block_hash, height));
+			let _ = payment_store.update(&payment_update);
+		}
+	}
+}
+
+impl Confirm for PayjoinHandler {
+	fn transactions_confirmed(&self, header: &Header, txdata: &TransactionData, height: u32) {
+		self.internal_transactions_confirmed(header, txdata, height);
+	}
+
+	fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<BlockHash>)> {
+		self.internal_get_relevant_txids()
+	}
+
+	fn best_block_updated(&self, header: &Header, height: u32) {
+		let block_hash = header.block_hash();
+		self.internal_best_block_updated(height, block_hash);
+	}
+
+	fn transaction_unconfirmed(&self, _txid: &Txid) {}
 }
