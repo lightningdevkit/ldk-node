@@ -200,6 +200,15 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 	listening_addresses
 }
 
+pub(crate) fn random_node_alias() -> Option<String> {
+	let mut rng = thread_rng();
+	let ranged_val = rng.gen_range(0..10);
+	match ranged_val {
+		0 => None,
+		val => Some(format!("ldk-node-{}", val)),
+	}
+}
+
 pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let mut config = Config::default();
 
@@ -219,6 +228,10 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let rand_listening_addresses = random_listening_addresses();
 	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
 	config.listening_addresses = Some(rand_listening_addresses);
+
+	let alias = random_node_alias();
+	println!("Setting random LDK node alias: {:?}", alias);
+	config.node_alias = alias;
 
 	config.log_level = LogLevel::Gossip;
 

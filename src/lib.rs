@@ -601,6 +601,7 @@ impl Node {
 		let bcast_logger = Arc::clone(&self.logger);
 		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
 		let mut stop_bcast = self.stop_sender.subscribe();
+		let node_alias = self.config().node_alias;
 		runtime.spawn(async move {
 			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 			#[cfg(not(test))]
@@ -650,7 +651,16 @@ impl Node {
 								continue;
 							}
 
-							bcast_pm.broadcast_node_announcement([0; 3], [0; 32], addresses);
+							// Extract alias if set, else select the default
+							let alias = if let Some(ref alias) = node_alias {
+								let mut buf = [0_u8; 32];
+								buf[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+								buf
+							} else {
+								[0; 32]
+							};
+
+							bcast_pm.broadcast_node_announcement([0; 3], alias, addresses);
 
 							let unix_time_secs_opt =
 								SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
