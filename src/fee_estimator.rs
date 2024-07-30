@@ -37,6 +37,29 @@ where
 	}
 
 	pub(crate) async fn update_fee_estimates(&self) -> Result<(), Error> {
+		let estimates = tokio::time::timeout(
+			Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+			self.esplora_client.get_fee_estimates(),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
+			Error::FeerateEstimationUpdateTimeout
+		})?
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
+			Error::FeerateEstimationUpdateFailed
+		})?;
+
+		if estimates.is_empty() && self.config.network == Network::Bitcoin {
+			// Ensure we fail if we didn't receive any estimates.
+			log_error!(
+				self.logger,
+				"Failed to retrieve fee rate estimates: empty fee estimates are dissallowed on Mainnet.",
+			);
+			return Err(Error::FeerateEstimationUpdateFailed);
+		}
+
 		let confirmation_targets = vec![
 			ConfirmationTarget::OnChainSweep,
 			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
@@ -57,42 +80,8 @@ where
 				ConfirmationTarget::OutputSpendingFee => 12,
 			};
 
-			let estimates = tokio::time::timeout(
-				Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
-				self.esplora_client.get_fee_estimates(),
-			)
-			.await
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Updating fee rate estimates for {:?} timed out: {}",
-					target,
-					e
-				);
-				Error::FeerateEstimationUpdateTimeout
-			})?
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Failed to retrieve fee rate estimates for {:?}: {}",
-					target,
-					e
-				);
-				Error::FeerateEstimationUpdateFailed
-			})?;
-
-			if estimates.is_empty() && self.config.network == Network::Bitcoin {
-				// Ensure we fail if we didn't receive any estimates.
-				log_error!(
-					self.logger,
-					"Failed to retrieve fee rate estimates for {:?}: empty fee estimates are dissallowed on Mainnet.",
-					target,
-				);
-				return Err(Error::FeerateEstimationUpdateFailed);
-			}
-
-			let converted_estimates = esplora_client::convert_fee_rate(num_blocks, estimates)
-				.map_err(|e| {
+			let converted_estimates =
+				esplora_client::convert_fee_rate(num_blocks, estimates.clone()).map_err(|e| {
 					log_error!(
 						self.logger,
 						"Failed to convert fee rate estimates for {:?}: {}",
