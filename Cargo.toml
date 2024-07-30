@@ -102,3 +102,13 @@ panic = "abort"
 
 [profile.dev]
 panic = "abort"
+
+[lints.rust.unexpected_cfgs]
+level = "forbid"
+# When adding a new cfg attribute, ensure that it is added to this list.
+check-cfg = [
+	"cfg(vss)",
+	"cfg(vss_test)",
+	"cfg(ldk_bench)",
+	"cfg(tokio_unstable)",
+]
