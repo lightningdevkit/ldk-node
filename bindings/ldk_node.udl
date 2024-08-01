@@ -136,7 +136,7 @@ interface Bolt12Payment {
 
 interface SpontaneousPayment {
 	[Throws=NodeError]
-	PaymentId send(u64 amount_msat, PublicKey node_id);
+	PaymentId send(u64 amount_msat, PublicKey node_id, SendingParameters? sending_parameters);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
 };

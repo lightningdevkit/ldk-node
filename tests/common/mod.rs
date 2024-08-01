@@ -695,7 +695,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nA send_spontaneous_payment");
 	let keysend_amount_msat = 2500_000;
 	let keysend_payment_id =
-		node_a.spontaneous_payment().send(keysend_amount_msat, node_b.node_id()).unwrap();
+		node_a.spontaneous_payment().send(keysend_amount_msat, node_b.node_id(), None).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_keysend_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
