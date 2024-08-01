@@ -7,7 +7,7 @@ use common::{
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
 
-use ldk_node::payment::{PaymentKind, QrPaymentResult};
+use ldk_node::payment::{PaymentKind, QrPaymentResult, SendingParameters};
 use ldk_node::{Builder, Event, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
@@ -156,8 +156,15 @@ fn multi_hop_sending() {
 	// Sleep a bit for gossip to propagate.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
+	let sending_params = SendingParameters {
+		max_total_routing_fee_msat: Some(75_000),
+		max_total_cltv_expiry_delta: Some(1000),
+		max_path_count: Some(10),
+		max_channel_saturation_power_of_half: Some(2),
+	};
+
 	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
-	nodes[0].bolt11_payment().send(&invoice).unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
 
 	let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);

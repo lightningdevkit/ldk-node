@@ -493,8 +493,8 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let invoice = node_b.bolt11_payment().receive(invoice_amount_1_msat, &"asdf", 9217).unwrap();
 
 	println!("\nA send");
-	let payment_id = node_a.bolt11_payment().send(&invoice).unwrap();
-	assert_eq!(node_a.bolt11_payment().send(&invoice), Err(NodeError::DuplicatePayment));
+	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+	assert_eq!(node_a.bolt11_payment().send(&invoice, None), Err(NodeError::DuplicatePayment));
 
 	assert_eq!(node_a.list_payments().first().unwrap().id, payment_id);
 
@@ -526,7 +526,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
-	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice));
+	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None));
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
@@ -579,7 +579,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let determined_amount_msat = 2345_678;
 	assert_eq!(
 		Err(NodeError::InvalidInvoice),
-		node_a.bolt11_payment().send(&variable_amount_invoice)
+		node_a.bolt11_payment().send(&variable_amount_invoice, None)
 	);
 	println!("\nA send_using_amount");
 	let payment_id = node_a
@@ -616,7 +616,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		.bolt11_payment()
 		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_payment_hash)
 		.unwrap();
-	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice).unwrap();
+	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).unwrap();
 
 	let claimable_amount_msat = expect_payment_claimable_event!(
 		node_b,
@@ -654,7 +654,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		.bolt11_payment()
 		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_fail_payment_hash)
 		.unwrap();
-	let manual_fail_payment_id = node_a.bolt11_payment().send(&manual_fail_invoice).unwrap();
+	let manual_fail_payment_id = node_a.bolt11_payment().send(&manual_fail_invoice, None).unwrap();
 
 	expect_payment_claimable_event!(
 		node_b,
