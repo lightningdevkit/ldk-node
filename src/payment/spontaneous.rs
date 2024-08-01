@@ -44,13 +44,15 @@ impl SpontaneousPayment {
 	/// Send a spontaneous, aka. "keysend", payment
 	pub fn send(
 		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<TlvEntry>,
+		preimage: Option<PaymentPreimage>,
 	) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
-		let payment_preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
+		let payment_preimage = preimage
+			.unwrap_or_else(|| PaymentPreimage(self.keys_manager.get_secure_random_bytes()));
 		let payment_hash = PaymentHash::from(payment_preimage);
 		let payment_id = PaymentId(payment_hash.0);
 
