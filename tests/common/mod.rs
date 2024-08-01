@@ -541,7 +541,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let underpaid_amount = invoice_amount_2_msat - 1;
 	assert_eq!(
 		Err(NodeError::InvalidAmount),
-		node_a.bolt11_payment().send_using_amount(&invoice, underpaid_amount)
+		node_a.bolt11_payment().send_using_amount(&invoice, underpaid_amount, None)
 	);
 
 	println!("\nB overpaid receive");
@@ -550,7 +550,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nA overpaid send");
 	let payment_id =
-		node_a.bolt11_payment().send_using_amount(&invoice, overpaid_amount_msat).unwrap();
+		node_a.bolt11_payment().send_using_amount(&invoice, overpaid_amount_msat, None).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
@@ -584,7 +584,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nA send_using_amount");
 	let payment_id = node_a
 		.bolt11_payment()
-		.send_using_amount(&variable_amount_invoice, determined_amount_msat)
+		.send_using_amount(&variable_amount_invoice, determined_amount_msat, None)
 		.unwrap();
 
 	expect_event!(node_a, PaymentSuccessful);
