@@ -699,7 +699,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let tlv2 = TlvEntry { r#type: 131075, value: vec![0xaa, 0xbb] };
 	let keysend_payment_id = node_a
 		.spontaneous_payment()
-		.send(keysend_amount_msat, node_b.node_id(), vec![tlv1, tlv2])
+		.send(keysend_amount_msat, node_b.node_id(), vec![tlv1, tlv2], None)
 		.unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_keysend_amount = match node_b.wait_next_event() {
