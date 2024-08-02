@@ -111,4 +111,5 @@ check-cfg = [
 	"cfg(vss_test)",
 	"cfg(ldk_bench)",
 	"cfg(tokio_unstable)",
+	"cfg(cln_test)",
 ]
