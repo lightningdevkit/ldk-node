@@ -16,6 +16,7 @@ dictionary Config {
 	LogLevel log_level;
 	AnchorChannelsConfig? anchor_channels_config;
 	SendingParameters? sending_parameters;
+	string? node_alias; 
 };
 
 dictionary AnchorChannelsConfig {
@@ -39,6 +40,8 @@ interface Builder {
 	void set_network(Network network);
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
+	[Throws=BuildError]
+	void set_node_alias(string node_alias);
 	[Throws=BuildError]
 	Node build();
 	[Throws=BuildError]
@@ -238,6 +241,7 @@ enum BuildError {
 	"KVStoreSetupFailed",
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
+	"InvalidNodeAlias"
 };
 
 [Enum]

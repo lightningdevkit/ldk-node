@@ -121,6 +121,8 @@ pub enum BuildError {
 	InvalidChannelMonitor,
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
+	/// The provided alias is invalid
+	InvalidNodeAlias,
 	/// We failed to read data from the [`KVStore`].
 	///
 	/// [`KVStore`]: lightning::util::persist::KVStore
@@ -139,8 +141,6 @@ pub enum BuildError {
 	WalletSetupFailed,
 	/// We failed to setup the logger.
 	LoggerSetupFailed,
-	/// The provided alias is invalid
-	InvalidNodeAlias(String),
 }
 
 impl fmt::Display for BuildError {
@@ -161,9 +161,7 @@ impl fmt::Display for BuildError {
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
-			Self::InvalidNodeAlias(ref reason) => {
-				write!(f, "Given node alias is invalid: {}", reason)
-			},
+			Self::InvalidNodeAlias => write!(f, "Given node alias is invalid."),
 		}
 	}
 }
@@ -316,9 +314,7 @@ impl NodeBuilder {
 
 	/// Sets the alias the [`Node`] will use in its announcement. The provided
 	/// alias must be a valid UTF-8 string.
-	pub fn set_node_alias<T: Into<String>>(
-		&mut self, node_alias: T,
-	) -> Result<&mut Self, BuildError> {
+	pub fn set_node_alias(&mut self, node_alias: String) -> Result<&mut Self, BuildError> {
 		let node_alias = sanitize_alias(node_alias).map_err(|e| e)?;
 
 		self.config.node_alias = Some(node_alias);
@@ -520,6 +516,11 @@ impl ArcedNodeBuilder {
 	/// Sets the level at which [`Node`] will log messages.
 	pub fn set_log_level(&self, level: LogLevel) {
 		self.inner.write().unwrap().set_log_level(level);
+	}
+
+	/// Sets the node alias.
+	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1073,21 +1074,12 @@ fn sanitize_alias<T: Into<String>>(node_alias: T) -> Result<String, BuildError> 
 	let node_alias: String = node_alias.into();
 	let alias = node_alias.trim();
 
-	// Alias is non-empty
-	if alias.is_empty() {
-		return Err(BuildError::InvalidNodeAlias("Node alias cannot be empty.".to_string()));
-	}
-
-	// Alias valid up to first null byte
-	let first_null = alias.as_bytes().iter().position(|b| *b == 0).unwrap_or(alias.len());
-	let actual_alias = alias.split_at(first_null).0;
-
 	// Alias must be 32-bytes long or less
-	if actual_alias.as_bytes().len() > 32 {
-		return Err(BuildError::InvalidNodeAlias("Node alias cannot exceed 32 bytes.".to_string()));
+	if alias.as_bytes().len() > 32 {
+		return Err(BuildError::InvalidNodeAlias);
 	}
 
-	Ok(actual_alias.to_string())
+	Ok(alias.to_string())
 }
 
 #[cfg(test)]
@@ -1096,19 +1088,16 @@ mod tests {
 
 	use super::NodeBuilder;
 
-	fn create_node_with_alias<T: Into<String>>(alias: T) -> Result<Node, BuildError> {
-		NodeBuilder::new().set_node_alias(&alias.into())?.build()
+	fn create_node_with_alias(alias: String) -> Result<Node, BuildError> {
+		NodeBuilder::new().set_node_alias(alias)?.build()
 	}
 
 	#[test]
 	fn empty_node_alias() {
 		// Empty node alias
 		let alias = "";
-		let node = create_node_with_alias(alias);
-		assert_eq!(
-			node.err().unwrap(),
-			BuildError::InvalidNodeAlias("Node alias cannot be empty.".to_string())
-		);
+		let node = create_node_with_alias(alias.to_string());
+		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
 	}
 
 	#[test]
@@ -1116,7 +1105,7 @@ mod tests {
 		// Alias with emojis
 		let expected_alias = "I\u{1F496}LDK-Node!";
 		let user_provided_alias = "I\u{1F496}LDK-Node!\0\u{26A1}";
-		let node = create_node_with_alias(user_provided_alias).unwrap();
+		let node = create_node_with_alias(user_provided_alias.to_string()).unwrap();
 
 		assert_eq!(expected_alias, node.config().node_alias.unwrap());
 	}
@@ -1124,10 +1113,7 @@ mod tests {
 	#[test]
 	fn node_alias_longer_than_32_bytes() {
 		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
-		let node = create_node_with_alias(alias);
-		assert_eq!(
-			node.err().unwrap(),
-			BuildError::InvalidNodeAlias("Node alias cannot exceed 32 bytes.".to_string())
-		);
+		let node = create_node_with_alias(alias.to_string());
+		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
 	}
 }

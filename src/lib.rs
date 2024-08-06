@@ -645,22 +645,18 @@ impl Node {
 							}
 
 							let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
-
-							if addresses.is_empty() {
-								// Skip if we are not listening on any addresses.
-								continue;
-							}
-
-							// Extract alias if set, else select the default
-							let alias = if let Some(ref alias) = node_alias {
+							let alias = node_alias.clone().map(|alias| {
 								let mut buf = [0_u8; 32];
 								buf[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
 								buf
-							} else {
-								[0; 32]
-							};
+							});
 
-							bcast_pm.broadcast_node_announcement([0; 3], alias, addresses);
+							if addresses.is_empty() || alias.is_none() {
+								// Skip if we are not listening on any addresses or if the node alias is not set.
+								continue;
+							}
+
+							bcast_pm.broadcast_node_announcement([0; 3], alias.unwrap(), addresses);
 
 							let unix_time_secs_opt =
 								SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
