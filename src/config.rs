@@ -283,5 +283,11 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 
+	if config.listening_addresses.is_none() || config.node_alias.is_none() {
+		user_config.accept_forwards_to_priv_channels = false;
+		user_config.channel_handshake_config.announced_channel = false;
+		user_config.channel_handshake_limits.force_announced_channel_preference = true;
+	}
+
 	user_config
 }
