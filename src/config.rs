@@ -35,7 +35,7 @@ pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/ap
 pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
 
 // The timeout after which we abandon retrying failed payments.
-pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(50); // (10);
 
 // The interval (in block height) after which we retry archiving fully resolved channel monitors.
 pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
@@ -59,10 +59,10 @@ pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90;
 pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90; // 30
 
 // The timeout after which we abort a fee rate cache update operation.
-pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
+pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 10; //5;
 
 // The timeout after which we abort a transaction broadcast operation.
-pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
+pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 10; //5;
 
 // The timeout after which we abort a RGS sync operation.
 pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
