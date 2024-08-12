@@ -58,13 +58,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: $HOME/bin/bitcoind
-          key: bitcoind
+          key: bitcoind-${{ runner.os }}
       - name: Enable caching for electrs
         id: cache-electrs
         uses: actions/cache@v4
         with:
           path: $HOME/bin/electrs
-          key: electrs
+          key: electrs-${{ runner.os }}
       - name: Download bitcoind/electrs and set environment variables
         if: "matrix.platform != 'windows-latest' && (steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true')"
         run: |
