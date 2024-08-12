@@ -53,14 +53,27 @@ jobs:
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+      - name: Enable caching for bitcoind
+        id: cache-bitcoind
+        uses: actions/cache@v4
+        with:
+          path: $HOME/bin/bitcoind
+          key: bitcoind
+      - name: Enable caching for electrs
+        id: cache-electrs
+        uses: actions/cache@v4
+        with:
+          path: $HOME/bin/electrs
+          key: electrs
       - name: Download bitcoind/electrs and set environment variables
-        if: "matrix.platform != 'windows-latest'"
+        if: "matrix.platform != 'windows-latest' && (steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true')"
         run: |
           source ./scripts/download_bitcoind_electrs.sh
-          cp "$BITCOIND_EXE" "$HOME"/bitcoind
-          cp "$ELECTRS_EXE" "$HOME"/electrs
-          echo "BITCOIND_EXE=$HOME/bitcoind" >> "$GITHUB_ENV"
-          echo "ELECTRS_EXE=$HOME/electrs" >> "$GITHUB_ENV"
+          mkdir -p "$HOME"/bin
+          mv "$BITCOIND_EXE" "$HOME"/bin/bitcoind
+          mv "$ELECTRS_EXE" "$HOME"/bin/electrs
+          echo "BITCOIND_EXE=$HOME/bin/bitcoind" >> "$GITHUB_ENV"
+          echo "ELECTRS_EXE=$HOME/bin/electrs" >> "$GITHUB_ENV"
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
