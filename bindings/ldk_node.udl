@@ -16,6 +16,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	LogLevel log_level;
 	AnchorChannelsConfig? anchor_channels_config;
+	SendingParameters? sending_parameters_config;
 };
 
 dictionary AnchorChannelsConfig {

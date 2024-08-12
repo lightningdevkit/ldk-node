@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::payment::SendingParameters;
+
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::config::UserConfig;
 use lightning::util::logger::Level as LogLevel;
@@ -86,6 +88,7 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
+/// | `sending_parameters_config`            | None               |
 ///
 /// See [`AnchorChannelsConfig`] for more information on its respective default values.
 ///
@@ -147,6 +150,12 @@ pub struct Config {
 	/// closure. We *will* however still try to get the Anchor spending transactions confirmed
 	/// on-chain with the funds available.
 	pub anchor_channels_config: Option<AnchorChannelsConfig>,
+
+	/// Configuration options for payment routing and pathfinding.
+	///
+	/// Setting the `SendingParameters` provides flexibility to customize how payments are routed,
+	/// including setting limits on routing fees, CLTV expiry, and channel utilization.
+	pub sending_parameters_config: Option<SendingParameters>,
 }
 
 impl Default for Config {
@@ -164,6 +173,7 @@ impl Default for Config {
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			log_level: DEFAULT_LOG_LEVEL,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
+			sending_parameters_config: None,
 		}
 	}
 }
