@@ -65,13 +65,15 @@ jobs:
         with:
           path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
           key: electrs-${{ runner.os }}-${{ runner.arch }}
-      - name: Download bitcoind/electrs and set environment variables
+      - name: Download bitcoind/electrs
         if: "matrix.platform != 'windows-latest' && (steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true')"
         run: |
           source ./scripts/download_bitcoind_electrs.sh
           mkdir bin
           mv "$BITCOIND_EXE" bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
           mv "$ELECTRS_EXE" bin/electrs-${{ runner.os }}-${{ runner.arch }}
+      - name: Set bitcoind/electrs environment variables
+        run: |
           echo "BITCOIND_EXE=$( pwd )/bin/bitcoind-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
           echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
       - name: Build on Rust ${{ matrix.toolchain }}
