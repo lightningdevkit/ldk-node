@@ -57,23 +57,23 @@ jobs:
         id: cache-bitcoind
         uses: actions/cache@v4
         with:
-          path: bin/bitcoind
-          key: bitcoind-${{ runner.os }}
+          path: bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
+          key: bitcoind-${{ runner.os }}-${{ runner.arch }}
       - name: Enable caching for electrs
         id: cache-electrs
         uses: actions/cache@v4
         with:
-          path: bin/electrs
-          key: electrs-${{ runner.os }}
+          path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
+          key: electrs-${{ runner.os }}-${{ runner.arch }}
       - name: Download bitcoind/electrs and set environment variables
         if: "matrix.platform != 'windows-latest' && (steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true')"
         run: |
           source ./scripts/download_bitcoind_electrs.sh
-          mkdir -p bin
-          mv "$BITCOIND_EXE" bin/bitcoind
-          mv "$ELECTRS_EXE" bin/electrs
-          echo "BITCOIND_EXE=bin/bitcoind" >> "$GITHUB_ENV"
-          echo "ELECTRS_EXE=bin/electrs" >> "$GITHUB_ENV"
+          mkdir bin
+          mv "$BITCOIND_EXE" bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
+          mv "$ELECTRS_EXE" bin/electrs-${{ runner.os }}-${{ runner.arch }}
+          echo "BITCOIND_EXE=$( pwd )/bin/bitcoind-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
+          echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
