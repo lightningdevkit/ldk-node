@@ -18,21 +18,7 @@ pub(crate) struct FilesystemLogger {
 
 impl FilesystemLogger {
 	pub(crate) fn new(log_dir: String, level: Level) -> Result<Self, ()> {
-		let log_file_name = FilesystemLogger::make_log_file_name();
-		let log_file_path = format!("{}/{}", log_dir, log_file_name);
-
-		if let Some(parent_dir) = Path::new(&log_file_path).parent() {
-			fs::create_dir_all(parent_dir).expect("Failed to create log parent directory");
-
-			// make sure the file exists, so that the symlink has something to point to.
-			fs::OpenOptions::new()
-				.create(true)
-				.append(true)
-				.open(log_file_path.clone())
-				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
-
-			FilesystemLogger::make_log_file_symlink(&parent_dir, &log_file_name)?;
-		}
+		fs::create_dir_all(&log_dir).expect("Failed to create log parent directory");
 
 		Ok(Self { log_dir, level })
 	}
