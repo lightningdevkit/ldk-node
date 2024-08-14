@@ -1338,6 +1338,7 @@ impl Node {
 					let now = Instant::now();
 					// We don't add an additional timeout here, as `Wallet::sync` already returns
 					// after a timeout.
+					log_info!(sync_logger, "Starting wallet sync");
 					match wallet.sync().await {
 						Ok(()) => {
 							log_info!(
@@ -1357,6 +1358,7 @@ impl Node {
 						},
 					};
 
+					log_info!(sync_logger, "Starting fee estimates sync");
 					let now = Instant::now();
 					// We don't add an additional timeout here, as
 					// `FeeEstimator::update_fee_estimates` already returns after a timeout.
@@ -1379,6 +1381,7 @@ impl Node {
 						},
 					}
 
+					log_info!(sync_logger, "Starting LDK wallet sync");
 					let now = Instant::now();
 					let tx_sync_timeout_fut = tokio::time::timeout(
 						Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),

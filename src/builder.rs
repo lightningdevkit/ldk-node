@@ -558,21 +558,25 @@ fn build_with_store_internal(
 
 	let (blockchain, tx_sync, tx_broadcaster, fee_estimator) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora(server_url)) => {
+			log_info!(logger, "Using custom esplora server: {}", server_url);
 			let mut client_builder = esplora_client::Builder::new(&server_url.clone());
 			client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
-			let esplora_client = client_builder.build_async().unwrap();
+
 			let tx_sync = Arc::new(EsploraSyncClient::from_client(
-				esplora_client.clone(),
+				client_builder.clone().build_async().unwrap(),
 				Arc::clone(&logger),
 			));
-			let blockchain = EsploraBlockchain::from_client(esplora_client, BDK_CLIENT_STOP_GAP)
-				.with_concurrency(BDK_CLIENT_CONCURRENCY);
+			let blockchain = EsploraBlockchain::from_client(
+				client_builder.clone().build_async().unwrap(),
+				BDK_CLIENT_STOP_GAP,
+			)
+			.with_concurrency(BDK_CLIENT_CONCURRENCY);
 			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
-				tx_sync.client().clone(),
+				client_builder.clone().build_async().unwrap(),
 				Arc::clone(&logger),
 			));
 			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-				tx_sync.client().clone(),
+				client_builder.clone().build_async().unwrap(),
 				Arc::clone(&config),
 				Arc::clone(&logger),
 			));
