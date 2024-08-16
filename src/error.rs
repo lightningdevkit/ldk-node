@@ -7,6 +7,7 @@
 
 use bdk_chain::bitcoin::psbt::ExtractTxError as BdkExtractTxError;
 use bdk_chain::local_chain::CannotConnectError as BdkChainConnectionError;
+use bdk_chain::tx_graph::CalculateFeeError as BdkChainCalculateFeeError;
 use bdk_wallet::error::CreateTxError as BdkCreateTxError;
 use bdk_wallet::signer::SignerError as BdkSignerError;
 
@@ -196,8 +197,11 @@ impl From<BdkSignerError> for Error {
 }
 
 impl From<BdkCreateTxError> for Error {
-	fn from(_: BdkCreateTxError) -> Self {
-		Self::OnchainTxCreationFailed
+	fn from(e: BdkCreateTxError) -> Self {
+		match e {
+			BdkCreateTxError::CoinSelection(_) => Self::InsufficientFunds,
+			_ => Self::OnchainTxCreationFailed,
+		}
 	}
 }
 
@@ -209,6 +213,12 @@ impl From<BdkExtractTxError> for Error {
 
 impl From<BdkChainConnectionError> for Error {
 	fn from(_: BdkChainConnectionError) -> Self {
+		Self::WalletOperationFailed
+	}
+}
+
+impl From<BdkChainCalculateFeeError> for Error {
+	fn from(_: BdkChainCalculateFeeError) -> Self {
 		Self::WalletOperationFailed
 	}
 }

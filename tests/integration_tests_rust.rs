@@ -305,7 +305,7 @@ fn onchain_spend_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b).unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 

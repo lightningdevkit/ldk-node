@@ -28,7 +28,7 @@ use lightning_invoice::RawBolt11Invoice;
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_chain::ChainPosition;
-use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Update};
+use bdk_wallet::{Balance, KeychainKind, PersistedWallet, SignOptions, Update};
 
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -44,6 +44,12 @@ use bitcoin::{
 
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+
+pub(crate) enum OnchainSendAmount {
+	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
+	AllRetainingReserve { cur_anchor_reserve_sats: u64 },
+	AllDrainingReserve,
+}
 
 pub(crate) mod persist;
 pub(crate) mod ser;
@@ -215,6 +221,12 @@ where
 			);
 		}
 
+		self.get_balances_inner(balance, total_anchor_channels_reserve_sats)
+	}
+
+	fn get_balances_inner(
+		&self, balance: Balance, total_anchor_channels_reserve_sats: u64,
+	) -> Result<(u64, u64), Error> {
 		let (total, spendable) = (
 			balance.total().to_sat(),
 			balance.trusted_spendable().to_sat().saturating_sub(total_anchor_channels_reserve_sats),
@@ -229,32 +241,95 @@ where
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
-	/// Send funds to the given address.
-	///
-	/// If `amount_msat_or_drain` is `None` the wallet will be drained, i.e., all available funds will be
-	/// spent.
 	pub(crate) fn send_to_address(
-		&self, address: &bitcoin::Address, amount_or_drain: Option<Amount>,
+		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
 	) -> Result<Txid, Error> {
 		let confirmation_target = ConfirmationTarget::OnchainPayment;
 		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
 		let tx = {
 			let mut locked_wallet = self.inner.lock().unwrap();
-			let mut tx_builder = locked_wallet.build_tx();
 
-			if let Some(amount) = amount_or_drain {
-				tx_builder
-					.add_recipient(address.script_pubkey(), amount)
-					.fee_rate(fee_rate)
-					.enable_rbf();
-			} else {
-				tx_builder
-					.drain_wallet()
-					.drain_to(address.script_pubkey())
-					.fee_rate(fee_rate)
-					.enable_rbf();
-			}
+			// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
+			let tx_builder = match send_amount {
+				OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
+					let mut tx_builder = locked_wallet.build_tx();
+					let amount = Amount::from_sat(amount_sats);
+					tx_builder
+						.add_recipient(address.script_pubkey(), amount)
+						.fee_rate(fee_rate)
+						.enable_rbf();
+					tx_builder
+				},
+				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
+					let change_address_info = locked_wallet.peek_address(KeychainKind::Internal, 0);
+					let balance = locked_wallet.balance();
+					let spendable_amount_sats = self
+						.get_balances_inner(balance, cur_anchor_reserve_sats)
+						.map(|(_, s)| s)
+						.unwrap_or(0);
+					let tmp_tx = {
+						let mut tmp_tx_builder = locked_wallet.build_tx();
+						tmp_tx_builder
+							.drain_wallet()
+							.drain_to(address.script_pubkey())
+							.add_recipient(
+								change_address_info.address.script_pubkey(),
+								Amount::from_sat(cur_anchor_reserve_sats),
+							)
+							.fee_rate(fee_rate)
+							.enable_rbf();
+						match tmp_tx_builder.finish() {
+							Ok(psbt) => psbt.unsigned_tx,
+							Err(err) => {
+								log_error!(
+									self.logger,
+									"Failed to create temporary transaction: {}",
+									err
+								);
+								return Err(err.into());
+							},
+						}
+					};
+
+					let estimated_tx_fee = locked_wallet.calculate_fee(&tmp_tx).map_err(|e| {
+						log_error!(
+							self.logger,
+							"Failed to calculate fee of temporary transaction: {}",
+							e
+						);
+						e
+					})?;
+					let estimated_spendable_amount = Amount::from_sat(
+						spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
+					);
+
+					if estimated_spendable_amount == Amount::ZERO {
+						log_error!(self.logger,
+							"Unable to send payment without infringing on Anchor reserves. Available: {}sats, estimated fee required: {}sats.",
+							spendable_amount_sats,
+							estimated_tx_fee,
+						);
+						return Err(Error::InsufficientFunds);
+					}
+
+					let mut tx_builder = locked_wallet.build_tx();
+					tx_builder
+						.add_recipient(address.script_pubkey(), estimated_spendable_amount)
+						.fee_absolute(estimated_tx_fee)
+						.enable_rbf();
+					tx_builder
+				},
+				OnchainSendAmount::AllDrainingReserve => {
+					let mut tx_builder = locked_wallet.build_tx();
+					tx_builder
+						.drain_wallet()
+						.drain_to(address.script_pubkey())
+						.fee_rate(fee_rate)
+						.enable_rbf();
+					tx_builder
+				},
+			};
 
 			let mut psbt = match tx_builder.finish() {
 				Ok(psbt) => {
@@ -266,6 +341,58 @@ where
 					return Err(err.into());
 				},
 			};
+
+			// Check the reserve requirements (again) and return an error if they aren't met.
+			match send_amount {
+				OnchainSendAmount::ExactRetainingReserve {
+					amount_sats,
+					cur_anchor_reserve_sats,
+				} => {
+					let balance = locked_wallet.balance();
+					let spendable_amount_sats = self
+						.get_balances_inner(balance, cur_anchor_reserve_sats)
+						.map(|(_, s)| s)
+						.unwrap_or(0);
+					let tx_fee_sats = locked_wallet
+						.calculate_fee(&psbt.unsigned_tx)
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to calculate fee of candidate transaction: {}",
+								e
+							);
+							e
+						})?
+						.to_sat();
+					if spendable_amount_sats < amount_sats.saturating_add(tx_fee_sats) {
+						log_error!(self.logger,
+							"Unable to send payment due to insufficient funds. Available: {}sats, Required: {}sats + {}sats fee",
+							spendable_amount_sats,
+							amount_sats,
+							tx_fee_sats,
+						);
+						return Err(Error::InsufficientFunds);
+					}
+				},
+				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
+					let balance = locked_wallet.balance();
+					let spendable_amount_sats = self
+						.get_balances_inner(balance, cur_anchor_reserve_sats)
+						.map(|(_, s)| s)
+						.unwrap_or(0);
+					let (sent, received) = locked_wallet.sent_and_received(&psbt.unsigned_tx);
+					let drain_amount = sent - received;
+					if spendable_amount_sats < drain_amount.to_sat() {
+						log_error!(self.logger,
+							"Unable to send payment due to insufficient funds. Available: {}sats, Required: {}",
+							spendable_amount_sats,
+							drain_amount,
+						);
+						return Err(Error::InsufficientFunds);
+					}
+				},
+				_ => {},
+			}
 
 			match locked_wallet.sign(&mut psbt, SignOptions::default()) {
 				Ok(finalized) => {
@@ -295,21 +422,33 @@ where
 
 		let txid = tx.compute_txid();
 
-		if let Some(amount) = amount_or_drain {
-			log_info!(
-				self.logger,
-				"Created new transaction {} sending {}sats on-chain to address {}",
-				txid,
-				amount.to_sat(),
-				address
-			);
-		} else {
-			log_info!(
-				self.logger,
-				"Created new transaction {} sending all available on-chain funds to address {}",
-				txid,
-				address
-			);
+		match send_amount {
+			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
+				log_info!(
+					self.logger,
+					"Created new transaction {} sending {}sats on-chain to address {}",
+					txid,
+					amount_sats,
+					address
+				);
+			},
+			OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
+				log_info!(
+					self.logger,
+					"Created new transaction {} sending available on-chain funds retaining a reserve of {}sats to address {}",
+					txid,
+					cur_anchor_reserve_sats,
+					address,
+				);
+			},
+			OnchainSendAmount::AllDrainingReserve => {
+				log_info!(
+					self.logger,
+					"Created new transaction {} sending all available on-chain funds to address {}",
+					txid,
+					address
+				);
+			},
 		}
 
 		Ok(txid)
