@@ -5,10 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::sweep::value_satoshis_from_descriptor;
+use crate::sweep::value_from_descriptor;
 
 use lightning::chain::channelmonitor::Balance as LdkBalance;
-use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
+use lightning::chain::channelmonitor::BalanceSource;
+use lightning::ln::types::ChannelId;
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
 
 use bitcoin::secp256k1::PublicKey;
@@ -80,6 +82,49 @@ pub enum LightningBalance {
 		/// The amount available to claim, in satoshis, excluding the on-chain fees which will be
 		/// required to do so.
 		amount_satoshis: u64,
+		/// The transaction fee we pay for the closing commitment transaction. This amount is not
+		/// included in the `amount_satoshis` value.
+		///
+		/// Note that if this channel is inbound (and thus our counterparty pays the commitment
+		/// transaction fee) this value will be zero. For channels created prior to LDK Node 0.4
+		/// the channel is always treated as outbound (and thus this value is never zero).
+		transaction_fee_satoshis: u64,
+		/// The amount of millisatoshis which has been burned to fees from HTLCs which are outbound
+		/// from us and are related to a payment which was sent by us. This is the sum of the
+		/// millisatoshis part of all HTLCs which are otherwise represented by
+		/// [`LightningBalance::MaybeTimeoutClaimableHTLC`] with their
+		/// [`LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment`] flag set, as well as
+		/// any dust HTLCs which would otherwise be represented the same.
+		///
+		/// This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+		outbound_payment_htlc_rounded_msat: u64,
+		/// The amount of millisatoshis which has been burned to fees from HTLCs which are outbound
+		/// from us and are related to a forwarded HTLC. This is the sum of the millisatoshis part
+		/// of all HTLCs which are otherwise represented by
+		/// [`LightningBalance::MaybeTimeoutClaimableHTLC`] with their
+		/// [`LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment`] flag *not* set, as
+		/// well as any dust HTLCs which would otherwise be represented the same.
+		///
+		/// This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+		outbound_forwarded_htlc_rounded_msat: u64,
+		/// The amount of millisatoshis which has been burned to fees from HTLCs which are inbound
+		/// to us and for which we know the preimage. This is the sum of the millisatoshis part of
+		/// all HTLCs which would be represented by [`LightningBalance::ContentiousClaimable`] on
+		/// channel close, but whose current value is included in `amount_satoshis`, as well as any
+		/// dust HTLCs which would otherwise be represented the same.
+		///
+		/// This amount (rounded up to a whole satoshi value) will not be included in the counterparty's
+		/// `amount_satoshis`.
+		inbound_claiming_htlc_rounded_msat: u64,
+		/// The amount of millisatoshis which has been burned to fees from HTLCs which are inbound
+		/// to us and for which we do not know the preimage. This is the sum of the millisatoshis
+		/// part of all HTLCs which would be represented by
+		/// [`LightningBalance::MaybePreimageClaimableHTLC`] on channel close, as well as any dust
+		/// HTLCs which would otherwise be represented the same.
+		///
+		/// This amount (rounded up to a whole satoshi value) will not be included in the
+		/// counterparty's `amount_satoshis`.
+		inbound_htlc_rounded_msat: u64,
 	},
 	/// The channel has been closed, and the given balance is ours but awaiting confirmations until
 	/// we consider it spendable.
@@ -96,6 +141,8 @@ pub enum LightningBalance {
 		///
 		/// [`Event::SpendableOutputs`]: lightning::events::Event::SpendableOutputs
 		confirmation_height: u32,
+		/// Whether this balance is a result of cooperative close, a force-close, or an HTLC.
+		source: BalanceSource,
 	},
 	/// The channel has been closed, and the given balance should be ours but awaiting spending
 	/// transaction confirmation. If the spending transaction does not confirm in time, it is
@@ -136,6 +183,8 @@ pub enum LightningBalance {
 		claimable_height: u32,
 		/// The payment hash whose preimage our counterparty needs to claim this HTLC.
 		payment_hash: PaymentHash,
+		/// Indicates whether this HTLC represents a payment which was sent outbound from us.
+		outbound_payment: bool,
 	},
 	/// HTLCs which we received from our counterparty which are claimable with a preimage which we
 	/// do not currently have. This will only be claimable if we receive the preimage from the node
@@ -174,16 +223,33 @@ impl LightningBalance {
 		channel_id: ChannelId, counterparty_node_id: PublicKey, balance: LdkBalance,
 	) -> Self {
 		match balance {
-			LdkBalance::ClaimableOnChannelClose { amount_satoshis } => {
-				Self::ClaimableOnChannelClose { channel_id, counterparty_node_id, amount_satoshis }
+			LdkBalance::ClaimableOnChannelClose {
+				amount_satoshis,
+				transaction_fee_satoshis,
+				outbound_payment_htlc_rounded_msat,
+				outbound_forwarded_htlc_rounded_msat,
+				inbound_claiming_htlc_rounded_msat,
+				inbound_htlc_rounded_msat,
+			} => Self::ClaimableOnChannelClose {
+				channel_id,
+				counterparty_node_id,
+				amount_satoshis,
+				transaction_fee_satoshis,
+				outbound_payment_htlc_rounded_msat,
+				outbound_forwarded_htlc_rounded_msat,
+				inbound_claiming_htlc_rounded_msat,
+				inbound_htlc_rounded_msat,
 			},
-			LdkBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height } => {
-				Self::ClaimableAwaitingConfirmations {
-					channel_id,
-					counterparty_node_id,
-					amount_satoshis,
-					confirmation_height,
-				}
+			LdkBalance::ClaimableAwaitingConfirmations {
+				amount_satoshis,
+				confirmation_height,
+				source,
+			} => Self::ClaimableAwaitingConfirmations {
+				channel_id,
+				counterparty_node_id,
+				amount_satoshis,
+				confirmation_height,
+				source,
 			},
 			LdkBalance::ContentiousClaimable {
 				amount_satoshis,
@@ -202,12 +268,14 @@ impl LightningBalance {
 				amount_satoshis,
 				claimable_height,
 				payment_hash,
+				outbound_payment,
 			} => Self::MaybeTimeoutClaimableHTLC {
 				channel_id,
 				counterparty_node_id,
 				amount_satoshis,
 				claimable_height,
 				payment_hash,
+				outbound_payment,
 			},
 			LdkBalance::MaybePreimageClaimableHTLC {
 				amount_satoshis,
@@ -278,7 +346,7 @@ impl PendingSweepBalance {
 		match output_info.status {
 			OutputSpendStatus::PendingInitialBroadcast { .. } => {
 				let channel_id = output_info.channel_id;
-				let amount_satoshis = value_satoshis_from_descriptor(&output_info.descriptor);
+				let amount_satoshis = value_from_descriptor(&output_info.descriptor).to_sat();
 				Self::PendingBroadcast { channel_id, amount_satoshis }
 			},
 			OutputSpendStatus::PendingFirstConfirmation {
@@ -287,8 +355,8 @@ impl PendingSweepBalance {
 				..
 			} => {
 				let channel_id = output_info.channel_id;
-				let amount_satoshis = value_satoshis_from_descriptor(&output_info.descriptor);
-				let latest_spending_txid = latest_spending_tx.txid();
+				let amount_satoshis = value_from_descriptor(&output_info.descriptor).to_sat();
+				let latest_spending_txid = latest_spending_tx.compute_txid();
 				Self::BroadcastAwaitingConfirmation {
 					channel_id,
 					latest_broadcast_height,
@@ -303,8 +371,8 @@ impl PendingSweepBalance {
 				..
 			} => {
 				let channel_id = output_info.channel_id;
-				let amount_satoshis = value_satoshis_from_descriptor(&output_info.descriptor);
-				let latest_spending_txid = latest_spending_tx.txid();
+				let amount_satoshis = value_from_descriptor(&output_info.descriptor).to_sat();
+				let latest_spending_txid = latest_spending_tx.compute_txid();
 				Self::AwaitingThresholdConfirmations {
 					channel_id,
 					latest_spending_txid,

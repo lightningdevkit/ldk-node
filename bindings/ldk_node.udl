@@ -79,7 +79,7 @@ interface Node {
 	[Throws=NodeError]
 	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
-	void force_close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
+	void force_close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, string? reason);
 	[Throws=NodeError]
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
@@ -92,7 +92,6 @@ interface Node {
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
 	NetworkGraph network_graph();
-	[Throws=NodeError]
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 };
@@ -130,9 +129,9 @@ interface Bolt12Payment {
 	[Throws=NodeError]
 	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note);
 	[Throws=NodeError]
-	Offer receive(u64 amount_msat, [ByRef]string description, u64? quantity);
+	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
-	Offer receive_variable_amount([ByRef]string description);
+	Offer receive_variable_amount([ByRef]string description, u32? expiry_secs);
 	[Throws=NodeError]
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
 	[Throws=NodeError]
@@ -183,7 +182,6 @@ enum NodeError {
 	"WalletOperationFailed",
 	"WalletOperationTimeout",
 	"OnchainTxSigningFailed",
-	"MessageSigningFailed",
 	"TxSyncFailed",
 	"TxSyncTimeout",
 	"GossipUpdateFailed",
@@ -251,7 +249,7 @@ enum BuildError {
 [Enum]
 interface Event {
 	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, u64? fee_paid_msat);
-	PaymentFailed(PaymentId? payment_id, PaymentHash payment_hash, PaymentFailureReason? reason);
+	PaymentFailed(PaymentId? payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
 	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat);
 	PaymentClaimable(PaymentId payment_id, PaymentHash payment_hash, u64 claimable_amount_msat, u32? claim_deadline);
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
@@ -266,12 +264,15 @@ enum PaymentFailureReason {
 	"PaymentExpired",
 	"RouteNotFound",
 	"UnexpectedError",
+	"UnknownRequiredFeatures",
+	"InvoiceRequestExpired",
+	"InvoiceRequestRejected",
 };
 
 [Enum]
 interface ClosureReason {
 	CounterpartyForceClosed(UntrustedString peer_msg);
-	HolderForceClosed();
+	HolderForceClosed(boolean? broadcasted_latest_txn);
 	LegacyCooperativeClosure();
 	CounterpartyInitiatedCooperativeClosure();
 	LocallyInitiatedCooperativeClosure();
@@ -283,6 +284,7 @@ interface ClosureReason {
 	CounterpartyCoopClosedUnfundedChannel();
 	FundingBatchClosure();
 	HTLCsTimedOut();
+	PeerFeerateTooLow(u32 peer_feerate_sat_per_kw, u32 required_feerate_sat_per_kw);
 };
 
 [Enum]
@@ -368,7 +370,7 @@ dictionary ChannelDetails {
 	boolean is_outbound;
 	boolean is_channel_ready;
 	boolean is_usable;
-	boolean is_public;
+	boolean is_announced;
 	u16? cltv_expiry_delta;
 	u64 counterparty_unspendable_punishment_reserve;
 	u64? counterparty_outbound_htlc_minimum_msat;
@@ -393,12 +395,58 @@ dictionary PeerDetails {
 
 [Enum]
 interface LightningBalance {
-	ClaimableOnChannelClose ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis );
-	ClaimableAwaitingConfirmations ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 confirmation_height );
-	ContentiousClaimable ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 timeout_height, PaymentHash payment_hash, PaymentPreimage payment_preimage );
-	MaybeTimeoutClaimableHTLC ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 claimable_height, PaymentHash payment_hash);
-	MaybePreimageClaimableHTLC ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis, u32 expiry_height, PaymentHash payment_hash);
-	CounterpartyRevokedOutputClaimable ( ChannelId channel_id, PublicKey counterparty_node_id, u64 amount_satoshis );
+	ClaimableOnChannelClose (
+		ChannelId channel_id,
+		PublicKey counterparty_node_id,
+		u64 amount_satoshis,
+		u64 transaction_fee_satoshis,
+		u64 outbound_payment_htlc_rounded_msat,
+		u64 outbound_forwarded_htlc_rounded_msat,
+		u64 inbound_claiming_htlc_rounded_msat,
+		u64 inbound_htlc_rounded_msat
+	);
+	ClaimableAwaitingConfirmations (
+		ChannelId channel_id,
+		PublicKey counterparty_node_id,
+		u64 amount_satoshis,
+		u32 confirmation_height,
+		BalanceSource source
+	);
+	ContentiousClaimable (
+		ChannelId channel_id,
+		PublicKey counterparty_node_id,
+		u64 amount_satoshis,
+		u32 timeout_height,
+		PaymentHash payment_hash,
+		PaymentPreimage payment_preimage
+	);
+	MaybeTimeoutClaimableHTLC (
+		ChannelId channel_id,
+		PublicKey counterparty_node_id,
+		u64 amount_satoshis,
+		u32 claimable_height,
+		PaymentHash payment_hash,
+		boolean outbound_payment
+	);
+	MaybePreimageClaimableHTLC (
+		ChannelId channel_id,
+		PublicKey counterparty_node_id,
+		u64 amount_satoshis,
+		u32 expiry_height,
+		PaymentHash payment_hash
+	);
+	CounterpartyRevokedOutputClaimable (
+		ChannelId channel_id,
+		PublicKey counterparty_node_id,
+		u64 amount_satoshis
+	);
+};
+
+enum BalanceSource {
+	"HolderForceClosed",
+	"CounterpartyForceClosed",
+	"CoopClose",
+	"Htlc",
 };
 
 [Enum]

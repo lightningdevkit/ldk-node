@@ -90,7 +90,8 @@ impl UnifiedQrPayment {
 
 		let amount_msats = amount_sats * 1_000;
 
-		let bolt12_offer = match self.bolt12_payment.receive(amount_msats, description, None) {
+		let bolt12_offer = match self.bolt12_payment.receive(amount_msats, description, None, None)
+		{
 			Ok(offer) => Some(offer),
 			Err(e) => {
 				log_error!(self.logger, "Failed to create offer: {}", e);

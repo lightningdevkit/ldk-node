@@ -151,12 +151,13 @@ pub(crate) fn do_test_store<K: KVStore>(store_0: &K, store_1: &K) {
 		.force_close_broadcasting_latest_txn(
 			&nodes[0].node.list_channels()[0].channel_id,
 			&nodes[1].node.get_our_node_id(),
+			"whoops".to_string(),
 		)
 		.unwrap();
 	check_closed_event!(
 		nodes[0],
 		1,
-		ClosureReason::HolderForceClosed,
+		ClosureReason::HolderForceClosed { broadcasted_latest_txn: Some(true) },
 		[nodes[1].node.get_our_node_id()],
 		100000
 	);

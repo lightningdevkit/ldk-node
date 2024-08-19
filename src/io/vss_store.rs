@@ -5,9 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use io::Error;
-use std::io;
-use std::io::ErrorKind;
+use lightning::io::{self, Error, ErrorKind};
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
 use std::time::Duration;
@@ -139,7 +137,14 @@ impl KVStore for VssStore {
 				})?;
 		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
 		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
-		let storable = Storable::decode(&resp.value.unwrap().value[..])?;
+		let storable = Storable::decode(&resp.value.unwrap().value[..]).map_err(|e| {
+			let msg = format!(
+				"Failed to decode data read from key {}/{}/{}: {}",
+				primary_namespace, secondary_namespace, key, e
+			);
+			Error::new(ErrorKind::Other, msg)
+		})?;
+
 		Ok(self.storable_builder.deconstruct(storable)?.0)
 	}
 

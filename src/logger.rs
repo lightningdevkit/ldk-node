@@ -9,11 +9,11 @@ pub(crate) use lightning::util::logger::Logger;
 pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace};
 
 use lightning::util::logger::{Level, Record};
-use lightning::util::ser::Writer;
 
 use chrono::Utc;
 
 use std::fs;
+use std::io::Write;
 #[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::symlink;
 use std::path::Path;

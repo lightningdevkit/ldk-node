@@ -32,7 +32,7 @@ const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 pub(crate) const BDK_CLIENT_STOP_GAP: usize = 20;
 
 // The number of concurrent requests made against the API provider.
-pub(crate) const BDK_CLIENT_CONCURRENCY: u8 = 4;
+pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
 
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
@@ -297,7 +297,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 
 	if !may_announce_channel(config) {
 		user_config.accept_forwards_to_priv_channels = false;
-		user_config.channel_handshake_config.announced_channel = false;
+		user_config.channel_handshake_config.announce_for_forwarding = false;
 		user_config.channel_handshake_limits.force_announced_channel_preference = true;
 	}
 

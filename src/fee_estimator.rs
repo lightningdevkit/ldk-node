@@ -13,10 +13,9 @@ use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarge
 use lightning::chain::chaininterface::FeeEstimator as LdkFeeEstimator;
 use lightning::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
 
-use bdk::FeeRate;
+use bitcoin::FeeRate;
 use esplora_client::AsyncClient as EsploraClient;
 
-use bitcoin::blockdata::weight::Weight;
 use bitcoin::Network;
 
 use std::collections::HashMap;
@@ -90,7 +89,8 @@ where
 		let confirmation_targets = vec![
 			ConfirmationTarget::OnchainPayment,
 			ConfirmationTarget::ChannelFunding,
-			LdkConfirmationTarget::OnChainSweep.into(),
+			LdkConfirmationTarget::MaximumFeeEstimate.into(),
+			LdkConfirmationTarget::UrgentOnChainSweep.into(),
 			LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee.into(),
 			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee.into(),
 			LdkConfirmationTarget::AnchorChannelFee.into(),
@@ -104,7 +104,8 @@ where
 				ConfirmationTarget::OnchainPayment => 6,
 				ConfirmationTarget::ChannelFunding => 12,
 				ConfirmationTarget::Lightning(ldk_target) => match ldk_target {
-					LdkConfirmationTarget::OnChainSweep => 6,
+					LdkConfirmationTarget::MaximumFeeEstimate => 1,
+					LdkConfirmationTarget::UrgentOnChainSweep => 6,
 					LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => 1008,
 					LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 144,
 					LdkConfirmationTarget::AnchorChannelFee => 1008,
@@ -114,7 +115,7 @@ where
 				},
 			};
 
-			let converted_estimates =
+			let converted_estimate_sat_vb =
 				esplora_client::convert_fee_rate(num_blocks, estimates.clone()).map_err(|e| {
 					log_error!(
 						self.logger,
@@ -125,7 +126,7 @@ where
 					Error::FeerateEstimationUpdateFailed
 				})?;
 
-			let fee_rate = FeeRate::from_sat_per_vb(converted_estimates);
+			let fee_rate = FeeRate::from_sat_per_kwu((converted_estimate_sat_vb * 250.0) as u64);
 
 			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
 			// require some post-estimation adjustments to the fee rates, which we do here.
@@ -133,9 +134,8 @@ where
 				ConfirmationTarget::Lightning(
 					LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
 				) => {
-					let slightly_less_than_background =
-						fee_rate.fee_wu(Weight::from_wu(1000)) - 250;
-					FeeRate::from_sat_per_kwu(slightly_less_than_background as f32)
+					let slightly_less_than_background = fee_rate.to_sat_per_kwu() - 250;
+					FeeRate::from_sat_per_kwu(slightly_less_than_background)
 				},
 				_ => fee_rate,
 			};
@@ -146,7 +146,7 @@ where
 				self.logger,
 				"Fee rate estimation updated for {:?}: {} sats/kwu",
 				target,
-				adjusted_fee_rate.fee_wu(Weight::from_wu(1000))
+				adjusted_fee_rate.to_sat_per_kwu(),
 			);
 		}
 		Ok(())
@@ -164,7 +164,8 @@ where
 			ConfirmationTarget::OnchainPayment => 5000,
 			ConfirmationTarget::ChannelFunding => 1000,
 			ConfirmationTarget::Lightning(ldk_target) => match ldk_target {
-				LdkConfirmationTarget::OnChainSweep => 5000,
+				LdkConfirmationTarget::MaximumFeeEstimate => 8000,
+				LdkConfirmationTarget::UrgentOnChainSweep => 5000,
 				LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => {
 					FEERATE_FLOOR_SATS_PER_KW
 				},
@@ -179,17 +180,13 @@ where
 		};
 
 		// We'll fall back on this, if we really don't have any other information.
-		let fallback_rate = FeeRate::from_sat_per_kwu(fallback_sats_kwu as f32);
+		let fallback_rate = FeeRate::from_sat_per_kwu(fallback_sats_kwu as u64);
 
 		let estimate = *locked_fee_rate_cache.get(&confirmation_target).unwrap_or(&fallback_rate);
 
 		// Currently we assume every transaction needs to at least be relayable, which is why we
 		// enforce a lower bound of `FEERATE_FLOOR_SATS_PER_KW`.
-		let weight_units = Weight::from_wu(1000);
-		FeeRate::from_wu(
-			estimate.fee_wu(weight_units).max(FEERATE_FLOOR_SATS_PER_KW as u64),
-			weight_units,
-		)
+		FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu().max(FEERATE_FLOOR_SATS_PER_KW as u64))
 	}
 }
 
@@ -198,6 +195,6 @@ where
 	L::Target: Logger,
 {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: LdkConfirmationTarget) -> u32 {
-		self.estimate_fee_rate(confirmation_target.into()).fee_wu(Weight::from_wu(1000)) as u32
+		self.estimate_fee_rate(confirmation_target.into()).to_sat_per_kwu() as u32
 	}
 }

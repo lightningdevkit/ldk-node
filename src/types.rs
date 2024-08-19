@@ -9,11 +9,11 @@ use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
 use lightning::chain::chainmonitor;
-use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
+use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::peer_handler::IgnoringMessageHandler;
-use lightning::ln::ChannelId;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
@@ -72,19 +72,11 @@ pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<
 
 pub(crate) type FeeEstimator = crate::fee_estimator::OnchainFeeEstimator<Arc<FilesystemLogger>>;
 
-pub(crate) type Wallet = crate::wallet::Wallet<
-	bdk::database::SqliteDatabase,
-	Arc<Broadcaster>,
-	Arc<FeeEstimator>,
-	Arc<FilesystemLogger>,
->;
+pub(crate) type Wallet =
+	crate::wallet::Wallet<Arc<Broadcaster>, Arc<FeeEstimator>, Arc<FilesystemLogger>>;
 
-pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
-	bdk::database::SqliteDatabase,
-	Arc<Broadcaster>,
-	Arc<FeeEstimator>,
-	Arc<FilesystemLogger>,
->;
+pub(crate) type KeysManager =
+	crate::wallet::WalletKeysManager<Arc<Broadcaster>, Arc<FeeEstimator>, Arc<FilesystemLogger>>;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<Graph>,
@@ -120,6 +112,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
+	IgnoringMessageHandler,
 	IgnoringMessageHandler,
 >;
 
@@ -234,7 +227,7 @@ pub struct ChannelDetails {
 	/// This is a strict superset of `is_channel_ready`.
 	pub is_usable: bool,
 	/// Returns `true` if this channel is (or will be) publicly-announced
-	pub is_public: bool,
+	pub is_announced: bool,
 	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
 	/// the channel.
 	pub cltv_expiry_delta: Option<u16>,
@@ -308,7 +301,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			is_outbound: value.is_outbound,
 			is_channel_ready: value.is_channel_ready,
 			is_usable: value.is_usable,
-			is_public: value.is_public,
+			is_announced: value.is_announced,
 			cltv_expiry_delta: value.config.map(|c| c.cltv_expiry_delta),
 			counterparty_unspendable_punishment_reserve: value
 				.counterparty
