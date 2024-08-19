@@ -120,17 +120,17 @@ interface Bolt11Payment {
 
 interface Bolt12Payment {
 	[Throws=NodeError]
-	PaymentId send([ByRef]Offer offer, string? payer_note);
+	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Offer offer, string? payer_note, u64 amount_msat);
+	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note);
 	[Throws=NodeError]
-	Offer receive(u64 amount_msat, [ByRef]string description);
+	Offer receive(u64 amount_msat, [ByRef]string description, u64? quantity);
 	[Throws=NodeError]
 	Offer receive_variable_amount([ByRef]string description);
 	[Throws=NodeError]
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
 	[Throws=NodeError]
-	Refund initiate_refund(u64 amount_msat, u32 expiry_secs);
+	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, u64? quantity, string? payer_note);
 };
 
 interface SpontaneousPayment {
@@ -201,6 +201,7 @@ enum NodeError {
 	"InvalidChannelId",
 	"InvalidNetwork",
 	"InvalidUri",
+	"InvalidQuantity",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
@@ -281,8 +282,8 @@ interface PaymentKind {
 	Onchain();
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
-	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id);
-	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret);
+	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
+	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, UntrustedString? payer_note, u64? quantity);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
 };
 
