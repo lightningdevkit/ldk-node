@@ -161,12 +161,60 @@ message OpenChannelRequest {
   // The amount of satoshis to push to the remote side as part of the initial commitment state.
   optional uint64 push_to_counterparty_msat = 4;
 
+  // The channel configuration to be used for opening this channel. If unset, default ChannelConfig is used.
+  optional ChannelConfig channel_config = 5;
+
   // Whether the channel should be public.
-  bool announce_channel = 5;
+  bool announce_channel = 6;
 }
 
 message OpenChannelResponse {
 
   // The channel id of the created channel that user can use to refer to channel.
   bytes user_channel_id = 1;
+}
+
+// ChannelConfig represents the configuration settings for a channel in a Lightning Network node.
+// See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html
+message ChannelConfig {
+  // Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
+  // over the channel.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_proportional_millionths
+  uint32 forwarding_fee_proportional_millionths = 1;
+
+  // Amount (in milli-satoshi) charged for payments forwarded outbound over the channel,
+  // in excess of forwarding_fee_proportional_millionths.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_base_msat
+  uint32 forwarding_fee_base_msat = 2;
+
+  // The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded
+  // over the channel this config applies to.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.cltv_expiry_delta
+  uint32 cltv_expiry_delta = 3;
+
+  // The maximum additional fee we’re willing to pay to avoid waiting for the counterparty’s
+  // to_self_delay to reclaim funds.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.force_close_avoidance_max_fee_satoshis
+  uint64 force_close_avoidance_max_fee_satoshis = 4;
+
+  // If set, allows this channel’s counterparty to skim an additional fee off this node’s
+  // inbound HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs
+  bool accept_underpaying_htlcs = 5;
+
+  // Limit our total exposure to potential loss to on-chain fees on close, including
+  // in-flight HTLCs which are burned to fees as they are too small to claim on-chain
+  // and fees on commitment transaction(s) broadcasted by our counterparty in excess of
+  // our own fee estimate.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.max_dust_htlc_exposure
+  oneof max_dust_htlc_exposure {
+
+    // This sets a fixed limit on the total dust exposure in millisatoshis.
+    // See more: https://docs.rs/lightning/latest/lightning/util/config/enum.MaxDustHTLCExposure.html#variant.FixedLimitMsat
+    uint64 fixed_limit_msat = 6;
+
+    // This sets a multiplier on the ConfirmationTarget::OnChainSweep feerate (in sats/KW) to determine the maximum allowed dust exposure.
+    // See more: https://docs.rs/lightning/latest/lightning/util/config/enum.MaxDustHTLCExposure.html#variant.FeeRateMultiplier
+    uint64 fee_rate_multiplier = 7;
+  }
 }
