@@ -1,0 +1,6 @@
+syntax = "proto3";
+package ldk_node_server;
+
+message DummyRequest {
+
+}
