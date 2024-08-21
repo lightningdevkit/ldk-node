@@ -143,3 +143,30 @@ message Bolt12SendResponse {
   // An identifier used to uniquely identify a payment.
   PaymentId payment_id = 1;
 }
+
+// Creates a new outbound channel to the given remote node.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.connect_open_channel
+message OpenChannelRequest {
+
+  // The hex-encoded public key of the node to open a channel with.
+  string node_pubkey = 1;
+
+  // An address which can be used to connect to a remote peer.
+  // It can be of type IPv4:port, IPv6:port, OnionV3:port or hostname:port
+  string address = 2;
+
+  // The amount of satoshis the caller is willing to commit to the channel.
+  uint64 channel_amount_sats = 3;
+
+  // The amount of satoshis to push to the remote side as part of the initial commitment state.
+  optional uint64 push_to_counterparty_msat = 4;
+
+  // Whether the channel should be public.
+  bool announce_channel = 5;
+}
+
+message OpenChannelResponse {
+
+  // The channel id of the created channel that user can use to refer to channel.
+  bytes user_channel_id = 1;
+}
