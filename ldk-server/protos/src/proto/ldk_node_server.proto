@@ -218,3 +218,23 @@ message ChannelConfig {
     uint64 fee_rate_multiplier = 7;
   }
 }
+
+// Closes the channel specified by given request.
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.close_channel
+// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.force_close_channel
+message CloseChannelRequest {
+
+  // The channel id of the created channel that user can use to refer to channel.
+  bytes user_channel_id = 1;
+
+  // The hex-encoded public key of the node to close a channel with.
+  string counterparty_node_id = 2;
+
+  // Whether to force close the specified channel.
+  optional bool force_close = 3;
+}
+
+message CloseChannelResponse {
+
+}
