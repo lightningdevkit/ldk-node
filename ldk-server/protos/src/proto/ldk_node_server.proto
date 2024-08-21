@@ -11,3 +11,31 @@ message OnchainReceiveResponse {
   // A Bitcoin on-chain address.
   string address = 1;
 }
+
+// Send an on-chain payment to the given address.
+message OnchainSendRequest {
+
+  // The address to send coins to.
+  string address = 1;
+
+  // The amount in satoshis to send.
+  // While sending the specified amount, we will respect any on-chain reserve we need to keep,
+  // i.e., won't allow to cut into `total_anchor_channels_reserve_sats`.
+  // See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.send_to_address
+  optional uint64 amount_sats = 2;
+
+  // If set, the amount_sats field should be unset.
+  // It indicates that node will send full balance to the specified address.
+  //
+  // Please note that when send_all is used this operation will **not** retain any on-chain reserves,
+  // which might be potentially dangerous if you have open Anchor channels for which you can't trust
+  // the counterparty to spend the Anchor output after channel closure.
+  // See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.send_all_to_address
+  optional bool send_all = 3;
+}
+
+message OnchainSendResponse {
+
+  // The transaction ID of the broadcasted transaction.
+  string txid = 1;
+}
