@@ -1,6 +1,13 @@
 syntax = "proto3";
 package ldk_node_server;
 
-message DummyRequest {
+// Retrieve a new on-chain funding address.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.new_address
+message OnchainReceiveRequest {
+}
 
+message OnchainReceiveResponse {
+
+  // A Bitcoin on-chain address.
+  string address = 1;
 }
