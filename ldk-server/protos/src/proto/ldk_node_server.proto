@@ -116,3 +116,30 @@ message Bolt12ReceiveResponse {
   // to the recipient.
   string offer = 1;
 }
+
+// Send a payment for a BOLT12 offer.
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.send
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.send_using_amount
+message Bolt12SendRequest {
+
+  // An offer for a payment within the Lightning Network.
+  string offer = 1;
+
+  // Set this field when paying a so-called "zero-amount" offer, i.e., an offer that leaves the
+  // amount paid to be determined by the user.
+  // This operation will fail if the amount specified is less than the value required by the given offer.
+  optional uint64 amount_msat = 2;
+
+  // If set, it represents the number of items requested.
+  optional uint64 quantity = 3;
+
+  // If set, it will be seen by the recipient and reflected back in the invoice.
+  optional string payer_note = 4;
+}
+
+message Bolt12SendResponse {
+
+  // An identifier used to uniquely identify a payment.
+  PaymentId payment_id = 1;
+}
