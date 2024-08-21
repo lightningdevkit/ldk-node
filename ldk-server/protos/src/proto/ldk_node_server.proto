@@ -93,3 +93,26 @@ message PaymentId {
 
   bytes data = 1;
 }
+
+// Returns a BOLT12 offer for the given amount, if specified.
+//
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.receive
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.receive_variable_amount
+message Bolt12ReceiveRequest {
+
+  // An optional description to attach along with the offer.
+  // Will be set in the description field of the encoded offer.
+  string description = 1;
+
+  // The amount in millisatoshi to send. If unset, a "zero-amount" or variable-amount offer is returned.
+  optional uint64 amount_msat = 2;
+}
+
+message Bolt12ReceiveResponse {
+
+  // An offer for a payment within the Lightning Network.
+  // With the details of the offer, the sender has all the data necessary to send a payment
+  // to the recipient.
+  string offer = 1;
+}
