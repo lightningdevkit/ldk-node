@@ -39,3 +39,31 @@ message OnchainSendResponse {
   // The transaction ID of the broadcasted transaction.
   string txid = 1;
 }
+
+// Return a BOLT11 payable invoice that can be used to request and receive a payment
+// for the given amount, if specified.
+// The inbound payment will be automatically claimed upon arrival.
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt11Payment.html#method.receive
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt11Payment.html#method.receive_variable_amount
+message Bolt11ReceiveRequest {
+
+  // The amount in millisatoshi to send. If unset, a "zero-amount" or variable-amount invoice is returned.
+  optional uint64 amount_msat = 1;
+
+  // An optional description to attach along with the invoice.
+  // Will be set in the description field of the encoded payment request.
+  string description = 2;
+
+  // Invoice expiry time in seconds.
+  uint32 expiry_secs = 3;
+}
+
+
+message Bolt11ReceiveResponse {
+
+  // An invoice for a payment within the Lightning Network.
+  // With the details of the invoice, the sender has all the data necessary to send a payment
+  // to the recipient.
+  string invoice = 1;
+}
