@@ -67,3 +67,29 @@ message Bolt11ReceiveResponse {
   // to the recipient.
   string invoice = 1;
 }
+
+// Send a payment for a BOLT11 invoice.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt11Payment.html#method.send
+message Bolt11SendRequest {
+
+  // An invoice for a payment within the Lightning Network.
+  string invoice = 1;
+
+  // Set this field when paying a so-called "zero-amount" invoice, i.e., an invoice that leaves the
+  // amount paid to be determined by the user.
+  // This operation will fail if the amount specified is less than the value required by the given invoice.
+  optional uint64 amount_msat = 2;
+
+}
+
+message Bolt11SendResponse {
+
+  // An identifier used to uniquely identify a payment.
+  PaymentId payment_id = 1;
+}
+
+// An identifier used to uniquely identify a payment.
+message PaymentId {
+
+  bytes data = 1;
+}
