@@ -6,11 +6,21 @@ jobs:
   build:
     strategy:
       matrix:
-        toolchain: [ stable ]
+        platform: [
+          ubuntu-latest,
+          macos-latest,
+          ]
+        toolchain: 
+          [ stable,
+            beta,
+            1.63.0, # MSRV
+          ]
         include:
           - toolchain: stable
             check-fmt: true
-    runs-on: ubuntu-latest
+          - toolchain: 1.63.0
+            msrv: true
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v3
@@ -18,11 +28,18 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
           rustup override set ${{ matrix.toolchain }}
-      - name: Build on Rust ${{ matrix.toolchain }}
-        run: cargo build --verbose --color always
       - name: Check formatting
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check
+      - name: Pin packages to allow for MSRV
+        if: matrix.msrv
+        run: |
+          cargo update -p hashlink --precise "0.8.2" --verbose # hashlink 0.8.3 requires hashbrown 0.14, requiring 1.64.0
+          cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
+          cargo update -p home --precise "0.5.5" --verbose # home v0.5.9 requires rustc 1.70 or newer
+          cargo update -p tokio --precise "1.38.1" --verbose # tokio v1.39.0 requires rustc 1.70 or newer
+      - name: Build on Rust ${{ matrix.toolchain }}
+        run: cargo build --verbose --color always
       - name: Test on Rust ${{ matrix.toolchain }}
         run: cargo test
       - name: Cargo check release on Rust ${{ matrix.toolchain }}
