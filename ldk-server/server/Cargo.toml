@@ -11,4 +11,4 @@ hyper = { version = "1", default-features = false, features = ["server", "http1"
 http-body-util = { version = "0.1", default-features = false }
 hyper-util = { version = "0.1", default-features = false, features = ["server-graceful"] }
 tokio = { version = "1.38.0", default-features = false, features = ["time", "signal", "rt-multi-thread"] }
-prost = { version = "0.12.3", default-features = false, features = ["derive", "std"] }
+prost = { version = "0.11.6", default-features = false, features = ["std"] }
