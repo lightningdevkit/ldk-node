@@ -1003,13 +1003,13 @@ impl Node {
 	///
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	#[cfg(not(feature = "uniffi"))]
-	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
-		Arc::new(Bolt12Payment::new(
+	pub fn bolt12_payment(&self) -> Bolt12Payment {
+		Bolt12Payment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.logger),
-		))
+		)
 	}
 
 	/// Returns a payment handler allowing to create and pay [BOLT 12] offers and refunds.
