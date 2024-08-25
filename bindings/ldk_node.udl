@@ -404,20 +404,19 @@ dictionary BalanceDetails {
 	sequence<PendingSweepBalance> pending_balances_from_channel_closures;
 };
 
-interface ChannelConfig {
-	constructor();
-	u32 forwarding_fee_proportional_millionths();
-	void set_forwarding_fee_proportional_millionths(u32 value);
-	u32 forwarding_fee_base_msat();
-	void set_forwarding_fee_base_msat(u32 fee_msat);
-	u16 cltv_expiry_delta();
-	void set_cltv_expiry_delta(u16 value);
-	u64 force_close_avoidance_max_fee_satoshis();
-	void set_force_close_avoidance_max_fee_satoshis(u64 value_sat);
-	boolean accept_underpaying_htlcs();
-	void set_accept_underpaying_htlcs(boolean value);
-	void set_max_dust_htlc_exposure_from_fixed_limit(u64 limit_msat);
-	void set_max_dust_htlc_exposure_from_fee_rate_multiplier(u64 multiplier);
+dictionary ChannelConfig {
+	u32 forwarding_fee_proportional_millionths;
+	u32 forwarding_fee_base_msat;
+	u16 cltv_expiry_delta;
+	MaxDustHTLCExposure max_dust_htlc_exposure;
+	u64 force_close_avoidance_max_fee_satoshis;
+	boolean accept_underpaying_htlcs;
+};
+
+[Enum]
+interface MaxDustHTLCExposure {
+	FixedLimit ( u64 limit_msat );
+	FeeRateMultiplier ( u64 multiplier );
 };
 
 enum LogLevel {

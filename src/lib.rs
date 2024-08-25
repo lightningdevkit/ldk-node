@@ -109,7 +109,7 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
-pub use types::ChannelConfig;
+pub use types::{ChannelConfig, MaxDustHTLCExposure};
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -1187,7 +1187,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn connect_open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_channel: bool,
 	) -> Result<UserChannelId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
@@ -1251,7 +1251,7 @@ impl Node {
 
 		let mut user_config = default_user_config(&self.config);
 		user_config.channel_handshake_config.announced_channel = announce_channel;
-		user_config.channel_config = (*(channel_config.unwrap_or_default())).clone().into();
+		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
 		// We set the max inflight to 100% for private channels.
 		// FIXME: LDK will default to this behavior soon, too, at which point we should drop this
 		// manual override.
@@ -1494,7 +1494,7 @@ impl Node {
 	/// Update the config for a previously opened channel.
 	pub fn update_channel_config(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		channel_config: Arc<ChannelConfig>,
+		channel_config: ChannelConfig,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
@@ -1505,7 +1505,7 @@ impl Node {
 				.update_channel_config(
 					&counterparty_node_id,
 					&[channel_details.channel_id],
-					&(*channel_config).clone().into(),
+					&(channel_config).clone().into(),
 				)
 				.map_err(|_| Error::ChannelConfigUpdateFailed)
 		} else {
