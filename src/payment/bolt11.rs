@@ -11,6 +11,7 @@ use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus, PaymentStore,
 };
+use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::types::{ChannelManager, KeysManager};
 
@@ -69,13 +70,20 @@ impl Bolt11Payment {
 	}
 
 	/// Send a payment given an invoice.
-	pub fn send(&self, invoice: &Bolt11Invoice) -> Result<PaymentId, Error> {
+	///
+	/// If [`SendingParameters`] are provided they will override the node's default routing parameters
+	/// on a per-field basis. Each field in `SendingParameters` that is set replaces the corresponding
+	/// default value. Fields that are not set fall back to the node's configured defaults. If no
+	/// `SendingParameters` are provided, the method fully relies on these defaults.
+	pub fn send(
+		&self, invoice: &Bolt11Invoice, sending_parameters: Option<SendingParameters>,
+	) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
-		let (payment_hash, recipient_onion, route_params) = payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
+		let (payment_hash, recipient_onion, mut route_params) = payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
 			log_error!(self.logger, "Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead.");
 			Error::InvalidInvoice
 		})?;
@@ -88,6 +96,40 @@ impl Bolt11Payment {
 				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
 				return Err(Error::DuplicatePayment);
 			}
+		}
+
+		if let Some(user_set_params) = sending_parameters {
+			if let Some(mut default_params) =
+				self.config.sending_parameters_config.as_ref().cloned()
+			{
+				default_params.max_total_routing_fee_msat = user_set_params
+					.max_total_routing_fee_msat
+					.or(default_params.max_total_routing_fee_msat);
+				default_params.max_total_cltv_expiry_delta = user_set_params
+					.max_total_cltv_expiry_delta
+					.or(default_params.max_total_cltv_expiry_delta);
+				default_params.max_path_count =
+					user_set_params.max_path_count.or(default_params.max_path_count);
+				default_params.max_channel_saturation_power_of_half = user_set_params
+					.max_channel_saturation_power_of_half
+					.or(default_params.max_channel_saturation_power_of_half);
+
+				route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
+				route_params.payment_params.max_total_cltv_expiry_delta =
+					default_params.max_total_cltv_expiry_delta.unwrap_or_default();
+				route_params.payment_params.max_path_count =
+					default_params.max_path_count.unwrap_or_default();
+				route_params.payment_params.max_channel_saturation_power_of_half =
+					default_params.max_channel_saturation_power_of_half.unwrap_or_default();
+			}
+		} else if let Some(default_params) = &self.config.sending_parameters_config {
+			route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta =
+				default_params.max_total_cltv_expiry_delta.unwrap_or_default();
+			route_params.payment_params.max_path_count =
+				default_params.max_path_count.unwrap_or_default();
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				default_params.max_channel_saturation_power_of_half.unwrap_or_default();
 		}
 
 		let payment_secret = Some(*invoice.payment_secret());
@@ -148,14 +190,20 @@ impl Bolt11Payment {
 		}
 	}
 
-	/// Send a payment given an invoice and an amount in millisatoshi.
+	/// Send a payment given an invoice and an amount in millisatoshis.
 	///
 	/// This will fail if the amount given is less than the value required by the given invoice.
 	///
 	/// This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
 	/// amount paid to be determined by the user.
+	///
+	/// If [`SendingParameters`] are provided they will override the node's default routing parameters
+	/// on a per-field basis. Each field in `SendingParameters` that is set replaces the corresponding
+	/// default value. Fields that are not set fall back to the node's configured defaults. If no
+	/// `SendingParameters` are provided, the method fully relies on these defaults.
 	pub fn send_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
+		sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -196,8 +244,42 @@ impl Bolt11Payment {
 				.with_bolt11_features(features.clone())
 				.map_err(|_| Error::InvalidInvoice)?;
 		}
-		let route_params =
+		let mut route_params =
 			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		if let Some(user_set_params) = sending_parameters {
+			if let Some(mut default_params) =
+				self.config.sending_parameters_config.as_ref().cloned()
+			{
+				default_params.max_total_routing_fee_msat = user_set_params
+					.max_total_routing_fee_msat
+					.or(default_params.max_total_routing_fee_msat);
+				default_params.max_total_cltv_expiry_delta = user_set_params
+					.max_total_cltv_expiry_delta
+					.or(default_params.max_total_cltv_expiry_delta);
+				default_params.max_path_count =
+					user_set_params.max_path_count.or(default_params.max_path_count);
+				default_params.max_channel_saturation_power_of_half = user_set_params
+					.max_channel_saturation_power_of_half
+					.or(default_params.max_channel_saturation_power_of_half);
+
+				route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
+				route_params.payment_params.max_total_cltv_expiry_delta =
+					default_params.max_total_cltv_expiry_delta.unwrap_or_default();
+				route_params.payment_params.max_path_count =
+					default_params.max_path_count.unwrap_or_default();
+				route_params.payment_params.max_channel_saturation_power_of_half =
+					default_params.max_channel_saturation_power_of_half.unwrap_or_default();
+			}
+		} else if let Some(default_params) = &self.config.sending_parameters_config {
+			route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta =
+				default_params.max_total_cltv_expiry_delta.unwrap_or_default();
+			route_params.payment_params.max_path_count =
+				default_params.max_path_count.unwrap_or_default();
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				default_params.max_channel_saturation_power_of_half.unwrap_or_default();
+		}
 
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let recipient_fields = RecipientOnionFields::secret_only(*payment_secret);

@@ -224,7 +224,7 @@ class LibraryTest {
 
         val invoice = node2.bolt11Payment().receive(2500000u, "asdf", 9217u)
 
-        node1.bolt11Payment().send(invoice)
+        node1.bolt11Payment().send(invoice, null)
 
         val paymentSuccessfulEvent = node1.waitNextEvent()
         println("Got event: $paymentSuccessfulEvent")

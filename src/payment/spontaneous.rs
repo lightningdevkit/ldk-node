@@ -6,6 +6,7 @@ use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::payment::store::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
+use crate::payment::SendingParameters;
 use crate::types::{ChannelManager, KeysManager};
 
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
@@ -41,8 +42,15 @@ impl SpontaneousPayment {
 		Self { runtime, channel_manager, keys_manager, payment_store, config, logger }
 	}
 
-	/// Send a spontaneous, aka. "keysend", payment
-	pub fn send(&self, amount_msat: u64, node_id: PublicKey) -> Result<PaymentId, Error> {
+	/// Send a spontaneous aka. "keysend", payment.
+	///
+	/// If [`SendingParameters`] are provided they will override the node's default routing parameters
+	/// on a per-field basis. Each field in `SendingParameters` that is set replaces the corresponding
+	/// default value. Fields that are not set fall back to the node's configured defaults. If no
+	/// `SendingParameters` are provided, the method fully relies on these defaults.
+	pub fn send(
+		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
+	) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -61,10 +69,45 @@ impl SpontaneousPayment {
 			}
 		}
 
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let mut route_params = RouteParameters::from_payment_params_and_value(
 			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
 			amount_msat,
 		);
+
+		if let Some(user_set_params) = sending_parameters {
+			if let Some(mut default_params) =
+				self.config.sending_parameters_config.as_ref().cloned()
+			{
+				default_params.max_total_routing_fee_msat = user_set_params
+					.max_total_routing_fee_msat
+					.or(default_params.max_total_routing_fee_msat);
+				default_params.max_total_cltv_expiry_delta = user_set_params
+					.max_total_cltv_expiry_delta
+					.or(default_params.max_total_cltv_expiry_delta);
+				default_params.max_path_count =
+					user_set_params.max_path_count.or(default_params.max_path_count);
+				default_params.max_channel_saturation_power_of_half = user_set_params
+					.max_channel_saturation_power_of_half
+					.or(default_params.max_channel_saturation_power_of_half);
+
+				route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
+				route_params.payment_params.max_total_cltv_expiry_delta =
+					default_params.max_total_cltv_expiry_delta.unwrap_or_default();
+				route_params.payment_params.max_path_count =
+					default_params.max_path_count.unwrap_or_default();
+				route_params.payment_params.max_channel_saturation_power_of_half =
+					default_params.max_channel_saturation_power_of_half.unwrap_or_default();
+			}
+		} else if let Some(default_params) = &self.config.sending_parameters_config {
+			route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta =
+				default_params.max_total_cltv_expiry_delta.unwrap_or_default();
+			route_params.payment_params.max_path_count =
+				default_params.max_path_count.unwrap_or_default();
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				default_params.max_channel_saturation_power_of_half.unwrap_or_default();
+		}
+
 		let recipient_fields = RecipientOnionFields::spontaneous_empty();
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(

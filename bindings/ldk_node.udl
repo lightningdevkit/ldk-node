@@ -16,6 +16,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	LogLevel log_level;
 	AnchorChannelsConfig? anchor_channels_config;
+	SendingParameters? sending_parameters_config;
 };
 
 dictionary AnchorChannelsConfig {
@@ -93,9 +94,9 @@ interface Node {
 
 interface Bolt11Payment {
 	[Throws=NodeError]
-	PaymentId send([ByRef]Bolt11Invoice invoice);
+	PaymentId send([ByRef]Bolt11Invoice invoice, SendingParameters? sending_parameters);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
+	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, SendingParameters? sending_parameters);
 	[Throws=NodeError]
 	void send_probes([ByRef]Bolt11Invoice invoice);
 	[Throws=NodeError]
@@ -135,7 +136,7 @@ interface Bolt12Payment {
 
 interface SpontaneousPayment {
 	[Throws=NodeError]
-	PaymentId send(u64 amount_msat, PublicKey node_id);
+	PaymentId send(u64 amount_msat, PublicKey node_id, SendingParameters? sending_parameters);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
 };
@@ -317,6 +318,13 @@ dictionary PaymentDetails {
 	PaymentDirection direction;
 	PaymentStatus status;
 	u64 latest_update_timestamp;
+};
+
+dictionary SendingParameters {
+    u64? max_total_routing_fee_msat;
+    u32? max_total_cltv_expiry_delta;
+    u8? max_path_count;
+    u8? max_channel_saturation_power_of_half;
 };
 
 [NonExhaustive]

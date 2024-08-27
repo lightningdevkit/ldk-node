@@ -143,7 +143,7 @@ impl UnifiedQrPayment {
 		}
 
 		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
-			match self.bolt11_invoice.send(&invoice) {
+			match self.bolt11_invoice.send(&invoice, None) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
 			}
