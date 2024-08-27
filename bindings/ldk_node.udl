@@ -8,7 +8,6 @@ dictionary Config {
 	string? log_dir_path;
 	Network network;
 	sequence<SocketAddress>? listening_addresses;
-	u32 default_cltv_expiry_delta;
 	u64 onchain_wallet_sync_interval_secs;
 	u64 wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;

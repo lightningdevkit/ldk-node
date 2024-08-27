@@ -12,7 +12,6 @@ use std::time::Duration;
 // Config defaults
 const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
-const DEFAULT_CLTV_EXPIRY_DELTA: u32 = 144;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
@@ -105,8 +104,6 @@ pub struct Config {
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
-	/// The default CLTV expiry delta to be used for payments.
-	pub default_cltv_expiry_delta: u32,
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
 	///
 	/// **Note:** A minimum of 10 seconds is always enforced.
@@ -168,7 +165,6 @@ impl Default for Config {
 			log_dir_path: None,
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
-			default_cltv_expiry_delta: DEFAULT_CLTV_EXPIRY_DELTA,
 			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
 			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
 			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,

@@ -18,6 +18,9 @@ use bitcoin::secp256k1::PublicKey;
 
 use std::sync::{Arc, RwLock};
 
+// The default `final_cltv_expiry_delta` we apply when not set.
+const LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 144;
+
 /// A payment handler allowing to send spontaneous ("keysend") payments.
 ///
 /// Should be retrieved by calling [`Node::spontaneous_payment`].
@@ -68,7 +71,7 @@ impl SpontaneousPayment {
 		}
 
 		let mut route_params = RouteParameters::from_payment_params_and_value(
-			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
+			PaymentParameters::from_node_id(node_id, LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA),
 			amount_msat,
 		);
 
@@ -153,13 +156,12 @@ impl SpontaneousPayment {
 		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
-		let cltv_expiry_delta = self.config.default_cltv_expiry_delta;
 
 		self.channel_manager
 			.send_spontaneous_preflight_probes(
 				node_id,
 				amount_msat,
-				cltv_expiry_delta,
+				LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA,
 				liquidity_limit_multiplier,
 			)
 			.map_err(|e| {
