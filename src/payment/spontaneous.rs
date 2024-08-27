@@ -44,10 +44,8 @@ impl SpontaneousPayment {
 
 	/// Send a spontaneous aka. "keysend", payment.
 	///
-	/// If [`SendingParameters`] are provided they will override the node's default routing parameters
-	/// on a per-field basis. Each field in `SendingParameters` that is set replaces the corresponding
-	/// default value. Fields that are not set fall back to the node's configured defaults. If no
-	/// `SendingParameters` are provided, the method fully relies on these defaults.
+	/// If `sending_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::sending_parameters`] on a per-field basis.
 	pub fn send(
 		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
@@ -75,9 +73,7 @@ impl SpontaneousPayment {
 		);
 
 		if let Some(user_set_params) = sending_parameters {
-			if let Some(mut default_params) =
-				self.config.sending_parameters_config.as_ref().cloned()
-			{
+			if let Some(mut default_params) = self.config.sending_parameters.as_ref().cloned() {
 				default_params.max_total_routing_fee_msat = user_set_params
 					.max_total_routing_fee_msat
 					.or(default_params.max_total_routing_fee_msat);
@@ -98,7 +94,7 @@ impl SpontaneousPayment {
 				route_params.payment_params.max_channel_saturation_power_of_half =
 					default_params.max_channel_saturation_power_of_half.unwrap_or_default();
 			}
-		} else if let Some(default_params) = &self.config.sending_parameters_config {
+		} else if let Some(default_params) = &self.config.sending_parameters {
 			route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
 			route_params.payment_params.max_total_cltv_expiry_delta =
 				default_params.max_total_cltv_expiry_delta.unwrap_or_default();
