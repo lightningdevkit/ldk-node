@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
@@ -8,6 +6,8 @@ use lightning::util::logger::Level as LogLevel;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+
+use std::time::Duration;
 
 // Config defaults
 const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
