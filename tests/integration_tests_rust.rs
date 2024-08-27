@@ -157,7 +157,7 @@ fn multi_hop_sending() {
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
 	let sending_params = SendingParameters {
-		max_total_routing_fee_msat: Some(75_000),
+		max_total_routing_fee_msat: Some(Some(75_000).into()),
 		max_total_cltv_expiry_delta: Some(1000),
 		max_path_count: Some(10),
 		max_channel_saturation_power_of_half: Some(2),

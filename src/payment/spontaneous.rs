@@ -72,37 +72,20 @@ impl SpontaneousPayment {
 			amount_msat,
 		);
 
-		if let Some(user_set_params) = sending_parameters {
-			if let Some(mut default_params) = self.config.sending_parameters.as_ref().cloned() {
-				default_params.max_total_routing_fee_msat = user_set_params
-					.max_total_routing_fee_msat
-					.or(default_params.max_total_routing_fee_msat);
-				default_params.max_total_cltv_expiry_delta = user_set_params
-					.max_total_cltv_expiry_delta
-					.or(default_params.max_total_cltv_expiry_delta);
-				default_params.max_path_count =
-					user_set_params.max_path_count.or(default_params.max_path_count);
-				default_params.max_channel_saturation_power_of_half = user_set_params
-					.max_channel_saturation_power_of_half
-					.or(default_params.max_channel_saturation_power_of_half);
-
-				route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
-				route_params.payment_params.max_total_cltv_expiry_delta =
-					default_params.max_total_cltv_expiry_delta.unwrap_or_default();
-				route_params.payment_params.max_path_count =
-					default_params.max_path_count.unwrap_or_default();
-				route_params.payment_params.max_channel_saturation_power_of_half =
-					default_params.max_channel_saturation_power_of_half.unwrap_or_default();
-			}
-		} else if let Some(default_params) = &self.config.sending_parameters {
-			route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
-			route_params.payment_params.max_total_cltv_expiry_delta =
-				default_params.max_total_cltv_expiry_delta.unwrap_or_default();
-			route_params.payment_params.max_path_count =
-				default_params.max_path_count.unwrap_or_default();
-			route_params.payment_params.max_channel_saturation_power_of_half =
-				default_params.max_channel_saturation_power_of_half.unwrap_or_default();
-		}
+		let override_params =
+			sending_parameters.as_ref().or(self.config.sending_parameters.as_ref());
+		if let Some(override_params) = override_params {
+			override_params
+				.max_total_routing_fee_msat
+				.map(|f| route_params.max_total_routing_fee_msat = f.into());
+			override_params
+				.max_total_cltv_expiry_delta
+				.map(|d| route_params.payment_params.max_total_cltv_expiry_delta = d);
+			override_params.max_path_count.map(|p| route_params.payment_params.max_path_count = p);
+			override_params
+				.max_channel_saturation_power_of_half
+				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
+		};
 
 		let recipient_fields = RecipientOnionFields::spontaneous_empty();
 

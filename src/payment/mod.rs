@@ -23,7 +23,16 @@ pub struct SendingParameters {
 	/// paths.
 	///
 	/// Note that values below a few sats may result in some paths being spuriously ignored.
-	pub max_total_routing_fee_msat: Option<u64>,
+	#[cfg(not(feature = "uniffi"))]
+	pub max_total_routing_fee_msat: Option<Option<u64>>,
+	/// The maximum total fees, in millisatoshi, that may accrue during route finding.
+	///
+	/// This limit also applies to the total fees that may arise while retrying failed payment
+	/// paths.
+	///
+	/// Note that values below a few sats may result in some paths being spuriously ignored.
+	#[cfg(feature = "uniffi")]
+	pub max_total_routing_fee_msat: Option<MaxTotalRoutingFeeLimit>,
 	/// The maximum total CLTV delta we accept for the route.
 	///
 	/// Defaults to [`DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA`].
@@ -58,4 +67,33 @@ pub struct SendingParameters {
 	///
 	/// Default value: 2
 	pub max_channel_saturation_power_of_half: Option<u8>,
+}
+
+/// Represents the possible states of [`SendingParameters::max_total_routing_fee_msat`].
+//
+// Required only in bindings as UniFFI can't expose `Option<Option<..>>`.
+#[cfg(feature = "uniffi")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MaxTotalRoutingFeeLimit {
+	None,
+	Some { amount_msat: u64 },
+}
+
+#[cfg(feature = "uniffi")]
+impl From<MaxTotalRoutingFeeLimit> for Option<u64> {
+	fn from(value: MaxTotalRoutingFeeLimit) -> Self {
+		match value {
+			MaxTotalRoutingFeeLimit::Some { amount_msat } => Some(amount_msat),
+			MaxTotalRoutingFeeLimit::None => None,
+		}
+	}
+}
+
+#[cfg(feature = "uniffi")]
+impl From<Option<u64>> for MaxTotalRoutingFeeLimit {
+	fn from(value: Option<u64>) -> Self {
+		value.map_or(MaxTotalRoutingFeeLimit::None, |amount_msat| MaxTotalRoutingFeeLimit::Some {
+			amount_msat,
+		})
+	}
 }

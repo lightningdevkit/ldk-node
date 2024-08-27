@@ -151,10 +151,10 @@ interface OnchainPayment {
 };
 
 interface UnifiedQrPayment {
-    [Throws=NodeError]
-    string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
-    [Throws=NodeError]
-    QrPaymentResult send([ByRef]string uri_str);
+	[Throws=NodeError]
+	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
+	[Throws=NodeError]
+	QrPaymentResult send([ByRef]string uri_str);
 };
 
 [Error]
@@ -290,9 +290,9 @@ interface PaymentKind {
 
 [Enum]
 interface QrPaymentResult {
-    Onchain(Txid txid);
-    Bolt11(PaymentId payment_id);
-    Bolt12(PaymentId payment_id);
+	Onchain(Txid txid);
+	Bolt11(PaymentId payment_id);
+	Bolt12(PaymentId payment_id);
 };
 
 enum PaymentDirection {
@@ -321,10 +321,16 @@ dictionary PaymentDetails {
 };
 
 dictionary SendingParameters {
-    u64? max_total_routing_fee_msat;
-    u32? max_total_cltv_expiry_delta;
-    u8? max_path_count;
-    u8? max_channel_saturation_power_of_half;
+	MaxTotalRoutingFeeLimit? max_total_routing_fee_msat;
+	u32? max_total_cltv_expiry_delta;
+	u8? max_path_count;
+	u8? max_channel_saturation_power_of_half;
+};
+
+[Enum]
+interface MaxTotalRoutingFeeLimit {
+	None ();
+	Some ( u64 amount_msat );
 };
 
 [NonExhaustive]
