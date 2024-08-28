@@ -18,6 +18,9 @@ use bitcoin::secp256k1::PublicKey;
 
 use std::sync::{Arc, RwLock};
 
+// The default `final_cltv_expiry_delta` we apply when not set.
+const LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 144;
+
 /// A payment handler allowing to send spontaneous ("keysend") payments.
 ///
 /// Should be retrieved by calling [`Node::spontaneous_payment`].
@@ -44,10 +47,8 @@ impl SpontaneousPayment {
 
 	/// Send a spontaneous aka. "keysend", payment.
 	///
-	/// If [`SendingParameters`] are provided they will override the node's default routing parameters
-	/// on a per-field basis. Each field in `SendingParameters` that is set replaces the corresponding
-	/// default value. Fields that are not set fall back to the node's configured defaults. If no
-	/// `SendingParameters` are provided, the method fully relies on these defaults.
+	/// If `sending_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::sending_parameters`] on a per-field basis.
 	pub fn send(
 		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
@@ -70,43 +71,24 @@ impl SpontaneousPayment {
 		}
 
 		let mut route_params = RouteParameters::from_payment_params_and_value(
-			PaymentParameters::from_node_id(node_id, self.config.default_cltv_expiry_delta),
+			PaymentParameters::from_node_id(node_id, LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA),
 			amount_msat,
 		);
 
-		if let Some(user_set_params) = sending_parameters {
-			if let Some(mut default_params) =
-				self.config.sending_parameters_config.as_ref().cloned()
-			{
-				default_params.max_total_routing_fee_msat = user_set_params
-					.max_total_routing_fee_msat
-					.or(default_params.max_total_routing_fee_msat);
-				default_params.max_total_cltv_expiry_delta = user_set_params
-					.max_total_cltv_expiry_delta
-					.or(default_params.max_total_cltv_expiry_delta);
-				default_params.max_path_count =
-					user_set_params.max_path_count.or(default_params.max_path_count);
-				default_params.max_channel_saturation_power_of_half = user_set_params
-					.max_channel_saturation_power_of_half
-					.or(default_params.max_channel_saturation_power_of_half);
-
-				route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
-				route_params.payment_params.max_total_cltv_expiry_delta =
-					default_params.max_total_cltv_expiry_delta.unwrap_or_default();
-				route_params.payment_params.max_path_count =
-					default_params.max_path_count.unwrap_or_default();
-				route_params.payment_params.max_channel_saturation_power_of_half =
-					default_params.max_channel_saturation_power_of_half.unwrap_or_default();
-			}
-		} else if let Some(default_params) = &self.config.sending_parameters_config {
-			route_params.max_total_routing_fee_msat = default_params.max_total_routing_fee_msat;
-			route_params.payment_params.max_total_cltv_expiry_delta =
-				default_params.max_total_cltv_expiry_delta.unwrap_or_default();
-			route_params.payment_params.max_path_count =
-				default_params.max_path_count.unwrap_or_default();
-			route_params.payment_params.max_channel_saturation_power_of_half =
-				default_params.max_channel_saturation_power_of_half.unwrap_or_default();
-		}
+		let override_params =
+			sending_parameters.as_ref().or(self.config.sending_parameters.as_ref());
+		if let Some(override_params) = override_params {
+			override_params
+				.max_total_routing_fee_msat
+				.map(|f| route_params.max_total_routing_fee_msat = f.into());
+			override_params
+				.max_total_cltv_expiry_delta
+				.map(|d| route_params.payment_params.max_total_cltv_expiry_delta = d);
+			override_params.max_path_count.map(|p| route_params.payment_params.max_path_count = p);
+			override_params
+				.max_channel_saturation_power_of_half
+				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
+		};
 
 		let recipient_fields = RecipientOnionFields::spontaneous_empty();
 
@@ -174,13 +156,12 @@ impl SpontaneousPayment {
 		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
-		let cltv_expiry_delta = self.config.default_cltv_expiry_delta;
 
 		self.channel_manager
 			.send_spontaneous_preflight_probes(
 				node_id,
 				amount_msat,
-				cltv_expiry_delta,
+				LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA,
 				liquidity_limit_multiplier,
 			)
 			.map_err(|e| {
