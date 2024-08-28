@@ -277,32 +277,74 @@ fn onchain_spend_receive() {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
+	let premine_amount_sat = 1_100_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
-		vec![addr_b.clone()],
-		Amount::from_sat(100000),
+		vec![addr_a.clone(), addr_b.clone()],
+		Amount::from_sat(premine_amount_sat),
 	);
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, 100000);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let channel_amount_sat = 1_000_000;
+	let reserve_amount_sat = 25_000;
+	open_channel(&node_b, &node_a, channel_amount_sat, true, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let onchain_fee_buffer_sat = 1000;
+	let expected_node_a_balance = premine_amount_sat - reserve_amount_sat;
+	let expected_node_b_balance_lower =
+		premine_amount_sat - channel_amount_sat - reserve_amount_sat - onchain_fee_buffer_sat;
+	let expected_node_b_balance_upper =
+		premine_amount_sat - channel_amount_sat - reserve_amount_sat;
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.onchain_payment().send_to_address(&addr_b, 1000)
+		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1)
 	);
 
-	let txid = node_b.onchain_payment().send_to_address(&addr_a, 1000).unwrap();
+	let amount_to_send_sats = 1000;
+	let txid = node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 1000);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats > 98000);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
+	let expected_node_a_balance = expected_node_a_balance + amount_to_send_sats;
+	let expected_node_b_balance_lower = expected_node_b_balance_lower - amount_to_send_sats;
+	let expected_node_b_balance_upper = expected_node_b_balance_upper - amount_to_send_sats;
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
+
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true).unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	wait_for_tx(&electrsd.client, txid);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let expected_node_b_balance_lower = expected_node_b_balance_lower + expected_node_a_balance;
+	let expected_node_b_balance_upper = expected_node_b_balance_upper + expected_node_a_balance;
+	let expected_node_a_balance = 0;
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert_eq!(node_a.list_balances().total_onchain_balance_sats, reserve_amount_sat);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false).unwrap();
@@ -312,9 +354,14 @@ fn onchain_spend_receive() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.list_balances().total_onchain_balance_sats, 0);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats > 99000);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
+	let expected_node_b_balance_lower = expected_node_b_balance_lower + reserve_amount_sat;
+	let expected_node_b_balance_upper = expected_node_b_balance_upper + reserve_amount_sat;
+	let expected_node_a_balance = 0;
+
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert_eq!(node_a.list_balances().total_onchain_balance_sats, expected_node_a_balance);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 }
 
 #[test]
