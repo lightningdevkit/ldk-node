@@ -11,11 +11,13 @@
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance,
+	sanitize_alias, Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError,
+	PendingSweepBalance,
 };
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStore;
 use lightning::util::test_utils::TestStore;
 use lightning_persister::fs_store::FilesystemStore;
@@ -200,12 +202,12 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 	listening_addresses
 }
 
-pub(crate) fn random_node_alias() -> Option<String> {
+pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	let mut rng = thread_rng();
 	let ranged_val = rng.gen_range(0..10);
 	match ranged_val {
 		0 => None,
-		val => Some(format!("ldk-node-{}", val)),
+		val => Some(sanitize_alias(&format!("ldk-node-{}", val)).unwrap()),
 	}
 }
 
@@ -398,17 +400,15 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 }
 
 pub fn open_channel(
-	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, announce: bool,
-	electrsd: &ElectrsD,
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, electrsd: &ElectrsD,
 ) {
 	node_a
-		.connect_open_channel(
+		.open_announced_channel(
 			node_b.node_id(),
 			node_b.listening_addresses().unwrap().first().unwrap().clone(),
 			funding_amount_sat,
 			None,
 			None,
-			announce,
 		)
 		.unwrap();
 	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
@@ -447,13 +447,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
 	node_a
-		.connect_open_channel(
+		.open_channel(
 			node_b.node_id(),
 			node_b.listening_addresses().unwrap().first().unwrap().clone(),
 			funding_amount_sat,
 			Some(push_msat),
 			None,
-			true,
 		)
 		.unwrap();
 

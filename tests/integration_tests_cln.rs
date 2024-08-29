@@ -82,15 +82,8 @@ fn test_cln() {
 	// Open the channel
 	let funding_amount_sat = 1_000_000;
 
-	node.connect_open_channel(
-		cln_node_id,
-		cln_address,
-		funding_amount_sat,
-		Some(500_000_000),
-		None,
-		false,
-	)
-	.unwrap();
+	node.open_channel(cln_node_id, cln_address, funding_amount_sat, Some(500_000_000), None)
+		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
 	common::wait_for_tx(&electrs_client, funding_txo.txid);
