@@ -47,7 +47,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.connect_open_channel(node_id, node_addr, 10000, None, None, false).unwrap();
+//! 	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -63,7 +63,8 @@
 //! [`build`]: Builder::build
 //! [`start`]: Node::start
 //! [`stop`]: Node::stop
-//! [`connect_open_channel`]: Node::connect_open_channel
+//! [`open_channel`]: Node::open_channel
+//! [`open_announced_channel`]: Node::open_announced_channel
 //! [`send`]: Bolt11Payment::send
 //!
 #![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
@@ -114,6 +115,7 @@ pub use io::utils::generate_entropy_mnemonic;
 #[cfg(feature = "uniffi")]
 use uniffi_types::*;
 
+pub use builder::sanitize_alias;
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -121,8 +123,9 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	default_user_config, LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
+	can_announce_channel, default_user_config, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
@@ -601,7 +604,8 @@ impl Node {
 		let bcast_logger = Arc::clone(&self.logger);
 		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
 		let mut stop_bcast = self.stop_sender.subscribe();
-		let node_alias = self.config().node_alias;
+		let node_alias = self.config.node_alias.clone();
+		let can_announce_channel = can_announce_channel(&self.config);
 		runtime.spawn(async move {
 			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 			#[cfg(not(test))]
@@ -646,17 +650,19 @@ impl Node {
 
 							let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
 							let alias = node_alias.clone().map(|alias| {
-								let mut buf = [0_u8; 32];
-								buf[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
-								buf
+								alias.0
 							});
 
-							if addresses.is_empty() || alias.is_none() {
+							if !can_announce_channel {
 								// Skip if we are not listening on any addresses or if the node alias is not set.
 								continue;
 							}
 
-							bcast_pm.broadcast_node_announcement([0; 3], alias.unwrap(), addresses);
+							if let Some(node_alias) = alias {
+								bcast_pm.broadcast_node_announcement([0; 3], node_alias, addresses);
+							} else {
+								continue
+							}
 
 							let unix_time_secs_opt =
 								SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
@@ -1189,10 +1195,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
-	pub fn connect_open_channel(
+	fn connect_open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_channel: bool,
 	) -> Result<UserChannelId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1254,12 +1259,13 @@ impl Node {
 		}
 
 		let mut user_config = default_user_config(&self.config);
-		user_config.channel_handshake_config.announced_channel = announce_channel;
+		let can_announce_channel = can_announce_channel(&self.config);
+		user_config.channel_handshake_config.announced_channel = can_announce_channel;
 		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
 		// We set the max inflight to 100% for private channels.
 		// FIXME: LDK will default to this behavior soon, too, at which point we should drop this
 		// manual override.
-		if !announce_channel {
+		if !can_announce_channel {
 			user_config
 				.channel_handshake_config
 				.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
@@ -1290,6 +1296,38 @@ impl Node {
 				Err(Error::ChannelCreationFailed)
 			},
 		}
+	}
+
+	/// Opens a channel with a peer.
+	pub fn open_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
+	) -> Result<UserChannelId, Error> {
+		self.connect_open_channel(
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+		)
+	}
+
+	/// Opens an announced channel with a peer.
+	pub fn open_announced_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
+	) -> Result<UserChannelId, Error> {
+		if !can_announce_channel(&self.config) {
+			return Err(Error::OpenAnnouncedChannelFailed);
+		}
+
+		self.open_channel(
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+		)
 	}
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate

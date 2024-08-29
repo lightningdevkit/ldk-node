@@ -111,6 +111,9 @@ pub struct Config {
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
+	///
+	/// **Note**: Node announcements will only be broadcast if the node_alias and the
+	/// listening_addresses are set.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
 	///
@@ -272,6 +275,17 @@ pub fn default_config() -> Config {
 	Config::default()
 }
 
+/// Checks if a node is can announce a channel based on the configured values of both the node's
+/// alias and its listening addresses. If either of them is unset, the node cannot announce the
+/// channel.
+pub fn can_announce_channel(config: &Config) -> bool {
+	let are_addresses_set =
+		config.listening_addresses.clone().is_some_and(|addr_vec| !addr_vec.is_empty());
+	let is_alias_set = config.node_alias.is_some();
+
+	is_alias_set && are_addresses_set
+}
+
 pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// Initialize the default config values.
 	//
@@ -284,11 +298,50 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 
-	if config.listening_addresses.is_none() || config.node_alias.is_none() {
+	if !can_announce_channel(config) {
 		user_config.accept_forwards_to_priv_channels = false;
 		user_config.channel_handshake_config.announced_channel = false;
 		user_config.channel_handshake_limits.force_announced_channel_preference = true;
 	}
 
 	user_config
+}
+
+#[cfg(test)]
+mod tests {
+	use std::str::FromStr;
+
+	use lightning::{ln::msgs::SocketAddress, routing::gossip::NodeAlias};
+
+	use crate::config::can_announce_channel;
+
+	use super::Config;
+
+	#[test]
+	fn node_can_announce_channel() {
+		// Default configuration with node alias and listening addresses unset
+		let mut node_config = Config::default();
+		assert_eq!(can_announce_channel(&node_config), false);
+
+		// Set node alias with listening addresses unset
+		let alias_frm_str = |alias: &str| {
+			let mut bytes = [0u8; 32];
+			bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+			NodeAlias(bytes)
+		};
+		node_config.node_alias = Some(alias_frm_str("LDK_Node"));
+		assert_eq!(can_announce_channel(&node_config), false);
+
+		// Set node alias with an empty list of listening addresses
+		node_config.listening_addresses = Some(vec![]);
+		assert_eq!(can_announce_channel(&node_config), false);
+
+		// Set node alias with a non-empty list of listening addresses
+		let socket_address =
+			SocketAddress::from_str("localhost:8000").expect("Socket address conversion failed.");
+		if let Some(ref mut addresses) = node_config.listening_addresses {
+			addresses.push(socket_address);
+		}
+		assert_eq!(can_announce_channel(&node_config), true);
+	}
 }

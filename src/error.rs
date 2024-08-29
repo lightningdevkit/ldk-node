@@ -98,6 +98,8 @@ pub enum Error {
 	InvalidUri,
 	/// The given quantity is invalid.
 	InvalidQuantity,
+	/// The given node alias is invalid.
+	InvalidNodeAlias,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
 	/// The provided offer was denonminated in an unsupported currency.
@@ -108,6 +110,10 @@ pub enum Error {
 	LiquiditySourceUnavailable,
 	/// The given operation failed due to the LSP's required opening fee being too high.
 	LiquidityFeeTooHigh,
+	/// Returned when trying to open an announced channel with a peer. This
+	/// error occurs when a [`crate::Node`'s] alias or listening addresses
+	/// are unconfigured.
+	OpenAnnouncedChannelFailed,
 }
 
 impl fmt::Display for Error {
@@ -163,6 +169,7 @@ impl fmt::Display for Error {
 			Self::InvalidNetwork => write!(f, "The given network is invalid."),
 			Self::InvalidUri => write!(f, "The given URI is invalid."),
 			Self::InvalidQuantity => write!(f, "The given quantity is invalid."),
+			Self::InvalidNodeAlias => write!(f, "The given node alias is invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
 			},
@@ -178,6 +185,7 @@ impl fmt::Display for Error {
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
 			},
+			Self::OpenAnnouncedChannelFailed => write!(f, "Failed to open an announced channel."),
 		}
 	}
 }
