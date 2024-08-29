@@ -16,7 +16,7 @@ dictionary Config {
 	LogLevel log_level;
 	AnchorChannelsConfig? anchor_channels_config;
 	SendingParameters? sending_parameters;
-	string? node_alias; 
+	NodeAlias? node_alias; 
 };
 
 dictionary AnchorChannelsConfig {
@@ -205,6 +205,7 @@ enum NodeError {
 	"InvalidNetwork",
 	"InvalidUri",
 	"InvalidQuantity",
+	"InvalidNodeAlias",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
@@ -235,6 +236,7 @@ enum BuildError {
 	"InvalidSystemTime",
 	"InvalidChannelMonitor",
 	"InvalidListeningAddresses",
+	"InvalidNodeAlias",
 	"ReadFailed",
 	"WriteFailed",
 	"StoragePathAccessFailed",
@@ -533,3 +535,6 @@ typedef string Mnemonic;
 
 [Custom]
 typedef string UntrustedString;
+
+[Custom]
+typedef string NodeAlias;

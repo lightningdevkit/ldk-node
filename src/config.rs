@@ -8,6 +8,7 @@
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
 use lightning::util::config::UserConfig;
 use lightning::util::logger::Level as LogLevel;
 
@@ -165,9 +166,9 @@ pub struct Config {
 	pub sending_parameters: Option<SendingParameters>,
 	/// The node alias to be used in announcements.
 	///
-	/// **Note**: This is required if, alongside a valid public socket address, node announcements
-	/// are to be broadcast.
-	pub node_alias: Option<String>,
+	/// **Note**: Node announcements will only be broadcast if the node_alias and the
+	/// listening_addresses are set.
+	pub node_alias: Option<NodeAlias>,
 }
 
 impl Default for Config {
