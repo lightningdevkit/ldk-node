@@ -280,7 +280,7 @@ pub fn default_config() -> Config {
 /// channel.
 pub fn can_announce_channel(config: &Config) -> bool {
 	let are_addresses_set =
-		config.listening_addresses.clone().is_some_and(|addr_vec| !addr_vec.is_empty());
+		config.listening_addresses.clone().map_or(false, |addr_vec| !addr_vec.is_empty());
 	let is_alias_set = config.node_alias.is_some();
 
 	is_alias_set && are_addresses_set
