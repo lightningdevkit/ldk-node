@@ -1301,7 +1301,7 @@ impl Node {
 	/// Opens a channel with a peer.
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		self.connect_open_channel(
 			node_id,
@@ -1315,7 +1315,7 @@ impl Node {
 	/// Opens an announced channel with a peer.
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		if !can_announce_channel(&self.config) {
 			return Err(Error::OpenAnnouncedChannelFailed);
