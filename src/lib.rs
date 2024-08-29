@@ -20,7 +20,7 @@
 //!
 //! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
 //! and configuring a [`Builder`] to your liking and calling [`build`]. `Node` can then be
-//! controlled via commands such as [`start`], [`stop`], [`connect_open_channel`],
+//! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`open_announced_channel`]
 //! [`send`], etc.:
 //!
 //! ```no_run
