@@ -1,9 +1,10 @@
 use crate::logger::{log_error, log_info, log_trace, Logger};
 
 use crate::config::BDK_WALLET_SYNC_TIMEOUT_SECS;
+use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::Error;
 
-use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
+use lightning::chain::chaininterface::BroadcasterInterface;
 
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
@@ -18,8 +19,7 @@ use lightning::util::message_signing;
 use bdk::blockchain::EsploraBlockchain;
 use bdk::database::BatchDatabase;
 use bdk::wallet::AddressIndex;
-use bdk::{Balance, FeeRate};
-use bdk::{SignOptions, SyncOptions};
+use bdk::{Balance, SignOptions, SyncOptions};
 
 use bitcoin::address::{Payload, WitnessVersion};
 use bitcoin::bech32::u5;
@@ -153,9 +153,7 @@ where
 		&self, output_script: ScriptBuf, value_sats: u64, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,
 	) -> Result<Transaction, Error> {
-		let fee_rate = FeeRate::from_sat_per_kwu(
-			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
-		);
+		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
@@ -240,10 +238,8 @@ where
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, amount_msat_or_drain: Option<u64>,
 	) -> Result<Txid, Error> {
-		let confirmation_target = ConfirmationTarget::OutputSpendingFee;
-		let fee_rate = FeeRate::from_sat_per_kwu(
-			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
-		);
+		let confirmation_target = ConfirmationTarget::OnchainPayment;
+		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
 		let tx = {
 			let locked_wallet = self.inner.lock().unwrap();
