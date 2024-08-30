@@ -6,6 +6,7 @@ use crate::{
 };
 
 use crate::connection::ConnectionManager;
+use crate::fee_estimator::ConfirmationTarget;
 
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
@@ -18,7 +19,6 @@ use crate::io::{
 };
 use crate::logger::{log_debug, log_error, log_info, Logger};
 
-use lightning::chain::chaininterface::ConfirmationTarget;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
@@ -398,7 +398,7 @@ where
 			} => {
 				// Construct the raw transaction with the output that is paid the amount of the
 				// channel.
-				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+				let confirmation_target = ConfirmationTarget::ChannelFunding;
 
 				// We set nLockTime to the current height to discourage fee sniping.
 				let cur_height = self.channel_manager.current_best_block().height;
