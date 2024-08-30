@@ -43,7 +43,7 @@ enum WalletSyncStatus {
 	InProgress { subscribers: tokio::sync::broadcast::Sender<Result<(), Error>> },
 }
 
-pub struct Wallet<D, B: Deref, E: Deref, L: Deref>
+pub(crate) struct Wallet<D, B: Deref, E: Deref, L: Deref>
 where
 	D: BatchDatabase,
 	B::Target: BroadcasterInterface,
@@ -485,7 +485,7 @@ where
 
 /// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
 /// directly spendable by the BDK wallet.
-pub struct WalletKeysManager<D, B: Deref, E: Deref, L: Deref>
+pub(crate) struct WalletKeysManager<D, B: Deref, E: Deref, L: Deref>
 where
 	D: BatchDatabase,
 	B::Target: BroadcasterInterface,
