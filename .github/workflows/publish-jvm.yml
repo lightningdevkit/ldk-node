@@ -67,7 +67,7 @@ jobs:
           ./scripts/uniffi_bindgen_generate_kotlin.sh
 
       - name: Download macOS native libraries from previous job
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.7
         id: download
         with:
           # download the artifact created in the prior job (named "artifact")
