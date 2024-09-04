@@ -1,3 +1,4 @@
+mod api;
 mod service;
 
 use crate::service::NodeService;

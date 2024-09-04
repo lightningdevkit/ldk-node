@@ -11,6 +11,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::api::onchain_receive::handle_onchain_receive_request;
+use crate::api::onchain_receive::ONCHAIN_RECEIVE_PATH;
+
 #[derive(Clone)]
 pub struct NodeService {
 	node: Arc<Node>,
@@ -28,8 +31,11 @@ impl Service<Request<Incoming>> for NodeService {
 	type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
 	fn call(&self, req: Request<Incoming>) -> Self::Future {
-		let _node = Arc::clone(&self.node);
+		let node = Arc::clone(&self.node);
 		match req.uri().path() {
+			ONCHAIN_RECEIVE_PATH => {
+				Box::pin(handle_request(node, req, handle_onchain_receive_request))
+			},
 			path => {
 				let error = format!("Unknown request: {}", path).into_bytes();
 				Box::pin(async {
