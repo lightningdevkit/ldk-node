@@ -17,6 +17,8 @@ use crate::api::onchain_send::handle_onchain_send_request;
 use crate::api::onchain_send::ONCHAIN_SEND_PATH;
 use crate::api::bolt11_receive::handle_bolt11_receive_request;
 use crate::api::bolt11_receive::BOLT11_RECEIVE_PATH;
+use crate::api::open_channel::handle_open_channel;
+use crate::api::open_channel::OPEN_CHANNEL_PATH;
 
 #[derive(Clone)]
 pub struct NodeService {
@@ -44,6 +46,7 @@ impl Service<Request<Incoming>> for NodeService {
 			BOLT11_RECEIVE_PATH => {
 				Box::pin(handle_request(node, req, handle_bolt11_receive_request))
 			},
+			OPEN_CHANNEL_PATH => Box::pin(handle_request(node, req, handle_open_channel)),
 			path => {
 				let error = format!("Unknown request: {}", path).into_bytes();
 				Box::pin(async {

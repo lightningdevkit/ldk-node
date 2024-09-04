@@ -13,3 +13,4 @@ hyper-util = { version = "0.1", default-features = false, features = ["server-gr
 tokio = { version = "1.38.0", default-features = false, features = ["time", "signal", "rt-multi-thread"] }
 prost = { version = "0.11.6", default-features = false, features = ["std"] }
 protos = { path = "../protos" }
+bytes = "1.4.0"

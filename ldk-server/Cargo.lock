@@ -809,6 +809,7 @@ dependencies = [
 name = "ldk-node-server"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "http-body-util",
  "hyper 1.4.1",
  "hyper-util",
