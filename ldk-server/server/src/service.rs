@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use crate::api::onchain_receive::handle_onchain_receive_request;
 use crate::api::onchain_receive::ONCHAIN_RECEIVE_PATH;
+use crate::api::onchain_send::handle_onchain_send_request;
+use crate::api::onchain_send::ONCHAIN_SEND_PATH;
 
 #[derive(Clone)]
 pub struct NodeService {
@@ -36,6 +38,7 @@ impl Service<Request<Incoming>> for NodeService {
 			ONCHAIN_RECEIVE_PATH => {
 				Box::pin(handle_request(node, req, handle_onchain_receive_request))
 			},
+			ONCHAIN_SEND_PATH => Box::pin(handle_request(node, req, handle_onchain_send_request)),
 			path => {
 				let error = format!("Unknown request: {}", path).into_bytes();
 				Box::pin(async {
