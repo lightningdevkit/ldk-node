@@ -1,14 +1,14 @@
-pub fn add(left: usize, right: usize) -> usize {
-	left + right
-}
+//! Client-side library to interact with LDK Node Server.
 
-#[cfg(test)]
-mod tests {
-	use super::*;
+#![deny(rustdoc::broken_intra_doc_links)]
+#![deny(rustdoc::private_intra_doc_links)]
+#![deny(missing_docs)]
 
-	#[test]
-	fn it_works() {
-		let result = add(2, 2);
-		assert_eq!(result, 4);
-	}
-}
+/// Implements a client ([`client::LdkNodeServerClient`]) to access a hosted instance of LDK Node Server.
+pub mod client;
+
+/// Implements the error type ([`error::LdkNodeServerError`]) returned on interacting with [`client::LdkNodeServerClient`]
+pub mod error;
+
+/// Request/Response structs required for interacting with the client.
+pub use protos;
