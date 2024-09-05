@@ -1,3 +1,10 @@
+// This file is Copyright its original authors, visible in version control history.
+//
+// This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
+// accordance with one or both of these licenses.
+
 //! The output sweeper used to live here before we upstreamed it to `rust-lightning` and migrated
 //! to the upstreamed version with LDK Node v0.3.0 (May 2024). We should drop this module entirely
 //! once sufficient time has passed for us to be confident any users completed the migration.
