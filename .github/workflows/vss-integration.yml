@@ -68,7 +68,7 @@ jobs:
           ./gradlew --version
           ./gradlew build
 
-          docker cp app/build/libs/app-1.0.war tomcat:/usr/local/tomcat/webapps/vss.war
+          docker cp app/build/libs/vss-1.0.war tomcat:/usr/local/tomcat/webapps/vss.war
           cd ../
       - name: Run VSS Integration tests against vss-instance.
         run: |
