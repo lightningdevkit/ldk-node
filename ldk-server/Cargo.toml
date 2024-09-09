@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [ "cli", "client", "server"]
+members = [ "cli", "client", "protos", "server"]
 
 [profile.release]
 panic = "abort"
