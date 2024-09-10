@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use client::client::LdkNodeServerClient;
 use client::error::LdkNodeServerError;
-use client::protos::{OnchainReceiveRequest, OnchainSendRequest};
+use client::protos::{Bolt11ReceiveRequest, OnchainReceiveRequest, OnchainSendRequest};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -24,6 +24,14 @@ enum Commands {
 		#[arg(long)]
 		send_all: Option<bool>,
 	},
+	Bolt11Receive {
+		#[arg(short, long)]
+		description: String,
+		#[arg(short, long)]
+		expiry_secs: u32,
+		#[arg(long)]
+		amount_msat: Option<u64>,
+	},
 }
 
 #[tokio::main]
@@ -38,6 +46,13 @@ async fn main() {
 		Commands::OnchainSend { address, amount_sats, send_all } => {
 			handle_response(
 				client.onchain_send(OnchainSendRequest { address, amount_sats, send_all }).await,
+			);
+		},
+		Commands::Bolt11Receive { description, expiry_secs, amount_msat } => {
+			handle_response(
+				client
+					.bolt11_receive(Bolt11ReceiveRequest { description, expiry_secs, amount_msat })
+					.await,
 			);
 		},
 	}
