@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use client::client::LdkNodeServerClient;
 use client::error::LdkNodeServerError;
 use client::protos::{
-	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, OnchainReceiveRequest,
-	OnchainSendRequest,
+	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
+	OnchainReceiveRequest, OnchainSendRequest,
 };
 
 #[derive(Parser, Debug)]
@@ -47,6 +47,16 @@ enum Commands {
 		#[arg(long)]
 		amount_msat: Option<u64>,
 	},
+	Bolt12Send {
+		#[arg(short, long)]
+		offer: String,
+		#[arg(long)]
+		amount_msat: Option<u64>,
+		#[arg(short, long)]
+		quantity: Option<u64>,
+		#[arg(short, long)]
+		payer_note: Option<String>,
+	},
 }
 
 #[tokio::main]
@@ -76,6 +86,13 @@ async fn main() {
 		Commands::Bolt12Receive { description, amount_msat } => {
 			handle_response(
 				client.bolt12_receive(Bolt12ReceiveRequest { description, amount_msat }).await,
+			);
+		},
+		Commands::Bolt12Send { offer, amount_msat, quantity, payer_note } => {
+			handle_response(
+				client
+					.bolt12_send(Bolt12SendRequest { offer, amount_msat, quantity, payer_note })
+					.await,
 			);
 		},
 	}
