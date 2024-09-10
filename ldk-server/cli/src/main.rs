@@ -3,7 +3,7 @@ use client::client::LdkNodeServerClient;
 use client::error::LdkNodeServerError;
 use client::protos::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
-	OnchainReceiveRequest, OnchainSendRequest,
+	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
 };
 
 #[derive(Parser, Debug)]
@@ -57,6 +57,18 @@ enum Commands {
 		#[arg(short, long)]
 		payer_note: Option<String>,
 	},
+	OpenChannel {
+		#[arg(short, long)]
+		node_pubkey: String,
+		#[arg(short, long)]
+		address: String,
+		#[arg(long)]
+		channel_amount_sats: u64,
+		#[arg(long)]
+		push_to_counterparty_msat: Option<u64>,
+		#[arg(long)]
+		announce_channel: bool,
+	},
 }
 
 #[tokio::main]
@@ -92,6 +104,26 @@ async fn main() {
 			handle_response(
 				client
 					.bolt12_send(Bolt12SendRequest { offer, amount_msat, quantity, payer_note })
+					.await,
+			);
+		},
+		Commands::OpenChannel {
+			node_pubkey,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			announce_channel,
+		} => {
+			handle_response(
+				client
+					.open_channel(OpenChannelRequest {
+						node_pubkey,
+						address,
+						channel_amount_sats,
+						push_to_counterparty_msat,
+						channel_config: None,
+						announce_channel,
+					})
 					.await,
 			);
 		},
