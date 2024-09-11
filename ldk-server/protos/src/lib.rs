@@ -255,8 +255,8 @@ pub struct CloseChannelRequest {
 	#[prost(string, tag = "2")]
 	pub counterparty_node_id: ::prost::alloc::string::String,
 	/// Whether to force close the specified channel.
-	#[prost(bool, tag = "3")]
-	pub force_close: bool,
+	#[prost(bool, optional, tag = "3")]
+	pub force_close: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -290,7 +290,7 @@ pub struct Channel {
 	/// The channel's funding transaction output, if we've negotiated the funding transaction with
 	/// our counterparty already.
 	#[prost(message, optional, tag = "3")]
-	pub funding_txo: ::core::option::Option<Outpoint>,
+	pub funding_txo: ::core::option::Option<OutPoint>,
 	/// The local `user_channel_id` of this channel.
 	#[prost(bytes = "vec", tag = "4")]
 	pub user_channel_id: ::prost::alloc::vec::Vec<u8>,
@@ -406,7 +406,7 @@ pub struct Channel {
 /// Represent a transaction outpoint.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Outpoint {
+pub struct OutPoint {
 	/// The referenced transaction's txid.
 	#[prost(string, tag = "1")]
 	pub txid: ::prost::alloc::string::String,
