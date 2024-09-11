@@ -137,6 +137,7 @@ fn handle_response<Rs: ::prost::Message>(response: Result<Rs, LdkNodeServerError
 		},
 		Err(e) => {
 			eprintln!("Error executing command: {:?}", e);
+			std::process::exit(1); // Exit with status code 1 on error.
 		},
 	};
 }
