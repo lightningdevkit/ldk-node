@@ -35,7 +35,7 @@ lightning-persister = { version = "0.0.123" }
 lightning-background-processor = { version = "0.0.123", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.123" }
 lightning-transaction-sync = { version = "0.0.123", features = ["esplora-async-https", "time"] }
-lightning-liquidity = { version = "0.1.0-alpha.4", features = ["std"] }
+lightning-liquidity = { version = "=0.1.0-alpha.4", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
