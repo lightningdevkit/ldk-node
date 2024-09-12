@@ -12,9 +12,11 @@ fn main() {
 
 #[cfg(genproto)]
 fn generate_protos() {
-	prost_build::compile_protos(&["src/proto/ldk_node_server.proto"], &["src/"])
+	prost_build::Config::new()
+		.bytes(&["."])
+		.compile_protos(&["src/proto/ldk_node_server.proto"], &["src/"])
 		.expect("protobuf compilation failed");
-	println!("sss {}", &env::var("OUT_DIR").unwrap());
+	println!("OUT_DIR: {}", &env::var("OUT_DIR").unwrap());
 	let from_path = Path::new(&env::var("OUT_DIR").unwrap()).join("ldk_node_server.rs");
 	fs::copy(from_path, "src/lib.rs").unwrap();
 }

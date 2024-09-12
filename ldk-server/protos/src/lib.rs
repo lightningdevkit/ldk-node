@@ -94,8 +94,8 @@ pub struct Bolt11SendResponse {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentId {
-	#[prost(bytes = "vec", tag = "1")]
-	pub data: ::prost::alloc::vec::Vec<u8>,
+	#[prost(bytes = "bytes", tag = "1")]
+	pub data: ::prost::bytes::Bytes,
 }
 /// Returns a BOLT12 offer for the given amount, if specified.
 ///
@@ -180,8 +180,8 @@ pub struct OpenChannelRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenChannelResponse {
 	/// The channel id of the created channel that user can use to refer to channel.
-	#[prost(bytes = "vec", tag = "1")]
-	pub user_channel_id: ::prost::alloc::vec::Vec<u8>,
+	#[prost(bytes = "bytes", tag = "1")]
+	pub user_channel_id: ::prost::bytes::Bytes,
 }
 /// ChannelConfig represents the configuration settings for a channel in a Lightning Network node.
 /// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html>
@@ -249,14 +249,14 @@ pub mod channel_config {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CloseChannelRequest {
 	/// The channel id of the created channel that user can use to refer to channel.
-	#[prost(bytes = "vec", tag = "1")]
-	pub user_channel_id: ::prost::alloc::vec::Vec<u8>,
+	#[prost(bytes = "bytes", tag = "1")]
+	pub user_channel_id: ::prost::bytes::Bytes,
 	/// The hex-encoded public key of the node to close a channel with.
 	#[prost(string, tag = "2")]
 	pub counterparty_node_id: ::prost::alloc::string::String,
 	/// Whether to force close the specified channel.
-	#[prost(bool, tag = "3")]
-	pub force_close: bool,
+	#[prost(bool, optional, tag = "3")]
+	pub force_close: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -290,10 +290,10 @@ pub struct Channel {
 	/// The channel's funding transaction output, if we've negotiated the funding transaction with
 	/// our counterparty already.
 	#[prost(message, optional, tag = "3")]
-	pub funding_txo: ::core::option::Option<Outpoint>,
+	pub funding_txo: ::core::option::Option<OutPoint>,
 	/// The local `user_channel_id` of this channel.
-	#[prost(bytes = "vec", tag = "4")]
-	pub user_channel_id: ::prost::alloc::vec::Vec<u8>,
+	#[prost(bytes = "bytes", tag = "4")]
+	pub user_channel_id: ::prost::bytes::Bytes,
 	/// The value, in satoshis, that must always be held as a reserve in the channel for us. This
 	/// value ensures that if we broadcast a revoked state, our counterparty can punish us by
 	/// claiming at least this value on chain.
@@ -406,7 +406,7 @@ pub struct Channel {
 /// Represent a transaction outpoint.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Outpoint {
+pub struct OutPoint {
 	/// The referenced transaction's txid.
 	#[prost(string, tag = "1")]
 	pub txid: ::prost::alloc::string::String,
