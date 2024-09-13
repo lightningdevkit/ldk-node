@@ -61,7 +61,7 @@ impl VssStore {
 				)
 			}) as _);
 
-		let client = VssClient::new(&base_url, retry_policy);
+		let client = VssClient::new(base_url, retry_policy);
 		Self { client, store_id, runtime, storable_builder }
 	}
 
