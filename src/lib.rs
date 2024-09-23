@@ -140,7 +140,7 @@ use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
 	Graph, KeysManager, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, ChannelType, PeerDetails, TlvEntry, UserChannelId};
+pub use types::{ChannelDetails, ChannelType, KeyValue, PeerDetails, TlvEntry, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
@@ -1537,6 +1537,29 @@ impl Node {
 	/// Remove the payment with the given id from the store.
 	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
 		self.payment_store.remove(&payment_id)
+	}
+
+	/// Alby: Return encoded channel monitors for a recovery of last resort
+	pub fn get_encoded_channel_monitors(&self) -> Result<Vec<KeyValue>, Error> {
+		let channel_monitor_store = Arc::clone(&self.kv_store);
+		let channel_monitor_logger = Arc::clone(&self.logger);
+		// TODO: error handling
+		let keys = channel_monitor_store.list("monitors", "").unwrap_or_else(|e| {
+			log_error!(channel_monitor_logger, "Failed to get monitor keys: {}", e);
+			return Vec::new();
+		});
+		let mut entries = Vec::new();
+
+		for key in keys {
+			// TODO: error handling
+			let value = channel_monitor_store.read("monitors", "", &key).unwrap_or_else(|e| {
+				log_error!(channel_monitor_logger, "Failed to get monitor value: {}", e);
+				return Vec::new();
+			});
+			entries.push(KeyValue { key, value })
+		}
+
+		return Ok(entries);
 	}
 
 	/// Retrieves an overview of all known balances.
