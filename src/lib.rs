@@ -89,6 +89,7 @@ mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
+mod prober;
 mod sweep;
 mod tx_broadcaster;
 mod types;
@@ -136,6 +137,7 @@ use payment::{
 	UnifiedQrPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
+use prober::Prober;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
 	Graph, KeysManager, PeerManager, Router, Scorer, Sweeper, Wallet,
@@ -192,7 +194,7 @@ pub struct Node {
 	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
 	kv_store: Arc<DynStore>,
 	logger: Arc<FilesystemLogger>,
-	_router: Arc<Router>,
+	router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
 	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
@@ -1071,6 +1073,18 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 		))
+	}
+
+	/// Send a probe
+	pub fn prober(&self) -> Prober {
+		Prober::new(
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.event_queue),
+			Arc::clone(&self.router),
+			Arc::clone(&self.scorer),
+			Arc::clone(&self.logger),
+			self.node_id(),
+		)
 	}
 
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],

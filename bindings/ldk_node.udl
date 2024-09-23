@@ -249,6 +249,8 @@ interface Event {
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
+	ProbeSuccessful(PaymentId payment_id, PaymentHash payment_hash);
+	ProbeFailed(PaymentId payment_id, PaymentHash payment_hash, u64? short_channel_id);
 };
 
 enum PaymentFailureReason {

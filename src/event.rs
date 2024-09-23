@@ -150,8 +150,32 @@ pub enum Event {
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
+	/// Indicates that a probe payment we sent returned successful, i.e., only failed at the destination.
+	ProbeSuccessful {
+		/// A local identifier used to track the payment.
+		payment_id: PaymentId,
+		/// The hash of the payment.
+		payment_hash: PaymentHash,
+		// path: Path,
+	},
+	/// Indicates that a probe payment we sent failed at an intermediary node on the path.
+	ProbeFailed {
+		/// A local identifier used to track the payment.
+		payment_id: PaymentId,
+		/// The hash of the payment.
+		payment_hash: PaymentHash,
+		// The payment path that failed.
+		// path: Path,
+		/// The channel responsible for the failed probe.
+		///
+		/// Note that for route hints or for the first hop in a path this may be an SCID alias and
+		/// may not refer to a channel in the public network graph. These aliases may also collide
+		/// with channels in the public network graph.
+		short_channel_id: Option<u64>,
+	},
 }
 
+// TODO (amackillop): Get the path field from the Probe* events working with this.
 impl_writeable_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
@@ -191,6 +215,19 @@ impl_writeable_tlv_based_enum!(Event,
 		(2, payment_id, required),
 		(4, claimable_amount_msat, required),
 		(6, claim_deadline, option),
+	},
+	(7, ProbeSuccessful) => {
+		(0, payment_id, required),
+		(1, payment_hash, required),
+		// (2, path.hops, required_vec),
+		// (3, path.blinded_tail, option),
+	},
+	(8, ProbeFailed) => {
+		(0, payment_id, required),
+		(1, payment_hash, required),
+		// (2, path.hops, required_vec),
+		(3, short_channel_id, option),
+		// (4, path.blinded_tail, option),
 	};
 );
 
@@ -883,8 +920,22 @@ where
 
 			LdkEvent::PaymentPathSuccessful { .. } => {},
 			LdkEvent::PaymentPathFailed { .. } => {},
-			LdkEvent::ProbeSuccessful { .. } => {},
-			LdkEvent::ProbeFailed { .. } => {},
+			LdkEvent::ProbeSuccessful { payment_id, payment_hash, .. } => {
+				self.event_queue
+					.add_event(Event::ProbeSuccessful { payment_id, payment_hash })
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					});
+			},
+			LdkEvent::ProbeFailed { payment_id, payment_hash, short_channel_id, .. } => {
+				self.event_queue
+					.add_event(Event::ProbeFailed { payment_id, payment_hash, short_channel_id })
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						panic!("Failed to push to event queue");
+					});
+			},
 			LdkEvent::HTLCHandlingFailed { .. } => {},
 			LdkEvent::PendingHTLCsForwardable { time_forwardable } => {
 				let forwarding_channel_manager = self.channel_manager.clone();
