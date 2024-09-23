@@ -100,6 +100,7 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
+use lightning::routing::gossip::NodeAlias;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
@@ -115,7 +116,6 @@ pub use io::utils::generate_entropy_mnemonic;
 #[cfg(feature = "uniffi")]
 use uniffi_types::*;
 
-pub use builder::sanitize_alias;
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -123,8 +123,8 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	can_announce_channel, default_user_config, LDK_WALLET_SYNC_TIMEOUT_SECS,
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	can_announce_channel, default_user_config, ChannelAnnouncementStatus,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
@@ -648,20 +648,19 @@ impl Node {
 								continue;
 							}
 
-							let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
-							let alias = node_alias.clone().map(|alias| {
-								alias.0
-							});
-
-							if !can_announce_channel {
-								// Skip if we are not listening on any addresses or if the node alias is not set.
-								continue;
-							}
-
-							if let Some(node_alias) = alias {
-								bcast_pm.broadcast_node_announcement([0; 3], node_alias, addresses);
-							} else {
-								continue
+							match can_announce_channel {
+								ChannelAnnouncementStatus::Unannounceable(_) => {
+									// Skip if we are not listening on any addresses or if the node alias is not set.
+									continue;
+								}
+								ChannelAnnouncementStatus::Announceable => {
+									let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
+									if let Some(node_alias) = node_alias.as_ref() {
+										bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
+									} else {
+										continue
+									}
+								}
 							}
 
 							let unix_time_secs_opt =
@@ -973,6 +972,11 @@ impl Node {
 		self.config.listening_addresses.clone()
 	}
 
+	/// Returns our node alias.
+	pub fn node_alias(&self) -> Option<NodeAlias> {
+		self.config.node_alias
+	}
+
 	/// Returns a payment handler allowing to create and pay [BOLT 11] invoices.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
@@ -1182,22 +1186,14 @@ impl Node {
 		Ok(())
 	}
 
-	/// Connect to a node and open a new channel. Disconnects and re-connects are handled automatically
+	/// Connect to a node and open a new channel.
 	///
-	/// Disconnects and reconnects are handled automatically.
-	///
-	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
-	/// channel counterparty on channel open. This can be useful to start out with the balance not
-	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
-	///
-	/// If Anchor channels are enabled, this will ensure the configured
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
-	/// opening the channel.
-	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
-	fn connect_open_channel(
+	/// See [`Node::open_channel`] or [`Node::open_announced_channel`] for more information about
+	/// parameters.
+	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		announce_channel: bool,
 	) -> Result<UserChannelId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1259,13 +1255,12 @@ impl Node {
 		}
 
 		let mut user_config = default_user_config(&self.config);
-		let can_announce_channel = can_announce_channel(&self.config);
-		user_config.channel_handshake_config.announced_channel = can_announce_channel;
+		user_config.channel_handshake_config.announced_channel = announce_channel;
 		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
 		// We set the max inflight to 100% for private channels.
 		// FIXME: LDK will default to this behavior soon, too, at which point we should drop this
 		// manual override.
-		if !can_announce_channel {
+		if !announce_channel {
 			user_config
 				.channel_handshake_config
 				.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
@@ -1298,36 +1293,79 @@ impl Node {
 		}
 	}
 
-	/// Opens a channel with a peer.
+	/// Connect to a node and open a new channel.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Calls `Node::open_channel_inner` with `announce_channel` set to `false`.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
-		self.connect_open_channel(
+		self.open_channel_inner(
 			node_id,
 			address,
 			channel_amount_sats,
 			push_to_counterparty_msat,
 			channel_config,
+			false,
 		)
 	}
 
-	/// Opens an announced channel with a peer.
+	/// Connect to a node and open a new announced channel.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Note that, regardless of the value of `announce_channel` passed, this function
+	/// checks that a node is configured to announce the channel to be openned and returns
+	/// an error if the configuration is wrong. Otherwise, calls `Node::open_channel_inner`
+	/// with `announced_channel` equals to `true`.
+	/// See `config::can_announce_channel` for more details.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
-		if !can_announce_channel(&self.config) {
-			return Err(Error::OpenAnnouncedChannelFailed);
+		match can_announce_channel(&self.config) {
+			config::ChannelAnnouncementStatus::Announceable => self.open_channel_inner(
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				true,
+			),
+			config::ChannelAnnouncementStatus::Unannounceable(reason) => match reason {
+				config::ChannelAnnouncementBlocker::MissingNodeAlias => {
+					return Err(Error::InvalidNodeAlias)
+				},
+				config::ChannelAnnouncementBlocker::MissingListeningAddresses => {
+					return Err(Error::InvalidSocketAddress)
+				},
+				config::ChannelAnnouncementBlocker::EmptyListeningAddresses => {
+					return Err(Error::InvalidSocketAddress)
+				},
+			},
 		}
-
-		self.open_channel(
-			node_id,
-			address,
-			channel_amount_sats,
-			push_to_counterparty_msat,
-			channel_config,
-		)
 	}
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate

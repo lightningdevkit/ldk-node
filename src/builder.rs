@@ -307,19 +307,20 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
-		self.config.log_level = level;
-		self
-	}
-
-	/// Sets the alias the [`Node`] will use in its announcement. The provided
-	/// alias must be a valid UTF-8 string.
+	/// Sets the alias the [`Node`] will use in its announcement.
+	///
+	/// The provided alias must be a valid UTF-8 string.
 	pub fn set_node_alias(&mut self, node_alias: String) -> Result<&mut Self, BuildError> {
 		let node_alias = sanitize_alias(&node_alias)?;
 
 		self.config.node_alias = Some(node_alias);
 		Ok(self)
+	}
+
+	/// Sets the level at which [`Node`] will log messages.
+	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
+		self.config.log_level = level;
+		self
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -514,14 +515,14 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
 	}
 
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&self, level: LogLevel) {
-		self.inner.write().unwrap().set_log_level(level);
-	}
-
 	/// Sets the node alias.
 	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
+	}
+
+	/// Sets the level at which [`Node`] will log messages.
+	pub fn set_log_level(&self, level: LogLevel) {
+		self.inner.write().unwrap().set_log_level(level);
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1070,7 +1071,7 @@ fn seed_bytes_from_config(
 }
 
 /// Sanitize the user-provided node alias to ensure that it is a valid protocol-specified UTF-8 string.
-pub fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
+pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 	let alias = alias_str.trim();
 
 	// Alias must be 32-bytes long or less.
@@ -1085,9 +1086,7 @@ pub fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
-	use lightning::routing::gossip::NodeAlias;
-
-	use crate::{builder::sanitize_alias, BuildError};
+	use super::{sanitize_alias, BuildError, NodeAlias};
 
 	#[test]
 	fn sanitize_empty_node_alias() {

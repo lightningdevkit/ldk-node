@@ -155,7 +155,7 @@ class TestLdkNode(unittest.TestCase):
         print("TOTAL 2:", total_balance_2)
         self.assertEqual(total_balance_2, 100000)
 
-        node_1.connect_open_channel(node_id_2, listening_addresses_2[0], 50000, None, None, True)
+        node_1.open_channel(node_id_2, listening_addresses_2[0], 50000, None, None)
 
         channel_pending_event_1 = node_1.wait_next_event()
         assert isinstance(channel_pending_event_1, Event.CHANNEL_PENDING)

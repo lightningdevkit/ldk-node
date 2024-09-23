@@ -8,6 +8,7 @@ dictionary Config {
 	string? log_dir_path;
 	Network network;
 	sequence<SocketAddress>? listening_addresses;
+	NodeAlias? node_alias;
 	u64 onchain_wallet_sync_interval_secs;
 	u64 wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;
@@ -16,7 +17,6 @@ dictionary Config {
 	LogLevel log_level;
 	AnchorChannelsConfig? anchor_channels_config;
 	SendingParameters? sending_parameters;
-	NodeAlias? node_alias; 
 };
 
 dictionary AnchorChannelsConfig {
@@ -62,6 +62,7 @@ interface Node {
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
+	NodeAlias? node_alias();
 	Bolt11Payment bolt11_payment();
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
@@ -213,7 +214,6 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
-	"OpenAnnouncedChannelFailed"
 };
 
 dictionary NodeStatus {
@@ -246,7 +246,6 @@ enum BuildError {
 	"KVStoreSetupFailed",
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
-	"InvalidNodeAlias"
 };
 
 [Enum]

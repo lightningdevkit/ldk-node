@@ -80,7 +80,7 @@ fn channel_open_fails_when_funds_insufficient() {
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
-	println!("\nA -- connect_open_channel -> B");
+	println!("\nA -- open_channel -> B");
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
 		node_a.open_channel(

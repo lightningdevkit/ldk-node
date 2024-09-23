@@ -11,8 +11,7 @@
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	sanitize_alias, Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError,
-	PendingSweepBalance,
+	Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance,
 };
 
 use lightning::ln::msgs::SocketAddress;
@@ -207,7 +206,12 @@ pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	let ranged_val = rng.gen_range(0..10);
 	match ranged_val {
 		0 => None,
-		val => Some(sanitize_alias(&format!("ldk-node-{}", val)).unwrap()),
+		val => {
+			let alias = format!("ldk-node-{}", val);
+			let mut bytes = [0u8; 32];
+			bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+			Some(NodeAlias(bytes))
+		},
 	}
 }
 
@@ -443,7 +447,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
 
-	println!("\nA -- connect_open_channel -> B");
+	println!("\nA -- open_channel -> B");
 	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
 	node_a

@@ -110,10 +110,6 @@ pub enum Error {
 	LiquiditySourceUnavailable,
 	/// The given operation failed due to the LSP's required opening fee being too high.
 	LiquidityFeeTooHigh,
-	/// Returned when trying to open an announced channel with a peer. This
-	/// error occurs when a [`crate::Node`'s] alias or listening addresses
-	/// are unconfigured.
-	OpenAnnouncedChannelFailed,
 }
 
 impl fmt::Display for Error {
@@ -185,7 +181,6 @@ impl fmt::Display for Error {
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
 			},
-			Self::OpenAnnouncedChannelFailed => write!(f, "Failed to open an announced channel."),
 		}
 	}
 }
