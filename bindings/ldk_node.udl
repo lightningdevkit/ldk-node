@@ -43,6 +43,7 @@ interface Builder {
 	Node build();
 	[Throws=BuildError]
 	Node build_with_fs_store();
+	void restore_encoded_channel_monitors(sequence<KeyValue> monitors);
 };
 
 interface Node {
@@ -90,6 +91,9 @@ interface Node {
 	[Throws=NodeError]
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
+	[Throws=NodeError]
+	sequence<KeyValue> get_encoded_channel_monitors();
+	void force_close_all_channels_without_broadcasting_txn();
 };
 
 interface Bolt11Payment {
@@ -421,6 +425,11 @@ enum LogLevel {
 
 dictionary TlvEntry {
 	u64 type;
+	sequence<u8> value;
+};
+
+dictionary KeyValue {
+	string key;
 	sequence<u8> value;
 };
 

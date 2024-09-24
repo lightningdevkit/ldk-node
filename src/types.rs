@@ -492,3 +492,12 @@ impl_writeable_tlv_based!(TlvEntry, {
 	(0, r#type, required),
 	(1, value, required),
 });
+
+/// KeyValue from LDK node DB
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyValue {
+	/// Key.
+	pub key: String,
+	/// Serialized value.
+	pub value: Vec<u8>,
+}
