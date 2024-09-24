@@ -92,6 +92,7 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
 	sequence<KeyValue> get_encoded_channel_monitors();
+	void force_close_all_channels_without_broadcasting_txn();
 };
 
 interface Bolt11Payment {

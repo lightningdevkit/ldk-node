@@ -1539,23 +1539,28 @@ impl Node {
 		self.payment_store.remove(&payment_id)
 	}
 
+	/// Alby: Used to recover funds after restoring static channel backup
+	pub fn force_close_all_channels_without_broadcasting_txn(&self) {
+		self.channel_manager.force_close_all_channels_without_broadcasting_txn();
+	}
+
 	/// Alby: Return encoded channel monitors for a recovery of last resort
 	pub fn get_encoded_channel_monitors(&self) -> Result<Vec<KeyValue>, Error> {
 		let channel_monitor_store = Arc::clone(&self.kv_store);
 		let channel_monitor_logger = Arc::clone(&self.logger);
-		// TODO: error handling
-		let keys = channel_monitor_store.list("monitors", "").unwrap_or_else(|e| {
+		let keys = channel_monitor_store.list("monitors", "").map_err(|e| {
 			log_error!(channel_monitor_logger, "Failed to get monitor keys: {}", e);
-			return Vec::new();
-		});
+			Error::ConnectionFailed
+		})?;
+
 		let mut entries = Vec::new();
 
 		for key in keys {
 			// TODO: error handling
-			let value = channel_monitor_store.read("monitors", "", &key).unwrap_or_else(|e| {
+			let value = channel_monitor_store.read("monitors", "", &key).map_err(|e| {
 				log_error!(channel_monitor_logger, "Failed to get monitor value: {}", e);
-				return Vec::new();
-			});
+				Error::ConnectionFailed
+			})?;
 			entries.push(KeyValue { key, value })
 		}
 
