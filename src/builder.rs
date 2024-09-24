@@ -15,8 +15,8 @@ use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, GossipSync, Graph, KeysManager, MessageRouter,
-	OnionMessenger, PeerManager,
+	ChainMonitor, ChannelManager, DynStore, GossipSync, Graph, KeyValue, KeysManager,
+	MessageRouter, OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
 use crate::{LogLevel, Node};
@@ -172,6 +172,7 @@ pub struct NodeBuilder {
 	chain_data_source_config: Option<ChainDataSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
+	monitors_to_restore: Option<Vec<KeyValue>>,
 }
 
 impl NodeBuilder {
@@ -187,13 +188,21 @@ impl NodeBuilder {
 		let chain_data_source_config = None;
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
+		let monitors_to_restore = None;
 		Self {
 			config,
 			entropy_source_config,
 			chain_data_source_config,
 			gossip_source_config,
 			liquidity_source_config,
+			monitors_to_restore,
 		}
+	}
+
+	/// Alby: set monitors to restore when restoring SCB
+	pub fn restore_encoded_channel_monitors(&mut self, monitors: Vec<KeyValue>) -> &mut Self {
+		self.monitors_to_restore = Some(monitors);
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
@@ -316,6 +325,7 @@ impl NodeBuilder {
 			)
 			.map_err(|_| BuildError::KVStoreSetupFailed)?,
 		);
+
 		self.build_with_store(kv_store)
 	}
 
@@ -381,6 +391,17 @@ impl NodeBuilder {
 		)?;
 		let config = Arc::new(self.config.clone());
 
+		// Alby: Restore encoded channel monitors for a recovery of last resort
+		if self.monitors_to_restore.is_some() {
+			let monitors = self.monitors_to_restore.clone().unwrap();
+			for monitor in monitors {
+				let result = kv_store.write("monitors", "", &monitor.key, &monitor.value);
+				if result.is_err() {
+					log_error!(logger, "Failed to restore monitor: {}", result.unwrap_err());
+				}
+			}
+		}
+
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -418,6 +439,11 @@ impl ArcedNodeBuilder {
 	pub fn from_config(config: Config) -> Self {
 		let inner = RwLock::new(NodeBuilder::from_config(config));
 		Self { inner }
+	}
+
+	/// Alby: set monitors to restore when restoring SCB
+	pub fn restore_encoded_channel_monitors(&self, monitors: Vec<KeyValue>) {
+		self.inner.write().unwrap().restore_encoded_channel_monitors(monitors);
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
