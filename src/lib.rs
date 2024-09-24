@@ -1556,7 +1556,6 @@ impl Node {
 		let mut entries = Vec::new();
 
 		for key in keys {
-			// TODO: error handling
 			let value = channel_monitor_store.read("monitors", "", &key).map_err(|e| {
 				log_error!(channel_monitor_logger, "Failed to get monitor value: {}", e);
 				Error::ConnectionFailed
@@ -1565,6 +1564,23 @@ impl Node {
 		}
 
 		return Ok(entries);
+	}
+
+	/// Alby: Restore encoded channel monitors for a recovery of last resort
+	pub fn restore_encoded_channel_monitors(&self, monitors: Vec<KeyValue>) -> Result<(), Error> {
+		let channel_monitor_store = Arc::clone(&self.kv_store);
+		let channel_monitor_logger = Arc::clone(&self.logger);
+
+		for monitor in monitors {
+			channel_monitor_store.write("monitors", "", &monitor.key, &monitor.value).map_err(
+				|e| {
+					log_error!(channel_monitor_logger, "Failed to restore monitor: {}", e);
+					Error::ConnectionFailed
+				},
+			)?;
+		}
+
+		return Ok(());
 	}
 
 	/// Retrieves an overview of all known balances.
