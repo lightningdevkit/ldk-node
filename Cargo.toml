@@ -13,6 +13,9 @@ categories = ["cryptography::cryptocurrencies"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(vss)'] }
+
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 name = "ldk_node"
