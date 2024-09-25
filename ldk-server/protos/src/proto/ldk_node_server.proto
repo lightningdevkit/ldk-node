@@ -85,13 +85,7 @@ message Bolt11SendRequest {
 message Bolt11SendResponse {
 
   // An identifier used to uniquely identify a payment.
-  PaymentId payment_id = 1;
-}
-
-// An identifier used to uniquely identify a payment.
-message PaymentId {
-
-  bytes data = 1;
+  bytes payment_id = 1;
 }
 
 // Returns a BOLT12 offer for the given amount, if specified.
@@ -141,7 +135,7 @@ message Bolt12SendRequest {
 message Bolt12SendResponse {
 
   // An identifier used to uniquely identify a payment.
-  PaymentId payment_id = 1;
+  bytes payment_id = 1;
 }
 
 // Creates a new outbound channel to the given remote node.
