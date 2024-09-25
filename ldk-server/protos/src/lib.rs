@@ -87,15 +87,8 @@ pub struct Bolt11SendRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt11SendResponse {
 	/// An identifier used to uniquely identify a payment.
-	#[prost(message, optional, tag = "1")]
-	pub payment_id: ::core::option::Option<PaymentId>,
-}
-/// An identifier used to uniquely identify a payment.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PaymentId {
 	#[prost(bytes = "bytes", tag = "1")]
-	pub data: ::prost::bytes::Bytes,
+	pub payment_id: ::prost::bytes::Bytes,
 }
 /// Returns a BOLT12 offer for the given amount, if specified.
 ///
@@ -148,8 +141,8 @@ pub struct Bolt12SendRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt12SendResponse {
 	/// An identifier used to uniquely identify a payment.
-	#[prost(message, optional, tag = "1")]
-	pub payment_id: ::core::option::Option<PaymentId>,
+	#[prost(bytes = "bytes", tag = "1")]
+	pub payment_id: ::prost::bytes::Bytes,
 }
 /// Creates a new outbound channel to the given remote node.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.connect_open_channel>
