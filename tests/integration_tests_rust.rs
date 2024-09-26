@@ -10,8 +10,9 @@ mod common;
 use common::{
 	do_channel_full_cycle, expect_channel_ready_event, expect_event, expect_payment_received_event,
 	expect_payment_successful_event, generate_blocks_and_wait, open_channel,
-	premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
+	premine_and_distribute_funds, random_announce_channel, random_config,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, wait_for_tx,
+	TestSyncStore,
 };
 
 use ldk_node::payment::{PaymentKind, QrPaymentResult, SendingParameters};
@@ -27,42 +28,46 @@ use std::sync::Arc;
 #[test]
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
 
 #[test]
 fn channel_full_cycle_force_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
 }
 
 #[test]
 fn channel_full_cycle_force_close_trusted_no_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, true);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, true, random_announce_channel());
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
 }
 
 #[test]
 fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, true, true, false);
+	let (node_a, node_b) = setup_two_nodes(&electrsd, true, true, false, random_announce_channel());
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true, true, false)
 }
 
 #[test]
 fn channel_full_cycle_legacy_staticremotekey() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, false, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, false, false, random_announce_channel());
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false);
 }
 
 #[test]
 fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -83,13 +88,23 @@ fn channel_open_fails_when_funds_insufficient() {
 	println!("\nA -- open_channel -> B");
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.open_channel(
-			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
-			120000,
-			None,
-			None,
-		)
+		if node_a.config().node_alias.is_some() {
+			node_a.open_announced_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				120000,
+				None,
+				None,
+			)
+		} else {
+			node_a.open_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				120000,
+				None,
+				None,
+			)
+		}
 	);
 }
 
@@ -100,8 +115,9 @@ fn multi_hop_sending() {
 
 	// Setup and fund 5 nodes
 	let mut nodes = Vec::new();
+	let announce_channel = random_announce_channel();
 	for _ in 0..5 {
-		let config = random_config(true);
+		let config = random_config(true, announce_channel);
 		setup_builder!(builder, config);
 		builder.set_esplora_server(esplora_url.clone());
 		let node = builder.build().unwrap();
@@ -170,16 +186,22 @@ fn multi_hop_sending() {
 	};
 
 	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
+	let send_res = nodes[0].bolt11_payment().send(&invoice, Some(sending_params));
 
-	let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
-	let fee_paid_msat = Some(2000);
-	expect_payment_successful_event!(nodes[0], payment_id, Some(fee_paid_msat));
+	// N0 cannot find a route to N4 if node and channel is unannounced.
+	if nodes[0].config().node_alias.is_none() {
+		assert_eq!(send_res, Err(NodeError::PaymentSendingFailed))
+	} else {
+		let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
+		assert_eq!(send_res.unwrap(), payment_id.unwrap());
+		let fee_paid_msat = Some(2000);
+		expect_payment_successful_event!(nodes[0], payment_id, Some(fee_paid_msat));
+	}
 }
 
 #[test]
 fn connect_to_public_testnet_esplora() {
-	let mut config = random_config(true);
+	let mut config = random_config(true, random_announce_channel());
 	config.network = Network::Testnet;
 	setup_builder!(builder, config);
 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
@@ -191,7 +213,7 @@ fn connect_to_public_testnet_esplora() {
 #[test]
 fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let config = random_config(true);
+	let config = random_config(true, random_announce_channel());
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
@@ -259,7 +281,8 @@ fn start_stop_reinit() {
 #[test]
 fn onchain_spend_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -307,7 +330,7 @@ fn onchain_spend_receive() {
 #[test]
 fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let config = random_config(true);
+	let config = random_config(true, random_announce_channel());
 	let node = setup_node(&electrsd, config);
 
 	// Tests arbitrary message signing and later verification
@@ -325,7 +348,8 @@ fn connection_restart_behavior() {
 
 fn do_connection_restart_behavior(persist: bool) {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, false, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, false, false, random_announce_channel());
 
 	let node_id_a = node_a.node_id();
 	let node_id_b = node_b.node_id();
@@ -376,7 +400,8 @@ fn do_connection_restart_behavior(persist: bool) {
 #[test]
 fn concurrent_connections_succeed() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 
 	let node_a = Arc::new(node_a);
 	let node_b = Arc::new(node_b);
@@ -406,7 +431,8 @@ fn concurrent_connections_succeed() {
 #[test]
 fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -428,191 +454,203 @@ fn simple_bolt12_send_receive() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	// Sleep until we broadcasted a node announcement.
-	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
+	// For announced nodes, we make a trivial check that node_alias is set knowing that
+	// `random_listening_addresses()` always sets the listening_addresses. This check
+	// is important to prevent the test from looping endlessly.
+	if node_a.config().node_alias.is_some() && node_b.config().node_alias.is_some() {
+		// Sleep until we broadcasted a node announcement.
+		while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
 
-	// Sleep one more sec to make sure the node announcement propagates.
-	std::thread::sleep(std::time::Duration::from_secs(1));
+		// Sleep one more sec to make sure the node announcement propagates.
+		std::thread::sleep(std::time::Duration::from_secs(1));
+	}
 
 	let expected_amount_msat = 100_000_000;
-	let offer = node_b.bolt12_payment().receive(expected_amount_msat, "asdf", Some(1)).unwrap();
-	let expected_quantity = Some(1);
-	let expected_payer_note = Some("Test".to_string());
-	let payment_id = node_a
-		.bolt12_payment()
-		.send(&offer, expected_quantity, expected_payer_note.clone())
-		.unwrap();
+	let offer_res = node_b.bolt12_payment().receive(expected_amount_msat, "asdf", Some(1));
+	if node_a.config().node_alias.is_none() && node_b.config().node_alias.is_none() {
+		// Node must be announced if alternative one-hop `BlindedPath` is to be used.
+		assert_eq!(offer_res, Err(NodeError::OfferCreationFailed))
+	} else {
+		let offer = offer_res.unwrap();
+		let expected_quantity = Some(1);
+		let expected_payer_note = Some("Test".to_string());
+		let payment_id = node_a
+			.bolt12_payment()
+			.send(&offer, expected_quantity, expected_payer_note.clone())
+			.unwrap();
 
-	expect_payment_successful_event!(node_a, Some(payment_id), None);
-	let node_a_payments = node_a.list_payments();
-	assert_eq!(node_a_payments.len(), 1);
-	match node_a_payments.first().unwrap().kind {
-		PaymentKind::Bolt12Offer {
-			hash,
-			preimage,
-			secret: _,
-			offer_id,
-			quantity: ref qty,
-			payer_note: ref note,
-		} => {
-			assert!(hash.is_some());
-			assert!(preimage.is_some());
-			assert_eq!(offer_id, offer.id());
-			assert_eq!(&expected_quantity, qty);
-			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
-			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
-			//API currently doesn't allow to do that.
-		},
-		_ => {
-			panic!("Unexpected payment kind");
-		},
+		expect_payment_successful_event!(node_a, Some(payment_id), None);
+		let node_a_payments = node_a.list_payments();
+		assert_eq!(node_a_payments.len(), 1);
+		match node_a_payments.first().unwrap().kind {
+			PaymentKind::Bolt12Offer {
+				hash,
+				preimage,
+				secret: _,
+				offer_id,
+				quantity: ref qty,
+				payer_note: ref note,
+			} => {
+				assert!(hash.is_some());
+				assert!(preimage.is_some());
+				assert_eq!(offer_id, offer.id());
+				assert_eq!(&expected_quantity, qty);
+				assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+				//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+				//API currently doesn't allow to do that.
+			},
+			_ => {
+				panic!("Unexpected payment kind");
+			},
+		}
+		assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+
+		expect_payment_received_event!(node_b, expected_amount_msat);
+		let node_b_payments = node_b.list_payments();
+		assert_eq!(node_b_payments.len(), 1);
+		match node_b_payments.first().unwrap().kind {
+			PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
+				assert!(hash.is_some());
+				assert!(preimage.is_some());
+				assert!(secret.is_some());
+				assert_eq!(offer_id, offer.id());
+			},
+			_ => {
+				panic!("Unexpected payment kind");
+			},
+		}
+		assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+
+		// Test send_using_amount
+		let offer_amount_msat = 100_000_000;
+		let less_than_offer_amount = offer_amount_msat - 10_000;
+		let expected_amount_msat = offer_amount_msat + 10_000;
+		let offer = node_b.bolt12_payment().receive(offer_amount_msat, "asdf", Some(1)).unwrap();
+		let expected_quantity = Some(1);
+		let expected_payer_note = Some("Test".to_string());
+		assert!(node_a
+			.bolt12_payment()
+			.send_using_amount(&offer, less_than_offer_amount, None, None)
+			.is_err());
+		let payment_id = node_a
+			.bolt12_payment()
+			.send_using_amount(
+				&offer,
+				expected_amount_msat,
+				expected_quantity,
+				expected_payer_note.clone(),
+			)
+			.unwrap();
+
+		expect_payment_successful_event!(node_a, Some(payment_id), None);
+		let node_a_payments = node_a.list_payments_with_filter(|p| p.id == payment_id);
+		assert_eq!(node_a_payments.len(), 1);
+		let payment_hash = match node_a_payments.first().unwrap().kind {
+			PaymentKind::Bolt12Offer {
+				hash,
+				preimage,
+				secret: _,
+				offer_id,
+				quantity: ref qty,
+				payer_note: ref note,
+			} => {
+				assert!(hash.is_some());
+				assert!(preimage.is_some());
+				assert_eq!(offer_id, offer.id());
+				assert_eq!(&expected_quantity, qty);
+				assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+				//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+				//API currently doesn't allow to do that.
+				hash.unwrap()
+			},
+			_ => {
+				panic!("Unexpected payment kind");
+			},
+		};
+		assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+
+		expect_payment_received_event!(node_b, expected_amount_msat);
+		let node_b_payment_id = PaymentId(payment_hash.0);
+		let node_b_payments = node_b.list_payments_with_filter(|p| p.id == node_b_payment_id);
+		assert_eq!(node_b_payments.len(), 1);
+		match node_b_payments.first().unwrap().kind {
+			PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
+				assert!(hash.is_some());
+				assert!(preimage.is_some());
+				assert!(secret.is_some());
+				assert_eq!(offer_id, offer.id());
+			},
+			_ => {
+				panic!("Unexpected payment kind");
+			},
+		}
+		assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+
+		// Now node_b refunds the amount node_a just overpaid.
+		let overpaid_amount = expected_amount_msat - offer_amount_msat;
+		let expected_quantity = Some(1);
+		let expected_payer_note = Some("Test".to_string());
+		let refund = node_b
+			.bolt12_payment()
+			.initiate_refund(overpaid_amount, 3600, expected_quantity, expected_payer_note.clone())
+			.unwrap();
+		let invoice = node_a.bolt12_payment().request_refund_payment(&refund).unwrap();
+		expect_payment_received_event!(node_a, overpaid_amount);
+
+		let node_b_payment_id = node_b
+			.list_payments_with_filter(|p| p.amount_msat == Some(overpaid_amount))
+			.first()
+			.unwrap()
+			.id;
+		expect_payment_successful_event!(node_b, Some(node_b_payment_id), None);
+
+		let node_b_payments = node_b.list_payments_with_filter(|p| p.id == node_b_payment_id);
+		assert_eq!(node_b_payments.len(), 1);
+		match node_b_payments.first().unwrap().kind {
+			PaymentKind::Bolt12Refund {
+				hash,
+				preimage,
+				secret: _,
+				quantity: ref qty,
+				payer_note: ref note,
+			} => {
+				assert!(hash.is_some());
+				assert!(preimage.is_some());
+				assert_eq!(&expected_quantity, qty);
+				assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0)
+				//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+				//API currently doesn't allow to do that.
+			},
+			_ => {
+				panic!("Unexpected payment kind");
+			},
+		}
+		assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(overpaid_amount));
+
+		let node_a_payment_id = PaymentId(invoice.payment_hash().0);
+		let node_a_payments = node_a.list_payments_with_filter(|p| p.id == node_a_payment_id);
+		assert_eq!(node_a_payments.len(), 1);
+		match node_a_payments.first().unwrap().kind {
+			PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => {
+				assert!(hash.is_some());
+				assert!(preimage.is_some());
+				assert!(secret.is_some());
+			},
+			_ => {
+				panic!("Unexpected payment kind");
+			},
+		}
+		assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(overpaid_amount));
 	}
-	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
-
-	expect_payment_received_event!(node_b, expected_amount_msat);
-	let node_b_payments = node_b.list_payments();
-	assert_eq!(node_b_payments.len(), 1);
-	match node_b_payments.first().unwrap().kind {
-		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
-			assert!(hash.is_some());
-			assert!(preimage.is_some());
-			assert!(secret.is_some());
-			assert_eq!(offer_id, offer.id());
-		},
-		_ => {
-			panic!("Unexpected payment kind");
-		},
-	}
-	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
-
-	// Test send_using_amount
-	let offer_amount_msat = 100_000_000;
-	let less_than_offer_amount = offer_amount_msat - 10_000;
-	let expected_amount_msat = offer_amount_msat + 10_000;
-	let offer = node_b.bolt12_payment().receive(offer_amount_msat, "asdf", Some(1)).unwrap();
-	let expected_quantity = Some(1);
-	let expected_payer_note = Some("Test".to_string());
-	assert!(node_a
-		.bolt12_payment()
-		.send_using_amount(&offer, less_than_offer_amount, None, None)
-		.is_err());
-	let payment_id = node_a
-		.bolt12_payment()
-		.send_using_amount(
-			&offer,
-			expected_amount_msat,
-			expected_quantity,
-			expected_payer_note.clone(),
-		)
-		.unwrap();
-
-	expect_payment_successful_event!(node_a, Some(payment_id), None);
-	let node_a_payments = node_a.list_payments_with_filter(|p| p.id == payment_id);
-	assert_eq!(node_a_payments.len(), 1);
-	let payment_hash = match node_a_payments.first().unwrap().kind {
-		PaymentKind::Bolt12Offer {
-			hash,
-			preimage,
-			secret: _,
-			offer_id,
-			quantity: ref qty,
-			payer_note: ref note,
-		} => {
-			assert!(hash.is_some());
-			assert!(preimage.is_some());
-			assert_eq!(offer_id, offer.id());
-			assert_eq!(&expected_quantity, qty);
-			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
-			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
-			//API currently doesn't allow to do that.
-			hash.unwrap()
-		},
-		_ => {
-			panic!("Unexpected payment kind");
-		},
-	};
-	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
-
-	expect_payment_received_event!(node_b, expected_amount_msat);
-	let node_b_payment_id = PaymentId(payment_hash.0);
-	let node_b_payments = node_b.list_payments_with_filter(|p| p.id == node_b_payment_id);
-	assert_eq!(node_b_payments.len(), 1);
-	match node_b_payments.first().unwrap().kind {
-		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
-			assert!(hash.is_some());
-			assert!(preimage.is_some());
-			assert!(secret.is_some());
-			assert_eq!(offer_id, offer.id());
-		},
-		_ => {
-			panic!("Unexpected payment kind");
-		},
-	}
-	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
-
-	// Now node_b refunds the amount node_a just overpaid.
-	let overpaid_amount = expected_amount_msat - offer_amount_msat;
-	let expected_quantity = Some(1);
-	let expected_payer_note = Some("Test".to_string());
-	let refund = node_b
-		.bolt12_payment()
-		.initiate_refund(overpaid_amount, 3600, expected_quantity, expected_payer_note.clone())
-		.unwrap();
-	let invoice = node_a.bolt12_payment().request_refund_payment(&refund).unwrap();
-	expect_payment_received_event!(node_a, overpaid_amount);
-
-	let node_b_payment_id = node_b
-		.list_payments_with_filter(|p| p.amount_msat == Some(overpaid_amount))
-		.first()
-		.unwrap()
-		.id;
-	expect_payment_successful_event!(node_b, Some(node_b_payment_id), None);
-
-	let node_b_payments = node_b.list_payments_with_filter(|p| p.id == node_b_payment_id);
-	assert_eq!(node_b_payments.len(), 1);
-	match node_b_payments.first().unwrap().kind {
-		PaymentKind::Bolt12Refund {
-			hash,
-			preimage,
-			secret: _,
-			quantity: ref qty,
-			payer_note: ref note,
-		} => {
-			assert!(hash.is_some());
-			assert!(preimage.is_some());
-			assert_eq!(&expected_quantity, qty);
-			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0)
-			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
-			//API currently doesn't allow to do that.
-		},
-		_ => {
-			panic!("Unexpected payment kind");
-		},
-	}
-	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(overpaid_amount));
-
-	let node_a_payment_id = PaymentId(invoice.payment_hash().0);
-	let node_a_payments = node_a.list_payments_with_filter(|p| p.id == node_a_payment_id);
-	assert_eq!(node_a_payments.len(), 1);
-	match node_a_payments.first().unwrap().kind {
-		PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => {
-			assert!(hash.is_some());
-			assert!(preimage.is_some());
-			assert!(secret.is_some());
-		},
-		_ => {
-			panic!("Unexpected payment kind");
-		},
-	}
-	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(overpaid_amount));
 }
 
 #[test]
 fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -639,21 +677,26 @@ fn generate_bip21_uri() {
 
 	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 
-	match uqr_payment.clone() {
-		Ok(ref uri) => {
-			println!("Generated URI: {}", uri);
-			assert!(uri.contains("BITCOIN:"));
-			assert!(uri.contains("lightning="));
-			assert!(uri.contains("lno="));
-		},
-		Err(e) => panic!("Failed to generate URI: {:?}", e),
+	if node_a.config().node_alias.is_none() && node_b.config().node_alias.is_none() {
+		assert_eq!(uqr_payment, Err(NodeError::OfferCreationFailed));
+	} else {
+		match uqr_payment.clone() {
+			Ok(ref uri) => {
+				println!("Generated URI: {}", uri);
+				assert!(uri.contains("BITCOIN:"));
+				assert!(uri.contains("lightning="));
+				assert!(uri.contains("lno="));
+			},
+			Err(e) => panic!("Failed to generate URI: {:?}", e),
+		}
 	}
 }
 
 #[test]
 fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let (node_a, node_b) = setup_two_nodes(&electrsd, false, true, false);
+	let (node_a, node_b) =
+		setup_two_nodes(&electrsd, false, true, false, random_announce_channel());
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -675,88 +718,98 @@ fn unified_qr_send_receive() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	// Sleep until we broadcast a node announcement.
-	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
+	// For announced nodes, we make a trivial check that node_alias is set knowing that
+	// `random_listening_addresses()` always sets the listening_addresses. This check
+	// is important to prevent the test from looping endlessly.
+	if node_a.config().node_alias.is_some() && node_b.config().node_alias.is_some() {
+		// Sleep until we broadcasted a node announcement.
+		while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
 
-	// Sleep one more sec to make sure the node announcement propagates.
-	std::thread::sleep(std::time::Duration::from_secs(1));
+		// Sleep one more sec to make sure the node announcement propagates.
+		std::thread::sleep(std::time::Duration::from_secs(1));
+	}
 
 	let expected_amount_sats = 100_000;
 	let expiry_sec = 4_000;
 
 	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
-	let uri_str = uqr_payment.clone().unwrap();
-	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str) {
-		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
-			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
-			payment_id
-		},
-		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
-			panic!("Expected Bolt12 payment but got Bolt11");
-		},
-		Ok(QrPaymentResult::Onchain { txid: _ }) => {
-			panic!("Expected Bolt12 payment but get On-chain transaction");
-		},
-		Err(e) => {
-			panic!("Expected Bolt12 payment but got error: {:?}", e);
-		},
-	};
-
-	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
-
-	// Removed one character from the offer to fall back on to invoice.
-	// Still needs work
-	let uri_str_with_invalid_offer = &uri_str[..uri_str.len() - 1];
-	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_with_invalid_offer) {
-			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
-				panic!("Expected Bolt11 payment but got Bolt12");
-			},
-			Ok(QrPaymentResult::Bolt11 { payment_id }) => {
-				println!("\nBolt11 payment sent successfully with PaymentID: {:?}", payment_id);
+	if node_a.config().node_alias.is_none() && node_b.config().node_alias.is_none() {
+		// Node must be announced if alternative one-hop `BlindedPath` is to be used used.
+		assert_eq!(uqr_payment, Err(NodeError::OfferCreationFailed))
+	} else {
+		let uri_str = uqr_payment.clone().unwrap();
+		let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str) {
+			Ok(QrPaymentResult::Bolt12 { payment_id }) => {
+				println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 				payment_id
 			},
+			Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
+				panic!("Expected Bolt12 payment but got Bolt11");
+			},
 			Ok(QrPaymentResult::Onchain { txid: _ }) => {
-				panic!("Expected Bolt11 payment but got on-chain transaction");
+				panic!("Expected Bolt12 payment but get On-chain transaction");
 			},
 			Err(e) => {
-				panic!("Expected Bolt11 payment but got error: {:?}", e);
+				panic!("Expected Bolt12 payment but got error: {:?}", e);
 			},
 		};
-	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
 
-	let expect_onchain_amount_sats = 800_000;
-	let onchain_uqr_payment =
-		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
+		expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
 
-	// Removed a character from the offer, so it would move on to the other parameters.
-	let txid = match node_a
-		.unified_qr_payment()
-		.send(&onchain_uqr_payment.as_str()[..onchain_uqr_payment.len() - 1])
-	{
-		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
-			panic!("Expected on-chain payment but got Bolt12")
-		},
-		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
-			panic!("Expected on-chain payment but got Bolt11");
-		},
-		Ok(QrPaymentResult::Onchain { txid }) => {
-			println!("\nOn-chain transaction successful with Txid: {}", txid);
-			txid
-		},
-		Err(e) => {
-			panic!("Expected on-chain payment but got error: {:?}", e);
-		},
-	};
+		// Removed one character from the offer to fall back on to invoice.
+		// Still needs work
+		let uri_str_with_invalid_offer = &uri_str[..uri_str.len() - 1];
+		let invoice_payment_id: PaymentId =
+			match node_a.unified_qr_payment().send(uri_str_with_invalid_offer) {
+				Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
+					panic!("Expected Bolt11 payment but got Bolt12");
+				},
+				Ok(QrPaymentResult::Bolt11 { payment_id }) => {
+					println!("\nBolt11 payment sent successfully with PaymentID: {:?}", payment_id);
+					payment_id
+				},
+				Ok(QrPaymentResult::Onchain { txid: _ }) => {
+					panic!("Expected Bolt11 payment but got on-chain transaction");
+				},
+				Err(e) => {
+					panic!("Expected Bolt11 payment but got error: {:?}", e);
+				},
+			};
+		expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
 
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
-	wait_for_tx(&electrsd.client, txid);
+		let expect_onchain_amount_sats = 800_000;
+		let onchain_uqr_payment =
+			node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+		// Removed a character from the offer, so it would move on to the other parameters.
+		let txid = match node_a
+			.unified_qr_payment()
+			.send(&onchain_uqr_payment.as_str()[..onchain_uqr_payment.len() - 1])
+		{
+			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
+				panic!("Expected on-chain payment but got Bolt12")
+			},
+			Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
+				panic!("Expected on-chain payment but got Bolt11");
+			},
+			Ok(QrPaymentResult::Onchain { txid }) => {
+				println!("\nOn-chain transaction successful with Txid: {}", txid);
+				txid
+			},
+			Err(e) => {
+				panic!("Expected on-chain payment but got error: {:?}", e);
+			},
+		};
 
-	assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
-	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+		wait_for_tx(&electrsd.client, txid);
+
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+
+		assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
+		assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
+	}
 }

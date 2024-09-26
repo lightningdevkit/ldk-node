@@ -654,6 +654,7 @@ impl Node {
 									continue;
 								}
 								ChannelAnnouncementStatus::Announceable => {
+									// Broadcast node announcement.
 									let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
 									if let Some(node_alias) = node_alias.as_ref() {
 										bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
