@@ -6,10 +6,14 @@
 // accordance with one or both of these licenses.
 
 use crate::config::{
-	BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	LDK_WALLET_SYNC_TIMEOUT_SECS,
+	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
+	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
 };
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::fee_estimator::{
+	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
+	OnchainFeeEstimator,
+};
+use crate::logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 use crate::types::Wallet;
 use crate::Error;
 
@@ -21,6 +25,9 @@ use bdk_esplora::EsploraAsyncExt;
 
 use esplora_client::AsyncClient as EsploraAsyncClient;
 
+use bitcoin::{FeeRate, Network};
+
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -90,13 +97,16 @@ pub(crate) enum ChainSource {
 		onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 		tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
+		fee_estimator: Arc<OnchainFeeEstimator>,
+		config: Arc<Config>,
 		logger: Arc<FilesystemLogger>,
 	},
 }
 
 impl ChainSource {
 	pub(crate) fn new_esplora(
-		server_url: String, onchain_wallet: Arc<Wallet>, logger: Arc<FilesystemLogger>,
+		server_url: String, onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
+		config: Arc<Config>, logger: Arc<FilesystemLogger>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url.clone());
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
@@ -111,6 +121,8 @@ impl ChainSource {
 			onchain_wallet_sync_status,
 			tx_sync,
 			lightning_wallet_sync_status,
+			fee_estimator,
+			config,
 			logger,
 		}
 	}
@@ -215,6 +227,74 @@ impl ChainSource {
 				lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
 				res
+			},
+		}
+	}
+
+	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
+		match self {
+			Self::Esplora { esplora_client, fee_estimator, config, logger, .. } => {
+				let estimates = tokio::time::timeout(
+					Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+					esplora_client.get_fee_estimates(),
+				)
+				.await
+				.map_err(|e| {
+					log_error!(logger, "Updating fee rate estimates timed out: {}", e);
+					Error::FeerateEstimationUpdateTimeout
+				})?
+				.map_err(|e| {
+					log_error!(logger, "Failed to retrieve fee rate estimates: {}", e);
+					Error::FeerateEstimationUpdateFailed
+				})?;
+
+				if estimates.is_empty() && config.network == Network::Bitcoin {
+					// Ensure we fail if we didn't receive any estimates.
+					log_error!(
+						logger,
+						"Failed to retrieve fee rate estimates: empty fee estimates are dissallowed on Mainnet.",
+					);
+					return Err(Error::FeerateEstimationUpdateFailed);
+				}
+
+				let confirmation_targets = get_all_conf_targets();
+
+				let mut new_fee_rate_cache = HashMap::with_capacity(10);
+				for target in confirmation_targets {
+					let num_blocks = get_num_block_defaults_for_target(target);
+
+					let converted_estimate_sat_vb =
+						esplora_client::convert_fee_rate(num_blocks, estimates.clone()).map_err(
+							|e| {
+								log_error!(
+									logger,
+									"Failed to convert fee rate estimates for {:?}: {}",
+									target,
+									e
+								);
+								Error::FeerateEstimationUpdateFailed
+							},
+						)?;
+
+					let fee_rate =
+						FeeRate::from_sat_per_kwu((converted_estimate_sat_vb * 250.0) as u64);
+
+					// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+					// require some post-estimation adjustments to the fee rates, which we do here.
+					let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+
+					new_fee_rate_cache.insert(target, adjusted_fee_rate);
+
+					log_trace!(
+						logger,
+						"Fee rate estimation updated for {:?}: {} sats/kwu",
+						target,
+						adjusted_fee_rate.to_sat_per_kwu(),
+					);
+				}
+
+				fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
+				Ok(())
 			},
 		}
 	}

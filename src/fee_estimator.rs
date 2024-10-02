@@ -5,23 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::config::FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS;
-use crate::logger::{log_error, log_trace, Logger};
-use crate::{Config, Error};
-
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
 use lightning::chain::chaininterface::FeeEstimator as LdkFeeEstimator;
 use lightning::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
 
 use bitcoin::FeeRate;
-use esplora_client::AsyncClient as EsploraClient;
-
-use bitcoin::Network;
 
 use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::RwLock;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ConfirmationTarget {
@@ -43,87 +34,22 @@ impl From<LdkConfirmationTarget> for ConfirmationTarget {
 	}
 }
 
-pub(crate) struct OnchainFeeEstimator<L: Deref>
-where
-	L::Target: Logger,
-{
+pub(crate) struct OnchainFeeEstimator {
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
-	esplora_client: EsploraClient,
-	config: Arc<Config>,
-	logger: L,
 }
 
-impl<L: Deref> OnchainFeeEstimator<L>
-where
-	L::Target: Logger,
-{
-	pub(crate) fn new(esplora_client: EsploraClient, config: Arc<Config>, logger: L) -> Self {
+impl OnchainFeeEstimator {
+	pub(crate) fn new() -> Self {
 		let fee_rate_cache = RwLock::new(HashMap::new());
-		Self { fee_rate_cache, esplora_client, config, logger }
+		Self { fee_rate_cache }
 	}
 
-	pub(crate) async fn update_fee_estimates(&self) -> Result<(), Error> {
-		let estimates = tokio::time::timeout(
-			Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
-			self.esplora_client.get_fee_estimates(),
-		)
-		.await
-		.map_err(|e| {
-			log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
-			Error::FeerateEstimationUpdateTimeout
-		})?
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
-			Error::FeerateEstimationUpdateFailed
-		})?;
-
-		if estimates.is_empty() && self.config.network == Network::Bitcoin {
-			// Ensure we fail if we didn't receive any estimates.
-			log_error!(
-				self.logger,
-				"Failed to retrieve fee rate estimates: empty fee estimates are dissallowed on Mainnet.",
-			);
-			return Err(Error::FeerateEstimationUpdateFailed);
-		}
-
-		let confirmation_targets = get_all_conf_targets();
-		for target in confirmation_targets {
-			let num_blocks = get_num_block_defaults_for_target(target);
-
-			let converted_estimate_sat_vb =
-				esplora_client::convert_fee_rate(num_blocks, estimates.clone()).map_err(|e| {
-					log_error!(
-						self.logger,
-						"Failed to convert fee rate estimates for {:?}: {}",
-						target,
-						e
-					);
-					Error::FeerateEstimationUpdateFailed
-				})?;
-
-			let fee_rate = FeeRate::from_sat_per_kwu((converted_estimate_sat_vb * 250.0) as u64);
-
-			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
-			// require some post-estimation adjustments to the fee rates, which we do here.
-			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
-
-			let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
-			locked_fee_rate_cache.insert(target, adjusted_fee_rate);
-			log_trace!(
-				self.logger,
-				"Fee rate estimation updated for {:?}: {} sats/kwu",
-				target,
-				adjusted_fee_rate.to_sat_per_kwu(),
-			);
-		}
-		Ok(())
+	pub(crate) fn set_fee_rate_cache(&self, fee_rate_cache: HashMap<ConfirmationTarget, FeeRate>) {
+		*self.fee_rate_cache.write().unwrap() = fee_rate_cache;
 	}
 }
 
-impl<L: Deref> FeeEstimator for OnchainFeeEstimator<L>
-where
-	L::Target: Logger,
-{
+impl FeeEstimator for OnchainFeeEstimator {
 	fn estimate_fee_rate(&self, confirmation_target: ConfirmationTarget) -> FeeRate {
 		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
 
@@ -140,10 +66,7 @@ where
 	}
 }
 
-impl<L: Deref> LdkFeeEstimator for OnchainFeeEstimator<L>
-where
-	L::Target: Logger,
-{
+impl LdkFeeEstimator for OnchainFeeEstimator {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: LdkConfirmationTarget) -> u32 {
 		self.estimate_fee_rate(confirmation_target.into()).to_sat_per_kwu() as u32
 	}

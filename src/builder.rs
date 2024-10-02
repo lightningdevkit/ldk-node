@@ -590,11 +590,7 @@ fn build_with_store_internal(
 			let esplora_client = client_builder.build_async().unwrap();
 			let tx_broadcaster =
 				Arc::new(TransactionBroadcaster::new(esplora_client.clone(), Arc::clone(&logger)));
-			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-				esplora_client,
-				Arc::clone(&config),
-				Arc::clone(&logger),
-			));
+			let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 
 			let wallet = Arc::new(Wallet::new(
 				bdk_wallet,
@@ -607,8 +603,11 @@ fn build_with_store_internal(
 			let chain_source = Arc::new(ChainSource::new_esplora(
 				server_url.clone(),
 				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&config),
 				Arc::clone(&logger),
 			));
+
 			(wallet, chain_source, tx_broadcaster, fee_estimator)
 		},
 		None => {
@@ -619,11 +618,7 @@ fn build_with_store_internal(
 			let esplora_client = client_builder.build_async().unwrap();
 			let tx_broadcaster =
 				Arc::new(TransactionBroadcaster::new(esplora_client.clone(), Arc::clone(&logger)));
-			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-				esplora_client,
-				Arc::clone(&config),
-				Arc::clone(&logger),
-			));
+			let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 
 			let wallet = Arc::new(Wallet::new(
 				bdk_wallet,
@@ -636,6 +631,8 @@ fn build_with_store_internal(
 			let chain_source = Arc::new(ChainSource::new_esplora(
 				server_url.clone(),
 				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&config),
 				Arc::clone(&logger),
 			));
 
@@ -1021,7 +1018,6 @@ fn build_with_store_internal(
 		wallet,
 		chain_source,
 		tx_broadcaster,
-		fee_estimator,
 		event_queue,
 		channel_manager,
 		chain_monitor,

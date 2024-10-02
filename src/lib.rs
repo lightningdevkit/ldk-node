@@ -138,8 +138,8 @@ use payment::{
 };
 use peer_store::{PeerInfo, PeerStore};
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
-	Graph, KeysManager, OnionMessenger, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
+	KeysManager, OnionMessenger, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
@@ -180,7 +180,6 @@ pub struct Node {
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
-	fee_estimator: Arc<FeeEstimator>,
 	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
@@ -243,7 +242,7 @@ impl Node {
 		);
 
 		// Block to ensure we update our fee rate cache once on startup
-		let fee_estimator = Arc::clone(&self.fee_estimator);
+		let chain_source = Arc::clone(&self.chain_source);
 		let sync_logger = Arc::clone(&self.logger);
 		let sync_fee_rate_update_timestamp =
 			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
@@ -251,7 +250,7 @@ impl Node {
 		tokio::task::block_in_place(move || {
 			runtime_ref.block_on(async move {
 				let now = Instant::now();
-				match fee_estimator.update_fee_estimates().await {
+				match chain_source.update_fee_rate_estimates().await {
 					Ok(()) => {
 						log_info!(
 							sync_logger,
@@ -323,7 +322,7 @@ impl Node {
 		let mut stop_fee_updates = self.stop_sender.subscribe();
 		let fee_update_logger = Arc::clone(&self.logger);
 		let fee_update_timestamp = Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
-		let fee_estimator = Arc::clone(&self.fee_estimator);
+		let chain_source = Arc::clone(&self.chain_source);
 		let fee_rate_cache_update_interval_secs =
 			self.config.fee_rate_cache_update_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 		runtime.spawn(async move {
@@ -344,7 +343,7 @@ impl Node {
 					}
 					_ = fee_rate_update_interval.tick() => {
 						let now = Instant::now();
-						match fee_estimator.update_fee_estimates().await {
+						match chain_source.update_fee_rate_estimates().await {
 							Ok(()) => {
 								log_trace!(
 								fee_update_logger,
@@ -1368,7 +1367,6 @@ impl Node {
 		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let archive_cmon = Arc::clone(&self.chain_monitor);
-		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		let sync_logger = Arc::clone(&self.logger);
 		let confirmables = vec![
@@ -1409,8 +1407,8 @@ impl Node {
 
 					let now = Instant::now();
 					// We don't add an additional timeout here, as
-					// `FeeEstimator::update_fee_estimates` already returns after a timeout.
-					match fee_estimator.update_fee_estimates().await {
+					// `ChainSource::update_fee_estimates` already returns after a timeout.
+					match chain_source.update_fee_rate_estimates().await {
 						Ok(()) => {
 							log_info!(
 								sync_logger,

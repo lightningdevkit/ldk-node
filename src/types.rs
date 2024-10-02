@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use crate::chain::ChainSource;
+use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
@@ -37,7 +38,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<ChainSource>,
 	Arc<Broadcaster>,
-	Arc<FeeEstimator>,
+	Arc<OnchainFeeEstimator>,
 	Arc<FilesystemLogger>,
 	Arc<DynStore>,
 >;
@@ -61,20 +62,21 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
-	Arc<FeeEstimator>,
+	Arc<OnchainFeeEstimator>,
 	Arc<Router>,
 	Arc<FilesystemLogger>,
 >;
 
 pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<FilesystemLogger>>;
 
-pub(crate) type FeeEstimator = crate::fee_estimator::OnchainFeeEstimator<Arc<FilesystemLogger>>;
-
 pub(crate) type Wallet =
-	crate::wallet::Wallet<Arc<Broadcaster>, Arc<FeeEstimator>, Arc<FilesystemLogger>>;
+	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<FilesystemLogger>>;
 
-pub(crate) type KeysManager =
-	crate::wallet::WalletKeysManager<Arc<Broadcaster>, Arc<FeeEstimator>, Arc<FilesystemLogger>>;
+pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
+	Arc<Broadcaster>,
+	Arc<OnchainFeeEstimator>,
+	Arc<FilesystemLogger>,
+>;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<Graph>,
@@ -123,7 +125,7 @@ pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMess
 pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,
 	Arc<KeysManager>,
-	Arc<FeeEstimator>,
+	Arc<OnchainFeeEstimator>,
 	Arc<ChainSource>,
 	Arc<DynStore>,
 	Arc<FilesystemLogger>,
