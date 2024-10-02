@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::chain::{DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS, DEFAULT_ESPLORA_SERVER_URL};
+use crate::chain::{ChainSource, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{default_user_config, Config, WALLET_KEYS_SEED_LEN};
 
 use crate::connection::ConnectionManager;
@@ -585,58 +585,78 @@ fn build_with_store_internal(
 			})?,
 	};
 
-	let (esplora_client, tx_sync, tx_broadcaster, fee_estimator) = match chain_data_source_config {
-		Some(ChainDataSourceConfig::Esplora(server_url)) => {
-			let mut client_builder = esplora_client::Builder::new(&server_url.clone());
-			client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
-			let esplora_client = client_builder.build_async().unwrap();
-			let tx_sync = Arc::new(EsploraSyncClient::from_client(
-				esplora_client.clone(),
-				Arc::clone(&logger),
-			));
-			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
-				tx_sync.client().clone(),
-				Arc::clone(&logger),
-			));
-			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-				tx_sync.client().clone(),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-			));
-			(esplora_client, tx_sync, tx_broadcaster, fee_estimator)
-		},
-		None => {
-			// Default to Esplora client.
-			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
-			let mut client_builder = esplora_client::Builder::new(&server_url);
-			client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
-			let esplora_client = client_builder.build_async().unwrap();
-			let tx_sync = Arc::new(EsploraSyncClient::from_client(
-				esplora_client.clone(),
-				Arc::clone(&logger),
-			));
-			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
-				tx_sync.client().clone(),
-				Arc::clone(&logger),
-			));
-			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-				tx_sync.client().clone(),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-			));
-			(esplora_client, tx_sync, tx_broadcaster, fee_estimator)
-		},
-	};
+	let (wallet, chain_source, tx_sync, tx_broadcaster, fee_estimator) =
+		match chain_data_source_config {
+			Some(ChainDataSourceConfig::Esplora(server_url)) => {
+				let mut client_builder = esplora_client::Builder::new(&server_url.clone());
+				client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+				let esplora_client = client_builder.build_async().unwrap();
+				let tx_sync =
+					Arc::new(EsploraSyncClient::from_client(esplora_client, Arc::clone(&logger)));
+				let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
+					tx_sync.client().clone(),
+					Arc::clone(&logger),
+				));
+				let fee_estimator = Arc::new(OnchainFeeEstimator::new(
+					tx_sync.client().clone(),
+					Arc::clone(&config),
+					Arc::clone(&logger),
+				));
+
+				let wallet = Arc::new(Wallet::new(
+					bdk_wallet,
+					wallet_persister,
+					Arc::clone(&tx_broadcaster),
+					Arc::clone(&fee_estimator),
+					Arc::clone(&logger),
+				));
+
+				let chain_source = Arc::new(ChainSource::new_esplora(
+					server_url.clone(),
+					Arc::clone(&wallet),
+					Arc::clone(&logger),
+				));
+				(wallet, chain_source, tx_sync, tx_broadcaster, fee_estimator)
+			},
+			None => {
+				// Default to Esplora client.
+				let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+				let mut client_builder = esplora_client::Builder::new(&server_url);
+				client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+				let esplora_client = client_builder.build_async().unwrap();
+				let tx_sync = Arc::new(EsploraSyncClient::from_client(
+					esplora_client.clone(),
+					Arc::clone(&logger),
+				));
+				let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
+					tx_sync.client().clone(),
+					Arc::clone(&logger),
+				));
+				let fee_estimator = Arc::new(OnchainFeeEstimator::new(
+					tx_sync.client().clone(),
+					Arc::clone(&config),
+					Arc::clone(&logger),
+				));
+
+				let wallet = Arc::new(Wallet::new(
+					bdk_wallet,
+					wallet_persister,
+					Arc::clone(&tx_broadcaster),
+					Arc::clone(&fee_estimator),
+					Arc::clone(&logger),
+				));
+
+				let chain_source = Arc::new(ChainSource::new_esplora(
+					server_url.clone(),
+					Arc::clone(&wallet),
+					Arc::clone(&logger),
+				));
+
+				(wallet, chain_source, tx_sync, tx_broadcaster, fee_estimator)
+			},
+		};
 
 	let runtime = Arc::new(RwLock::new(None));
-	let wallet = Arc::new(Wallet::new(
-		bdk_wallet,
-		wallet_persister,
-		esplora_client,
-		Arc::clone(&tx_broadcaster),
-		Arc::clone(&fee_estimator),
-		Arc::clone(&logger),
-	));
 
 	// Initialize the ChainMonitor
 	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
@@ -1012,6 +1032,7 @@ fn build_with_store_internal(
 		event_handling_stopped_sender,
 		config,
 		wallet,
+		chain_source,
 		tx_sync,
 		tx_broadcaster,
 		fee_estimator,

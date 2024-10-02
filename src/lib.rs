@@ -120,6 +120,7 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 
+use chain::ChainSource;
 use config::{
 	default_user_config, may_announce_channel, LDK_WALLET_SYNC_TIMEOUT_SECS,
 	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
@@ -180,6 +181,7 @@ pub struct Node {
 	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
+	chain_source: Arc<ChainSource>,
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	tx_broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<FeeEstimator>,
@@ -274,7 +276,7 @@ impl Node {
 		})?;
 
 		// Setup wallet sync
-		let wallet = Arc::clone(&self.wallet);
+		let chain_source = Arc::clone(&self.chain_source);
 		let sync_logger = Arc::clone(&self.logger);
 		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
 		let mut stop_sync = self.stop_sender.subscribe();
@@ -298,7 +300,7 @@ impl Node {
 					}
 					_ = onchain_wallet_sync_interval.tick() => {
 						let now = Instant::now();
-						match wallet.sync().await {
+						match chain_source.sync_onchain_wallet().await {
 							Ok(()) => {
 								log_trace!(
 									sync_logger,
@@ -1370,7 +1372,7 @@ impl Node {
 			return Err(Error::NotRunning);
 		}
 
-		let wallet = Arc::clone(&self.wallet);
+		let chain_source = Arc::clone(&self.chain_source);
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let archive_cman = Arc::clone(&self.channel_manager);
@@ -1396,7 +1398,7 @@ impl Node {
 					let now = Instant::now();
 					// We don't add an additional timeout here, as `Wallet::sync` already returns
 					// after a timeout.
-					match wallet.sync().await {
+					match chain_source.sync_onchain_wallet().await {
 						Ok(()) => {
 							log_info!(
 								sync_logger,
