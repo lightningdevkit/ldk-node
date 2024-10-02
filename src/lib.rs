@@ -74,6 +74,7 @@
 
 mod balance;
 mod builder;
+mod chain;
 mod config;
 mod connection;
 mod error;
