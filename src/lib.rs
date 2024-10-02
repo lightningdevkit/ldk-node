@@ -122,8 +122,7 @@ pub use builder::NodeBuilder as Builder;
 
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, LDK_WALLET_SYNC_TIMEOUT_SECS,
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	default_user_config, may_announce_channel, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
@@ -157,8 +156,6 @@ pub use lightning::util::logger::Level as LogLevel;
 
 use lightning_background_processor::process_events_async;
 
-use lightning_transaction_sync::EsploraSyncClient;
-
 use bitcoin::secp256k1::PublicKey;
 
 use rand::Rng;
@@ -182,7 +179,6 @@ pub struct Node {
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
-	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	tx_broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<FeeEstimator>,
 	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
@@ -372,7 +368,7 @@ impl Node {
 			}
 		});
 
-		let tx_sync = Arc::clone(&self.tx_sync);
+		let chain_source = Arc::clone(&self.chain_source);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
@@ -390,45 +386,40 @@ impl Node {
 			wallet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 			loop {
 				tokio::select! {
-					_ = stop_sync.changed() => {
-						log_trace!(
-							sync_logger,
-							"Stopping background syncing Lightning wallet.",
-						);
-						return;
-					}
-					_ = wallet_sync_interval.tick() => {
-						let confirmables = vec![
-							&*sync_cman as &(dyn Confirm + Sync + Send),
-							&*sync_cmon as &(dyn Confirm + Sync + Send),
-							&*sync_sweeper as &(dyn Confirm + Sync + Send),
-						];
-						let now = Instant::now();
-						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
-						match timeout_fut.await {
-							Ok(res) => match res {
-								Ok(()) => {
-									log_trace!(
-										sync_logger,
-										"Background sync of Lightning wallet finished in {}ms.",
-										now.elapsed().as_millis()
-										);
-									let unix_time_secs_opt =
-										SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-									*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+				_ = stop_sync.changed() => {
+					log_trace!(
+						sync_logger,
+						"Stopping background syncing Lightning wallet.",
+					);
+					return;
+				}
+				_ = wallet_sync_interval.tick() => {
+					let confirmables = vec![
+						&*sync_cman as &(dyn Confirm + Sync + Send),
+						&*sync_cmon as &(dyn Confirm + Sync + Send),
+						&*sync_sweeper as &(dyn Confirm + Sync + Send),
+					];
+					let now = Instant::now();
 
-									periodically_archive_fully_resolved_monitors(
-										Arc::clone(&archive_cman),
-										Arc::clone(&archive_cmon),
-										Arc::clone(&sync_monitor_archival_height)
+					match chain_source.sync_lightning_wallet(confirmables).await {
+							Ok(()) => {
+								log_trace!(
+									sync_logger,
+									"Background sync of Lightning wallet finished in {}ms.",
+									now.elapsed().as_millis()
 									);
-								}
-								Err(e) => {
-									log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
-								}
+								let unix_time_secs_opt =
+									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+
+								periodically_archive_fully_resolved_monitors(
+									Arc::clone(&archive_cman),
+									Arc::clone(&archive_cmon),
+									Arc::clone(&sync_monitor_archival_height)
+								);
 							}
 							Err(e) => {
-								log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
+								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
 							}
 						}
 					}
@@ -1373,7 +1364,6 @@ impl Node {
 		}
 
 		let chain_source = Arc::clone(&self.chain_source);
-		let tx_sync = Arc::clone(&self.tx_sync);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
@@ -1440,40 +1430,30 @@ impl Node {
 					}
 
 					let now = Instant::now();
-					let tx_sync_timeout_fut = tokio::time::timeout(
-						Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
-						tx_sync.sync(confirmables),
-					);
-					match tx_sync_timeout_fut.await {
-						Ok(res) => match res {
-							Ok(()) => {
-								log_info!(
-									sync_logger,
-									"Sync of Lightning wallet finished in {}ms.",
-									now.elapsed().as_millis()
-								);
+					match chain_source.sync_lightning_wallet(confirmables).await {
+						Ok(()) => {
+							log_info!(
+								sync_logger,
+								"Sync of Lightning wallet finished in {}ms.",
+								now.elapsed().as_millis()
+							);
 
-								let unix_time_secs_opt = SystemTime::now()
-									.duration_since(UNIX_EPOCH)
-									.ok()
-									.map(|d| d.as_secs());
-								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+							let unix_time_secs_opt = SystemTime::now()
+								.duration_since(UNIX_EPOCH)
+								.ok()
+								.map(|d| d.as_secs());
+							*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
 
-								periodically_archive_fully_resolved_monitors(
-									archive_cman,
-									archive_cmon,
-									sync_monitor_archival_height,
-								);
-								Ok(())
-							},
-							Err(e) => {
-								log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
-								Err(e.into())
-							},
+							periodically_archive_fully_resolved_monitors(
+								archive_cman,
+								archive_cmon,
+								sync_monitor_archival_height,
+							);
+							Ok(())
 						},
 						Err(e) => {
-							log_error!(sync_logger, "Sync of Lightning wallet timed out: {}", e);
-							Err(Error::TxSyncTimeout)
+							log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
+							Err(e.into())
 						},
 					}
 				},

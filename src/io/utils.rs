@@ -8,10 +8,11 @@
 use super::*;
 use crate::config::WALLET_KEYS_SEED_LEN;
 
+use crate::chain::ChainSource;
 use crate::logger::{log_error, FilesystemLogger};
 use crate::peer_store::PeerStore;
 use crate::sweep::DeprecatedSpendableOutputInfo;
-use crate::types::{Broadcaster, ChainSource, DynStore, FeeEstimator, KeysManager, Sweeper};
+use crate::types::{Broadcaster, DynStore, FeeEstimator, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
 use crate::{Error, EventQueue, PaymentDetails};
 

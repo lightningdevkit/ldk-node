@@ -51,8 +51,6 @@ use lightning::util::sweep::OutputSweeper;
 
 use lightning_persister::fs_store::FilesystemStore;
 
-use lightning_transaction_sync::EsploraSyncClient;
-
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityManager};
 
@@ -585,82 +583,71 @@ fn build_with_store_internal(
 			})?,
 	};
 
-	let (wallet, chain_source, tx_sync, tx_broadcaster, fee_estimator) =
-		match chain_data_source_config {
-			Some(ChainDataSourceConfig::Esplora(server_url)) => {
-				let mut client_builder = esplora_client::Builder::new(&server_url.clone());
-				client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
-				let esplora_client = client_builder.build_async().unwrap();
-				let tx_sync =
-					Arc::new(EsploraSyncClient::from_client(esplora_client, Arc::clone(&logger)));
-				let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
-					tx_sync.client().clone(),
-					Arc::clone(&logger),
-				));
-				let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-					tx_sync.client().clone(),
-					Arc::clone(&config),
-					Arc::clone(&logger),
-				));
+	let (wallet, chain_source, tx_broadcaster, fee_estimator) = match chain_data_source_config {
+		Some(ChainDataSourceConfig::Esplora(server_url)) => {
+			let mut client_builder = esplora_client::Builder::new(&server_url.clone());
+			client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+			let esplora_client = client_builder.build_async().unwrap();
+			let tx_broadcaster =
+				Arc::new(TransactionBroadcaster::new(esplora_client.clone(), Arc::clone(&logger)));
+			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
+				esplora_client,
+				Arc::clone(&config),
+				Arc::clone(&logger),
+			));
 
-				let wallet = Arc::new(Wallet::new(
-					bdk_wallet,
-					wallet_persister,
-					Arc::clone(&tx_broadcaster),
-					Arc::clone(&fee_estimator),
-					Arc::clone(&logger),
-				));
+			let wallet = Arc::new(Wallet::new(
+				bdk_wallet,
+				wallet_persister,
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&logger),
+			));
 
-				let chain_source = Arc::new(ChainSource::new_esplora(
-					server_url.clone(),
-					Arc::clone(&wallet),
-					Arc::clone(&logger),
-				));
-				(wallet, chain_source, tx_sync, tx_broadcaster, fee_estimator)
-			},
-			None => {
-				// Default to Esplora client.
-				let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
-				let mut client_builder = esplora_client::Builder::new(&server_url);
-				client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
-				let esplora_client = client_builder.build_async().unwrap();
-				let tx_sync = Arc::new(EsploraSyncClient::from_client(
-					esplora_client.clone(),
-					Arc::clone(&logger),
-				));
-				let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
-					tx_sync.client().clone(),
-					Arc::clone(&logger),
-				));
-				let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-					tx_sync.client().clone(),
-					Arc::clone(&config),
-					Arc::clone(&logger),
-				));
+			let chain_source = Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				Arc::clone(&wallet),
+				Arc::clone(&logger),
+			));
+			(wallet, chain_source, tx_broadcaster, fee_estimator)
+		},
+		None => {
+			// Default to Esplora client.
+			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+			let mut client_builder = esplora_client::Builder::new(&server_url);
+			client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+			let esplora_client = client_builder.build_async().unwrap();
+			let tx_broadcaster =
+				Arc::new(TransactionBroadcaster::new(esplora_client.clone(), Arc::clone(&logger)));
+			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
+				esplora_client,
+				Arc::clone(&config),
+				Arc::clone(&logger),
+			));
 
-				let wallet = Arc::new(Wallet::new(
-					bdk_wallet,
-					wallet_persister,
-					Arc::clone(&tx_broadcaster),
-					Arc::clone(&fee_estimator),
-					Arc::clone(&logger),
-				));
+			let wallet = Arc::new(Wallet::new(
+				bdk_wallet,
+				wallet_persister,
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&logger),
+			));
 
-				let chain_source = Arc::new(ChainSource::new_esplora(
-					server_url.clone(),
-					Arc::clone(&wallet),
-					Arc::clone(&logger),
-				));
+			let chain_source = Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				Arc::clone(&wallet),
+				Arc::clone(&logger),
+			));
 
-				(wallet, chain_source, tx_sync, tx_broadcaster, fee_estimator)
-			},
-		};
+			(wallet, chain_source, tx_broadcaster, fee_estimator)
+		},
+	};
 
 	let runtime = Arc::new(RwLock::new(None));
 
 	// Initialize the ChainMonitor
 	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
-		Some(Arc::clone(&tx_sync)),
+		Some(Arc::clone(&chain_source)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
 		Arc::clone(&fee_estimator),
@@ -876,7 +863,7 @@ fn build_with_store_internal(
 			let liquidity_manager = Arc::new(LiquidityManager::new(
 				Arc::clone(&keys_manager),
 				Arc::clone(&channel_manager),
-				Some(Arc::clone(&tx_sync)),
+				Some(Arc::clone(&chain_source)),
 				None,
 				None,
 				liquidity_client_config,
@@ -944,7 +931,7 @@ fn build_with_store_internal(
 	let output_sweeper = match io::utils::read_output_sweeper(
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
-		Arc::clone(&tx_sync),
+		Arc::clone(&chain_source),
 		Arc::clone(&keys_manager),
 		Arc::clone(&kv_store),
 		Arc::clone(&logger),
@@ -956,7 +943,7 @@ fn build_with_store_internal(
 					channel_manager.current_best_block(),
 					Arc::clone(&tx_broadcaster),
 					Arc::clone(&fee_estimator),
-					Some(Arc::clone(&tx_sync)),
+					Some(Arc::clone(&chain_source)),
 					Arc::clone(&keys_manager),
 					Arc::clone(&keys_manager),
 					Arc::clone(&kv_store),
@@ -1033,7 +1020,6 @@ fn build_with_store_internal(
 		config,
 		wallet,
 		chain_source,
-		tx_sync,
 		tx_broadcaster,
 		fee_estimator,
 		event_queue,

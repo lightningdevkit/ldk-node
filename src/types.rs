@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use crate::chain::ChainSource;
 use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
@@ -24,7 +25,6 @@ use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_net_tokio::SocketDescriptor;
-use lightning_transaction_sync::EsploraSyncClient;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
@@ -51,8 +51,6 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<NodeCustomMessageHandler<Arc<FilesystemLogger>>>,
 	Arc<KeysManager>,
 >;
-
-pub(crate) type ChainSource = EsploraSyncClient<Arc<FilesystemLogger>>;
 
 pub(crate) type LiquidityManager =
 	lightning_liquidity::LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<ChainSource>>;

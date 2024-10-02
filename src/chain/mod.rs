@@ -5,10 +5,17 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::config::{BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS};
+use crate::config::{
+	BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
+	LDK_WALLET_SYNC_TIMEOUT_SECS,
+};
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::types::Wallet;
 use crate::Error;
+
+use lightning::chain::{Confirm, Filter};
+
+use lightning_transaction_sync::EsploraSyncClient;
 
 use bdk_esplora::EsploraAsyncExt;
 
@@ -81,6 +88,8 @@ pub(crate) enum ChainSource {
 		esplora_client: EsploraAsyncClient,
 		onchain_wallet: Arc<Wallet>,
 		onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
+		tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 		logger: Arc<FilesystemLogger>,
 	},
 }
@@ -92,8 +101,18 @@ impl ChainSource {
 		let mut client_builder = esplora_client::Builder::new(&server_url.clone());
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
 		let esplora_client = client_builder.build_async().unwrap();
+		let tx_sync =
+			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
-		Self::Esplora { esplora_client, onchain_wallet, onchain_wallet_sync_status, logger }
+		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		Self::Esplora {
+			esplora_client,
+			onchain_wallet,
+			onchain_wallet_sync_status,
+			tx_sync,
+			lightning_wallet_sync_status,
+			logger,
+		}
 	}
 
 	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
@@ -159,6 +178,57 @@ impl ChainSource {
 
 				res
 			},
+		}
+	}
+
+	pub(crate) async fn sync_lightning_wallet(
+		&self, confirmables: Vec<&(dyn Confirm + Send + Sync)>,
+	) -> Result<(), Error> {
+		match self {
+			Self::Esplora { tx_sync, lightning_wallet_sync_status, logger, .. } => {
+				let receiver_res = {
+					let mut status_lock = lightning_wallet_sync_status.lock().unwrap();
+					status_lock.register_or_subscribe_pending_sync()
+				};
+				if let Some(mut sync_receiver) = receiver_res {
+					log_info!(logger, "Sync in progress, skipping.");
+					return sync_receiver.recv().await.map_err(|e| {
+						debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+						log_error!(logger, "Failed to receive wallet sync result: {:?}", e);
+						Error::WalletOperationFailed
+					})?;
+				}
+				let res = {
+					let timeout_fut = tokio::time::timeout(
+						Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
+						tx_sync.sync(confirmables),
+					);
+					match timeout_fut.await {
+						Ok(res) => res.map_err(|_| Error::TxSyncFailed),
+						Err(e) => {
+							log_error!(logger, "Lightning wallet sync timed out: {}", e);
+							Err(Error::TxSyncTimeout)
+						},
+					}
+				};
+
+				lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+				res
+			},
+		}
+	}
+}
+
+impl Filter for ChainSource {
+	fn register_tx(&self, txid: &bitcoin::Txid, script_pubkey: &bitcoin::Script) {
+		match self {
+			Self::Esplora { tx_sync, .. } => tx_sync.register_tx(txid, script_pubkey),
+		}
+	}
+	fn register_output(&self, output: lightning::chain::WatchedOutput) {
+		match self {
+			Self::Esplora { tx_sync, .. } => tx_sync.register_output(output),
 		}
 	}
 }
