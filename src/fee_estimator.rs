@@ -86,34 +86,9 @@ where
 			return Err(Error::FeerateEstimationUpdateFailed);
 		}
 
-		let confirmation_targets = vec![
-			ConfirmationTarget::OnchainPayment,
-			ConfirmationTarget::ChannelFunding,
-			LdkConfirmationTarget::MaximumFeeEstimate.into(),
-			LdkConfirmationTarget::UrgentOnChainSweep.into(),
-			LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee.into(),
-			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee.into(),
-			LdkConfirmationTarget::AnchorChannelFee.into(),
-			LdkConfirmationTarget::NonAnchorChannelFee.into(),
-			LdkConfirmationTarget::ChannelCloseMinimum.into(),
-			LdkConfirmationTarget::OutputSpendingFee.into(),
-		];
-
+		let confirmation_targets = get_all_conf_targets();
 		for target in confirmation_targets {
-			let num_blocks = match target {
-				ConfirmationTarget::OnchainPayment => 6,
-				ConfirmationTarget::ChannelFunding => 12,
-				ConfirmationTarget::Lightning(ldk_target) => match ldk_target {
-					LdkConfirmationTarget::MaximumFeeEstimate => 1,
-					LdkConfirmationTarget::UrgentOnChainSweep => 6,
-					LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => 1008,
-					LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 144,
-					LdkConfirmationTarget::AnchorChannelFee => 1008,
-					LdkConfirmationTarget::NonAnchorChannelFee => 12,
-					LdkConfirmationTarget::ChannelCloseMinimum => 144,
-					LdkConfirmationTarget::OutputSpendingFee => 12,
-				},
-			};
+			let num_blocks = get_num_block_defaults_for_target(target);
 
 			let converted_estimate_sat_vb =
 				esplora_client::convert_fee_rate(num_blocks, estimates.clone()).map_err(|e| {
@@ -130,15 +105,7 @@ where
 
 			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
 			// require some post-estimation adjustments to the fee rates, which we do here.
-			let adjusted_fee_rate = match target {
-				ConfirmationTarget::Lightning(
-					LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
-				) => {
-					let slightly_less_than_background = fee_rate.to_sat_per_kwu() - 250;
-					FeeRate::from_sat_per_kwu(slightly_less_than_background)
-				},
-				_ => fee_rate,
-			};
+			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
 
 			let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
 			locked_fee_rate_cache.insert(target, adjusted_fee_rate);
@@ -160,24 +127,7 @@ where
 	fn estimate_fee_rate(&self, confirmation_target: ConfirmationTarget) -> FeeRate {
 		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
 
-		let fallback_sats_kwu = match confirmation_target {
-			ConfirmationTarget::OnchainPayment => 5000,
-			ConfirmationTarget::ChannelFunding => 1000,
-			ConfirmationTarget::Lightning(ldk_target) => match ldk_target {
-				LdkConfirmationTarget::MaximumFeeEstimate => 8000,
-				LdkConfirmationTarget::UrgentOnChainSweep => 5000,
-				LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => {
-					FEERATE_FLOOR_SATS_PER_KW
-				},
-				LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => {
-					FEERATE_FLOOR_SATS_PER_KW
-				},
-				LdkConfirmationTarget::AnchorChannelFee => 500,
-				LdkConfirmationTarget::NonAnchorChannelFee => 1000,
-				LdkConfirmationTarget::ChannelCloseMinimum => 500,
-				LdkConfirmationTarget::OutputSpendingFee => 1000,
-			},
-		};
+		let fallback_sats_kwu = get_fallback_rate_for_target(confirmation_target);
 
 		// We'll fall back on this, if we really don't have any other information.
 		let fallback_rate = FeeRate::from_sat_per_kwu(fallback_sats_kwu as u64);
@@ -196,5 +146,68 @@ where
 {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: LdkConfirmationTarget) -> u32 {
 		self.estimate_fee_rate(confirmation_target.into()).to_sat_per_kwu() as u32
+	}
+}
+
+pub(crate) fn get_num_block_defaults_for_target(target: ConfirmationTarget) -> usize {
+	match target {
+		ConfirmationTarget::OnchainPayment => 6,
+		ConfirmationTarget::ChannelFunding => 12,
+		ConfirmationTarget::Lightning(ldk_target) => match ldk_target {
+			LdkConfirmationTarget::MaximumFeeEstimate => 1,
+			LdkConfirmationTarget::UrgentOnChainSweep => 6,
+			LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => 1008,
+			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 144,
+			LdkConfirmationTarget::AnchorChannelFee => 1008,
+			LdkConfirmationTarget::NonAnchorChannelFee => 12,
+			LdkConfirmationTarget::ChannelCloseMinimum => 144,
+			LdkConfirmationTarget::OutputSpendingFee => 12,
+		},
+	}
+}
+
+pub(crate) fn get_fallback_rate_for_target(target: ConfirmationTarget) -> u32 {
+	match target {
+		ConfirmationTarget::OnchainPayment => 5000,
+		ConfirmationTarget::ChannelFunding => 1000,
+		ConfirmationTarget::Lightning(ldk_target) => match ldk_target {
+			LdkConfirmationTarget::MaximumFeeEstimate => 8000,
+			LdkConfirmationTarget::UrgentOnChainSweep => 5000,
+			LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
+			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
+			LdkConfirmationTarget::AnchorChannelFee => 500,
+			LdkConfirmationTarget::NonAnchorChannelFee => 1000,
+			LdkConfirmationTarget::ChannelCloseMinimum => 500,
+			LdkConfirmationTarget::OutputSpendingFee => 1000,
+		},
+	}
+}
+
+pub(crate) fn get_all_conf_targets() -> [ConfirmationTarget; 10] {
+	[
+		ConfirmationTarget::OnchainPayment,
+		ConfirmationTarget::ChannelFunding,
+		LdkConfirmationTarget::MaximumFeeEstimate.into(),
+		LdkConfirmationTarget::UrgentOnChainSweep.into(),
+		LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee.into(),
+		LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee.into(),
+		LdkConfirmationTarget::AnchorChannelFee.into(),
+		LdkConfirmationTarget::NonAnchorChannelFee.into(),
+		LdkConfirmationTarget::ChannelCloseMinimum.into(),
+		LdkConfirmationTarget::OutputSpendingFee.into(),
+	]
+}
+
+pub(crate) fn apply_post_estimation_adjustments(
+	target: ConfirmationTarget, estimated_rate: FeeRate,
+) -> FeeRate {
+	match target {
+		ConfirmationTarget::Lightning(
+			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
+		) => {
+			let slightly_less_than_background = estimated_rate.to_sat_per_kwu() - 250;
+			FeeRate::from_sat_per_kwu(slightly_less_than_background)
+		},
+		_ => estimated_rate,
 	}
 }
