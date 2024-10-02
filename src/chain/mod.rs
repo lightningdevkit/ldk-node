@@ -7,17 +7,18 @@
 
 use crate::config::{
 	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	OnchainFeeEstimator,
 };
-use crate::logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
-use crate::types::Wallet;
+use crate::logger::{log_bytes, log_error, log_info, log_trace, FilesystemLogger, Logger};
+use crate::types::{Broadcaster, Wallet};
 use crate::Error;
 
 use lightning::chain::{Confirm, Filter};
+use lightning::util::ser::Writeable;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
@@ -98,6 +99,7 @@ pub(crate) enum ChainSource {
 		tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 		fee_estimator: Arc<OnchainFeeEstimator>,
+		tx_broadcaster: Arc<Broadcaster>,
 		config: Arc<Config>,
 		logger: Arc<FilesystemLogger>,
 	},
@@ -106,9 +108,9 @@ pub(crate) enum ChainSource {
 impl ChainSource {
 	pub(crate) fn new_esplora(
 		server_url: String, onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		config: Arc<Config>, logger: Arc<FilesystemLogger>,
+		tx_broadcaster: Arc<Broadcaster>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
 	) -> Self {
-		let mut client_builder = esplora_client::Builder::new(&server_url.clone());
+		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
 		let esplora_client = client_builder.build_async().unwrap();
 		let tx_sync =
@@ -122,6 +124,7 @@ impl ChainSource {
 			tx_sync,
 			lightning_wallet_sync_status,
 			fee_estimator,
+			tx_broadcaster,
 			config,
 			logger,
 		}
@@ -295,6 +298,82 @@ impl ChainSource {
 
 				fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
 				Ok(())
+			},
+		}
+	}
+
+	pub(crate) async fn process_broadcast_queue(&self) {
+		match self {
+			Self::Esplora { esplora_client, tx_broadcaster, logger, .. } => {
+				let mut receiver = tx_broadcaster.get_broadcast_queue().await;
+				while let Some(next_package) = receiver.recv().await {
+					for tx in &next_package {
+						let txid = tx.compute_txid();
+						let timeout_fut = tokio::time::timeout(
+							Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
+							esplora_client.broadcast(tx),
+						);
+						match timeout_fut.await {
+							Ok(res) => match res {
+								Ok(()) => {
+									log_trace!(
+										logger,
+										"Successfully broadcast transaction {}",
+										txid
+									);
+								},
+								Err(e) => match e {
+									esplora_client::Error::Reqwest(err) => {
+										if err.status() == reqwest::StatusCode::from_u16(400).ok() {
+											// Ignore 400, as this just means bitcoind already knows the
+											// transaction.
+											// FIXME: We can further differentiate here based on the error
+											// message which will be available with rust-esplora-client 0.7 and
+											// later.
+										} else {
+											log_error!(
+												logger,
+												"Failed to broadcast due to HTTP connection error: {}",
+												err
+											);
+										}
+										log_trace!(
+											logger,
+											"Failed broadcast transaction bytes: {}",
+											log_bytes!(tx.encode())
+										);
+									},
+									_ => {
+										log_error!(
+											logger,
+											"Failed to broadcast transaction {}: {}",
+											txid,
+											e
+										);
+										log_trace!(
+											logger,
+											"Failed broadcast transaction bytes: {}",
+											log_bytes!(tx.encode())
+										);
+									},
+								},
+							},
+							Err(e) => {
+								log_error!(
+									logger,
+									"Failed to broadcast transaction due to timeout {}: {}",
+									txid,
+									e
+								);
+								log_trace!(
+									logger,
+									"Failed broadcast transaction bytes: {}",
+									log_bytes!(tx.encode())
+								);
+							},
+						}
+					}
+				}
 			},
 		}
 	}

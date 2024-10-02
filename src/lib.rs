@@ -669,7 +669,7 @@ impl Node {
 		}
 
 		let mut stop_tx_bcast = self.stop_sender.subscribe();
-		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
+		let chain_source = Arc::clone(&self.chain_source);
 		let tx_bcast_logger = Arc::clone(&self.logger);
 		runtime.spawn(async move {
 			// Every second we try to clear our broadcasting queue.
@@ -685,7 +685,7 @@ impl Node {
 							return;
 						}
 						_ = interval.tick() => {
-							tx_bcaster.process_queue().await;
+							chain_source.process_broadcast_queue().await;
 						}
 				}
 			}
