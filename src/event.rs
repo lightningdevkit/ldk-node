@@ -156,6 +156,7 @@ pub enum Event {
 		payment_id: PaymentId,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
+		// The path that the probe took.
 		// path: Path,
 	},
 	/// Indicates that a probe payment we sent failed at an intermediary node on the path.
@@ -227,7 +228,6 @@ impl_writeable_tlv_based_enum!(Event,
 		(1, payment_hash, required),
 		// (2, path.hops, required_vec),
 		(3, short_channel_id, option),
-		// (4, path.blinded_tail, option),
 	};
 );
 
