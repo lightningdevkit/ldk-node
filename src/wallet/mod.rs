@@ -25,7 +25,7 @@ use lightning::sign::{
 use lightning::util::message_signing;
 use lightning_invoice::RawBolt11Invoice;
 
-use bdk_chain::spk_client::FullScanRequest;
+use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_chain::ChainPosition;
 use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Update};
 
@@ -78,6 +78,10 @@ where
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
 		self.inner.lock().unwrap().start_full_scan().build()
+	}
+
+	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
+		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
 	}
 
 	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {

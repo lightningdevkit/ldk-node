@@ -240,31 +240,9 @@ impl Node {
 
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
-		let sync_logger = Arc::clone(&self.logger);
-		let sync_fee_rate_update_timestamp =
-			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
 		let runtime_ref = &runtime;
 		tokio::task::block_in_place(move || {
-			runtime_ref.block_on(async move {
-				let now = Instant::now();
-				match chain_source.update_fee_rate_estimates().await {
-					Ok(()) => {
-						log_info!(
-							sync_logger,
-							"Initial fee rate cache update finished in {}ms.",
-							now.elapsed().as_millis()
-						);
-						let unix_time_secs_opt =
-							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-						*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
-						Ok(())
-					},
-					Err(e) => {
-						log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
-						Err(e)
-					},
-				}
-			})
+			runtime_ref.block_on(async move { chain_source.update_fee_rate_estimates().await })
 		})?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
