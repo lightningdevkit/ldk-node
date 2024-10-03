@@ -218,11 +218,12 @@ dictionary NodeStatus {
 	boolean is_running;
 	boolean is_listening;
 	BestBlock current_best_block;
-	u64? latest_wallet_sync_timestamp;
+	u64? latest_lightning_wallet_sync_timestamp;
 	u64? latest_onchain_wallet_sync_timestamp;
 	u64? latest_fee_rate_cache_update_timestamp;
 	u64? latest_rgs_snapshot_timestamp;
 	u64? latest_node_announcement_broadcast_timestamp;
+	u32? latest_channel_monitor_archival_height;
 };
 
 dictionary BestBlock {

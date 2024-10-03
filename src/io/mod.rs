@@ -33,15 +33,10 @@ pub(crate) const DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE:
 	"spendable_outputs";
 pub(crate) const DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
-/// RapidGossipSync's `latest_sync_timestamp` will be persisted under this key.
-pub(crate) const LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE: &str = "";
-pub(crate) const LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE: &str = "";
-pub(crate) const LATEST_RGS_SYNC_TIMESTAMP_KEY: &str = "latest_rgs_sync_timestamp";
-
-/// The last time we broadcast a node announcement will be persisted under this key.
-pub(crate) const LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE: &str = "";
-pub(crate) const LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE: &str = "";
-pub(crate) const LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY: &str = "latest_node_ann_bcast_timestamp";
+/// The node metrics will be persisted under this key.
+pub(crate) const NODE_METRICS_PRIMARY_NAMESPACE: &str = "";
+pub(crate) const NODE_METRICS_SECONDARY_NAMESPACE: &str = "";
+pub(crate) const NODE_METRICS_KEY: &str = "node_metrics";
 
 /// The BDK wallet's [`ChangeSet::descriptor`] will be persisted under this key.
 ///

@@ -15,9 +15,10 @@ use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	OnchainFeeEstimator,
 };
+use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, FilesystemLogger, Logger};
-use crate::types::{Broadcaster, ChainMonitor, ChannelManager, Sweeper, Wallet};
-use crate::Error;
+use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::{Error, NodeMetrics};
 
 use lightning::chain::{Confirm, Filter};
 use lightning::util::ser::Writeable;
@@ -102,23 +103,18 @@ pub(crate) enum ChainSource {
 		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 		fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>,
 		config: Arc<Config>,
 		logger: Arc<FilesystemLogger>,
-		latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-		latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-		latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
-		latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	},
 }
 
 impl ChainSource {
 	pub(crate) fn new_esplora(
 		server_url: String, onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
-		latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-		latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-		latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
-		latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
+		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<FilesystemLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
@@ -135,12 +131,10 @@ impl ChainSource {
 			lightning_wallet_sync_status,
 			fee_estimator,
 			tx_broadcaster,
+			kv_store,
 			config,
 			logger,
-			latest_wallet_sync_timestamp,
-			latest_onchain_wallet_sync_timestamp,
-			latest_fee_rate_cache_update_timestamp,
-			latest_channel_monitor_archival_height,
+			node_metrics,
 		}
 	}
 
@@ -211,8 +205,9 @@ impl ChainSource {
 				esplora_client,
 				onchain_wallet,
 				onchain_wallet_sync_status,
+				kv_store,
 				logger,
-				latest_onchain_wallet_sync_timestamp,
+				node_metrics,
 				..
 			} => {
 				let receiver_res = {
@@ -232,7 +227,7 @@ impl ChainSource {
 					// If this is our first sync, do a full scan with the configured gap limit.
 					// Otherwise just do an incremental sync.
 					let incremental_sync =
-						latest_onchain_wallet_sync_timestamp.read().unwrap().is_some();
+						node_metrics.read().unwrap().latest_onchain_wallet_sync_timestamp.is_some();
 
 					macro_rules! get_and_apply_wallet_update {
 						($sync_future: expr) => {{
@@ -251,8 +246,11 @@ impl ChainSource {
 												.duration_since(UNIX_EPOCH)
 												.ok()
 												.map(|d| d.as_secs());
-											*latest_onchain_wallet_sync_timestamp.write().unwrap() =
-												unix_time_secs_opt;
+											{
+												let mut locked_node_metrics = node_metrics.write().unwrap();
+												locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+												write_node_metrics(&*locked_node_metrics, Arc::clone(&kv_store), Arc::clone(&logger))?;
+											}
 											Ok(())
 										},
 										Err(e) => Err(e),
@@ -327,9 +325,9 @@ impl ChainSource {
 			Self::Esplora {
 				tx_sync,
 				lightning_wallet_sync_status,
+				kv_store,
 				logger,
-				latest_wallet_sync_timestamp,
-				latest_channel_monitor_archival_height,
+				node_metrics,
 				..
 			} => {
 				let sync_cman = Arc::clone(&channel_manager);
@@ -372,13 +370,24 @@ impl ChainSource {
 									.duration_since(UNIX_EPOCH)
 									.ok()
 									.map(|d| d.as_secs());
-								*latest_wallet_sync_timestamp.write().unwrap() = unix_time_secs_opt;
+								{
+									let mut locked_node_metrics = node_metrics.write().unwrap();
+									locked_node_metrics.latest_lightning_wallet_sync_timestamp =
+										unix_time_secs_opt;
+									write_node_metrics(
+										&*locked_node_metrics,
+										Arc::clone(&kv_store),
+										Arc::clone(&logger),
+									)?;
+								}
 
 								periodically_archive_fully_resolved_monitors(
 									Arc::clone(&channel_manager),
 									Arc::clone(&chain_monitor),
-									Arc::clone(&latest_channel_monitor_archival_height),
-								);
+									Arc::clone(&kv_store),
+									Arc::clone(&logger),
+									Arc::clone(&node_metrics),
+								)?;
 								Ok(())
 							},
 							Err(e) => {
@@ -406,8 +415,9 @@ impl ChainSource {
 				esplora_client,
 				fee_estimator,
 				config,
+				kv_store,
 				logger,
-				latest_fee_rate_cache_update_timestamp,
+				node_metrics,
 				..
 			} => {
 				let now = Instant::now();
@@ -479,7 +489,15 @@ impl ChainSource {
 				);
 				let unix_time_secs_opt =
 					SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-				*latest_fee_rate_cache_update_timestamp.write().unwrap() = unix_time_secs_opt;
+				{
+					let mut locked_node_metrics = node_metrics.write().unwrap();
+					locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
+					write_node_metrics(
+						&*locked_node_metrics,
+						Arc::clone(&kv_store),
+						Arc::clone(&logger),
+					)?;
+				}
 
 				Ok(())
 			},
@@ -578,16 +596,19 @@ impl Filter for ChainSource {
 
 fn periodically_archive_fully_resolved_monitors(
 	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
-) {
-	let mut latest_archival_height_lock = latest_channel_monitor_archival_height.write().unwrap();
+	kv_store: Arc<DynStore>, logger: Arc<FilesystemLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+) -> Result<(), Error> {
+	let mut locked_node_metrics = node_metrics.write().unwrap();
 	let cur_height = channel_manager.current_best_block().height;
-	let should_archive = latest_archival_height_lock
+	let should_archive = locked_node_metrics
+		.latest_channel_monitor_archival_height
 		.as_ref()
 		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
 
 	if should_archive {
 		chain_monitor.archive_fully_resolved_channel_monitors();
-		*latest_archival_height_lock = Some(cur_height);
+		locked_node_metrics.latest_channel_monitor_archival_height = Some(cur_height);
+		write_node_metrics(&*locked_node_metrics, kv_store, logger)?;
 	}
+	Ok(())
 }

@@ -122,12 +122,14 @@ pub use builder::NodeBuilder as Builder;
 
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	default_user_config, may_announce_channel, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use graph::NetworkGraph;
+use io::utils::write_node_metrics;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
 use payment::{
@@ -145,6 +147,7 @@ use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
+use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
@@ -196,11 +199,7 @@ pub struct Node {
 	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
 	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
 	is_listening: Arc<AtomicBool>,
-	latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_rgs_snapshot_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_node_announcement_broadcast_timestamp: Arc<RwLock<Option<u64>>>,
+	node_metrics: Arc<RwLock<NodeMetrics>>,
 }
 
 impl Node {
@@ -261,7 +260,7 @@ impl Node {
 			let gossip_source = Arc::clone(&self.gossip_source);
 			let gossip_sync_store = Arc::clone(&self.kv_store);
 			let gossip_sync_logger = Arc::clone(&self.logger);
-			let gossip_rgs_sync_timestamp = Arc::clone(&self.latest_rgs_snapshot_timestamp);
+			let gossip_node_metrics = Arc::clone(&self.node_metrics);
 			let mut stop_gossip_sync = self.stop_sender.subscribe();
 			runtime.spawn(async move {
 				let mut interval = tokio::time::interval(RGS_SYNC_INTERVAL);
@@ -284,22 +283,22 @@ impl Node {
 										"Background sync of RGS gossip data finished in {}ms.",
 										now.elapsed().as_millis()
 										);
-									io::utils::write_latest_rgs_sync_timestamp(
-										updated_timestamp,
-										Arc::clone(&gossip_sync_store),
-										Arc::clone(&gossip_sync_logger),
-										)
-										.unwrap_or_else(|e| {
-											log_error!(gossip_sync_logger, "Persistence failed: {}", e);
-											panic!("Persistence failed");
-										});
-									*gossip_rgs_sync_timestamp.write().unwrap() = Some(updated_timestamp as u64);
+									{
+										let mut locked_node_metrics = gossip_node_metrics.write().unwrap();
+										locked_node_metrics.latest_rgs_snapshot_timestamp = Some(updated_timestamp);
+										write_node_metrics(&*locked_node_metrics, Arc::clone(&gossip_sync_store), Arc::clone(&gossip_sync_logger))
+											.unwrap_or_else(|e| {
+												log_error!(gossip_sync_logger, "Persistence failed: {}", e);
+											});
+									}
 								}
-								Err(e) => log_error!(
-									gossip_sync_logger,
-									"Background sync of RGS gossip data failed: {}",
-									e
-									),
+								Err(e) => {
+									log_error!(
+										gossip_sync_logger,
+										"Background sync of RGS gossip data failed: {}",
+										e
+									)
+								}
 							}
 						}
 					}
@@ -421,7 +420,7 @@ impl Node {
 		let bcast_config = Arc::clone(&self.config);
 		let bcast_store = Arc::clone(&self.kv_store);
 		let bcast_logger = Arc::clone(&self.logger);
-		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
+		let bcast_node_metrics = Arc::clone(&self.node_metrics);
 		let mut stop_bcast = self.stop_sender.subscribe();
 		let node_alias = self.config.node_alias.clone();
 		if may_announce_channel(&self.config) {
@@ -441,13 +440,13 @@ impl Node {
 							return;
 						}
 						_ = interval.tick() => {
-							let skip_broadcast = match io::utils::read_latest_node_ann_bcast_timestamp(Arc::clone(&bcast_store), Arc::clone(&bcast_logger)) {
-								Ok(latest_bcast_time_secs) => {
+							let skip_broadcast = match bcast_node_metrics.read().unwrap().latest_node_announcement_broadcast_timestamp {
+								Some(latest_bcast_time_secs) => {
 									// Skip if the time hasn't elapsed yet.
 									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
 									next_bcast_unix_time.elapsed().is_err()
 								}
-								Err(_) => {
+								None => {
 									// Don't skip if we haven't broadcasted before.
 									false
 								}
@@ -479,20 +478,18 @@ impl Node {
 
 								let unix_time_secs_opt =
 									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*bcast_ann_timestamp.write().unwrap() = unix_time_secs_opt;
-
-								if let Some(unix_time_secs) = unix_time_secs_opt {
-									io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
+								{
+									let mut locked_node_metrics = bcast_node_metrics.write().unwrap();
+									locked_node_metrics.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt;
+									write_node_metrics(&*locked_node_metrics, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
 										.unwrap_or_else(|e| {
 											log_error!(bcast_logger, "Persistence failed: {}", e);
-											panic!("Persistence failed");
 										});
 								}
 							} else {
 								debug_assert!(false, "We checked whether the node may announce, so node alias should always be set");
 								continue
 							}
-
 						}
 					}
 				}
@@ -719,24 +716,30 @@ impl Node {
 		let is_running = self.runtime.read().unwrap().is_some();
 		let is_listening = self.is_listening.load(Ordering::Acquire);
 		let current_best_block = self.channel_manager.current_best_block().into();
-		let latest_wallet_sync_timestamp = *self.latest_wallet_sync_timestamp.read().unwrap();
+		let locked_node_metrics = self.node_metrics.read().unwrap();
+		let latest_lightning_wallet_sync_timestamp =
+			locked_node_metrics.latest_lightning_wallet_sync_timestamp;
 		let latest_onchain_wallet_sync_timestamp =
-			*self.latest_onchain_wallet_sync_timestamp.read().unwrap();
+			locked_node_metrics.latest_onchain_wallet_sync_timestamp;
 		let latest_fee_rate_cache_update_timestamp =
-			*self.latest_fee_rate_cache_update_timestamp.read().unwrap();
-		let latest_rgs_snapshot_timestamp = *self.latest_rgs_snapshot_timestamp.read().unwrap();
+			locked_node_metrics.latest_fee_rate_cache_update_timestamp;
+		let latest_rgs_snapshot_timestamp =
+			locked_node_metrics.latest_rgs_snapshot_timestamp.map(|val| val as u64);
 		let latest_node_announcement_broadcast_timestamp =
-			*self.latest_node_announcement_broadcast_timestamp.read().unwrap();
+			locked_node_metrics.latest_node_announcement_broadcast_timestamp;
+		let latest_channel_monitor_archival_height =
+			locked_node_metrics.latest_channel_monitor_archival_height;
 
 		NodeStatus {
 			is_running,
 			is_listening,
 			current_best_block,
-			latest_wallet_sync_timestamp,
+			latest_lightning_wallet_sync_timestamp,
 			latest_onchain_wallet_sync_timestamp,
 			latest_fee_rate_cache_update_timestamp,
 			latest_rgs_snapshot_timestamp,
 			latest_node_announcement_broadcast_timestamp,
+			latest_channel_monitor_archival_height,
 		}
 	}
 
@@ -1497,29 +1500,66 @@ pub struct NodeStatus {
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
 	/// our Lightning wallet to the chain tip.
 	///
-	/// Will be `None` if the wallet hasn't been synced since the [`Node`] was initialized.
-	pub latest_wallet_sync_timestamp: Option<u64>,
+	/// Will be `None` if the wallet hasn't been synced yet.
+	pub latest_lightning_wallet_sync_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
 	/// our on-chain wallet to the chain tip.
 	///
-	/// Will be `None` if the wallet hasn't been synced since the [`Node`] was initialized.
+	/// Will be `None` if the wallet hasn't been synced yet.
 	pub latest_onchain_wallet_sync_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully update
 	/// our fee rate cache.
 	///
-	/// Will be `None` if the cache hasn't been updated since the [`Node`] was initialized.
+	/// Will be `None` if the cache hasn't been updated yet.
 	pub latest_fee_rate_cache_update_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when the last rapid gossip sync
 	/// (RGS) snapshot we successfully applied was generated.
 	///
-	/// Will be `None` if RGS isn't configured or the snapshot hasn't been updated since the [`Node`] was initialized.
+	/// Will be `None` if RGS isn't configured or the snapshot hasn't been updated yet.
 	pub latest_rgs_snapshot_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node
 	/// announcement.
 	///
-	/// Will be `None` if we have no public channels or we haven't broadcasted since the [`Node`] was initialized.
+	/// Will be `None` if we have no public channels or we haven't broadcasted yet.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
+	/// The block height when we last archived closed channel monitor data.
+	///
+	/// Will be `None` if we haven't archived any monitors of closed channels yet.
+	pub latest_channel_monitor_archival_height: Option<u32>,
 }
+
+/// Status fields that are persisted across restarts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NodeMetrics {
+	latest_lightning_wallet_sync_timestamp: Option<u64>,
+	latest_onchain_wallet_sync_timestamp: Option<u64>,
+	latest_fee_rate_cache_update_timestamp: Option<u64>,
+	latest_rgs_snapshot_timestamp: Option<u32>,
+	latest_node_announcement_broadcast_timestamp: Option<u64>,
+	latest_channel_monitor_archival_height: Option<u32>,
+}
+
+impl Default for NodeMetrics {
+	fn default() -> Self {
+		Self {
+			latest_lightning_wallet_sync_timestamp: None,
+			latest_onchain_wallet_sync_timestamp: None,
+			latest_fee_rate_cache_update_timestamp: None,
+			latest_rgs_snapshot_timestamp: None,
+			latest_node_announcement_broadcast_timestamp: None,
+			latest_channel_monitor_archival_height: None,
+		}
+	}
+}
+
+impl_writeable_tlv_based!(NodeMetrics, {
+	(0, latest_lightning_wallet_sync_timestamp, option),
+	(2, latest_onchain_wallet_sync_timestamp, option),
+	(4, latest_fee_rate_cache_update_timestamp, option),
+	(6, latest_rgs_snapshot_timestamp, option),
+	(8, latest_node_announcement_broadcast_timestamp, option),
+	(10, latest_channel_monitor_archival_height, option),
+});
 
 pub(crate) fn total_anchor_channels_reserve_sats(
 	channel_manager: &ChannelManager, config: &Config,

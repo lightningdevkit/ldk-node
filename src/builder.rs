@@ -12,8 +12,8 @@ use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
-use crate::io;
 use crate::io::sqlite_store::SqliteStore;
+use crate::io::utils::{read_node_metrics, write_node_metrics};
 #[cfg(any(vss, vss_test))]
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
@@ -28,6 +28,7 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
+use crate::{io, NodeMetrics};
 use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
@@ -554,12 +555,16 @@ fn build_with_store_internal(
 ) -> Result<Node, BuildError> {
 	// Initialize the status fields.
 	let is_listening = Arc::new(AtomicBool::new(false));
-	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
-	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
-	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
-	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
+	let node_metrics = match read_node_metrics(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(metrics) => Arc::new(RwLock::new(metrics)),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(RwLock::new(NodeMetrics::default()))
+			} else {
+				return Err(BuildError::ReadFailed);
+			}
+		},
+	};
 
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::Xpriv::new_master(config.network, &seed_bytes).map_err(|e| {
@@ -608,12 +613,10 @@ fn build_with_store_internal(
 			Arc::clone(&wallet),
 			Arc::clone(&fee_estimator),
 			Arc::clone(&tx_broadcaster),
+			Arc::clone(&kv_store),
 			Arc::clone(&config),
 			Arc::clone(&logger),
-			Arc::clone(&latest_wallet_sync_timestamp),
-			Arc::clone(&latest_onchain_wallet_sync_timestamp),
-			Arc::clone(&latest_fee_rate_cache_update_timestamp),
-			latest_channel_monitor_archival_height,
+			Arc::clone(&node_metrics),
 		)),
 		None => {
 			// Default to Esplora client.
@@ -623,12 +626,10 @@ fn build_with_store_internal(
 				Arc::clone(&wallet),
 				Arc::clone(&fee_estimator),
 				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
 				Arc::clone(&config),
 				Arc::clone(&logger),
-				Arc::clone(&latest_wallet_sync_timestamp),
-				Arc::clone(&latest_onchain_wallet_sync_timestamp),
-				Arc::clone(&latest_fee_rate_cache_update_timestamp),
-				latest_channel_monitor_archival_height,
+				Arc::clone(&node_metrics),
 			))
 		},
 	};
@@ -820,23 +821,24 @@ fn build_with_store_internal(
 				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)));
 
 			// Reset the RGS sync timestamp in case we somehow switch gossip sources
-			io::utils::write_latest_rgs_sync_timestamp(
-				0,
-				Arc::clone(&kv_store),
-				Arc::clone(&logger),
-			)
-			.map_err(|e| {
-				log_error!(logger, "Failed writing to store: {}", e);
-				BuildError::WriteFailed
-			})?;
+			{
+				let mut locked_node_metrics = node_metrics.write().unwrap();
+				locked_node_metrics.latest_rgs_snapshot_timestamp = None;
+				write_node_metrics(
+					&*locked_node_metrics,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)
+				.map_err(|e| {
+					log_error!(logger, "Failed writing to store: {}", e);
+					BuildError::WriteFailed
+				})?;
+			}
 			p2p_source
 		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
-			let latest_sync_timestamp = io::utils::read_latest_rgs_sync_timestamp(
-				Arc::clone(&kv_store),
-				Arc::clone(&logger),
-			)
-			.unwrap_or(0);
+			let latest_sync_timestamp =
+				node_metrics.read().unwrap().latest_rgs_snapshot_timestamp.unwrap_or(0);
 			Arc::new(GossipSource::new_rgs(
 				rgs_server.clone(),
 				latest_sync_timestamp,
@@ -1021,11 +1023,7 @@ fn build_with_store_internal(
 		peer_store,
 		payment_store,
 		is_listening,
-		latest_wallet_sync_timestamp,
-		latest_onchain_wallet_sync_timestamp,
-		latest_fee_rate_cache_update_timestamp,
-		latest_rgs_snapshot_timestamp,
-		latest_node_announcement_broadcast_timestamp,
+		node_metrics,
 	})
 }
 
