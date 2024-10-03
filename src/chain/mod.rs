@@ -7,14 +7,16 @@
 
 use crate::config::{
 	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
+	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, TX_BROADCAST_TIMEOUT_SECS,
+	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	OnchainFeeEstimator,
 };
 use crate::logger::{log_bytes, log_error, log_info, log_trace, FilesystemLogger, Logger};
-use crate::types::{Broadcaster, Wallet};
+use crate::types::{Broadcaster, ChainMonitor, ChannelManager, Sweeper, Wallet};
 use crate::Error;
 
 use lightning::chain::{Confirm, Filter};
@@ -29,8 +31,8 @@ use esplora_client::AsyncClient as EsploraAsyncClient;
 use bitcoin::{FeeRate, Network};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
@@ -102,6 +104,10 @@ pub(crate) enum ChainSource {
 		tx_broadcaster: Arc<Broadcaster>,
 		config: Arc<Config>,
 		logger: Arc<FilesystemLogger>,
+		latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
+		latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
+		latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
+		latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
 	},
 }
 
@@ -109,6 +115,10 @@ impl ChainSource {
 	pub(crate) fn new_esplora(
 		server_url: String, onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
+		latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
+		latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
+		latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
+		latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
@@ -127,6 +137,71 @@ impl ChainSource {
 			tx_broadcaster,
 			config,
 			logger,
+			latest_wallet_sync_timestamp,
+			latest_onchain_wallet_sync_timestamp,
+			latest_fee_rate_cache_update_timestamp,
+			latest_channel_monitor_archival_height,
+		}
+	}
+
+	pub(crate) async fn continuously_sync_wallets(
+		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) {
+		match self {
+			Self::Esplora { config, logger, .. } => {
+				// Setup syncing intervals
+				let onchain_wallet_sync_interval_secs =
+					config.onchain_wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+				let mut onchain_wallet_sync_interval =
+					tokio::time::interval(Duration::from_secs(onchain_wallet_sync_interval_secs));
+				onchain_wallet_sync_interval
+					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+				let fee_rate_cache_update_interval_secs = config
+					.fee_rate_cache_update_interval_secs
+					.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+				let mut fee_rate_update_interval =
+					tokio::time::interval(Duration::from_secs(fee_rate_cache_update_interval_secs));
+				// When starting up, we just blocked on updating, so skip the first tick.
+				fee_rate_update_interval.reset();
+				fee_rate_update_interval
+					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+				let wallet_sync_interval_secs =
+					config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+				let mut wallet_sync_interval =
+					tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
+				wallet_sync_interval
+					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+				// Start the syncing loop.
+				loop {
+					tokio::select! {
+						_ = stop_sync_receiver.changed() => {
+							log_trace!(
+								logger,
+								"Stopping background syncing on-chain wallet.",
+							);
+							return;
+						}
+						_ = onchain_wallet_sync_interval.tick() => {
+							let _ = self.sync_onchain_wallet().await;
+						}
+						_ = fee_rate_update_interval.tick() => {
+							let _ = self.update_fee_rate_estimates().await;
+						}
+						_ = wallet_sync_interval.tick() => {
+							let _ = self.sync_lightning_wallet(
+								Arc::clone(&channel_manager),
+								Arc::clone(&chain_monitor),
+								Arc::clone(&output_sweeper),
+							).await;
+						}
+					}
+				}
+			},
 		}
 	}
 
@@ -137,6 +212,7 @@ impl ChainSource {
 				onchain_wallet,
 				onchain_wallet_sync_status,
 				logger,
+				latest_onchain_wallet_sync_timestamp,
 				..
 			} => {
 				let receiver_res = {
@@ -152,42 +228,60 @@ impl ChainSource {
 					})?;
 				}
 
-				let res = {
-					let full_scan_request = onchain_wallet.get_full_scan_request();
+				let res =
+					{
+						let full_scan_request = onchain_wallet.get_full_scan_request();
 
-					let wallet_sync_timeout_fut = tokio::time::timeout(
-						Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
-						esplora_client.full_scan(
-							full_scan_request,
-							BDK_CLIENT_STOP_GAP,
-							BDK_CLIENT_CONCURRENCY,
-						),
-					);
+						let wallet_sync_timeout_fut = tokio::time::timeout(
+							Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+							esplora_client.full_scan(
+								full_scan_request,
+								BDK_CLIENT_STOP_GAP,
+								BDK_CLIENT_CONCURRENCY,
+							),
+						);
 
-					match wallet_sync_timeout_fut.await {
-						Ok(res) => match res {
-							Ok(update) => onchain_wallet.apply_update(update),
-							Err(e) => match *e {
-								esplora_client::Error::Reqwest(he) => {
-									log_error!(
-										logger,
-										"Sync failed due to HTTP connection error: {}",
-										he
-									);
-									Err(Error::WalletOperationFailed)
+						let now = Instant::now();
+						match wallet_sync_timeout_fut.await {
+							Ok(res) => match res {
+								Ok(update) => match onchain_wallet.apply_update(update) {
+									Ok(()) => {
+										log_info!(
+											logger,
+											"Sync of on-chain wallet finished in {}ms.",
+											now.elapsed().as_millis()
+										);
+										let unix_time_secs_opt = SystemTime::now()
+											.duration_since(UNIX_EPOCH)
+											.ok()
+											.map(|d| d.as_secs());
+										*latest_onchain_wallet_sync_timestamp.write().unwrap() =
+											unix_time_secs_opt;
+										Ok(())
+									},
+									Err(e) => Err(e),
 								},
-								_ => {
-									log_error!(logger, "Sync failed due to Esplora error: {}", e);
-									Err(Error::WalletOperationFailed)
+								Err(e) => match *e {
+									esplora_client::Error::Reqwest(he) => {
+										log_error!(
+											logger,
+											"Sync failed due to HTTP connection error: {}",
+											he
+										);
+										Err(Error::WalletOperationFailed)
+									},
+									_ => {
+										log_error!(logger, "Sync of on-chain wallet failed due to Esplora error: {}", e);
+										Err(Error::WalletOperationFailed)
+									},
 								},
 							},
-						},
-						Err(e) => {
-							log_error!(logger, "On-chain wallet sync timed out: {}", e);
-							Err(Error::WalletOperationTimeout)
-						},
-					}
-				};
+							Err(e) => {
+								log_error!(logger, "On-chain wallet sync timed out: {}", e);
+								Err(Error::WalletOperationTimeout)
+							},
+						}
+					};
 
 				onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
@@ -197,10 +291,27 @@ impl ChainSource {
 	}
 
 	pub(crate) async fn sync_lightning_wallet(
-		&self, confirmables: Vec<&(dyn Confirm + Send + Sync)>,
+		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		match self {
-			Self::Esplora { tx_sync, lightning_wallet_sync_status, logger, .. } => {
+			Self::Esplora {
+				tx_sync,
+				lightning_wallet_sync_status,
+				logger,
+				latest_wallet_sync_timestamp,
+				latest_channel_monitor_archival_height,
+				..
+			} => {
+				let sync_cman = Arc::clone(&channel_manager);
+				let sync_cmon = Arc::clone(&chain_monitor);
+				let sync_sweeper = Arc::clone(&output_sweeper);
+				let confirmables = vec![
+					&*sync_cman as &(dyn Confirm + Sync + Send),
+					&*sync_cmon as &(dyn Confirm + Sync + Send),
+					&*sync_sweeper as &(dyn Confirm + Sync + Send),
+				];
+
 				let receiver_res = {
 					let mut status_lock = lightning_wallet_sync_status.lock().unwrap();
 					status_lock.register_or_subscribe_pending_sync()
@@ -218,8 +329,34 @@ impl ChainSource {
 						Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
 						tx_sync.sync(confirmables),
 					);
+					let now = Instant::now();
 					match timeout_fut.await {
-						Ok(res) => res.map_err(|_| Error::TxSyncFailed),
+						Ok(res) => match res {
+							Ok(()) => {
+								log_info!(
+									logger,
+									"Sync of Lightning wallet finished in {}ms.",
+									now.elapsed().as_millis()
+								);
+
+								let unix_time_secs_opt = SystemTime::now()
+									.duration_since(UNIX_EPOCH)
+									.ok()
+									.map(|d| d.as_secs());
+								*latest_wallet_sync_timestamp.write().unwrap() = unix_time_secs_opt;
+
+								periodically_archive_fully_resolved_monitors(
+									Arc::clone(&channel_manager),
+									Arc::clone(&chain_monitor),
+									Arc::clone(&latest_channel_monitor_archival_height),
+								);
+								Ok(())
+							},
+							Err(e) => {
+								log_error!(logger, "Sync of Lightning wallet failed: {}", e);
+								Err(e.into())
+							},
+						},
 						Err(e) => {
 							log_error!(logger, "Lightning wallet sync timed out: {}", e);
 							Err(Error::TxSyncTimeout)
@@ -236,7 +373,15 @@ impl ChainSource {
 
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		match self {
-			Self::Esplora { esplora_client, fee_estimator, config, logger, .. } => {
+			Self::Esplora {
+				esplora_client,
+				fee_estimator,
+				config,
+				logger,
+				latest_fee_rate_cache_update_timestamp,
+				..
+			} => {
+				let now = Instant::now();
 				let estimates = tokio::time::timeout(
 					Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
 					esplora_client.get_fee_estimates(),
@@ -297,6 +442,16 @@ impl ChainSource {
 				}
 
 				fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
+
+				log_info!(
+					logger,
+					"Fee rate cache update finished in {}ms.",
+					now.elapsed().as_millis()
+				);
+				let unix_time_secs_opt =
+					SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+				*latest_fee_rate_cache_update_timestamp.write().unwrap() = unix_time_secs_opt;
+
 				Ok(())
 			},
 		}
@@ -389,5 +544,21 @@ impl Filter for ChainSource {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_output(output),
 		}
+	}
+}
+
+fn periodically_archive_fully_resolved_monitors(
+	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
+) {
+	let mut latest_archival_height_lock = latest_channel_monitor_archival_height.write().unwrap();
+	let cur_height = channel_manager.current_best_block().height;
+	let should_archive = latest_archival_height_lock
+		.as_ref()
+		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
+
+	if should_archive {
+		chain_monitor.archive_fully_resolved_channel_monitors();
+		*latest_archival_height_lock = Some(cur_height);
 	}
 }

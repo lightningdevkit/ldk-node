@@ -122,9 +122,7 @@ pub use builder::NodeBuilder as Builder;
 
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
-	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	default_user_config, may_announce_channel, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -145,7 +143,7 @@ pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
-use lightning::chain::{BestBlock, Confirm};
+use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
@@ -203,7 +201,6 @@ pub struct Node {
 	latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_rgs_snapshot_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_node_announcement_broadcast_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
 }
 
 impl Node {
@@ -270,160 +267,16 @@ impl Node {
 			})
 		})?;
 
-		// Setup wallet sync
-		let chain_source = Arc::clone(&self.chain_source);
-		let sync_logger = Arc::clone(&self.logger);
-		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
-		let mut stop_sync = self.stop_sender.subscribe();
-		let onchain_wallet_sync_interval_secs = self
-			.config
-			.onchain_wallet_sync_interval_secs
-			.max(config::WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-		runtime.spawn(async move {
-			let mut onchain_wallet_sync_interval =
-				tokio::time::interval(Duration::from_secs(onchain_wallet_sync_interval_secs));
-			onchain_wallet_sync_interval
-				.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-					_ = stop_sync.changed() => {
-						log_trace!(
-							sync_logger,
-							"Stopping background syncing on-chain wallet.",
-						);
-						return;
-					}
-					_ = onchain_wallet_sync_interval.tick() => {
-						let now = Instant::now();
-						match chain_source.sync_onchain_wallet().await {
-							Ok(()) => {
-								log_trace!(
-									sync_logger,
-									"Background sync of on-chain wallet finished in {}ms.",
-									now.elapsed().as_millis()
-								);
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-							}
-							Err(err) => {
-								log_error!(
-									sync_logger,
-									"Background sync of on-chain wallet failed: {}",
-									err
-								)
-							}
-						}
-					}
-				}
-			}
-		});
-
-		let mut stop_fee_updates = self.stop_sender.subscribe();
-		let fee_update_logger = Arc::clone(&self.logger);
-		let fee_update_timestamp = Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
-		let chain_source = Arc::clone(&self.chain_source);
-		let fee_rate_cache_update_interval_secs =
-			self.config.fee_rate_cache_update_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-		runtime.spawn(async move {
-			let mut fee_rate_update_interval =
-				tokio::time::interval(Duration::from_secs(fee_rate_cache_update_interval_secs));
-			// We just blocked on updating, so skip the first tick.
-			fee_rate_update_interval.reset();
-			fee_rate_update_interval
-				.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-					_ = stop_fee_updates.changed() => {
-						log_trace!(
-							fee_update_logger,
-							"Stopping background updates of fee rate cache.",
-						);
-						return;
-					}
-					_ = fee_rate_update_interval.tick() => {
-						let now = Instant::now();
-						match chain_source.update_fee_rate_estimates().await {
-							Ok(()) => {
-								log_trace!(
-								fee_update_logger,
-								"Background update of fee rate cache finished in {}ms.",
-								now.elapsed().as_millis()
-								);
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*fee_update_timestamp.write().unwrap() = unix_time_secs_opt;
-							}
-							Err(err) => {
-								log_error!(
-									fee_update_logger,
-									"Background update of fee rate cache failed: {}",
-									err
-									)
-							}
-						}
-					}
-				}
-			}
-		});
-
+		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
+		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
 		let sync_cman = Arc::clone(&self.channel_manager);
-		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
-		let archive_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		let sync_logger = Arc::clone(&self.logger);
-		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
-		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
-		let mut stop_sync = self.stop_sender.subscribe();
-		let wallet_sync_interval_secs =
-			self.config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 		runtime.spawn(async move {
-			let mut wallet_sync_interval =
-				tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
-			wallet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-				_ = stop_sync.changed() => {
-					log_trace!(
-						sync_logger,
-						"Stopping background syncing Lightning wallet.",
-					);
-					return;
-				}
-				_ = wallet_sync_interval.tick() => {
-					let confirmables = vec![
-						&*sync_cman as &(dyn Confirm + Sync + Send),
-						&*sync_cmon as &(dyn Confirm + Sync + Send),
-						&*sync_sweeper as &(dyn Confirm + Sync + Send),
-					];
-					let now = Instant::now();
-
-					match chain_source.sync_lightning_wallet(confirmables).await {
-							Ok(()) => {
-								log_trace!(
-									sync_logger,
-									"Background sync of Lightning wallet finished in {}ms.",
-									now.elapsed().as_millis()
-									);
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-
-								periodically_archive_fully_resolved_monitors(
-									Arc::clone(&archive_cman),
-									Arc::clone(&archive_cmon),
-									Arc::clone(&sync_monitor_archival_height)
-								);
-							}
-							Err(e) => {
-								log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
-							}
-						}
-					}
-				}
-			}
+			chain_source
+				.continuously_sync_wallets(stop_sync_receiver, sync_cman, sync_cmon, sync_sweeper)
+				.await;
 		});
 
 		if self.gossip_source.is_rgs() {
@@ -1364,96 +1217,15 @@ impl Node {
 
 		let chain_source = Arc::clone(&self.chain_source);
 		let sync_cman = Arc::clone(&self.channel_manager);
-		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
-		let archive_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		let sync_logger = Arc::clone(&self.logger);
-		let confirmables = vec![
-			&*sync_cman as &(dyn Confirm + Sync + Send),
-			&*sync_cmon as &(dyn Confirm + Sync + Send),
-			&*sync_sweeper as &(dyn Confirm + Sync + Send),
-		];
-		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
-		let sync_fee_rate_update_timestamp =
-			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
-		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
-		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
-
 		tokio::task::block_in_place(move || {
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
 				async move {
-					let now = Instant::now();
-					// We don't add an additional timeout here, as `Wallet::sync` already returns
-					// after a timeout.
-					match chain_source.sync_onchain_wallet().await {
-						Ok(()) => {
-							log_info!(
-								sync_logger,
-								"Sync of on-chain wallet finished in {}ms.",
-								now.elapsed().as_millis()
-							);
-							let unix_time_secs_opt = SystemTime::now()
-								.duration_since(UNIX_EPOCH)
-								.ok()
-								.map(|d| d.as_secs());
-							*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-						},
-						Err(e) => {
-							log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
-							return Err(e);
-						},
-					};
-
-					let now = Instant::now();
-					// We don't add an additional timeout here, as
-					// `ChainSource::update_fee_estimates` already returns after a timeout.
-					match chain_source.update_fee_rate_estimates().await {
-						Ok(()) => {
-							log_info!(
-								sync_logger,
-								"Fee rate cache update finished in {}ms.",
-								now.elapsed().as_millis()
-							);
-							let unix_time_secs_opt = SystemTime::now()
-								.duration_since(UNIX_EPOCH)
-								.ok()
-								.map(|d| d.as_secs());
-							*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
-						},
-						Err(e) => {
-							log_error!(sync_logger, "Fee rate cache update failed: {}", e,);
-							return Err(e);
-						},
-					}
-
-					let now = Instant::now();
-					match chain_source.sync_lightning_wallet(confirmables).await {
-						Ok(()) => {
-							log_info!(
-								sync_logger,
-								"Sync of Lightning wallet finished in {}ms.",
-								now.elapsed().as_millis()
-							);
-
-							let unix_time_secs_opt = SystemTime::now()
-								.duration_since(UNIX_EPOCH)
-								.ok()
-								.map(|d| d.as_secs());
-							*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-
-							periodically_archive_fully_resolved_monitors(
-								archive_cman,
-								archive_cmon,
-								sync_monitor_archival_height,
-							);
-							Ok(())
-						},
-						Err(e) => {
-							log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
-							Err(e.into())
-						},
-					}
+					chain_source.update_fee_rate_estimates().await?;
+					chain_source.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper).await?;
+					chain_source.sync_onchain_wallet().await?;
+					Ok(())
 				},
 			)
 		})
@@ -1789,20 +1561,4 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
-}
-
-fn periodically_archive_fully_resolved_monitors(
-	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
-) {
-	let mut latest_archival_height_lock = latest_channel_monitor_archival_height.write().unwrap();
-	let cur_height = channel_manager.current_best_block().height;
-	let should_archive = latest_archival_height_lock
-		.as_ref()
-		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
-
-	if should_archive {
-		chain_monitor.archive_fully_resolved_channel_monitors();
-		*latest_archival_height_lock = Some(cur_height);
-	}
 }

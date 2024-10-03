@@ -552,6 +552,15 @@ fn build_with_store_internal(
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
 	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
+	// Initialize the status fields.
+	let is_listening = Arc::new(AtomicBool::new(false));
+	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
+	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
+	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
+	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
+	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
+
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::Xpriv::new_master(config.network, &seed_bytes).map_err(|e| {
 		log_error!(logger, "Failed to derive master secret: {}", e);
@@ -601,6 +610,10 @@ fn build_with_store_internal(
 			Arc::clone(&tx_broadcaster),
 			Arc::clone(&config),
 			Arc::clone(&logger),
+			Arc::clone(&latest_wallet_sync_timestamp),
+			Arc::clone(&latest_onchain_wallet_sync_timestamp),
+			Arc::clone(&latest_fee_rate_cache_update_timestamp),
+			latest_channel_monitor_archival_height,
 		)),
 		None => {
 			// Default to Esplora client.
@@ -612,6 +625,10 @@ fn build_with_store_internal(
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&config),
 				Arc::clone(&logger),
+				Arc::clone(&latest_wallet_sync_timestamp),
+				Arc::clone(&latest_onchain_wallet_sync_timestamp),
+				Arc::clone(&latest_fee_rate_cache_update_timestamp),
+				latest_channel_monitor_archival_height,
 			))
 		},
 	};
@@ -978,14 +995,6 @@ fn build_with_store_internal(
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
 
-	let is_listening = Arc::new(AtomicBool::new(false));
-	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
-	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
-	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
-	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
-
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1017,7 +1026,6 @@ fn build_with_store_internal(
 		latest_fee_rate_cache_update_timestamp,
 		latest_rgs_snapshot_timestamp,
 		latest_node_announcement_broadcast_timestamp,
-		latest_channel_monitor_archival_height,
 	})
 }
 
