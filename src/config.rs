@@ -87,7 +87,7 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `log_dir_path`                         | None               |
 /// | `network`                              | Bitcoin            |
 /// | `listening_addresses`                  | None               |
-/// | `node_alias`                  		 | None               |
+/// | `node_alias`                           | None               |
 /// | `default_cltv_expiry_delta`            | 144                |
 /// | `onchain_wallet_sync_interval_secs`    | 80                 |
 /// | `wallet_sync_interval_secs`            | 30                 |
