@@ -307,9 +307,10 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
-	/// Sets the alias the [`Node`] will use in its announcement.
+	/// Sets the node alias that will be used when broadcasting announcements to the gossip
+	/// network.
 	///
-	/// The provided alias must be a valid UTF-8 string.
+	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	pub fn set_node_alias(&mut self, node_alias: String) -> Result<&mut Self, BuildError> {
 		let node_alias = sanitize_alias(&node_alias)?;
 
@@ -515,7 +516,10 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
 	}
 
-	/// Sets the node alias.
+	/// Sets the node alias that will be used when broadcasting announcements to the gossip
+	/// network.
+	///
+	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
 	}

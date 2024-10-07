@@ -113,12 +113,14 @@ pub struct Config {
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
 	///
-	/// **Note**: Node announcements will only be broadcast if the `node_alias` and the
+	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
-	/// The node alias to be used in announcements.
+	/// The node alias that will be used when broadcasting announcements to the gossip network.
 	///
-	/// **Note**: Node announcements will only be broadcast if the `node_alias` and the
+	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
+	///
+	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub node_alias: Option<NodeAlias>,
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
