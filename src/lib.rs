@@ -20,8 +20,7 @@
 //!
 //! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
 //! and configuring a [`Builder`] to your liking and calling [`build`]. `Node` can then be
-//! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`open_announced_channel`]
-//! [`send`], etc.:
+//! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`send`], etc.:
 //!
 //! ```no_run
 //! use ldk_node::Builder;
@@ -64,7 +63,6 @@
 //! [`start`]: Node::start
 //! [`stop`]: Node::stop
 //! [`open_channel`]: Node::open_channel
-//! [`open_announced_channel`]: Node::open_announced_channel
 //! [`send`]: Bolt11Payment::send
 //!
 #![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
