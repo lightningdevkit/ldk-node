@@ -9,6 +9,7 @@
 
 mod common;
 
+use common::random_announce_channel;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
@@ -43,7 +44,7 @@ fn test_cln() {
 	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1);
 
 	// Setup LDK Node
-	let config = common::random_config(true);
+	let config = common::random_config(true, random_announce_channel());
 	let mut builder = Builder::from_config(config);
 	builder.set_esplora_server("http://127.0.0.1:3002".to_string());
 
@@ -82,15 +83,19 @@ fn test_cln() {
 	// Open the channel
 	let funding_amount_sat = 1_000_000;
 
-	node.connect_open_channel(
-		cln_node_id,
-		cln_address,
-		funding_amount_sat,
-		Some(500_000_000),
-		None,
-		false,
-	)
-	.unwrap();
+	if node.config().node_alias.is_none() {
+		node.open_channel(cln_node_id, cln_address, funding_amount_sat, Some(500_000_000), None)
+			.unwrap();
+	} else {
+		node.open_announced_channel(
+			cln_node_id,
+			cln_address,
+			funding_amount_sat,
+			Some(500_000_000),
+			None,
+		)
+		.unwrap();
+	}
 
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
 	common::wait_for_tx(&electrs_client, funding_txo.txid);

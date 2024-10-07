@@ -20,7 +20,7 @@
 //!
 //! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
 //! and configuring a [`Builder`] to your liking and calling [`build`]. `Node` can then be
-//! controlled via commands such as [`start`], [`stop`], [`connect_open_channel`],
+//! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`open_announced_channel`]
 //! [`send`], etc.:
 //!
 //! ```no_run
@@ -47,7 +47,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.connect_open_channel(node_id, node_addr, 10000, None, None, false).unwrap();
+//! 	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -63,7 +63,8 @@
 //! [`build`]: Builder::build
 //! [`start`]: Node::start
 //! [`stop`]: Node::stop
-//! [`connect_open_channel`]: Node::connect_open_channel
+//! [`open_channel`]: Node::open_channel
+//! [`open_announced_channel`]: Node::open_announced_channel
 //! [`send`]: Bolt11Payment::send
 //!
 #![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
@@ -99,6 +100,7 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
+use lightning::routing::gossip::NodeAlias;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
@@ -121,8 +123,9 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	default_user_config, LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
+	can_announce_channel, default_user_config, ChannelAnnouncementStatus,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use connection::ConnectionManager;
@@ -601,6 +604,8 @@ impl Node {
 		let bcast_logger = Arc::clone(&self.logger);
 		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
 		let mut stop_bcast = self.stop_sender.subscribe();
+		let node_alias = self.config.node_alias.clone();
+		let can_announce_channel = can_announce_channel(&self.config);
 		runtime.spawn(async move {
 			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 			#[cfg(not(test))]
@@ -643,14 +648,21 @@ impl Node {
 								continue;
 							}
 
-							let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
-
-							if addresses.is_empty() {
-								// Skip if we are not listening on any addresses.
-								continue;
+							match can_announce_channel {
+								ChannelAnnouncementStatus::Unannounceable(_) => {
+									// Skip if we are not listening on any addresses or if the node alias is not set.
+									continue;
+								}
+								ChannelAnnouncementStatus::Announceable => {
+									// Broadcast node announcement.
+									let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
+									if let Some(node_alias) = node_alias.as_ref() {
+										bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
+									} else {
+										continue
+									}
+								}
 							}
-
-							bcast_pm.broadcast_node_announcement([0; 3], [0; 32], addresses);
 
 							let unix_time_secs_opt =
 								SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
@@ -961,6 +973,11 @@ impl Node {
 		self.config.listening_addresses.clone()
 	}
 
+	/// Returns our node alias.
+	pub fn node_alias(&self) -> Option<NodeAlias> {
+		self.config.node_alias
+	}
+
 	/// Returns a payment handler allowing to create and pay [BOLT 11] invoices.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
@@ -1170,20 +1187,11 @@ impl Node {
 		Ok(())
 	}
 
-	/// Connect to a node and open a new channel. Disconnects and re-connects are handled automatically
+	/// Connect to a node and open a new channel.
 	///
-	/// Disconnects and reconnects are handled automatically.
-	///
-	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
-	/// channel counterparty on channel open. This can be useful to start out with the balance not
-	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
-	///
-	/// If Anchor channels are enabled, this will ensure the configured
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
-	/// opening the channel.
-	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
-	pub fn connect_open_channel(
+	/// See [`Node::open_channel`] or [`Node::open_announced_channel`] for more information about
+	/// parameters.
+	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_channel: bool,
@@ -1282,6 +1290,81 @@ impl Node {
 			Err(e) => {
 				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
 				Err(Error::ChannelCreationFailed)
+			},
+		}
+	}
+
+	/// Connect to a node and open a new channel.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Calls `Node::open_channel_inner` with `announce_channel` set to `false`.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	pub fn open_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+		)
+	}
+
+	/// Connect to a node and open a new announced channel.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Note that, regardless of the value of `announce_channel` passed, this function
+	/// checks that a node is configured to announce the channel to be openned and returns
+	/// an error if the configuration is wrong. Otherwise, calls `Node::open_channel_inner`
+	/// with `announced_channel` equals to `true`.
+	/// See `config::can_announce_channel` for more details.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	pub fn open_announced_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		match can_announce_channel(&self.config) {
+			config::ChannelAnnouncementStatus::Announceable => self.open_channel_inner(
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				true,
+			),
+			config::ChannelAnnouncementStatus::Unannounceable(reason) => match reason {
+				config::ChannelAnnouncementBlocker::MissingNodeAlias => {
+					return Err(Error::InvalidNodeAlias)
+				},
+				config::ChannelAnnouncementBlocker::MissingListeningAddresses => {
+					return Err(Error::InvalidSocketAddress)
+				},
+				config::ChannelAnnouncementBlocker::EmptyListeningAddresses => {
+					return Err(Error::InvalidSocketAddress)
+				},
 			},
 		}
 	}

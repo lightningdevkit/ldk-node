@@ -32,6 +32,7 @@ use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
 	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
@@ -109,7 +110,7 @@ impl Default for LiquiditySourceConfig {
 /// An error encountered during building a [`Node`].
 ///
 /// [`Node`]: crate::Node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BuildError {
 	/// The given seed bytes are invalid, e.g., have invalid length.
 	InvalidSeedBytes,
@@ -121,6 +122,8 @@ pub enum BuildError {
 	InvalidChannelMonitor,
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
+	/// The provided alias is invalid.
+	InvalidNodeAlias,
 	/// We failed to read data from the [`KVStore`].
 	///
 	/// [`KVStore`]: lightning::util::persist::KVStore
@@ -159,6 +162,7 @@ impl fmt::Display for BuildError {
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
+			Self::InvalidNodeAlias => write!(f, "Given node alias is invalid."),
 		}
 	}
 }
@@ -300,6 +304,16 @@ impl NodeBuilder {
 		}
 
 		self.config.listening_addresses = Some(listening_addresses);
+		Ok(self)
+	}
+
+	/// Sets the alias the [`Node`] will use in its announcement.
+	///
+	/// The provided alias must be a valid UTF-8 string.
+	pub fn set_node_alias(&mut self, node_alias: String) -> Result<&mut Self, BuildError> {
+		let node_alias = sanitize_alias(&node_alias)?;
+
+		self.config.node_alias = Some(node_alias);
 		Ok(self)
 	}
 
@@ -499,6 +513,11 @@ impl ArcedNodeBuilder {
 		&self, listening_addresses: Vec<SocketAddress>,
 	) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
+	}
+
+	/// Sets the node alias.
+	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
 	}
 
 	/// Sets the level at which [`Node`] will log messages.
@@ -1048,5 +1067,60 @@ fn seed_bytes_from_config(
 			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
 		},
+	}
+}
+
+/// Sanitize the user-provided node alias to ensure that it is a valid protocol-specified UTF-8 string.
+pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
+	let alias = alias_str.trim();
+
+	// Alias must be 32-bytes long or less.
+	if alias.as_bytes().len() > 32 {
+		return Err(BuildError::InvalidNodeAlias);
+	}
+
+	let mut bytes = [0u8; 32];
+	bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+	Ok(NodeAlias(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{sanitize_alias, BuildError, NodeAlias};
+
+	#[test]
+	fn sanitize_empty_node_alias() {
+		// Empty node alias
+		let alias = "";
+		let mut buf = [0u8; 32];
+		buf[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+
+		let expected_node_alias = NodeAlias([0; 32]);
+		let node_alias = sanitize_alias(alias).unwrap();
+		assert_eq!(node_alias, expected_node_alias);
+	}
+
+	#[test]
+	fn sanitize_alias_with_sandwiched_null() {
+		// Alias with emojis
+		let alias = "I\u{1F496}LDK-Node!";
+		let mut buf = [0u8; 32];
+		buf[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+		let expected_alias = NodeAlias(buf);
+
+		let user_provided_alias = "I\u{1F496}LDK-Node!\0\u{26A1}";
+		let node_alias = sanitize_alias(user_provided_alias).unwrap();
+
+		let node_alias_display = format!("{}", node_alias);
+
+		assert_eq!(alias, &node_alias_display);
+		assert_ne!(expected_alias, node_alias);
+	}
+
+	#[test]
+	fn sanitize_alias_gt_32_bytes() {
+		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
+		let node = sanitize_alias(alias);
+		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
 	}
 }

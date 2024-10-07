@@ -8,6 +8,7 @@
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
 use lightning::util::config::UserConfig;
 use lightning::util::logger::Level as LogLevel;
 
@@ -86,6 +87,7 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `log_dir_path`                         | None               |
 /// | `network`                              | Bitcoin            |
 /// | `listening_addresses`                  | None               |
+/// | `node_alias`                  		 | None               |
 /// | `default_cltv_expiry_delta`            | 144                |
 /// | `onchain_wallet_sync_interval_secs`    | 80                 |
 /// | `wallet_sync_interval_secs`            | 30                 |
@@ -110,7 +112,15 @@ pub struct Config {
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
+	///
+	/// **Note**: Node announcements will only be broadcast if the `node_alias` and the
+	/// `listening_addresses` are set.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
+	/// The node alias to be used in announcements.
+	///
+	/// **Note**: Node announcements will only be broadcast if the `node_alias` and the
+	/// `listening_addresses` are set.
+	pub node_alias: Option<NodeAlias>,
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
 	///
 	/// **Note:** A minimum of 10 seconds is always enforced.
@@ -180,6 +190,7 @@ impl Default for Config {
 			log_level: DEFAULT_LOG_LEVEL,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
+			node_alias: None,
 		}
 	}
 }
@@ -265,17 +276,124 @@ pub fn default_config() -> Config {
 	Config::default()
 }
 
+/// Specifies reasons why a channel cannot be announced.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ChannelAnnouncementBlocker {
+	/// The node alias is not set.
+	MissingNodeAlias,
+	/// The listening addresses are not set.
+	MissingListeningAddresses,
+	// This listening addresses is set but the vector is empty.
+	EmptyListeningAddresses,
+}
+
+/// Enumeration defining the announcement status of a channel.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ChannelAnnouncementStatus {
+	/// The channel is announceable.
+	Announceable,
+	/// The channel is not announceable.
+	Unannounceable(ChannelAnnouncementBlocker),
+}
+
+/// Checks if a node is can announce a channel based on the configured values of both the node's
+/// alias and its listening addresses.
+///
+/// If either of them is unset, the node cannot announce the channel. This ability to announce/
+/// unannounce a channel is codified with `ChannelAnnouncementStatus`
+pub(crate) fn can_announce_channel(config: &Config) -> ChannelAnnouncementStatus {
+	if config.node_alias.is_none() {
+		return ChannelAnnouncementStatus::Unannounceable(
+			ChannelAnnouncementBlocker::MissingNodeAlias,
+		);
+	}
+
+	match &config.listening_addresses {
+		None => ChannelAnnouncementStatus::Unannounceable(
+			ChannelAnnouncementBlocker::MissingListeningAddresses,
+		),
+		Some(addresses) if addresses.is_empty() => ChannelAnnouncementStatus::Unannounceable(
+			ChannelAnnouncementBlocker::EmptyListeningAddresses,
+		),
+		Some(_) => ChannelAnnouncementStatus::Announceable,
+	}
+}
+
 pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// Initialize the default config values.
 	//
-	// Note that methods such as Node::connect_open_channel might override some of the values set
-	// here, e.g. the ChannelHandshakeConfig, meaning these default values will mostly be relevant
-	// for inbound channels.
+	// Note that methods such as Node::open_channel and Node::open_announced_channel might override
+	// some of the values set here, e.g. the ChannelHandshakeConfig, meaning these default values
+	// will mostly be relevant for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
 	user_config.manually_accept_inbound_channels = true;
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 
+	match can_announce_channel(config) {
+		ChannelAnnouncementStatus::Announceable => (),
+		ChannelAnnouncementStatus::Unannounceable(_) => {
+			user_config.accept_forwards_to_priv_channels = false;
+			user_config.channel_handshake_config.announced_channel = false;
+			user_config.channel_handshake_limits.force_announced_channel_preference = true;
+		},
+	}
+
 	user_config
+}
+
+#[cfg(test)]
+mod tests {
+	use std::str::FromStr;
+
+	use crate::config::ChannelAnnouncementStatus;
+
+	use super::can_announce_channel;
+	use super::Config;
+	use super::NodeAlias;
+	use super::SocketAddress;
+
+	#[test]
+	fn node_can_announce_channel() {
+		// Default configuration with node alias and listening addresses unset
+		let mut node_config = Config::default();
+		assert_eq!(
+			can_announce_channel(&node_config),
+			ChannelAnnouncementStatus::Unannounceable(
+				crate::config::ChannelAnnouncementBlocker::MissingNodeAlias
+			)
+		);
+
+		// Set node alias with listening addresses unset
+		let alias_frm_str = |alias: &str| {
+			let mut bytes = [0u8; 32];
+			bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+			NodeAlias(bytes)
+		};
+		node_config.node_alias = Some(alias_frm_str("LDK_Node"));
+		assert_eq!(
+			can_announce_channel(&node_config),
+			ChannelAnnouncementStatus::Unannounceable(
+				crate::config::ChannelAnnouncementBlocker::MissingListeningAddresses
+			)
+		);
+
+		// Set node alias with an empty list of listening addresses
+		node_config.listening_addresses = Some(vec![]);
+		assert_eq!(
+			can_announce_channel(&node_config),
+			ChannelAnnouncementStatus::Unannounceable(
+				crate::config::ChannelAnnouncementBlocker::EmptyListeningAddresses
+			)
+		);
+
+		// Set node alias with a non-empty list of listening addresses
+		let socket_address =
+			SocketAddress::from_str("localhost:8000").expect("Socket address conversion failed.");
+		if let Some(ref mut addresses) = node_config.listening_addresses {
+			addresses.push(socket_address);
+		}
+		assert_eq!(can_announce_channel(&node_config), ChannelAnnouncementStatus::Announceable);
+	}
 }

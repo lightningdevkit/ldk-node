@@ -19,7 +19,7 @@ pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::{Offer, OfferId};
 pub use lightning::offers::refund::Refund;
-pub use lightning::routing::gossip::{NodeId, RoutingFees};
+pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
 
 pub use lightning_invoice::Bolt11Invoice;
@@ -30,6 +30,7 @@ pub use bip39::Mnemonic;
 
 use crate::UniffiCustomTypeConverter;
 
+use crate::builder::sanitize_alias;
 use crate::error::Error;
 use crate::hex_utils;
 use crate::{SocketAddress, UserChannelId};
@@ -318,6 +319,18 @@ impl UniffiCustomTypeConverter for UntrustedString {
 	type Builtin = String;
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
 		Ok(UntrustedString(val))
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for NodeAlias {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(sanitize_alias(&val).map_err(|_| Error::InvalidNodeAlias)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {

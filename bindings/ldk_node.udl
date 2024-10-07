@@ -8,6 +8,7 @@ dictionary Config {
 	string? log_dir_path;
 	Network network;
 	sequence<SocketAddress>? listening_addresses;
+	NodeAlias? node_alias;
 	u64 onchain_wallet_sync_interval_secs;
 	u64 wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;
@@ -40,6 +41,8 @@ interface Builder {
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
+	void set_node_alias(string node_alias);
+	[Throws=BuildError]
 	Node build();
 	[Throws=BuildError]
 	Node build_with_fs_store();
@@ -59,6 +62,7 @@ interface Node {
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
+	NodeAlias? node_alias();
 	Bolt11Payment bolt11_payment();
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
@@ -69,7 +73,9 @@ interface Node {
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
 	[Throws=NodeError]
-	UserChannelId connect_open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config, boolean announce_channel);
+	UserChannelId open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
+	[Throws=NodeError]
+	UserChannelId open_announced_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
 	[Throws=NodeError]
 	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
@@ -202,6 +208,7 @@ enum NodeError {
 	"InvalidNetwork",
 	"InvalidUri",
 	"InvalidQuantity",
+	"InvalidNodeAlias",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
@@ -232,6 +239,7 @@ enum BuildError {
 	"InvalidSystemTime",
 	"InvalidChannelMonitor",
 	"InvalidListeningAddresses",
+	"InvalidNodeAlias",
 	"ReadFailed",
 	"WriteFailed",
 	"StoragePathAccessFailed",
@@ -529,3 +537,6 @@ typedef string Mnemonic;
 
 [Custom]
 typedef string UntrustedString;
+
+[Custom]
+typedef string NodeAlias;
