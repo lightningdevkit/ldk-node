@@ -278,47 +278,9 @@ pub fn default_config() -> Config {
 	Config::default()
 }
 
-/// Specifies reasons why a channel cannot be announced.
-#[derive(Debug, PartialEq)]
-pub(crate) enum ChannelAnnouncementBlocker {
-	/// The node alias is not set.
-	MissingNodeAlias,
-	/// The listening addresses are not set.
-	MissingListeningAddresses,
-	// This listening addresses is set but the vector is empty.
-	EmptyListeningAddresses,
-}
-
-/// Enumeration defining the announcement status of a channel.
-#[derive(Debug, PartialEq)]
-pub(crate) enum ChannelAnnouncementStatus {
-	/// The channel is announceable.
-	Announceable,
-	/// The channel is not announceable.
-	Unannounceable(ChannelAnnouncementBlocker),
-}
-
-/// Checks if a node is can announce a channel based on the configured values of both the node's
-/// alias and its listening addresses.
-///
-/// If either of them is unset, the node cannot announce the channel. This ability to announce/
-/// unannounce a channel is codified with `ChannelAnnouncementStatus`
-pub(crate) fn can_announce_channel(config: &Config) -> ChannelAnnouncementStatus {
-	if config.node_alias.is_none() {
-		return ChannelAnnouncementStatus::Unannounceable(
-			ChannelAnnouncementBlocker::MissingNodeAlias,
-		);
-	}
-
-	match &config.listening_addresses {
-		None => ChannelAnnouncementStatus::Unannounceable(
-			ChannelAnnouncementBlocker::MissingListeningAddresses,
-		),
-		Some(addresses) if addresses.is_empty() => ChannelAnnouncementStatus::Unannounceable(
-			ChannelAnnouncementBlocker::EmptyListeningAddresses,
-		),
-		Some(_) => ChannelAnnouncementStatus::Announceable,
-	}
+pub(crate) fn may_announce_channel(config: &Config) -> bool {
+	config.node_alias.is_some()
+		&& config.listening_addresses.as_ref().map_or(false, |addrs| !addrs.is_empty())
 }
 
 pub(crate) fn default_user_config(config: &Config) -> UserConfig {
@@ -333,13 +295,10 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 
-	match can_announce_channel(config) {
-		ChannelAnnouncementStatus::Announceable => (),
-		ChannelAnnouncementStatus::Unannounceable(_) => {
-			user_config.accept_forwards_to_priv_channels = false;
-			user_config.channel_handshake_config.announced_channel = false;
-			user_config.channel_handshake_limits.force_announced_channel_preference = true;
-		},
+	if !may_announce_channel(config) {
+		user_config.accept_forwards_to_priv_channels = false;
+		user_config.channel_handshake_config.announced_channel = false;
+		user_config.channel_handshake_limits.force_announced_channel_preference = true;
 	}
 
 	user_config
@@ -349,23 +308,16 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 mod tests {
 	use std::str::FromStr;
 
-	use crate::config::ChannelAnnouncementStatus;
-
-	use super::can_announce_channel;
+	use super::may_announce_channel;
 	use super::Config;
 	use super::NodeAlias;
 	use super::SocketAddress;
 
 	#[test]
-	fn node_can_announce_channel() {
+	fn node_announce_channel() {
 		// Default configuration with node alias and listening addresses unset
 		let mut node_config = Config::default();
-		assert_eq!(
-			can_announce_channel(&node_config),
-			ChannelAnnouncementStatus::Unannounceable(
-				crate::config::ChannelAnnouncementBlocker::MissingNodeAlias
-			)
-		);
+		assert!(!may_announce_channel(&node_config));
 
 		// Set node alias with listening addresses unset
 		let alias_frm_str = |alias: &str| {
@@ -374,21 +326,11 @@ mod tests {
 			NodeAlias(bytes)
 		};
 		node_config.node_alias = Some(alias_frm_str("LDK_Node"));
-		assert_eq!(
-			can_announce_channel(&node_config),
-			ChannelAnnouncementStatus::Unannounceable(
-				crate::config::ChannelAnnouncementBlocker::MissingListeningAddresses
-			)
-		);
+		assert!(!may_announce_channel(&node_config));
 
 		// Set node alias with an empty list of listening addresses
 		node_config.listening_addresses = Some(vec![]);
-		assert_eq!(
-			can_announce_channel(&node_config),
-			ChannelAnnouncementStatus::Unannounceable(
-				crate::config::ChannelAnnouncementBlocker::EmptyListeningAddresses
-			)
-		);
+		assert!(!may_announce_channel(&node_config));
 
 		// Set node alias with a non-empty list of listening addresses
 		let socket_address =
@@ -396,6 +338,6 @@ mod tests {
 		if let Some(ref mut addresses) = node_config.listening_addresses {
 			addresses.push(socket_address);
 		}
-		assert_eq!(can_announce_channel(&node_config), ChannelAnnouncementStatus::Announceable);
+		assert!(may_announce_channel(&node_config));
 	}
 }

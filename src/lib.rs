@@ -122,8 +122,8 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	can_announce_channel, default_user_config, ChannelAnnouncementStatus,
-	LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	default_user_config, may_announce_channel, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
@@ -605,20 +605,20 @@ impl Node {
 		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
 		let mut stop_bcast = self.stop_sender.subscribe();
 		let node_alias = self.config.node_alias.clone();
-		let can_announce_channel = can_announce_channel(&self.config);
-		runtime.spawn(async move {
-			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
-			#[cfg(not(test))]
-			let mut interval = tokio::time::interval(Duration::from_secs(30));
-			#[cfg(test)]
-			let mut interval = tokio::time::interval(Duration::from_secs(5));
-			loop {
-				tokio::select! {
+		if may_announce_channel(&self.config) {
+			runtime.spawn(async move {
+				// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
+				#[cfg(not(test))]
+				let mut interval = tokio::time::interval(Duration::from_secs(30));
+				#[cfg(test)]
+				let mut interval = tokio::time::interval(Duration::from_secs(5));
+				loop {
+					tokio::select! {
 						_ = stop_bcast.changed() => {
 							log_trace!(
 								bcast_logger,
 								"Stopping broadcasting node announcements.",
-							);
+								);
 							return;
 						}
 						_ = interval.tick() => {
@@ -648,36 +648,37 @@ impl Node {
 								continue;
 							}
 
-							match can_announce_channel {
-								ChannelAnnouncementStatus::Unannounceable(_) => {
-									// Skip if we are not listening on any addresses or if the node alias is not set.
-									continue;
+							let addresses = if let Some(addresses) = bcast_config.listening_addresses.clone() {
+								addresses
+							} else {
+								debug_assert!(false, "We checked whether the node may announce, so listening addresses should always be set");
+								continue;
+							};
+
+							if let Some(node_alias) = node_alias.as_ref() {
+								bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
+
+								let unix_time_secs_opt =
+									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+								*bcast_ann_timestamp.write().unwrap() = unix_time_secs_opt;
+
+								if let Some(unix_time_secs) = unix_time_secs_opt {
+									io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
+										.unwrap_or_else(|e| {
+											log_error!(bcast_logger, "Persistence failed: {}", e);
+											panic!("Persistence failed");
+										});
 								}
-								ChannelAnnouncementStatus::Announceable => {
-									let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
-									if let Some(node_alias) = node_alias.as_ref() {
-										bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
-									} else {
-										continue
-									}
-								}
+							} else {
+								debug_assert!(false, "We checked whether the node may announce, so node alias should always be set");
+								continue
 							}
 
-							let unix_time_secs_opt =
-								SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-							*bcast_ann_timestamp.write().unwrap() = unix_time_secs_opt;
-
-							if let Some(unix_time_secs) = unix_time_secs_opt {
-								io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
-									.unwrap_or_else(|e| {
-										log_error!(bcast_logger, "Persistence failed: {}", e);
-										panic!("Persistence failed");
-									});
-							}
 						}
+					}
 				}
-			}
-		});
+			});
+		}
 
 		let mut stop_tx_bcast = self.stop_sender.subscribe();
 		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
@@ -1341,26 +1342,18 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
-		match can_announce_channel(&self.config) {
-			config::ChannelAnnouncementStatus::Announceable => self.open_channel_inner(
+		if may_announce_channel(&self.config) {
+			self.open_channel_inner(
 				node_id,
 				address,
 				channel_amount_sats,
 				push_to_counterparty_msat,
 				channel_config,
 				true,
-			),
-			config::ChannelAnnouncementStatus::Unannounceable(reason) => match reason {
-				config::ChannelAnnouncementBlocker::MissingNodeAlias => {
-					return Err(Error::InvalidNodeAlias)
-				},
-				config::ChannelAnnouncementBlocker::MissingListeningAddresses => {
-					return Err(Error::InvalidSocketAddress)
-				},
-				config::ChannelAnnouncementBlocker::EmptyListeningAddresses => {
-					return Err(Error::InvalidSocketAddress)
-				},
-			},
+			)
+		} else {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node. Please make sure to configure listening addreesses and node alias");
+			return Err(Error::ChannelCreationFailed);
 		}
 	}
 
