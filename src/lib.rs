@@ -1186,10 +1186,6 @@ impl Node {
 		Ok(())
 	}
 
-	/// Connect to a node and open a new channel.
-	///
-	/// See [`Node::open_channel`] or [`Node::open_announced_channel`] for more information about
-	/// parameters.
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1293,7 +1289,9 @@ impl Node {
 		}
 	}
 
-	/// Connect to a node and open a new channel.
+	/// Connect to a node and open a new unannounced channel.
+	///
+	/// To open an announced channel, see [`Node::open_announced_channel`].
 	///
 	/// Disconnects and reconnects are handled automatically.
 	///
@@ -1304,8 +1302,6 @@ impl Node {
 	/// If Anchor channels are enabled, this will ensure the configured
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
-	///
-	/// Calls `Node::open_channel_inner` with `announce_channel` set to `false`.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_channel(
@@ -1324,6 +1320,12 @@ impl Node {
 
 	/// Connect to a node and open a new announced channel.
 	///
+	/// This will return an error if the node has not been sufficiently configured to operate as a
+	/// forwarding node that can properly announce its existence to the publip network graph, i.e.,
+	/// [`Config::listening_addresses`] and [`Config::node_alias`] are unset.
+	///
+	/// To open an unannounced channel, see [`Node::open_channel`].
+	///
 	/// Disconnects and reconnects are handled automatically.
 	///
 	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
@@ -1333,12 +1335,6 @@ impl Node {
 	/// If Anchor channels are enabled, this will ensure the configured
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
-	///
-	/// Note that, regardless of the value of `announce_channel` passed, this function
-	/// checks that a node is configured to announce the channel to be openned and returns
-	/// an error if the configuration is wrong. Otherwise, calls `Node::open_channel_inner`
-	/// with `announced_channel` equals to `true`.
-	/// See `config::can_announce_channel` for more details.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_announced_channel(
