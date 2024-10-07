@@ -100,7 +100,6 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
-use lightning::routing::gossip::NodeAlias;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
@@ -151,6 +150,7 @@ use lightning::chain::{BestBlock, Confirm};
 use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
 use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
 
 pub use lightning::util::logger::Level as LogLevel;
 
