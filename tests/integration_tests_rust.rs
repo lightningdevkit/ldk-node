@@ -131,16 +131,16 @@ fn multi_hop_sending() {
 	//                   \                  /
 	//                    (1M:0)- N3 -(1M:0)
 
-	open_channel(&nodes[0], &nodes[1], 100_000, &electrsd);
-	open_channel(&nodes[1], &nodes[2], 1_000_000, &electrsd);
+	open_channel(&nodes[0], &nodes[1], 100_000, true, &electrsd);
+	open_channel(&nodes[1], &nodes[2], 1_000_000, true, &electrsd);
 	// We need to sync wallets in-between back-to-back channel opens from the same node so BDK
 	// wallet picks up on the broadcast funding tx and doesn't double-spend itself.
 	//
 	// TODO: Remove once fixed in BDK.
 	nodes[1].sync_wallets().unwrap();
-	open_channel(&nodes[1], &nodes[3], 1_000_000, &electrsd);
-	open_channel(&nodes[2], &nodes[4], 1_000_000, &electrsd);
-	open_channel(&nodes[3], &nodes[4], 1_000_000, &electrsd);
+	open_channel(&nodes[1], &nodes[3], 1_000_000, true, &electrsd);
+	open_channel(&nodes[2], &nodes[4], 1_000_000, true, &electrsd);
+	open_channel(&nodes[3], &nodes[4], 1_000_000, true, &electrsd);
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
@@ -418,7 +418,7 @@ fn simple_bolt12_send_receive() {
 	);
 
 	node_a.sync_wallets().unwrap();
-	open_channel(&node_a, &node_b, 4_000_000, &electrsd);
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
@@ -625,7 +625,7 @@ fn generate_bip21_uri() {
 	);
 
 	node_a.sync_wallets().unwrap();
-	open_channel(&node_a, &node_b, 4_000_000, &electrsd);
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
 	node_a.sync_wallets().unwrap();
@@ -666,7 +666,7 @@ fn unified_qr_send_receive() {
 	);
 
 	node_a.sync_wallets().unwrap();
-	open_channel(&node_a, &node_b, 4_000_000, &electrsd);
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
 	node_a.sync_wallets().unwrap();

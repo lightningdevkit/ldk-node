@@ -203,16 +203,11 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 
 pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	let mut rng = thread_rng();
-	let ranged_val = rng.gen_range(0..10);
-	match ranged_val {
-		0 => None,
-		val => {
-			let alias = format!("ldk-node-{}", val);
-			let mut bytes = [0u8; 32];
-			bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
-			Some(NodeAlias(bytes))
-		},
-	}
+	let rand_val = rng.gen_range(0..1000);
+	let alias = format!("ldk-node-{}", rand_val);
+	let mut bytes = [0u8; 32];
+	bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+	Some(NodeAlias(bytes))
 }
 
 pub(crate) fn random_config(anchor_channels: bool) -> Config {
@@ -404,17 +399,30 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 }
 
 pub fn open_channel(
-	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, electrsd: &ElectrsD,
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
+	electrsd: &ElectrsD,
 ) {
-	node_a
-		.open_announced_channel(
-			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
-			funding_amount_sat,
-			None,
-			None,
-		)
-		.unwrap();
+	if should_announce {
+		node_a
+			.open_announced_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				None,
+				None,
+			)
+			.unwrap();
+	} else {
+		node_a
+			.open_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				None,
+				None,
+			)
+			.unwrap();
+	}
 	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
 
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
@@ -451,7 +459,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
 	node_a
-		.open_channel(
+		.open_announced_channel(
 			node_b.node_id(),
 			node_b.listening_addresses().unwrap().first().unwrap().clone(),
 			funding_amount_sat,
