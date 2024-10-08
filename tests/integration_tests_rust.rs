@@ -14,6 +14,7 @@ use common::{
 	setup_node, setup_two_nodes, wait_for_tx, TestSyncStore,
 };
 
+use ldk_node::config::EsploraSyncConfig;
 use ldk_node::payment::{PaymentKind, QrPaymentResult, SendingParameters};
 use ldk_node::{Builder, Event, NodeError};
 
@@ -102,8 +103,11 @@ fn multi_hop_sending() {
 	let mut nodes = Vec::new();
 	for _ in 0..5 {
 		let config = random_config(true);
+		let mut sync_config = EsploraSyncConfig::default();
+		sync_config.onchain_wallet_sync_interval_secs = 100000;
+		sync_config.lightning_wallet_sync_interval_secs = 100000;
 		setup_builder!(builder, config);
-		builder.set_esplora_server(esplora_url.clone());
+		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		let node = builder.build().unwrap();
 		node.start().unwrap();
 		nodes.push(node);
@@ -182,7 +186,7 @@ fn connect_to_public_testnet_esplora() {
 	let mut config = random_config(true);
 	config.network = Network::Testnet;
 	setup_builder!(builder, config);
-	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
 	let node = builder.build().unwrap();
 	node.start().unwrap();
 	node.stop().unwrap();
@@ -198,8 +202,11 @@ fn start_stop_reinit() {
 	let test_sync_store: Arc<dyn KVStore + Sync + Send> =
 		Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
 
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.onchain_wallet_sync_interval_secs = 100000;
+	sync_config.lightning_wallet_sync_interval_secs = 100000;
 	setup_builder!(builder, config);
-	builder.set_esplora_server(esplora_url.clone());
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
 	node.start().unwrap();
@@ -236,7 +243,7 @@ fn start_stop_reinit() {
 	drop(node);
 
 	setup_builder!(builder, config);
-	builder.set_esplora_server(esplora_url.clone());
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let reinitialized_node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
 	reinitialized_node.start().unwrap();

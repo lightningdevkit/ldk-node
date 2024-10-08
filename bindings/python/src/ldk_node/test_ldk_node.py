@@ -84,7 +84,7 @@ def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
     config = default_config()
     builder = Builder.from_config(config)
     builder.set_storage_dir_path(tmp_dir)
-    builder.set_esplora_server(esplora_endpoint)
+    builder.set_chain_source_esplora(esplora_endpoint, None)
     builder.set_network(DEFAULT_TEST_NETWORK)
     builder.set_listening_addresses(listening_addresses)
     return builder.build()

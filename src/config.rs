@@ -121,18 +121,6 @@ pub struct Config {
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub node_alias: Option<NodeAlias>,
-	/// The time in-between background sync attempts of the onchain wallet, in seconds.
-	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
-	pub onchain_wallet_sync_interval_secs: u64,
-	/// The time in-between background sync attempts of the LDK wallet, in seconds.
-	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
-	pub wallet_sync_interval_secs: u64,
-	/// The time in-between background update attempts to our fee rate cache, in seconds.
-	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
-	pub fee_rate_cache_update_interval_secs: u64,
 	/// A list of peers that we allow to establish zero confirmation channels to us.
 	///
 	/// **Note:** Allowing payments via zero-confirmation channels is potentially insecure if the
@@ -182,9 +170,6 @@ impl Default for Config {
 			log_dir_path: None,
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
-			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
-			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
-			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			log_level: DEFAULT_LOG_LEVEL,
@@ -300,6 +285,41 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	}
 
 	user_config
+}
+
+/// Options related to syncing the Lightning and on-chain wallets via an Esplora backend.
+///
+/// ### Defaults
+///
+/// | Parameter                              | Value              |
+/// |----------------------------------------|--------------------|
+/// | `onchain_wallet_sync_interval_secs`    | 80                 |
+/// | `lightning_wallet_sync_interval_secs`  | 30                 |
+/// | `fee_rate_cache_update_interval_secs`  | 600                |
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct EsploraSyncConfig {
+	/// The time in-between background sync attempts of the onchain wallet, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub onchain_wallet_sync_interval_secs: u64,
+	/// The time in-between background sync attempts of the LDK wallet, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub lightning_wallet_sync_interval_secs: u64,
+	/// The time in-between background update attempts to our fee rate cache, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub fee_rate_cache_update_interval_secs: u64,
+}
+
+impl Default for EsploraSyncConfig {
+	fn default() -> Self {
+		Self {
+			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
+			lightning_wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
+			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
+		}
+	}
 }
 
 /// Options which apply on a per-channel basis and may change at runtime or based on negotiation

@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
-use crate::config::{default_user_config, Config, WALLET_KEYS_SEED_LEN};
+use crate::config::{default_user_config, Config, EsploraSyncConfig, WALLET_KEYS_SEED_LEN};
 
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -77,7 +77,7 @@ use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
-	Esplora(String),
+	Esplora { server_url: String, sync_config: Option<EsploraSyncConfig> },
 }
 
 #[derive(Debug, Clone)]
@@ -237,8 +237,14 @@ impl NodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
-	pub fn set_esplora_server(&mut self, esplora_server_url: String) -> &mut Self {
-		self.chain_data_source_config = Some(ChainDataSourceConfig::Esplora(esplora_server_url));
+	///
+	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_esplora(
+		&mut self, server_url: String, sync_config: Option<EsploraSyncConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::Esplora { server_url, sync_config });
 		self
 	}
 
@@ -464,8 +470,13 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
-	pub fn set_esplora_server(&self, esplora_server_url: String) {
-		self.inner.write().unwrap().set_esplora_server(esplora_server_url);
+	///
+	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_esplora(
+		&self, server_url: String, sync_config: Option<EsploraSyncConfig>,
+	) {
+		self.inner.write().unwrap().set_chain_source_esplora(server_url, sync_config);
 	}
 
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
@@ -608,21 +619,27 @@ fn build_with_store_internal(
 	));
 
 	let chain_source = match chain_data_source_config {
-		Some(ChainDataSourceConfig::Esplora(server_url)) => Arc::new(ChainSource::new_esplora(
-			server_url.clone(),
-			Arc::clone(&wallet),
-			Arc::clone(&fee_estimator),
-			Arc::clone(&tx_broadcaster),
-			Arc::clone(&kv_store),
-			Arc::clone(&config),
-			Arc::clone(&logger),
-			Arc::clone(&node_metrics),
-		)),
+		Some(ChainDataSourceConfig::Esplora { server_url, sync_config }) => {
+			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
+			Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				sync_config,
+				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
 		None => {
 			// Default to Esplora client.
 			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+			let sync_config = EsploraSyncConfig::default();
 			Arc::new(ChainSource::new_esplora(
 				server_url.clone(),
+				sync_config,
 				Arc::clone(&wallet),
 				Arc::clone(&fee_estimator),
 				Arc::clone(&tx_broadcaster),

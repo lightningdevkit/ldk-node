@@ -33,7 +33,7 @@
 //! fn main() {
 //! 	let mut builder = Builder::new();
 //! 	builder.set_network(Network::Testnet);
-//! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+//! 	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
 //! 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
 //!
 //! 	let node = builder.build().unwrap();
@@ -1188,10 +1188,14 @@ impl Node {
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
 	/// cache.
 	///
-	/// **Note:** The wallets are regularly synced in the background, which is configurable via
-	/// [`Config::onchain_wallet_sync_interval_secs`] and [`Config::wallet_sync_interval_secs`].
-	/// Therefore, using this blocking sync method is almost always redundant and should be avoided
-	/// where possible.
+	/// **Note:** The wallets are regularly synced in the background, which is configurable via the
+	/// respective config object, e.g., via
+	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`] and
+	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]. Therefore, using this blocking
+	/// sync method is almost always redundant and should be avoided where possible.
+	///
+	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::onchain_wallet_sync_interval_secs
+	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::lightning_wallet_sync_interval_secs
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {

@@ -6,8 +6,8 @@
 // accordance with one or both of these licenses.
 
 use crate::config::{
-	Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
+	BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, TX_BROADCAST_TIMEOUT_SECS,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
@@ -96,6 +96,7 @@ impl WalletSyncStatus {
 
 pub(crate) enum ChainSource {
 	Esplora {
+		sync_config: EsploraSyncConfig,
 		esplora_client: EsploraAsyncClient,
 		onchain_wallet: Arc<Wallet>,
 		onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
@@ -112,9 +113,10 @@ pub(crate) enum ChainSource {
 
 impl ChainSource {
 	pub(crate) fn new_esplora(
-		server_url: String, onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<FilesystemLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		server_url: String, sync_config: EsploraSyncConfig, onchain_wallet: Arc<Wallet>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
@@ -124,6 +126,7 @@ impl ChainSource {
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		Self::Esplora {
+			sync_config,
 			esplora_client,
 			onchain_wallet,
 			onchain_wallet_sync_status,
@@ -144,16 +147,17 @@ impl ChainSource {
 		output_sweeper: Arc<Sweeper>,
 	) {
 		match self {
-			Self::Esplora { config, logger, .. } => {
+			Self::Esplora { sync_config, logger, .. } => {
 				// Setup syncing intervals
-				let onchain_wallet_sync_interval_secs =
-					config.onchain_wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+				let onchain_wallet_sync_interval_secs = sync_config
+					.onchain_wallet_sync_interval_secs
+					.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 				let mut onchain_wallet_sync_interval =
 					tokio::time::interval(Duration::from_secs(onchain_wallet_sync_interval_secs));
 				onchain_wallet_sync_interval
 					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-				let fee_rate_cache_update_interval_secs = config
+				let fee_rate_cache_update_interval_secs = sync_config
 					.fee_rate_cache_update_interval_secs
 					.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 				let mut fee_rate_update_interval =
@@ -163,11 +167,12 @@ impl ChainSource {
 				fee_rate_update_interval
 					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-				let wallet_sync_interval_secs =
-					config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-				let mut wallet_sync_interval =
-					tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
-				wallet_sync_interval
+				let lightning_wallet_sync_interval_secs = sync_config
+					.lightning_wallet_sync_interval_secs
+					.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+				let mut lightning_wallet_sync_interval =
+					tokio::time::interval(Duration::from_secs(lightning_wallet_sync_interval_secs));
+				lightning_wallet_sync_interval
 					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
 				// Start the syncing loop.
@@ -186,7 +191,7 @@ impl ChainSource {
 						_ = fee_rate_update_interval.tick() => {
 							let _ = self.update_fee_rate_estimates().await;
 						}
-						_ = wallet_sync_interval.tick() => {
+						_ = lightning_wallet_sync_interval.tick() => {
 							let _ = self.sync_lightning_wallet(
 								Arc::clone(&channel_manager),
 								Arc::clone(&chain_monitor),
