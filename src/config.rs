@@ -11,6 +11,8 @@ use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
+use lightning::util::config::ChannelConfig as LdkChannelConfig;
+use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::config::UserConfig;
 use lightning::util::logger::Level as LogLevel;
 
@@ -298,6 +300,122 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	}
 
 	user_config
+}
+
+/// Options which apply on a per-channel basis and may change at runtime or based on negotiation
+/// with our counterparty.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ChannelConfig {
+	/// Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
+	/// over the channel.
+	/// This may be allowed to change at runtime in a later update, however doing so must result in
+	/// update messages sent to notify all nodes of our updated relay fee.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub forwarding_fee_proportional_millionths: u32,
+	/// Amount (in milli-satoshi) charged for payments forwarded outbound over the channel, in
+	/// excess of [`ChannelConfig::forwarding_fee_proportional_millionths`].
+	/// This may be allowed to change at runtime in a later update, however doing so must result in
+	/// update messages sent to notify all nodes of our updated relay fee.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub forwarding_fee_base_msat: u32,
+	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
+	/// the channel this config applies to.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub cltv_expiry_delta: u16,
+	/// Limit our total exposure to potential loss to on-chain fees on close, including in-flight
+	/// HTLCs which are burned to fees as they are too small to claim on-chain and fees on
+	/// commitment transaction(s) broadcasted by our counterparty in excess of our own fee estimate.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub max_dust_htlc_exposure: MaxDustHTLCExposure,
+	/// The additional fee we're willing to pay to avoid waiting for the counterparty's
+	/// `to_self_delay` to reclaim funds.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub force_close_avoidance_max_fee_satoshis: u64,
+	/// If set, allows this channel's counterparty to skim an additional fee off this node's inbound
+	/// HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub accept_underpaying_htlcs: bool,
+}
+
+impl From<LdkChannelConfig> for ChannelConfig {
+	fn from(value: LdkChannelConfig) -> Self {
+		Self {
+			forwarding_fee_proportional_millionths: value.forwarding_fee_proportional_millionths,
+			forwarding_fee_base_msat: value.forwarding_fee_base_msat,
+			cltv_expiry_delta: value.cltv_expiry_delta,
+			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
+			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
+			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
+		}
+	}
+}
+
+impl From<ChannelConfig> for LdkChannelConfig {
+	fn from(value: ChannelConfig) -> Self {
+		Self {
+			forwarding_fee_proportional_millionths: value.forwarding_fee_proportional_millionths,
+			forwarding_fee_base_msat: value.forwarding_fee_base_msat,
+			cltv_expiry_delta: value.cltv_expiry_delta,
+			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
+			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
+			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
+		}
+	}
+}
+
+impl Default for ChannelConfig {
+	fn default() -> Self {
+		LdkChannelConfig::default().into()
+	}
+}
+
+/// Options for how to set the max dust exposure allowed on a channel.
+///
+/// See [`LdkChannelConfig::max_dust_htlc_exposure`] for details.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MaxDustHTLCExposure {
+	/// This sets a fixed limit on the total dust exposure in millisatoshis.
+	///
+	/// Please refer to [`LdkMaxDustHTLCExposure`] for further details.
+	FixedLimit {
+		/// The fixed limit, in millisatoshis.
+		limit_msat: u64,
+	},
+	/// This sets a multiplier on the feerate to determine the maximum allowed dust exposure.
+	///
+	/// Please refer to [`LdkMaxDustHTLCExposure`] for further details.
+	FeeRateMultiplier {
+		/// The applied fee rate multiplier.
+		multiplier: u64,
+	},
+}
+
+impl From<LdkMaxDustHTLCExposure> for MaxDustHTLCExposure {
+	fn from(value: LdkMaxDustHTLCExposure) -> Self {
+		match value {
+			LdkMaxDustHTLCExposure::FixedLimitMsat(limit_msat) => Self::FixedLimit { limit_msat },
+			LdkMaxDustHTLCExposure::FeeRateMultiplier(multiplier) => {
+				Self::FeeRateMultiplier { multiplier }
+			},
+		}
+	}
+}
+
+impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
+	fn from(value: MaxDustHTLCExposure) -> Self {
+		match value {
+			MaxDustHTLCExposure::FixedLimit { limit_msat } => Self::FixedLimitMsat(limit_msat),
+			MaxDustHTLCExposure::FeeRateMultiplier { multiplier } => {
+				Self::FeeRateMultiplier(multiplier)
+			},
+		}
+	}
 }
 
 #[cfg(test)]

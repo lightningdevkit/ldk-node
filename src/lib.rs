@@ -106,7 +106,6 @@ pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
-pub use types::{ChannelConfig, MaxDustHTLCExposure};
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -121,7 +120,7 @@ pub use builder::NodeBuilder as Builder;
 
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, Config, NODE_ANN_BCAST_INTERVAL,
+	default_user_config, may_announce_channel, ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL,
 	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
