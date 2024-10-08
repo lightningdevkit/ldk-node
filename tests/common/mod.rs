@@ -203,35 +203,18 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 
 pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	let mut rng = thread_rng();
-	let ranged_val = rng.gen_range(0..10);
-
-	let alias = format!("ldk-node-{}", ranged_val);
+	let rand_val = rng.gen_range(0..1000);
+	let alias = format!("ldk-node-{}", rand_val);
 	let mut bytes = [0u8; 32];
 	bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
-
 	Some(NodeAlias(bytes))
 }
 
-pub(crate) fn random_announce_channel() -> bool {
-	let mut rng = thread_rng();
-	let ranged_val = rng.gen_range(0..=1);
-	match ranged_val {
-		0 => false,
-		_ => true,
-	}
-}
-
-pub(crate) fn random_config(anchor_channels: bool, announce_channel: bool) -> Config {
+pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let mut config = Config::default();
 
 	if !anchor_channels {
 		config.anchor_channels_config = None;
-	}
-
-	if announce_channel {
-		let alias = random_node_alias();
-		println!("Setting random LDK node alias: {:?}", alias);
-		config.node_alias = alias;
 	}
 
 	config.network = Network::Regtest;
@@ -246,6 +229,10 @@ pub(crate) fn random_config(anchor_channels: bool, announce_channel: bool) -> Co
 	let rand_listening_addresses = random_listening_addresses();
 	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
 	config.listening_addresses = Some(rand_listening_addresses);
+
+	let alias = random_node_alias();
+	println!("Setting random LDK node alias: {:?}", alias);
+	config.node_alias = alias;
 
 	config.log_level = LogLevel::Gossip;
 
@@ -269,15 +256,14 @@ macro_rules! setup_builder {
 pub(crate) use setup_builder;
 
 pub(crate) fn setup_two_nodes(
-	electrsd: &ElectrsD, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool, announce_channel: bool,
+	electrsd: &ElectrsD, allow_0conf: bool, anchor_channels: bool, anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
-	let config_a = random_config(anchor_channels, announce_channel);
+	let config_a = random_config(anchor_channels);
 	let node_a = setup_node(electrsd, config_a);
 
 	println!("\n== Node B ==");
-	let mut config_b = random_config(anchor_channels, announce_channel);
+	let mut config_b = random_config(anchor_channels);
 	if allow_0conf {
 		config_b.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -413,9 +399,10 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 }
 
 pub fn open_channel(
-	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, electrsd: &ElectrsD,
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
+	electrsd: &ElectrsD,
 ) {
-	if node_a.config().node_alias.is_some() {
+	if should_announce {
 		node_a
 			.open_announced_channel(
 				node_b.node_id(),
@@ -436,7 +423,6 @@ pub fn open_channel(
 			)
 			.unwrap();
 	}
-
 	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
 
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
@@ -472,28 +458,15 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nA -- open_channel -> B");
 	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
-
-	if node_a.config().node_alias.is_some() {
-		node_a
-			.open_announced_channel(
-				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
-				funding_amount_sat,
-				Some(push_msat),
-				None,
-			)
-			.unwrap();
-	} else {
-		node_a
-			.open_channel(
-				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
-				funding_amount_sat,
-				Some(push_msat),
-				None,
-			)
-			.unwrap();
-	}
+	node_a
+		.open_announced_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			funding_amount_sat,
+			Some(push_msat),
+			None,
+		)
+		.unwrap();
 
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
 	assert!(node_a.list_peers().first().unwrap().is_persisted);

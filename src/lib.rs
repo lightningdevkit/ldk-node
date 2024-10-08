@@ -20,8 +20,7 @@
 //!
 //! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
 //! and configuring a [`Builder`] to your liking and calling [`build`]. `Node` can then be
-//! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`open_announced_channel`]
-//! [`send`], etc.:
+//! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`send`], etc.:
 //!
 //! ```no_run
 //! use ldk_node::Builder;
@@ -64,7 +63,6 @@
 //! [`start`]: Node::start
 //! [`stop`]: Node::stop
 //! [`open_channel`]: Node::open_channel
-//! [`open_announced_channel`]: Node::open_announced_channel
 //! [`send`]: Bolt11Payment::send
 //!
 #![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
@@ -100,7 +98,6 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
-use lightning::routing::gossip::NodeAlias;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
@@ -123,8 +120,8 @@ pub use builder::BuildError;
 pub use builder::NodeBuilder as Builder;
 
 use config::{
-	can_announce_channel, default_user_config, ChannelAnnouncementStatus,
-	LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	default_user_config, may_announce_channel, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
@@ -151,6 +148,7 @@ use lightning::chain::{BestBlock, Confirm};
 use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
 use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
 
 pub use lightning::util::logger::Level as LogLevel;
 
@@ -605,20 +603,20 @@ impl Node {
 		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
 		let mut stop_bcast = self.stop_sender.subscribe();
 		let node_alias = self.config.node_alias.clone();
-		let can_announce_channel = can_announce_channel(&self.config);
-		runtime.spawn(async move {
-			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
-			#[cfg(not(test))]
-			let mut interval = tokio::time::interval(Duration::from_secs(30));
-			#[cfg(test)]
-			let mut interval = tokio::time::interval(Duration::from_secs(5));
-			loop {
-				tokio::select! {
+		if may_announce_channel(&self.config) {
+			runtime.spawn(async move {
+				// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
+				#[cfg(not(test))]
+				let mut interval = tokio::time::interval(Duration::from_secs(30));
+				#[cfg(test)]
+				let mut interval = tokio::time::interval(Duration::from_secs(5));
+				loop {
+					tokio::select! {
 						_ = stop_bcast.changed() => {
 							log_trace!(
 								bcast_logger,
 								"Stopping broadcasting node announcements.",
-							);
+								);
 							return;
 						}
 						_ = interval.tick() => {
@@ -648,37 +646,37 @@ impl Node {
 								continue;
 							}
 
-							match can_announce_channel {
-								ChannelAnnouncementStatus::Unannounceable(_) => {
-									// Skip if we are not listening on any addresses or if the node alias is not set.
-									continue;
+							let addresses = if let Some(addresses) = bcast_config.listening_addresses.clone() {
+								addresses
+							} else {
+								debug_assert!(false, "We checked whether the node may announce, so listening addresses should always be set");
+								continue;
+							};
+
+							if let Some(node_alias) = node_alias.as_ref() {
+								bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
+
+								let unix_time_secs_opt =
+									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+								*bcast_ann_timestamp.write().unwrap() = unix_time_secs_opt;
+
+								if let Some(unix_time_secs) = unix_time_secs_opt {
+									io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
+										.unwrap_or_else(|e| {
+											log_error!(bcast_logger, "Persistence failed: {}", e);
+											panic!("Persistence failed");
+										});
 								}
-								ChannelAnnouncementStatus::Announceable => {
-									// Broadcast node announcement.
-									let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
-									if let Some(node_alias) = node_alias.as_ref() {
-										bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
-									} else {
-										continue
-									}
-								}
+							} else {
+								debug_assert!(false, "We checked whether the node may announce, so node alias should always be set");
+								continue
 							}
 
-							let unix_time_secs_opt =
-								SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-							*bcast_ann_timestamp.write().unwrap() = unix_time_secs_opt;
-
-							if let Some(unix_time_secs) = unix_time_secs_opt {
-								io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
-									.unwrap_or_else(|e| {
-										log_error!(bcast_logger, "Persistence failed: {}", e);
-										panic!("Persistence failed");
-									});
-							}
 						}
+					}
 				}
-			}
-		});
+			});
+		}
 
 		let mut stop_tx_bcast = self.stop_sender.subscribe();
 		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
@@ -1187,10 +1185,6 @@ impl Node {
 		Ok(())
 	}
 
-	/// Connect to a node and open a new channel.
-	///
-	/// See [`Node::open_channel`] or [`Node::open_announced_channel`] for more information about
-	/// parameters.
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1294,7 +1288,9 @@ impl Node {
 		}
 	}
 
-	/// Connect to a node and open a new channel.
+	/// Connect to a node and open a new unannounced channel.
+	///
+	/// To open an announced channel, see [`Node::open_announced_channel`].
 	///
 	/// Disconnects and reconnects are handled automatically.
 	///
@@ -1305,8 +1301,6 @@ impl Node {
 	/// If Anchor channels are enabled, this will ensure the configured
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
-	///
-	/// Calls `Node::open_channel_inner` with `announce_channel` set to `false`.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_channel(
@@ -1325,6 +1319,12 @@ impl Node {
 
 	/// Connect to a node and open a new announced channel.
 	///
+	/// This will return an error if the node has not been sufficiently configured to operate as a
+	/// forwarding node that can properly announce its existence to the publip network graph, i.e.,
+	/// [`Config::listening_addresses`] and [`Config::node_alias`] are unset.
+	///
+	/// To open an unannounced channel, see [`Node::open_channel`].
+	///
 	/// Disconnects and reconnects are handled automatically.
 	///
 	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
@@ -1335,37 +1335,23 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
-	/// Note that, regardless of the value of `announce_channel` passed, this function
-	/// checks that a node is configured to announce the channel to be openned and returns
-	/// an error if the configuration is wrong. Otherwise, calls `Node::open_channel_inner`
-	/// with `announced_channel` equals to `true`.
-	/// See `config::can_announce_channel` for more details.
-	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
-		match can_announce_channel(&self.config) {
-			config::ChannelAnnouncementStatus::Announceable => self.open_channel_inner(
+		if may_announce_channel(&self.config) {
+			self.open_channel_inner(
 				node_id,
 				address,
 				channel_amount_sats,
 				push_to_counterparty_msat,
 				channel_config,
 				true,
-			),
-			config::ChannelAnnouncementStatus::Unannounceable(reason) => match reason {
-				config::ChannelAnnouncementBlocker::MissingNodeAlias => {
-					return Err(Error::InvalidNodeAlias)
-				},
-				config::ChannelAnnouncementBlocker::MissingListeningAddresses => {
-					return Err(Error::InvalidSocketAddress)
-				},
-				config::ChannelAnnouncementBlocker::EmptyListeningAddresses => {
-					return Err(Error::InvalidSocketAddress)
-				},
-			},
+			)
+		} else {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node. Please make sure to configure listening addreesses and node alias");
+			return Err(Error::ChannelCreationFailed);
 		}
 	}
 
