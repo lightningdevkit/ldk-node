@@ -75,7 +75,7 @@
 mod balance;
 mod builder;
 mod chain;
-mod config;
+pub mod config;
 mod connection;
 mod error;
 mod event;
@@ -102,7 +102,6 @@ pub use lightning;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
-pub use config::{default_config, AnchorChannelsConfig, Config};
 pub use error::Error as NodeError;
 use error::Error;
 
@@ -122,8 +121,8 @@ pub use builder::NodeBuilder as Builder;
 
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RGS_SYNC_INTERVAL,
+	default_user_config, may_announce_channel, Config, NODE_ANN_BCAST_INTERVAL,
+	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -1131,6 +1130,8 @@ impl Node {
 	/// opening the channel.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1164,6 +1165,8 @@ impl Node {
 	/// opening the channel.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1233,6 +1236,8 @@ impl Node {
 	/// Broadcasting the closing transactions will be omitted for Anchor channels if we trust the
 	/// counterparty to broadcast for us (see [`AnchorChannelsConfig::trusted_peers_no_reserve`]
 	/// for more information).
+	///
+	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
 	pub fn force_close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		reason: Option<String>,
@@ -1389,7 +1394,8 @@ impl Node {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
-	/// # use ldk_node::{Builder, Config};
+	/// # use ldk_node::Builder;
+	/// # use ldk_node::config::Config;
 	/// # use ldk_node::payment::PaymentDirection;
 	/// # use ldk_node::bitcoin::Network;
 	/// # let mut config = Config::default();

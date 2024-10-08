@@ -8,11 +8,10 @@
 #![cfg(any(test, cln_test, vss_test))]
 #![allow(dead_code)]
 
+use ldk_node::config::Config;
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{
-	Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance,
-};
+use ldk_node::{Builder, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
