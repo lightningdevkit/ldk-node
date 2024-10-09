@@ -13,7 +13,7 @@ use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
-use lightning::chain::Listen;
+use lightning::chain::{BestBlock, Listen};
 
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
@@ -83,6 +83,11 @@ where
 
 	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
 		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
+	}
+
+	pub(crate) fn current_best_block(&self) -> BestBlock {
+		let checkpoint = self.inner.lock().unwrap().latest_checkpoint();
+		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
 	}
 
 	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {

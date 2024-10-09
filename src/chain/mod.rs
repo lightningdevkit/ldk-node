@@ -7,6 +7,7 @@
 
 mod bitcoind_rpc;
 
+use crate::chain::bitcoind_rpc::{BitcoindRpcClient, BoundedHeaderCache, ChainListener};
 use crate::config::{
 	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
@@ -22,10 +23,14 @@ use crate::logger::{log_bytes, log_error, log_info, log_trace, FilesystemLogger,
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
-use lightning::chain::{Confirm, Filter};
+use lightning::chain::{Confirm, Filter, Listen};
 use lightning::util::ser::Writeable;
 
 use lightning_transaction_sync::EsploraSyncClient;
+
+use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
+use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
+use lightning_block_sync::SpvClient;
 
 use bdk_esplora::EsploraAsyncExt;
 
@@ -37,13 +42,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use self::bitcoind_rpc::BitcoindRpcClient;
-
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
 // The default Esplora client timeout we're using.
 pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
+
+const CHAIN_POLLING_INTERVAL_SECS: u64 = 1;
 
 pub(crate) enum WalletSyncStatus {
 	Completed,
@@ -115,7 +120,10 @@ pub(crate) enum ChainSource {
 	},
 	BitcoindRpc {
 		bitcoind_rpc_client: Arc<BitcoindRpcClient>,
+		header_cache: tokio::sync::Mutex<BoundedHeaderCache>,
+		latest_chain_tip: RwLock<Option<ValidatedBlockHeader>>,
 		onchain_wallet: Arc<Wallet>,
+		wallet_polling_status: Mutex<WalletSyncStatus>,
 		fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>,
@@ -163,9 +171,15 @@ impl ChainSource {
 	) -> Self {
 		let bitcoind_rpc_client =
 			Arc::new(BitcoindRpcClient::new(host, port, rpc_user, rpc_password));
+		let header_cache = tokio::sync::Mutex::new(BoundedHeaderCache::new());
+		let latest_chain_tip = RwLock::new(None);
+		let wallet_polling_status = Mutex::new(WalletSyncStatus::Completed);
 		Self::BitcoindRpc {
 			bitcoind_rpc_client,
+			header_cache,
+			latest_chain_tip,
 			onchain_wallet,
+			wallet_polling_status,
 			fee_estimator,
 			tx_broadcaster,
 			kv_store,
@@ -235,7 +249,129 @@ impl ChainSource {
 					}
 				}
 			},
-			Self::BitcoindRpc { .. } => todo!(),
+			Self::BitcoindRpc {
+				bitcoind_rpc_client,
+				header_cache,
+				latest_chain_tip,
+				onchain_wallet,
+				wallet_polling_status,
+				kv_store,
+				config,
+				logger,
+				node_metrics,
+				..
+			} => {
+				// First register for the wallet polling status to make sure `Node::sync_wallets` calls
+				// wait on the result before proceeding.
+				{
+					let mut status_lock = wallet_polling_status.lock().unwrap();
+					if status_lock.register_or_subscribe_pending_sync().is_some() {
+						debug_assert!(false, "Sync already in progress. This should never happen.");
+					}
+				}
+
+				let channel_manager_best_block_hash =
+					channel_manager.current_best_block().block_hash;
+				let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
+				let onchain_wallet_best_block_hash = onchain_wallet.current_best_block().block_hash;
+
+				let mut chain_listeners = vec![
+					(
+						onchain_wallet_best_block_hash,
+						&**onchain_wallet as &(dyn Listen + Send + Sync),
+					),
+					(
+						channel_manager_best_block_hash,
+						&*channel_manager as &(dyn Listen + Send + Sync),
+					),
+					(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
+				];
+
+				// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
+				// before giving them to `ChainMonitor` it the first place. However, this isn't
+				// trivial as we load them on initialization (in the `Builder`) and only gain
+				// network access during `start`. For now, we just make sure we get the worst known
+				// block hash and sychronize them via `ChainMonitor`.
+				if let Some(worst_channel_monitor_block_hash) = chain_monitor
+					.list_monitors()
+					.iter()
+					.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
+					.map(|m| m.current_best_block())
+					.min_by_key(|b| b.height)
+					.map(|b| b.block_hash)
+				{
+					chain_listeners.push((
+						worst_channel_monitor_block_hash,
+						&*chain_monitor as &(dyn Listen + Send + Sync),
+					));
+				}
+
+				loop {
+					let mut locked_header_cache = header_cache.lock().await;
+					match synchronize_listeners(
+						bitcoind_rpc_client.as_ref(),
+						config.network,
+						&mut *locked_header_cache,
+						chain_listeners.clone(),
+					)
+					.await
+					{
+						Ok(chain_tip) => {
+							{
+								*latest_chain_tip.write().unwrap() = Some(chain_tip);
+								let unix_time_secs_opt = SystemTime::now()
+									.duration_since(UNIX_EPOCH)
+									.ok()
+									.map(|d| d.as_secs());
+								let mut locked_node_metrics = node_metrics.write().unwrap();
+								locked_node_metrics.latest_lightning_wallet_sync_timestamp =
+									unix_time_secs_opt;
+								locked_node_metrics.latest_onchain_wallet_sync_timestamp =
+									unix_time_secs_opt;
+								write_node_metrics(
+									&*locked_node_metrics,
+									Arc::clone(&kv_store),
+									Arc::clone(&logger),
+								)
+								.unwrap_or_else(|e| {
+									log_error!(logger, "Failed to persist node metrics: {}", e);
+								});
+							}
+							break;
+						},
+
+						Err(e) => {
+							log_error!(logger, "Failed to synchronize chain listeners: {:?}", e);
+							tokio::time::sleep(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS))
+								.await;
+						},
+					}
+				}
+
+				// Now propagate the initial result to unblock waiting subscribers.
+				wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(Ok(()));
+
+				let mut chain_polling_interval =
+					tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
+				chain_polling_interval
+					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+				// Start the polling loop.
+				loop {
+					tokio::select! {
+						_ = stop_sync_receiver.changed() => {
+							log_trace!(
+								logger,
+								"Stopping polling for new chain data.",
+							);
+							return;
+						}
+						_ = chain_polling_interval.tick() => {
+							let _ = self.poll_and_update_listeners(Arc::clone(&channel_manager), Arc::clone(&chain_monitor), Arc::clone(&output_sweeper)).await;
+						}
+					}
+				}
+			},
 		}
 	}
 
@@ -448,6 +584,119 @@ impl ChainSource {
 				res
 			},
 			Self::BitcoindRpc { .. } => todo!(),
+		}
+	}
+
+	pub(crate) async fn poll_and_update_listeners(
+		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) -> Result<(), Error> {
+		match self {
+			Self::Esplora { .. } => {
+				debug_assert!(false, "Polling should only be used with chain listeners");
+				Ok(())
+			},
+			Self::BitcoindRpc {
+				bitcoind_rpc_client,
+				header_cache,
+				latest_chain_tip,
+				onchain_wallet,
+				wallet_polling_status,
+				kv_store,
+				config,
+				logger,
+				node_metrics,
+				..
+			} => {
+				let receiver_res = {
+					let mut status_lock = wallet_polling_status.lock().unwrap();
+					status_lock.register_or_subscribe_pending_sync()
+				};
+
+				if let Some(mut sync_receiver) = receiver_res {
+					log_info!(logger, "Sync in progress, skipping.");
+					return sync_receiver.recv().await.map_err(|e| {
+						debug_assert!(false, "Failed to receive wallet polling result: {:?}", e);
+						log_error!(logger, "Failed to receive wallet polling result: {:?}", e);
+						Error::WalletOperationFailed
+					})?;
+				}
+
+				let latest_chain_tip_opt = latest_chain_tip.read().unwrap().clone();
+				let chain_tip = if let Some(tip) = latest_chain_tip_opt {
+					tip
+				} else {
+					match validate_best_block_header(bitcoind_rpc_client.as_ref()).await {
+						Ok(tip) => {
+							*latest_chain_tip.write().unwrap() = Some(tip);
+							tip
+						},
+						Err(e) => {
+							log_error!(logger, "Failed to poll for chain data: {:?}", e);
+							let res = Err(Error::TxSyncFailed);
+							wallet_polling_status
+								.lock()
+								.unwrap()
+								.propagate_result_to_subscribers(res);
+							return res;
+						},
+					}
+				};
+
+				let mut locked_header_cache = header_cache.lock().await;
+				let chain_poller =
+					ChainPoller::new(Arc::clone(&bitcoind_rpc_client), config.network);
+				let chain_listener = ChainListener {
+					onchain_wallet: Arc::clone(&onchain_wallet),
+					channel_manager: Arc::clone(&channel_manager),
+					chain_monitor,
+					output_sweeper,
+				};
+				let mut spv_client = SpvClient::new(
+					chain_tip,
+					chain_poller,
+					&mut *locked_header_cache,
+					&chain_listener,
+				);
+				let mut chain_polling_interval =
+					tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
+				chain_polling_interval
+					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+				match spv_client.poll_best_tip().await {
+					Ok((ChainTip::Better(tip), true)) => {
+						*latest_chain_tip.write().unwrap() = Some(tip);
+					},
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(logger, "Failed to poll for chain data: {:?}", e);
+						let res = Err(Error::TxSyncFailed);
+						wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
+						return res;
+					},
+				}
+
+				let res = {
+					let unix_time_secs_opt =
+						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+					let mut locked_node_metrics = node_metrics.write().unwrap();
+					locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+					locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+					write_node_metrics(
+						&*locked_node_metrics,
+						Arc::clone(&kv_store),
+						Arc::clone(&logger),
+					)
+					.map_err(|e| {
+						log_error!(logger, "Failed to persist node metrics: {}", e);
+						Error::PersistenceFailed
+					})
+				};
+
+				wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+				res
+			},
 		}
 	}
 

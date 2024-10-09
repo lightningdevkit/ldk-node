@@ -1209,9 +1209,21 @@ impl Node {
 		tokio::task::block_in_place(move || {
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
 				async move {
-					chain_source.update_fee_rate_estimates().await?;
-					chain_source.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper).await?;
-					chain_source.sync_onchain_wallet().await?;
+					match chain_source.as_ref() {
+						ChainSource::Esplora { .. } => {
+							chain_source.update_fee_rate_estimates().await?;
+							chain_source
+								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
+								.await?;
+							chain_source.sync_onchain_wallet().await?;
+						},
+						ChainSource::BitcoindRpc { .. } => {
+							chain_source.update_fee_rate_estimates().await?;
+							chain_source
+								.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper)
+								.await?;
+						},
+					}
 					Ok(())
 				},
 			)
