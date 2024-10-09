@@ -47,6 +47,7 @@ where
 		let mut receiver = self.queue_receiver.lock().await;
 		while let Some(next_package) = receiver.recv().await {
 			for tx in &next_package {
+				let txid = tx.compute_txid();
 				let timeout_fut = tokio::time::timeout(
 					Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
 					self.esplora_client.broadcast(tx),
@@ -54,11 +55,7 @@ where
 				match timeout_fut.await {
 					Ok(res) => match res {
 						Ok(()) => {
-							log_trace!(
-								self.logger,
-								"Successfully broadcast transaction {}",
-								tx.txid()
-							);
+							log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
 						},
 						Err(e) => match e {
 							esplora_client::Error::Reqwest(err) => {
@@ -85,7 +82,7 @@ where
 								log_error!(
 									self.logger,
 									"Failed to broadcast transaction {}: {}",
-									tx.txid(),
+									txid,
 									e
 								);
 								log_trace!(
@@ -100,7 +97,7 @@ where
 						log_error!(
 							self.logger,
 							"Failed to broadcast transaction due to timeout {}: {}",
-							tx.txid(),
+							txid,
 							e
 						);
 						log_trace!(

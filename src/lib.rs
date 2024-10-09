@@ -138,7 +138,7 @@ use payment::{
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
-	Graph, KeysManager, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Graph, KeysManager, OnionMessenger, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
@@ -146,7 +146,8 @@ use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::{BestBlock, Confirm};
 use lightning::events::bump_transaction::Wallet as LdkWallet;
-use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
+use lightning::ln::channel_state::ChannelShutdownState;
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 
@@ -186,6 +187,7 @@ pub struct Node {
 	chain_monitor: Arc<ChainMonitor>,
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
+	onion_messenger: Arc<OnionMessenger>,
 	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
@@ -279,49 +281,44 @@ impl Node {
 			.config
 			.onchain_wallet_sync_interval_secs
 			.max(config::WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-		std::thread::spawn(move || {
-			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
-				async move {
-					let mut onchain_wallet_sync_interval = tokio::time::interval(
-						Duration::from_secs(onchain_wallet_sync_interval_secs),
-					);
-					onchain_wallet_sync_interval
-						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-					loop {
-						tokio::select! {
-							_ = stop_sync.changed() => {
+		runtime.spawn(async move {
+			let mut onchain_wallet_sync_interval =
+				tokio::time::interval(Duration::from_secs(onchain_wallet_sync_interval_secs));
+			onchain_wallet_sync_interval
+				.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					_ = stop_sync.changed() => {
+						log_trace!(
+							sync_logger,
+							"Stopping background syncing on-chain wallet.",
+						);
+						return;
+					}
+					_ = onchain_wallet_sync_interval.tick() => {
+						let now = Instant::now();
+						match wallet.sync().await {
+							Ok(()) => {
 								log_trace!(
 									sync_logger,
-									"Stopping background syncing on-chain wallet.",
-									);
-								return;
+									"Background sync of on-chain wallet finished in {}ms.",
+									now.elapsed().as_millis()
+								);
+								let unix_time_secs_opt =
+									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+								*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
 							}
-							_ = onchain_wallet_sync_interval.tick() => {
-								let now = Instant::now();
-								match wallet.sync().await {
-									Ok(()) => {
-										log_trace!(
-										sync_logger,
-										"Background sync of on-chain wallet finished in {}ms.",
-										now.elapsed().as_millis()
-										);
-										let unix_time_secs_opt =
-											SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-										*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-									}
-									Err(err) => {
-										log_error!(
-											sync_logger,
-											"Background sync of on-chain wallet failed: {}",
-											err
-											)
-									}
-								}
+							Err(err) => {
+								log_error!(
+									sync_logger,
+									"Background sync of on-chain wallet failed: {}",
+									err
+								)
 							}
 						}
 					}
-				},
-			);
+				}
+			}
 		});
 
 		let mut stop_fee_updates = self.stop_sender.subscribe();
@@ -636,7 +633,7 @@ impl Node {
 								continue;
 							}
 
-							if !bcast_cm.list_channels().iter().any(|chan| chan.is_public && chan.is_channel_ready) {
+							if !bcast_cm.list_channels().iter().any(|chan| chan.is_announced && chan.is_channel_ready) {
 								// Skip if we don't have any public channels that are ready.
 								continue;
 							}
@@ -730,6 +727,7 @@ impl Node {
 		let background_chan_man = Arc::clone(&self.channel_manager);
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
+		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
@@ -762,6 +760,7 @@ impl Node {
 				|e| background_event_handler.handle_event(e),
 				background_chain_mon,
 				background_chan_man,
+				Some(background_onion_messenger),
 				background_gossip_sync,
 				background_peer_man,
 				background_logger,
@@ -1188,7 +1187,7 @@ impl Node {
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_channel: bool,
+		announce_for_forwarding: bool,
 	) -> Result<UserChannelId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1250,12 +1249,12 @@ impl Node {
 		}
 
 		let mut user_config = default_user_config(&self.config);
-		user_config.channel_handshake_config.announced_channel = announce_channel;
+		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
 		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
 		// We set the max inflight to 100% for private channels.
 		// FIXME: LDK will default to this behavior soon, too, at which point we should drop this
 		// manual override.
-		if !announce_channel {
+		if !announce_for_forwarding {
 			user_config
 				.channel_handshake_config
 				.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
@@ -1484,7 +1483,7 @@ impl Node {
 	pub fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, false)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
 	}
 
 	/// Force-close a previously opened channel.
@@ -1500,13 +1499,19 @@ impl Node {
 	/// for more information).
 	pub fn force_close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		reason: Option<String>,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, true)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason)
 	}
 
 	fn close_channel_internal(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
+		force_close_reason: Option<String>,
 	) -> Result<(), Error> {
+		debug_assert!(
+			force_close_reason.is_none() || force,
+			"Reason can only be set for force closures"
+		);
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -1520,6 +1525,7 @@ impl Node {
 						.force_close_without_broadcasting_txn(
 							&channel_details.channel_id,
 							&counterparty_node_id,
+							force_close_reason.unwrap_or_default(),
 						)
 						.map_err(|e| {
 							log_error!(
@@ -1534,6 +1540,7 @@ impl Node {
 						.force_close_broadcasting_latest_txn(
 							&channel_details.channel_id,
 							&counterparty_node_id,
+							force_close_reason.unwrap_or_default(),
 						)
 						.map_err(|e| {
 							log_error!(self.logger, "Failed to force-close channel: {:?}", e);
@@ -1727,7 +1734,7 @@ impl Node {
 	/// can be sure that the signature was generated by the caller.
 	/// Signatures are EC recoverable, meaning that given the message and the
 	/// signature the `PublicKey` of the signer can be extracted.
-	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
+	pub fn sign_message(&self, msg: &[u8]) -> String {
 		self.keys_manager.sign_message(msg)
 	}
 

@@ -12,7 +12,7 @@ use crate::error::Error;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::types::{ChannelManager, Wallet};
 
-use bitcoin::{Address, Txid};
+use bitcoin::{Address, Amount, Txid};
 
 use std::sync::{Arc, RwLock};
 
@@ -70,7 +70,9 @@ impl OnchainPayment {
 			);
 			return Err(Error::InsufficientFunds);
 		}
-		self.wallet.send_to_address(address, Some(amount_sats))
+
+		let amount = Amount::from_sat(amount_sats);
+		self.wallet.send_to_address(address, Some(amount))
 	}
 
 	/// Send an on-chain payment to the given address, draining all the available funds.

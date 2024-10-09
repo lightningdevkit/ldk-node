@@ -27,11 +27,12 @@ use crate::io::{
 use crate::logger::{log_debug, log_error, log_info, Logger};
 
 use lightning::events::bump_transaction::BumpTransactionEvent;
-use lightning::events::{ClosureReason, PaymentPurpose};
+use lightning::events::{ClosureReason, PaymentPurpose, ReplayEvent};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::{ChannelId, PaymentHash};
+use lightning::ln::types::ChannelId;
+use lightning::ln::PaymentHash;
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
@@ -40,7 +41,7 @@ use lightning_liquidity::lsps2::utils::compute_opening_fee;
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::OutPoint;
+use bitcoin::{Amount, OutPoint};
 
 use rand::{thread_rng, Rng};
 
@@ -74,7 +75,12 @@ pub enum Event {
 		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
 		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
-		payment_hash: PaymentHash,
+		///
+		/// This will be `None` if the payment failed before receiving an invoice when paying a
+		/// BOLT12 [`Offer`].
+		///
+		/// [`Offer`]: lightning::offers::offer::Offer
+		payment_hash: Option<PaymentHash>,
 		/// The reason why the payment failed.
 		///
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
@@ -159,8 +165,8 @@ impl_writeable_tlv_based_enum!(Event,
 		(3, payment_id, option),
 	},
 	(1, PaymentFailed) => {
-		(0, payment_hash, required),
-		(1, reason, option),
+		(0, payment_hash, option),
+		(1, reason, upgradable_option),
 		(3, payment_id, option),
 	},
 	(2, PaymentReceived) => {
@@ -191,7 +197,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(2, payment_id, required),
 		(4, claimable_amount_msat, required),
 		(6, claim_deadline, option),
-	};
+	}
 );
 
 pub struct EventQueue<L: Deref>
@@ -394,7 +400,7 @@ where
 		}
 	}
 
-	pub async fn handle_event(&self, event: LdkEvent) {
+	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
 		match event {
 			LdkEvent::FundingGenerationReady {
 				temporary_channel_id,
@@ -412,17 +418,18 @@ where
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
 				// Sign the final funding transaction and broadcast it.
+				let channel_amount = Amount::from_sat(channel_value_satoshis);
 				match self.wallet.create_funding_transaction(
 					output_script,
-					channel_value_satoshis,
+					channel_amount,
 					confirmation_target,
 					locktime,
 				) {
 					Ok(final_tx) => {
 						// Give the funding transaction back to LDK for opening the channel.
 						match self.channel_manager.funding_transaction_generated(
-							&temporary_channel_id,
-							&counterparty_node_id,
+							temporary_channel_id,
+							counterparty_node_id,
 							final_tx,
 						) {
 							Ok(()) => {},
@@ -452,6 +459,7 @@ where
 							.force_close_without_broadcasting_txn(
 								&temporary_channel_id,
 								&counterparty_node_id,
+								"Failed to create funding transaction".to_string(),
 							)
 							.unwrap_or_else(|e| {
 								log_error!(self.logger, "Failed to force close channel after funding generation failed: {:?}", e);
@@ -461,6 +469,9 @@ where
 							});
 					},
 				}
+			},
+			LdkEvent::FundingTxBroadcastSafe { .. } => {
+				debug_assert!(false, "We currently only support safe funding, so this event should never be emitted.");
 			},
 			LdkEvent::PaymentClaimable {
 				payment_hash,
@@ -491,7 +502,7 @@ where
 							log_error!(self.logger, "Failed to access payment store: {}", e);
 							panic!("Failed to access payment store");
 						});
-						return;
+						return Ok(());
 					}
 
 					if info.status == PaymentStatus::Succeeded
@@ -513,7 +524,7 @@ where
 							log_error!(self.logger, "Failed to access payment store: {}", e);
 							panic!("Failed to access payment store");
 						});
-						return;
+						return Ok(());
 					}
 
 					let max_total_opening_fee_msat = match info.kind {
@@ -552,7 +563,7 @@ where
 							log_error!(self.logger, "Failed to access payment store: {}", e);
 							panic!("Failed to access payment store");
 						});
-						return;
+						return Ok(());
 					}
 
 					// If this is known by the store but ChannelManager doesn't know the preimage,
@@ -581,7 +592,7 @@ where
 										);
 										panic!("Failed to push to event queue");
 									});
-								return;
+								return Ok(());
 							}
 						},
 						_ => {},
@@ -717,6 +728,7 @@ where
 				receiver_node_id: _,
 				htlcs: _,
 				sender_intended_total_msat: _,
+				onion_fields: _,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				log_info!(
@@ -810,7 +822,7 @@ where
 					id
 				} else {
 					debug_assert!(false, "payment_id should always be set.");
-					return;
+					return Ok(());
 				};
 
 				let update = PaymentDetailsUpdate {
@@ -855,13 +867,13 @@ where
 			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
 				log_info!(
 					self.logger,
-					"Failed to send payment to payment hash {:?} due to {:?}.",
-					hex_utils::to_string(&payment_hash.0),
+					"Failed to send payment with ID {} due to {:?}.",
+					payment_id,
 					reason
 				);
 
 				let update = PaymentDetailsUpdate {
-					hash: Some(Some(payment_hash)),
+					hash: Some(payment_hash),
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
@@ -916,8 +928,14 @@ where
 				funding_satoshis,
 				channel_type,
 				push_msat: _,
+				is_announced: _,
+				params: _,
 			} => {
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
+
+				// TODO: We should use `is_announced` flag above and reject announced channels if
+				// we're not a forwading node, once we add a 'forwarding mode' based on listening
+				// address / node alias being set.
 
 				if anchor_channel {
 					if let Some(anchor_channels_config) =
@@ -951,11 +969,12 @@ where
 								.force_close_without_broadcasting_txn(
 									&temporary_channel_id,
 									&counterparty_node_id,
+									"Channel request rejected".to_string(),
 								)
 								.unwrap_or_else(|e| {
 									log_error!(self.logger, "Failed to reject channel: {:?}", e)
 								});
-							return;
+							return Ok(());
 						}
 					} else {
 						log_error!(
@@ -967,11 +986,12 @@ where
 							.force_close_without_broadcasting_txn(
 								&temporary_channel_id,
 								&counterparty_node_id,
+								"Channel request rejected".to_string(),
 							)
 							.unwrap_or_else(|e| {
 								log_error!(self.logger, "Failed to reject channel: {:?}", e)
 							});
-						return;
+						return Ok(());
 					}
 				}
 
@@ -1038,7 +1058,7 @@ where
 							node.announcement_info
 								.as_ref()
 								.map_or("unnamed node".to_string(), |ann| {
-									format!("node {}", ann.alias)
+									format!("node {}", ann.alias())
 								})
 						})
 				};
@@ -1177,21 +1197,8 @@ where
 			},
 			LdkEvent::DiscardFunding { .. } => {},
 			LdkEvent::HTLCIntercepted { .. } => {},
-			LdkEvent::InvoiceRequestFailed { payment_id } => {
-				log_error!(
-					self.logger,
-					"Failed to request invoice for outbound BOLT12 payment {}",
-					payment_id
-				);
-				let update = PaymentDetailsUpdate {
-					status: Some(PaymentStatus::Failed),
-					..PaymentDetailsUpdate::new(payment_id)
-				};
-				self.payment_store.update(&update).unwrap_or_else(|e| {
-					log_error!(self.logger, "Failed to access payment store: {}", e);
-					panic!("Failed to access payment store");
-				});
-				return;
+			LdkEvent::InvoiceReceived { .. } => {
+				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
 			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
 				let runtime_lock = self.runtime.read().unwrap();
@@ -1243,13 +1250,20 @@ where
 							"Ignoring BumpTransactionEvent for channel {} due to trusted counterparty {}",
 							channel_id, counterparty_node_id
 						);
-						return;
+						return Ok(());
 					}
 				}
 
 				self.bump_tx_event_handler.handle_event(&bte);
 			},
+			LdkEvent::OnionMessageIntercepted { .. } => {
+				debug_assert!(false, "We currently don't support onion message interception, so this event should never be emitted.");
+			},
+			LdkEvent::OnionMessagePeerConnected { .. } => {
+				debug_assert!(false, "We currently don't support onion message interception, so this event should never be emitted.");
+			},
 		}
+		Ok(())
 	}
 }
 
