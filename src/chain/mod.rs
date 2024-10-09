@@ -5,6 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+mod bitcoind_rpc;
+
 use crate::config::{
 	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
@@ -34,6 +36,8 @@ use bitcoin::{FeeRate, Network};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use self::bitcoind_rpc::BitcoindRpcClient;
 
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
@@ -109,6 +113,16 @@ pub(crate) enum ChainSource {
 		logger: Arc<FilesystemLogger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	},
+	BitcoindRpc {
+		bitcoind_rpc_client: Arc<BitcoindRpcClient>,
+		onchain_wallet: Arc<Wallet>,
+		fee_estimator: Arc<OnchainFeeEstimator>,
+		tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>,
+		config: Arc<Config>,
+		logger: Arc<FilesystemLogger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
+	},
 }
 
 impl ChainSource {
@@ -132,6 +146,26 @@ impl ChainSource {
 			onchain_wallet_sync_status,
 			tx_sync,
 			lightning_wallet_sync_status,
+			fee_estimator,
+			tx_broadcaster,
+			kv_store,
+			config,
+			logger,
+			node_metrics,
+		}
+	}
+
+	pub(crate) fn new_bitcoind_rpc(
+		host: String, port: u16, rpc_user: String, rpc_password: String,
+		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
+		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<FilesystemLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+	) -> Self {
+		let bitcoind_rpc_client =
+			Arc::new(BitcoindRpcClient::new(host, port, rpc_user, rpc_password));
+		Self::BitcoindRpc {
+			bitcoind_rpc_client,
+			onchain_wallet,
 			fee_estimator,
 			tx_broadcaster,
 			kv_store,
@@ -201,6 +235,7 @@ impl ChainSource {
 					}
 				}
 			},
+			Self::BitcoindRpc { .. } => todo!(),
 		}
 	}
 
@@ -319,6 +354,7 @@ impl ChainSource {
 
 				res
 			},
+			Self::BitcoindRpc { .. } => todo!(),
 		}
 	}
 
@@ -411,6 +447,7 @@ impl ChainSource {
 
 				res
 			},
+			Self::BitcoindRpc { .. } => todo!(),
 		}
 	}
 
@@ -506,6 +543,7 @@ impl ChainSource {
 
 				Ok(())
 			},
+			Self::BitcoindRpc { .. } => todo!(),
 		}
 	}
 
@@ -582,6 +620,7 @@ impl ChainSource {
 					}
 				}
 			},
+			Self::BitcoindRpc { .. } => todo!(),
 		}
 	}
 }
@@ -590,11 +629,13 @@ impl Filter for ChainSource {
 	fn register_tx(&self, txid: &bitcoin::Txid, script_pubkey: &bitcoin::Script) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_tx(txid, script_pubkey),
+			Self::BitcoindRpc { .. } => (),
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_output(output),
+			Self::BitcoindRpc { .. } => (),
 		}
 	}
 }
