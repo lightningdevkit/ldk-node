@@ -7,12 +7,13 @@
 
 use persist::KVStoreWalletPersister;
 
-use crate::logger::{log_error, log_info, log_trace, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, Logger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
+use lightning::chain::Listen;
 
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
@@ -282,6 +283,66 @@ where
 		}
 
 		Ok(txid)
+	}
+}
+
+impl<B: Deref, E: Deref, L: Deref> Listen for Wallet<B, E, L>
+where
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	fn filtered_block_connected(
+		&self, _header: &bitcoin::block::Header,
+		_txdata: &lightning::chain::transaction::TransactionData, _height: u32,
+	) {
+		debug_assert!(false, "Syncing filtered blocks is currently not supported");
+		// As far as we can tell this would be a no-op anyways as we don't have to tell BDK about
+		// the header chain of intermediate blocks. According to the BDK team, it's sufficient to
+		// only connect full blocks starting from the last point of disagreement.
+	}
+
+	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let pre_checkpoint = locked_wallet.latest_checkpoint();
+		if pre_checkpoint.height() != height - 1
+			|| pre_checkpoint.hash() != block.header.prev_blockhash
+		{
+			log_debug!(
+				self.logger,
+				"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
+				block.header.block_hash(),
+				height
+			);
+		}
+
+		match locked_wallet.apply_block(block, height) {
+			Ok(()) => (),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to apply connected block to on-chain wallet: {}",
+					e
+				);
+				return;
+			},
+		};
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		match locked_wallet.persist(&mut locked_persister) {
+			Ok(_) => (),
+			Err(e) => {
+				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
+				return;
+			},
+		};
+	}
+
+	fn block_disconnected(&self, _header: &bitcoin::block::Header, _height: u32) {
+		// This is a no-op as we don't have to tell BDK about disconnections. According to the BDK
+		// team, it's sufficient in case of a reorg to always connect blocks starting from the last
+		// point of disagreement.
 	}
 }
 
