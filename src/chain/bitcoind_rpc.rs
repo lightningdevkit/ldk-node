@@ -10,13 +10,16 @@ use crate::types::{ChainMonitor, ChannelManager, Sweeper, Wallet};
 use lightning::chain::Listen;
 
 use lightning_block_sync::http::HttpEndpoint;
+use lightning_block_sync::http::JsonResponse;
 use lightning_block_sync::poll::ValidatedBlockHeader;
 use lightning_block_sync::rpc::RpcClient;
 use lightning_block_sync::{
 	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, Cache,
 };
 
-use bitcoin::{BlockHash, Transaction, Txid};
+use serde::Serialize;
+
+use bitcoin::{BlockHash, FeeRate, Transaction, Txid};
 
 use base64::prelude::{Engine, BASE64_STANDARD};
 
@@ -46,6 +49,27 @@ impl BitcoindRpcClient {
 		let tx_json = serde_json::json!(tx_serialized);
 		self.rpc_client.call_method::<Txid>("sendrawtransaction", &vec![tx_json]).await
 	}
+
+	pub(crate) async fn get_fee_estimate_for_target(
+		&self, num_blocks: usize, estimation_mode: FeeRateEstimationMode,
+	) -> std::io::Result<FeeRate> {
+		let num_blocks_json = serde_json::json!(num_blocks);
+		let estimation_mode_json = serde_json::json!(estimation_mode);
+		self.rpc_client
+			.call_method::<FeeResponse>(
+				"estimatesmartfee",
+				&vec![num_blocks_json, estimation_mode_json],
+			)
+			.await
+			.map(|resp| resp.0)
+	}
+
+	pub(crate) async fn get_mempool_minimum_fee_rate(&self) -> std::io::Result<FeeRate> {
+		self.rpc_client
+			.call_method::<MempoolMinFeeResponse>("getmempoolinfo", &vec![])
+			.await
+			.map(|resp| resp.0)
+	}
 }
 
 impl BlockSource for BitcoindRpcClient {
@@ -64,6 +88,55 @@ impl BlockSource for BitcoindRpcClient {
 	fn get_best_block<'a>(&'a self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
 		Box::pin(async move { self.rpc_client.get_best_block().await })
 	}
+}
+
+pub(crate) struct FeeResponse(pub FeeRate);
+
+impl TryInto<FeeResponse> for JsonResponse {
+	type Error = std::io::Error;
+	fn try_into(self) -> std::io::Result<FeeResponse> {
+		if !self.0["errors"].is_null() {
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::Other,
+				self.0["errors"].to_string(),
+			));
+		}
+		let fee_rate_btc_per_kvbyte = self.0["feerate"]
+			.as_f64()
+			.ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Failed to parse fee rate"))?;
+		// Bitcoin Core gives us a feerate in BTC/KvB.
+		// Thus, we multiply by 25_000_000 (10^8 / 4) to get satoshis/kwu.
+		let fee_rate = {
+			let fee_rate_sat_per_kwu = (fee_rate_btc_per_kvbyte * 25_000_000.0).round() as u64;
+			FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
+		};
+		Ok(FeeResponse(fee_rate))
+	}
+}
+
+pub struct MempoolMinFeeResponse(pub FeeRate);
+
+impl TryInto<MempoolMinFeeResponse> for JsonResponse {
+	type Error = std::io::Error;
+	fn try_into(self) -> std::io::Result<MempoolMinFeeResponse> {
+		let fee_rate_btc_per_kvbyte = self.0["mempoolminfee"]
+			.as_f64()
+			.ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Failed to parse fee rate"))?;
+		// Bitcoin Core gives us a feerate in BTC/KvB.
+		// Thus, we multiply by 25_000_000 (10^8 / 4) to get satoshis/kwu.
+		let fee_rate = {
+			let fee_rate_sat_per_kwu = (fee_rate_btc_per_kvbyte * 25_000_000.0).round() as u64;
+			FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
+		};
+		Ok(MempoolMinFeeResponse(fee_rate))
+	}
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub(crate) enum FeeRateEstimationMode {
+	Economical,
+	Conservative,
 }
 
 const MAX_HEADER_CACHE_ENTRIES: usize = 100;

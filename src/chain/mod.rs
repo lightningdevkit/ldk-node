@@ -7,7 +7,9 @@
 
 mod bitcoind_rpc;
 
-use crate::chain::bitcoind_rpc::{BitcoindRpcClient, BoundedHeaderCache, ChainListener};
+use crate::chain::bitcoind_rpc::{
+	BitcoindRpcClient, BoundedHeaderCache, ChainListener, FeeRateEstimationMode,
+};
 use crate::config::{
 	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
@@ -16,13 +18,14 @@ use crate::config::{
 };
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
-	OnchainFeeEstimator,
+	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, FilesystemLogger, Logger};
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
+use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
 use lightning::chain::{Confirm, Filter, Listen};
 use lightning::util::ser::Writeable;
 
@@ -356,6 +359,13 @@ impl ChainSource {
 				chain_polling_interval
 					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+				let mut fee_rate_update_interval =
+					tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
+				// When starting up, we just blocked on updating, so skip the first tick.
+				fee_rate_update_interval.reset();
+				fee_rate_update_interval
+					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
 				// Start the polling loop.
 				loop {
 					tokio::select! {
@@ -368,6 +378,9 @@ impl ChainSource {
 						}
 						_ = chain_polling_interval.tick() => {
 							let _ = self.poll_and_update_listeners(Arc::clone(&channel_manager), Arc::clone(&chain_monitor), Arc::clone(&output_sweeper)).await;
+						}
+						_ = fee_rate_update_interval.tick() => {
+							let _ = self.update_fee_rate_estimates().await;
 						}
 					}
 				}
@@ -805,7 +818,108 @@ impl ChainSource {
 
 				Ok(())
 			},
-			Self::BitcoindRpc { .. } => todo!(),
+			Self::BitcoindRpc {
+				bitcoind_rpc_client,
+				fee_estimator,
+				kv_store,
+				logger,
+				node_metrics,
+				..
+			} => {
+				macro_rules! get_fee_rate_update {
+					($estimation_fut: expr) => {{
+						tokio::time::timeout(
+							Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+							$estimation_fut,
+						)
+						.await
+						.map_err(|e| {
+							log_error!(logger, "Updating fee rate estimates timed out: {}", e);
+							Error::FeerateEstimationUpdateTimeout
+						})?
+						.map_err(|e| {
+							log_error!(logger, "Failed to retrieve fee rate estimates: {}", e);
+							Error::FeerateEstimationUpdateFailed
+						})?
+					}};
+				}
+				let confirmation_targets = get_all_conf_targets();
+
+				let mut new_fee_rate_cache = HashMap::with_capacity(10);
+				let now = Instant::now();
+				for target in confirmation_targets {
+					let fee_rate = match target {
+						ConfirmationTarget::Lightning(
+							LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
+						) => {
+							let estimation_fut = bitcoind_rpc_client.get_mempool_minimum_fee_rate();
+							get_fee_rate_update!(estimation_fut)
+						},
+						ConfirmationTarget::Lightning(
+							LdkConfirmationTarget::MaximumFeeEstimate,
+						) => {
+							let num_blocks = get_num_block_defaults_for_target(target);
+							let estimation_mode = FeeRateEstimationMode::Conservative;
+							let estimation_fut = bitcoind_rpc_client
+								.get_fee_estimate_for_target(num_blocks, estimation_mode);
+							get_fee_rate_update!(estimation_fut)
+						},
+						ConfirmationTarget::Lightning(
+							LdkConfirmationTarget::UrgentOnChainSweep,
+						) => {
+							let num_blocks = get_num_block_defaults_for_target(target);
+							let estimation_mode = FeeRateEstimationMode::Conservative;
+							let estimation_fut = bitcoind_rpc_client
+								.get_fee_estimate_for_target(num_blocks, estimation_mode);
+							get_fee_rate_update!(estimation_fut)
+						},
+						_ => {
+							// Otherwise, we default to economical block-target estimate.
+							let num_blocks = get_num_block_defaults_for_target(target);
+							let estimation_mode = FeeRateEstimationMode::Economical;
+							let estimation_fut = bitcoind_rpc_client
+								.get_fee_estimate_for_target(num_blocks, estimation_mode);
+							get_fee_rate_update!(estimation_fut)
+						},
+					};
+
+					// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+					// require some post-estimation adjustments to the fee rates, which we do here.
+					let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+
+					new_fee_rate_cache.insert(target, adjusted_fee_rate);
+
+					log_trace!(
+						logger,
+						"Fee rate estimation updated for {:?}: {} sats/kwu",
+						target,
+						adjusted_fee_rate.to_sat_per_kwu(),
+					);
+				}
+
+				if fee_estimator.set_fee_rate_cache(new_fee_rate_cache) {
+					// We only log if the values changed, as it might be very spammy otherwise.
+					log_info!(
+						logger,
+						"Fee rate cache update finished in {}ms.",
+						now.elapsed().as_millis()
+					);
+				}
+
+				let unix_time_secs_opt =
+					SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+				{
+					let mut locked_node_metrics = node_metrics.write().unwrap();
+					locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
+					write_node_metrics(
+						&*locked_node_metrics,
+						Arc::clone(&kv_store),
+						Arc::clone(&logger),
+					)?;
+				}
+
+				Ok(())
+			},
 		}
 	}
 
