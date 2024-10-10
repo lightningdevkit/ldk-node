@@ -46,10 +46,10 @@ impl VssStore {
 	pub(crate) fn new(base_url: String, store_id: String, data_encryption_key: [u8; 32]) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
-		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(100))
-			.with_max_attempts(3)
-			.with_max_total_delay(Duration::from_secs(2))
-			.with_max_jitter(Duration::from_millis(50))
+		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
+			.with_max_attempts(10)
+			.with_max_total_delay(Duration::from_secs(15))
+			.with_max_jitter(Duration::from_millis(10))
 			.skip_retry_on_error(Box::new(|e: &VssError| {
 				matches!(
 					e,
