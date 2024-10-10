@@ -375,6 +375,8 @@ impl ChainSource {
 		}
 	}
 
+	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum,
+	// etc.)
 	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
 		match self {
 			Self::Esplora {
@@ -490,10 +492,16 @@ impl ChainSource {
 
 				res
 			},
-			Self::BitcoindRpc { .. } => todo!(),
+			Self::BitcoindRpc { .. } => {
+				// In BitcoindRpc mode we sync lightning and onchain wallet in one go by via
+				// `ChainPoller`. So nothing to do here.
+				unreachable!("Onchain wallet will be synced via chain polling")
+			},
 		}
 	}
 
+	// Synchronize the Lightning wallet via transaction-based protocols (i.e., Esplora, Electrum,
+	// etc.)
 	pub(crate) async fn sync_lightning_wallet(
 		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
@@ -583,7 +591,11 @@ impl ChainSource {
 
 				res
 			},
-			Self::BitcoindRpc { .. } => todo!(),
+			Self::BitcoindRpc { .. } => {
+				// In BitcoindRpc mode we sync lightning and onchain wallet in one go by via
+				// `ChainPoller`. So nothing to do here.
+				unreachable!("Lightning wallet will be synced via chain polling")
+			},
 		}
 	}
 
@@ -593,8 +605,9 @@ impl ChainSource {
 	) -> Result<(), Error> {
 		match self {
 			Self::Esplora { .. } => {
-				debug_assert!(false, "Polling should only be used with chain listeners");
-				Ok(())
+				// In Esplora mode we sync lightning and onchain wallets via
+				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
+				unreachable!("Listeners will be synced via transction-based syncing")
 			},
 			Self::BitcoindRpc {
 				bitcoind_rpc_client,
