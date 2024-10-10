@@ -16,7 +16,7 @@ use lightning_block_sync::{
 	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, Cache,
 };
 
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, Transaction, Txid};
 
 use base64::prelude::{Engine, BASE64_STANDARD};
 
@@ -39,6 +39,12 @@ impl BitcoindRpcClient {
 		);
 
 		Self { rpc_client }
+	}
+
+	pub(crate) async fn broadcast_transaction(&self, tx: &Transaction) -> std::io::Result<Txid> {
+		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
+		let tx_json = serde_json::json!(tx_serialized);
+		self.rpc_client.call_method::<Txid>("sendrawtransaction", &vec![tx_json]).await
 	}
 }
 

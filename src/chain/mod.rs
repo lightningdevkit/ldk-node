@@ -882,7 +882,60 @@ impl ChainSource {
 					}
 				}
 			},
-			Self::BitcoindRpc { .. } => todo!(),
+			Self::BitcoindRpc { bitcoind_rpc_client, tx_broadcaster, logger, .. } => {
+				// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
+				// features, we should eventually switch to use `submitpackage` via the
+				// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
+				// transactions.
+				let mut receiver = tx_broadcaster.get_broadcast_queue().await;
+				while let Some(next_package) = receiver.recv().await {
+					for tx in &next_package {
+						let txid = tx.compute_txid();
+						let timeout_fut = tokio::time::timeout(
+							Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
+							bitcoind_rpc_client.broadcast_transaction(tx),
+						);
+						match timeout_fut.await {
+							Ok(res) => match res {
+								Ok(id) => {
+									debug_assert_eq!(id, txid);
+									log_trace!(
+										logger,
+										"Successfully broadcast transaction {}",
+										txid
+									);
+								},
+								Err(e) => {
+									log_error!(
+										logger,
+										"Failed to broadcast transaction {}: {}",
+										txid,
+										e
+									);
+									log_trace!(
+										logger,
+										"Failed broadcast transaction bytes: {}",
+										log_bytes!(tx.encode())
+									);
+								},
+							},
+							Err(e) => {
+								log_error!(
+									logger,
+									"Failed to broadcast transaction due to timeout {}: {}",
+									txid,
+									e
+								);
+								log_trace!(
+									logger,
+									"Failed broadcast transaction bytes: {}",
+									log_bytes!(tx.encode())
+								);
+							},
+						}
+					}
+				}
+			},
 		}
 	}
 }
