@@ -78,6 +78,7 @@ use std::time::SystemTime;
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
 	Esplora { server_url: String, sync_config: Option<EsploraSyncConfig> },
+	BitcoindRpc { rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String },
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +246,16 @@ impl NodeBuilder {
 	) -> &mut Self {
 		self.chain_data_source_config =
 			Some(ChainDataSourceConfig::Esplora { server_url, sync_config });
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data from the given Bitcoin Core RPC
+	/// endpoint.
+	pub fn set_chain_source_bitcoind_rpc(
+		&mut self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::BitcoindRpc { rpc_host, rpc_port, rpc_user, rpc_password });
 		self
 	}
 
@@ -479,6 +490,19 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_chain_source_esplora(server_url, sync_config);
 	}
 
+	/// Configures the [`Node`] instance to source its chain data from the given Bitcoin Core RPC
+	/// endpoint.
+	pub fn set_chain_source_bitcoind_rpc(
+		&self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
+	) {
+		self.inner.write().unwrap().set_chain_source_bitcoind_rpc(
+			rpc_host,
+			rpc_port,
+			rpc_user,
+			rpc_password,
+		);
+	}
+
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
 	/// network.
 	pub fn set_gossip_source_p2p(&self) {
@@ -624,6 +648,21 @@ fn build_with_store_internal(
 			Arc::new(ChainSource::new_esplora(
 				server_url.clone(),
 				sync_config,
+				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+		Some(ChainDataSourceConfig::BitcoindRpc { rpc_host, rpc_port, rpc_user, rpc_password }) => {
+			Arc::new(ChainSource::new_bitcoind_rpc(
+				rpc_host.clone(),
+				*rpc_port,
+				rpc_user.clone(),
+				rpc_password.clone(),
 				Arc::clone(&wallet),
 				Arc::clone(&fee_estimator),
 				Arc::clone(&tx_broadcaster),
