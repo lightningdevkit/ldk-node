@@ -46,7 +46,8 @@ impl Service<Request<Incoming>> for NodeService {
 
 	fn call(&self, req: Request<Incoming>) -> Self::Future {
 		let node = Arc::clone(&self.node);
-		match req.uri().path() {
+		// Exclude '/' from path pattern matching.
+		match &req.uri().path()[1..] {
 			ONCHAIN_RECEIVE_PATH => {
 				Box::pin(handle_request(node, req, handle_onchain_receive_request))
 			},
