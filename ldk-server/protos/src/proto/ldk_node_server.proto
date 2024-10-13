@@ -174,27 +174,27 @@ message ChannelConfig {
   // Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
   // over the channel.
   // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_proportional_millionths
-  uint32 forwarding_fee_proportional_millionths = 1;
+  optional uint32 forwarding_fee_proportional_millionths = 1;
 
   // Amount (in milli-satoshi) charged for payments forwarded outbound over the channel,
   // in excess of forwarding_fee_proportional_millionths.
   // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_base_msat
-  uint32 forwarding_fee_base_msat = 2;
+  optional uint32 forwarding_fee_base_msat = 2;
 
   // The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded
   // over the channel this config applies to.
   // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.cltv_expiry_delta
-  uint32 cltv_expiry_delta = 3;
+  optional uint32 cltv_expiry_delta = 3;
 
   // The maximum additional fee we’re willing to pay to avoid waiting for the counterparty’s
   // to_self_delay to reclaim funds.
   // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.force_close_avoidance_max_fee_satoshis
-  uint64 force_close_avoidance_max_fee_satoshis = 4;
+  optional uint64 force_close_avoidance_max_fee_satoshis = 4;
 
   // If set, allows this channel’s counterparty to skim an additional fee off this node’s
   // inbound HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
   // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs
-  bool accept_underpaying_htlcs = 5;
+  optional bool accept_underpaying_htlcs = 5;
 
   // Limit our total exposure to potential loss to on-chain fees on close, including
   // in-flight HTLCs which are burned to fees as they are too small to claim on-chain
@@ -259,8 +259,8 @@ message Channel {
   // our counterparty already.
   optional OutPoint funding_txo = 3;
 
-  // The local `user_channel_id` of this channel.
-  bytes user_channel_id = 4;
+  // The hex-encoded local `user_channel_id` of this channel.
+  string user_channel_id = 4;
 
   // The value, in satoshis, that must always be held as a reserve in the channel for us. This
   // value ensures that if we broadcast a revoked state, our counterparty can punish us by
@@ -358,7 +358,7 @@ message Channel {
   // claiming at least this value on chain.
   //
   // This value is not included in `inbound_capacity_msat` as it can never be spent.
-  optional uint64 counterparty_unspendable_punishment_reserve = 22;
+  uint64 counterparty_unspendable_punishment_reserve = 22;
 
   // Base routing fee in millisatoshis.
   optional uint32 counterparty_forwarding_info_fee_base_msat = 23;

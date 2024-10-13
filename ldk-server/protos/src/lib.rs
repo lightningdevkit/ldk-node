@@ -184,28 +184,28 @@ pub struct ChannelConfig {
 	/// Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
 	/// over the channel.
 	/// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_proportional_millionths>
-	#[prost(uint32, tag = "1")]
-	pub forwarding_fee_proportional_millionths: u32,
+	#[prost(uint32, optional, tag = "1")]
+	pub forwarding_fee_proportional_millionths: ::core::option::Option<u32>,
 	/// Amount (in milli-satoshi) charged for payments forwarded outbound over the channel,
 	/// in excess of forwarding_fee_proportional_millionths.
 	/// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_base_msat>
-	#[prost(uint32, tag = "2")]
-	pub forwarding_fee_base_msat: u32,
+	#[prost(uint32, optional, tag = "2")]
+	pub forwarding_fee_base_msat: ::core::option::Option<u32>,
 	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded
 	/// over the channel this config applies to.
 	/// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.cltv_expiry_delta>
-	#[prost(uint32, tag = "3")]
-	pub cltv_expiry_delta: u32,
+	#[prost(uint32, optional, tag = "3")]
+	pub cltv_expiry_delta: ::core::option::Option<u32>,
 	/// The maximum additional fee we’re willing to pay to avoid waiting for the counterparty’s
 	/// to_self_delay to reclaim funds.
 	/// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.force_close_avoidance_max_fee_satoshis>
-	#[prost(uint64, tag = "4")]
-	pub force_close_avoidance_max_fee_satoshis: u64,
+	#[prost(uint64, optional, tag = "4")]
+	pub force_close_avoidance_max_fee_satoshis: ::core::option::Option<u64>,
 	/// If set, allows this channel’s counterparty to skim an additional fee off this node’s
 	/// inbound HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
 	/// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs>
-	#[prost(bool, tag = "5")]
-	pub accept_underpaying_htlcs: bool,
+	#[prost(bool, optional, tag = "5")]
+	pub accept_underpaying_htlcs: ::core::option::Option<bool>,
 	/// Limit our total exposure to potential loss to on-chain fees on close, including
 	/// in-flight HTLCs which are burned to fees as they are too small to claim on-chain
 	/// and fees on commitment transaction(s) broadcasted by our counterparty in excess of
@@ -284,9 +284,9 @@ pub struct Channel {
 	/// our counterparty already.
 	#[prost(message, optional, tag = "3")]
 	pub funding_txo: ::core::option::Option<OutPoint>,
-	/// The local `user_channel_id` of this channel.
-	#[prost(bytes = "bytes", tag = "4")]
-	pub user_channel_id: ::prost::bytes::Bytes,
+	/// The hex-encoded local `user_channel_id` of this channel.
+	#[prost(string, tag = "4")]
+	pub user_channel_id: ::prost::alloc::string::String,
 	/// The value, in satoshis, that must always be held as a reserve in the channel for us. This
 	/// value ensures that if we broadcast a revoked state, our counterparty can punish us by
 	/// claiming at least this value on chain.
@@ -383,8 +383,8 @@ pub struct Channel {
 	/// claiming at least this value on chain.
 	///
 	/// This value is not included in `inbound_capacity_msat` as it can never be spent.
-	#[prost(uint64, optional, tag = "22")]
-	pub counterparty_unspendable_punishment_reserve: ::core::option::Option<u64>,
+	#[prost(uint64, tag = "22")]
+	pub counterparty_unspendable_punishment_reserve: u64,
 	/// Base routing fee in millisatoshis.
 	#[prost(uint32, optional, tag = "23")]
 	pub counterparty_forwarding_info_fee_base_msat: ::core::option::Option<u32>,
