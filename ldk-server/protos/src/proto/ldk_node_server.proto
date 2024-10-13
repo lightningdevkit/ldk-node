@@ -1,6 +1,52 @@
 syntax = "proto3";
 package ldk_node_server;
 
+// Retrieve the latest node info like `node_id`, `current_best_block` etc.
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.node_id
+// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.status
+message GetNodeInfoRequest {
+}
+
+message GetNodeInfoResponse {
+
+  // The hex-encoded `node-id` or public key for our own lightning node.
+  string node_id = 1;
+
+  // The best block to which our Lightning wallet is currently synced.
+  //
+  // Should be always set, will never be `None`.
+  BestBlock current_best_block = 3;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our Lightning wallet
+  // to the chain tip.
+  //
+  // Will be `None` if the wallet hasn’t been synced since the node was initialized.
+  optional uint64 latest_wallet_sync_timestamp = 4;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our on-chain
+  // wallet to the chain tip.
+  //
+  // Will be `None` if the wallet hasn’t been synced since the node was initialized.
+  optional uint64 latest_onchain_wallet_sync_timestamp = 5;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully update our fee rate cache.
+  //
+  // Will be `None` if the cache hasn’t been updated since the node was initialized.
+  optional uint64 latest_fee_rate_cache_update_timestamp = 6;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when the last rapid gossip sync (RGS) snapshot we
+  // successfully applied was generated.
+  //
+  // Will be `None` if RGS isn’t configured or the snapshot hasn’t been updated since the node was initialized.
+  optional uint64 latest_rgs_snapshot_timestamp = 7;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node announcement.
+  //
+  // Will be `None` if we have no public channels or we haven’t broadcasted since the node was initialized.
+  optional uint64  latest_node_announcement_broadcast_timestamp = 8;
+}
+
 // Retrieve a new on-chain funding address.
 // See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.new_address
 message OnchainReceiveRequest {
@@ -378,4 +424,14 @@ message OutPoint {
 
   // The index of the referenced output in its transaction's vout.
   uint32 vout = 2;
+}
+
+message BestBlock {
+
+  // The block’s hash
+  string block_hash = 1;
+
+  // The height at which the block was confirmed.
+  uint32 height = 2;
+
 }

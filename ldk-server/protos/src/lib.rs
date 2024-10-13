@@ -1,3 +1,50 @@
+/// Retrieve the latest node info like `node_id`, `current_best_block` etc.
+/// See more:
+/// - <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.node_id>
+/// - <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.status>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetNodeInfoRequest {}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetNodeInfoResponse {
+	/// The hex-encoded `node-id` or public key for our own lightning node.
+	#[prost(string, tag = "1")]
+	pub node_id: ::prost::alloc::string::String,
+	/// The best block to which our Lightning wallet is currently synced.
+	///
+	/// Should be always set, will never be `None`.
+	#[prost(message, optional, tag = "3")]
+	pub current_best_block: ::core::option::Option<BestBlock>,
+	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our Lightning wallet
+	/// to the chain tip.
+	///
+	/// Will be `None` if the wallet hasn’t been synced since the node was initialized.
+	#[prost(uint64, optional, tag = "4")]
+	pub latest_wallet_sync_timestamp: ::core::option::Option<u64>,
+	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our on-chain
+	/// wallet to the chain tip.
+	///
+	/// Will be `None` if the wallet hasn’t been synced since the node was initialized.
+	#[prost(uint64, optional, tag = "5")]
+	pub latest_onchain_wallet_sync_timestamp: ::core::option::Option<u64>,
+	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully update our fee rate cache.
+	///
+	/// Will be `None` if the cache hasn’t been updated since the node was initialized.
+	#[prost(uint64, optional, tag = "6")]
+	pub latest_fee_rate_cache_update_timestamp: ::core::option::Option<u64>,
+	/// The timestamp, in seconds since start of the UNIX epoch, when the last rapid gossip sync (RGS) snapshot we
+	/// successfully applied was generated.
+	///
+	/// Will be `None` if RGS isn’t configured or the snapshot hasn’t been updated since the node was initialized.
+	#[prost(uint64, optional, tag = "7")]
+	pub latest_rgs_snapshot_timestamp: ::core::option::Option<u64>,
+	/// The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node announcement.
+	///
+	/// Will be `None` if we have no public channels or we haven’t broadcasted since the node was initialized.
+	#[prost(uint64, optional, tag = "8")]
+	pub latest_node_announcement_broadcast_timestamp: ::core::option::Option<u64>,
+}
 /// Retrieve a new on-chain funding address.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.new_address>
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -406,4 +453,14 @@ pub struct OutPoint {
 	/// The index of the referenced output in its transaction's vout.
 	#[prost(uint32, tag = "2")]
 	pub vout: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BestBlock {
+	/// The block’s hash
+	#[prost(string, tag = "1")]
+	pub block_hash: ::prost::alloc::string::String,
+	/// The height at which the block was confirmed.
+	#[prost(uint32, tag = "2")]
+	pub height: u32,
 }
