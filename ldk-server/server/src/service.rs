@@ -16,6 +16,7 @@ use crate::api::bolt11_send::{handle_bolt11_send_request, BOLT11_SEND_PATH};
 use crate::api::bolt12_receive::{handle_bolt12_receive_request, BOLT12_RECEIVE_PATH};
 use crate::api::bolt12_send::{handle_bolt12_send_request, BOLT12_SEND_PATH};
 use crate::api::close_channel::{handle_close_channel_request, CLOSE_CHANNEL_PATH};
+use crate::api::get_node_info::{handle_get_node_info_request, GET_NODE_INFO};
 use crate::api::list_channels::{handle_list_channels_request, LIST_CHANNELS_PATH};
 use crate::api::onchain_receive::{handle_onchain_receive_request, ONCHAIN_RECEIVE_PATH};
 use crate::api::onchain_send::{handle_onchain_send_request, ONCHAIN_SEND_PATH};
@@ -41,6 +42,7 @@ impl Service<Request<Incoming>> for NodeService {
 		let node = Arc::clone(&self.node);
 		// Exclude '/' from path pattern matching.
 		match &req.uri().path()[1..] {
+			GET_NODE_INFO => Box::pin(handle_request(node, req, handle_get_node_info_request)),
 			ONCHAIN_RECEIVE_PATH => {
 				Box::pin(handle_request(node, req, handle_onchain_receive_request))
 			},
