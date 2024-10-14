@@ -846,12 +846,14 @@ impl Node {
 		// FIXME: For now, we wait up to 100 secs (BDK_WALLET_SYNC_TIMEOUT_SECS + 10) to allow
 		// event handling to exit gracefully even if it was blocked on the BDK wallet syncing. We
 		// should drop this considerably post upgrading to BDK 1.0.
-		let timeout_res = runtime.block_on(async {
-			tokio::time::timeout(
-				Duration::from_secs(100),
-				event_handling_stopped_receiver.changed(),
-			)
-			.await
+		let timeout_res = tokio::task::block_in_place(move || {
+			runtime.block_on(async {
+				tokio::time::timeout(
+					Duration::from_secs(100),
+					event_handling_stopped_receiver.changed(),
+				)
+				.await
+			})
 		});
 
 		match timeout_res {
