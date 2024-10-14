@@ -298,6 +298,179 @@ message ListChannelsResponse {
   repeated Channel channels = 1;
 }
 
+// Returns payment details for a given payment_id.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.payment
+message GetPaymentDetailsRequest {
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string payment_id = 1;
+}
+
+message GetPaymentDetailsResponse {
+  // Represents a payment.
+  // Will be `None` if payment doesn't exist.
+  Payment payment = 1;
+}
+
+// Represents a payment.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.PaymentDetails.html
+message Payment {
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string id = 1;
+
+  // The kind of the payment.
+  PaymentKind kind = 2;
+
+  // The amount transferred.
+  optional uint64 amount_msat = 3;
+
+  // The direction of the payment.
+  PaymentDirection direction = 4;
+
+  // The status of the payment.
+  PaymentStatus status = 5;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+  uint64 latest_update_timestamp = 6;
+}
+
+message PaymentKind {
+  oneof kind {
+    Onchain onchain = 1;
+    Bolt11 bolt11 = 2;
+    Bolt11Jit bolt11_jit = 3;
+    Bolt12Offer bolt12_offer = 4;
+    Bolt12Refund bolt12_refund = 5;
+    Spontaneous spontaneous = 6;
+  }
+}
+
+// Represents an on-chain payment.
+message Onchain {}
+
+// Represents a BOLT 11 payment.
+message Bolt11 {
+  // The payment hash, i.e., the hash of the preimage.
+  string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+}
+
+// Represents a BOLT 11 payment intended to open an LSPS 2 just-in-time channel.
+message Bolt11Jit {
+  // The payment hash, i.e., the hash of the preimage.
+  string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+
+  // Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+  //
+  // Allowing them to deduct this fee from the first inbound payment will pay for the LSP’s channel opening fees.
+  //
+  // See [`LdkChannelConfig::accept_underpaying_htlcs`](https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs)
+  // for more information.
+  LSPFeeLimits lsp_fee_limits = 4;
+}
+
+// Represents a BOLT 12 ‘offer’ payment, i.e., a payment for an Offer.
+message Bolt12Offer {
+  // The payment hash, i.e., the hash of the preimage.
+  optional string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+
+  // The hex-encoded ID of the offer this payment is for.
+  string offer_id = 4;
+
+  // The payer's note for the payment.
+  // Truncated to [PAYER_NOTE_LIMIT](https://docs.rs/lightning/latest/lightning/offers/invoice_request/constant.PAYER_NOTE_LIMIT.html).
+  //
+  // **Caution**: The `payer_note` field may come from an untrusted source. To prevent potential misuse,
+  // all non-printable characters will be sanitized and replaced with safe characters.
+  optional string payer_note = 5;
+
+  // The quantity of an item requested in the offer.
+  optional uint64 quantity = 6;
+}
+
+// Represents a BOLT 12 ‘refund’ payment, i.e., a payment for a Refund.
+message Bolt12Refund {
+  // The payment hash, i.e., the hash of the preimage.
+  optional string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+
+  // The payer's note for the payment.
+  // Truncated to [PAYER_NOTE_LIMIT](https://docs.rs/lightning/latest/lightning/offers/invoice_request/constant.PAYER_NOTE_LIMIT.html).
+  //
+  // **Caution**: The `payer_note` field may come from an untrusted source. To prevent potential misuse,
+  // all non-printable characters will be sanitized and replaced with safe characters.
+  optional string payer_note = 5;
+
+  // The quantity of an item requested in the offer.
+  optional uint64 quantity = 6;
+
+}
+
+// Represents a spontaneous (“keysend”) payment.
+message Spontaneous {
+  // The payment hash, i.e., the hash of the preimage.
+  string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+}
+
+// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
+//
+// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
+message LSPFeeLimits {
+  // The maximal total amount we allow any configured LSP withhold from us when forwarding the
+  // payment.
+  optional uint64 max_total_opening_fee_msat = 1;
+
+  // The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+  // LSP withhold from us when forwarding the payment.
+  optional uint64 max_proportional_opening_fee_ppm_msat = 2;
+}
+
+// Represents the direction of a payment.
+enum PaymentDirection {
+  // The payment is inbound.
+  INBOUND = 0;
+
+  // The payment is outbound.
+  OUTBOUND = 1;
+}
+
+// Represents the current status of a payment.
+enum PaymentStatus {
+  // The payment is still pending.
+  PENDING = 0;
+
+  // The payment succeeded.
+  SUCCEEDED = 1;
+
+  // The payment failed.
+  FAILED = 2;
+}
+
 message Channel {
   // The channel ID (prior to funding transaction generation, this is a random 32-byte
   // identifier, afterwards this is the transaction ID of the funding transaction XOR the
