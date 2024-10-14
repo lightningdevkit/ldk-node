@@ -867,17 +867,19 @@ where
 						hex_utils::to_string(&payment_preimage.0)
 					);
 				});
+				let event = Event::PaymentSuccessful {
+					payment_id: Some(payment_id),
+					payment_hash,
+					fee_paid_msat,
+				};
 
-				self.event_queue
-					.add_event(Event::PaymentSuccessful {
-						payment_id: Some(payment_id),
-						payment_hash,
-						fee_paid_msat,
-					})
-					.unwrap_or_else(|e| {
+				match self.event_queue.add_event(event) {
+					Ok(_) => return Ok(()),
+					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
-						panic!("Failed to push to event queue");
-					});
+						return Err(ReplayEvent());
+					},
+				};
 			},
 			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
 				log_info!(
