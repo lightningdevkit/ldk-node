@@ -935,12 +935,13 @@ where
 				}
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
-				self.output_sweeper
-					.track_spendable_outputs(outputs, channel_id, true, None)
-					.unwrap_or_else(|_| {
+				match self.output_sweeper.track_spendable_outputs(outputs, channel_id, true, None) {
+					Ok(_) => return Ok(()),
+					Err(_) => {
 						log_error!(self.logger, "Failed to track spendable outputs");
-						panic!("Failed to track spendable outputs");
-					});
+						return Err(ReplayEvent());
+					},
+				};
 			},
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,
