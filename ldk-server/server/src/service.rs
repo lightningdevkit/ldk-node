@@ -17,6 +17,9 @@ use crate::api::bolt12_receive::{handle_bolt12_receive_request, BOLT12_RECEIVE_P
 use crate::api::bolt12_send::{handle_bolt12_send_request, BOLT12_SEND_PATH};
 use crate::api::close_channel::{handle_close_channel_request, CLOSE_CHANNEL_PATH};
 use crate::api::get_node_info::{handle_get_node_info_request, GET_NODE_INFO};
+use crate::api::get_payment_details::{
+	handle_get_payment_details_request, GET_PAYMENT_DETAILS_PATH,
+};
 use crate::api::list_channels::{handle_list_channels_request, LIST_CHANNELS_PATH};
 use crate::api::onchain_receive::{handle_onchain_receive_request, ONCHAIN_RECEIVE_PATH};
 use crate::api::onchain_send::{handle_onchain_send_request, ONCHAIN_SEND_PATH};
@@ -58,6 +61,9 @@ impl Service<Request<Incoming>> for NodeService {
 			OPEN_CHANNEL_PATH => Box::pin(handle_request(node, req, handle_open_channel)),
 			CLOSE_CHANNEL_PATH => Box::pin(handle_request(node, req, handle_close_channel_request)),
 			LIST_CHANNELS_PATH => Box::pin(handle_request(node, req, handle_list_channels_request)),
+			GET_PAYMENT_DETAILS_PATH => {
+				Box::pin(handle_request(node, req, handle_get_payment_details_request))
+			},
 			path => {
 				let error = format!("Unknown request: {}", path).into_bytes();
 				Box::pin(async {
