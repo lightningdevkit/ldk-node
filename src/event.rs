@@ -886,10 +886,13 @@ where
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
-				self.payment_store.update(&update).unwrap_or_else(|e| {
-					log_error!(self.logger, "Failed to access payment store: {}", e);
-					panic!("Failed to access payment store");
-				});
+				match self.payment_store.update(&update) {
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
 				self.event_queue
 					.add_event(Event::PaymentFailed {
 						payment_id: Some(payment_id),
