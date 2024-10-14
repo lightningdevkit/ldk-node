@@ -841,10 +841,13 @@ where
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
-				self.payment_store.update(&update).unwrap_or_else(|e| {
-					log_error!(self.logger, "Failed to access payment store: {}", e);
-					panic!("Failed to access payment store");
-				});
+				match self.payment_store.update(&update) {
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
 
 				self.payment_store.get(&payment_id).map(|payment| {
 					log_info!(
