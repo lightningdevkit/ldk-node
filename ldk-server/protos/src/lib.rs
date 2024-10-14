@@ -339,6 +339,18 @@ pub struct GetPaymentDetailsResponse {
 	#[prost(message, optional, tag = "1")]
 	pub payment: ::core::option::Option<Payment>,
 }
+/// Retrieves list of all payments.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_payments>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListPaymentsRequest {}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListPaymentsResponse {
+	/// List of payments.
+	#[prost(message, repeated, tag = "1")]
+	pub payments: ::prost::alloc::vec::Vec<Payment>,
+}
 /// Represents a payment.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/payment/struct.PaymentDetails.html>
 #[allow(clippy::derive_partial_eq_without_eq)]

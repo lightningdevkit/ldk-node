@@ -311,6 +311,15 @@ message GetPaymentDetailsResponse {
   Payment payment = 1;
 }
 
+// Retrieves list of all payments.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_payments
+message ListPaymentsRequest {}
+
+message ListPaymentsResponse {
+  // List of payments.
+  repeated Payment payments = 1;
+}
+
 // Represents a payment.
 // See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.PaymentDetails.html
 message Payment {
