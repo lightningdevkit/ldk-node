@@ -109,6 +109,21 @@ where
 		}
 	}
 
+	pub(crate) fn apply_unconfirmed_txs(
+		&self, unconfirmed_txs: Vec<(Transaction, u64)>,
+	) -> Result<(), Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		Ok(())
+	}
+
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,

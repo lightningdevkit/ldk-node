@@ -12,7 +12,7 @@ use lightning::chain::Listen;
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::http::JsonResponse;
 use lightning_block_sync::poll::ValidatedBlockHeader;
-use lightning_block_sync::rpc::RpcClient;
+use lightning_block_sync::rpc::{RpcClient, RpcError};
 use lightning_block_sync::{
 	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, Cache,
 };
@@ -24,10 +24,12 @@ use bitcoin::{BlockHash, FeeRate, Transaction, Txid};
 use base64::prelude::{Engine, BASE64_STANDARD};
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub struct BitcoindRpcClient {
 	rpc_client: Arc<RpcClient>,
+	latest_mempool_timestamp: AtomicU64,
 }
 
 impl BitcoindRpcClient {
@@ -41,7 +43,9 @@ impl BitcoindRpcClient {
 				.expect("RpcClient::new is actually infallible"),
 		);
 
-		Self { rpc_client }
+		let latest_mempool_timestamp = AtomicU64::new(0);
+
+		Self { rpc_client, latest_mempool_timestamp }
 	}
 
 	pub(crate) async fn broadcast_transaction(&self, tx: &Transaction) -> std::io::Result<Txid> {
@@ -69,6 +73,99 @@ impl BitcoindRpcClient {
 			.call_method::<MempoolMinFeeResponse>("getmempoolinfo", &vec![])
 			.await
 			.map(|resp| resp.0)
+	}
+
+	pub(crate) async fn get_raw_transaction(
+		&self, txid: &Txid,
+	) -> std::io::Result<Option<Transaction>> {
+		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
+		let txid_json = serde_json::json!(txid_hex);
+		match self
+			.rpc_client
+			.call_method::<GetRawTransactionResponse>("getrawtransaction", &vec![txid_json])
+			.await
+		{
+			Ok(resp) => Ok(Some(resp.0)),
+			Err(e) => match e.into_inner() {
+				Some(inner) => {
+					let rpc_error_res: Result<Box<RpcError>, _> = inner.downcast();
+
+					match rpc_error_res {
+						Ok(rpc_error) => {
+							// Check if it's the 'not found' error code.
+							if rpc_error.code == -5 {
+								Ok(None)
+							} else {
+								Err(std::io::Error::new(std::io::ErrorKind::Other, rpc_error))
+							}
+						},
+						Err(_) => Err(std::io::Error::new(
+							std::io::ErrorKind::Other,
+							"Failed to process getrawtransaction response",
+						)),
+					}
+				},
+				None => Err(std::io::Error::new(
+					std::io::ErrorKind::Other,
+					"Failed to process getrawtransaction response",
+				)),
+			},
+		}
+	}
+
+	pub(crate) async fn get_raw_mempool(&self) -> std::io::Result<Vec<RawMempoolEntry>> {
+		let verbose_flag_json = serde_json::json!(true);
+		self.rpc_client
+			.call_method::<GetRawMempoolResponse>("getrawmempool", &vec![verbose_flag_json])
+			.await
+			.map(|resp| resp.0)
+	}
+
+	/// Get mempool transactions, alongside their first-seen unix timestamps.
+	///
+	/// This method is an adapted version of `bdk_bitcoind_rpc::Emitter::mempool`. It emits each
+	/// transaction only once, unless we cannot assume the transaction's ancestors are already
+	/// emitted.
+	pub(crate) async fn get_mempool_transactions_and_timestamp_at_height(
+		&self, best_processed_height: u32,
+	) -> std::io::Result<Vec<(Transaction, u64)>> {
+		let prev_mempool_time = self.latest_mempool_timestamp.load(Ordering::Relaxed);
+		let mut latest_time = prev_mempool_time;
+
+		let mempool_entries = self.get_raw_mempool().await?;
+		let mut txs_to_emit = Vec::new();
+
+		for entry in mempool_entries {
+			if entry.time > latest_time {
+				latest_time = entry.time;
+			}
+
+			// Avoid emitting transactions that are already emitted if we can guarantee
+			// blocks containing ancestors are already emitted. The bitcoind rpc interface
+			// provides us with the block height that the tx is introduced to the mempool.
+			// If we have already emitted the block of height, we can assume that all
+			// ancestor txs have been processed by the receiver.
+			let ancestor_within_height = entry.height <= best_processed_height;
+			let is_already_emitted = entry.time <= prev_mempool_time;
+			if is_already_emitted && ancestor_within_height {
+				continue;
+			}
+
+			match self.get_raw_transaction(&entry.txid).await {
+				Ok(Some(tx)) => {
+					txs_to_emit.push((tx, entry.time));
+				},
+				Ok(None) => {
+					continue;
+				},
+				Err(e) => return Err(e),
+			};
+		}
+
+		if !txs_to_emit.is_empty() {
+			self.latest_mempool_timestamp.store(latest_time, Ordering::Release);
+		}
+		Ok(txs_to_emit)
 	}
 }
 
@@ -130,6 +227,91 @@ impl TryInto<MempoolMinFeeResponse> for JsonResponse {
 		};
 		Ok(MempoolMinFeeResponse(fee_rate))
 	}
+}
+
+pub struct GetRawTransactionResponse(pub Transaction);
+
+impl TryInto<GetRawTransactionResponse> for JsonResponse {
+	type Error = std::io::Error;
+	fn try_into(self) -> std::io::Result<GetRawTransactionResponse> {
+		let tx = self
+			.0
+			.as_str()
+			.ok_or(std::io::Error::new(
+				std::io::ErrorKind::Other,
+				"Failed to parse getrawtransaction response",
+			))
+			.and_then(|s| {
+				bitcoin::consensus::encode::deserialize_hex(s).map_err(|_| {
+					std::io::Error::new(
+						std::io::ErrorKind::Other,
+						"Failed to parse getrawtransaction response",
+					)
+				})
+			})?;
+
+		Ok(GetRawTransactionResponse(tx))
+	}
+}
+
+pub struct GetRawMempoolResponse(Vec<RawMempoolEntry>);
+
+impl TryInto<GetRawMempoolResponse> for JsonResponse {
+	type Error = std::io::Error;
+	fn try_into(self) -> std::io::Result<GetRawMempoolResponse> {
+		let mut mempool_transactions = Vec::new();
+		let res = self.0.as_object().ok_or(std::io::Error::new(
+			std::io::ErrorKind::Other,
+			"Failed to parse getrawmempool response",
+		))?;
+
+		for (k, v) in res {
+			let txid = match bitcoin::consensus::encode::deserialize_hex(k) {
+				Ok(txid) => txid,
+				Err(_) => {
+					return Err(std::io::Error::new(
+						std::io::ErrorKind::Other,
+						"Failed to parse getrawmempool response",
+					));
+				},
+			};
+
+			let time = match v["time"].as_u64() {
+				Some(time) => time,
+				None => {
+					return Err(std::io::Error::new(
+						std::io::ErrorKind::Other,
+						"Failed to parse getrawmempool response",
+					));
+				},
+			};
+
+			let height = match v["height"].as_u64().and_then(|h| h.try_into().ok()) {
+				Some(height) => height,
+				None => {
+					return Err(std::io::Error::new(
+						std::io::ErrorKind::Other,
+						"Failed to parse getrawmempool response",
+					));
+				},
+			};
+			let entry = RawMempoolEntry { txid, time, height };
+
+			mempool_transactions.push(entry);
+		}
+
+		Ok(GetRawMempoolResponse(mempool_transactions))
+	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RawMempoolEntry {
+	/// The transaction id
+	txid: Txid,
+	/// Local time transaction entered pool in seconds since 1 Jan 1970 GMT
+	time: u64,
+	/// Block height when transaction entered pool
+	height: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

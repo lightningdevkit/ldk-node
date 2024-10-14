@@ -702,25 +702,45 @@ impl ChainSource {
 					},
 				}
 
-				let res = {
-					let unix_time_secs_opt =
-						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-					let mut locked_node_metrics = node_metrics.write().unwrap();
-					locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
-					locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
-					write_node_metrics(
-						&*locked_node_metrics,
-						Arc::clone(&kv_store),
-						Arc::clone(&logger),
-					)
-					.map_err(|e| {
+				let cur_height = channel_manager.current_best_block().height;
+				match bitcoind_rpc_client
+					.get_mempool_transactions_and_timestamp_at_height(cur_height)
+					.await
+				{
+					Ok(unconfirmed_txs) => {
+						let _ = onchain_wallet.apply_unconfirmed_txs(unconfirmed_txs);
+					},
+					Err(e) => {
+						log_error!(logger, "Failed to poll for mempool transactions: {:?}", e);
+						let res = Err(Error::TxSyncFailed);
+						wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
+						return res;
+					},
+				}
+
+				let unix_time_secs_opt =
+					SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+				let mut locked_node_metrics = node_metrics.write().unwrap();
+				locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+				locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+
+				let write_res = write_node_metrics(
+					&*locked_node_metrics,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				);
+				match write_res {
+					Ok(()) => (),
+					Err(e) => {
 						log_error!(logger, "Failed to persist node metrics: {}", e);
-						Error::PersistenceFailed
-					})
-				};
+						let res = Err(Error::PersistenceFailed);
+						wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
+						return res;
+					},
+				}
 
+				let res = Ok(());
 				wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
-
 				res
 			},
 		}
