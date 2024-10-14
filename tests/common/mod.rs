@@ -502,7 +502,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	let onchain_fee_buffer_sat = 1500;
+	let onchain_fee_buffer_sat = 5000;
 	let node_a_anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
 	let node_a_upper_bound_sat =
 		premine_amount_sat - node_a_anchor_reserve_sat - funding_amount_sat;
