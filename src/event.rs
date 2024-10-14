@@ -810,16 +810,18 @@ where
 					},
 				}
 
-				self.event_queue
-					.add_event(Event::PaymentReceived {
-						payment_id: Some(payment_id),
-						payment_hash,
-						amount_msat,
-					})
-					.unwrap_or_else(|e| {
+				let event = Event::PaymentReceived {
+					payment_id: Some(payment_id),
+					payment_hash,
+					amount_msat,
+				};
+				match self.event_queue.add_event(event) {
+					Ok(_) => return Ok(()),
+					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
-						panic!("Failed to push to event queue");
-					});
+						return Err(ReplayEvent());
+					},
+				};
 			},
 			LdkEvent::PaymentSent {
 				payment_id,
