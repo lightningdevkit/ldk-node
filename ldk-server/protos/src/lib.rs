@@ -229,6 +229,24 @@ pub struct OpenChannelResponse {
 	#[prost(bytes = "bytes", tag = "1")]
 	pub user_channel_id: ::prost::bytes::Bytes,
 }
+/// Update the config for a previously opened channel.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.update_channel_config>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateChannelConfigRequest {
+	/// The hex-encoded local `user_channel_id` of this channel.
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
+	/// The hex-encoded public key of the counterparty node to update channel config with.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The updated channel configuration settings for a channel.
+	#[prost(message, optional, tag = "3")]
+	pub channel_config: ::core::option::Option<ChannelConfig>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateChannelConfigResponse {}
 /// ChannelConfig represents the configuration settings for a channel in a Lightning Network node.
 /// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html>
 #[allow(clippy::derive_partial_eq_without_eq)]
