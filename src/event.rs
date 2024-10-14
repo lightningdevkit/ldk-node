@@ -498,11 +498,13 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
-						self.payment_store.update(&update).unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to access payment store: {}", e);
-							panic!("Failed to access payment store");
-						});
-						return Ok(());
+						match self.payment_store.update(&update) {
+							Ok(_) => return Ok(()),
+							Err(e) => {
+								log_error!(self.logger, "Failed to access payment store: {}", e);
+								return Err(ReplayEvent())
+							},
+						};
 					}
 
 					if info.status == PaymentStatus::Succeeded
@@ -520,11 +522,13 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
-						self.payment_store.update(&update).unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to access payment store: {}", e);
-							panic!("Failed to access payment store");
-						});
-						return Ok(());
+						match self.payment_store.update(&update) {
+							Ok(_) => return Ok(()),
+							Err(e) => {
+								log_error!(self.logger, "Failed to access payment store: {}", e);
+								return Err(ReplayEvent())
+							},
+						};
 					}
 
 					let max_total_opening_fee_msat = match info.kind {
@@ -559,11 +563,13 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
-						self.payment_store.update(&update).unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to access payment store: {}", e);
-							panic!("Failed to access payment store");
-						});
-						return Ok(());
+						match self.payment_store.update(&update) {
+							Ok(_) => return Ok(()),
+							Err(e) => {
+								log_error!(self.logger, "Failed to access payment store: {}", e);
+								return Err(ReplayEvent())
+							},
+						};
 					}
 
 					// If this is known by the store but ChannelManager doesn't know the preimage,
@@ -715,10 +721,13 @@ where
 						status: Some(PaymentStatus::Failed),
 						..PaymentDetailsUpdate::new(payment_id)
 					};
-					self.payment_store.update(&update).unwrap_or_else(|e| {
-						log_error!(self.logger, "Failed to access payment store: {}", e);
-						panic!("Failed to access payment store");
-					});
+					match self.payment_store.update(&update) {
+						Ok(_) => return Ok(()),
+						Err(e) => {
+							log_error!(self.logger, "Failed to access payment store: {}", e);
+							return Err(ReplayEvent())
+						},
+					};
 				}
 			},
 			LdkEvent::PaymentClaimed {
@@ -796,7 +805,7 @@ where
 							payment_id,
 							e
 						);
-						panic!("Failed to access payment store");
+						return Err(ReplayEvent());
 					},
 				}
 
