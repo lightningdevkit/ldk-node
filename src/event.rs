@@ -1188,16 +1188,19 @@ where
 					channel_id,
 					counterparty_node_id,
 				);
-				self.event_queue
-					.add_event(Event::ChannelReady {
-						channel_id,
-						user_channel_id: UserChannelId(user_channel_id),
-						counterparty_node_id: Some(counterparty_node_id),
-					})
-					.unwrap_or_else(|e| {
+
+				let event = Event::ChannelReady {
+					channel_id,
+					user_channel_id: UserChannelId(user_channel_id),
+					counterparty_node_id: Some(counterparty_node_id),
+				};
+				match self.event_queue.add_event(event) {
+					Ok(_) => {},
+					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
-						panic!("Failed to push to event queue");
-					});
+						return Err(ReplayEvent());
+					},
+				};
 			},
 			LdkEvent::ChannelClosed {
 				channel_id,
