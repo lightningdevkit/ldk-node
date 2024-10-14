@@ -1131,18 +1131,22 @@ where
 					channel_id,
 					counterparty_node_id,
 				);
-				self.event_queue
-					.add_event(Event::ChannelPending {
-						channel_id,
-						user_channel_id: UserChannelId(user_channel_id),
-						former_temporary_channel_id: former_temporary_channel_id.unwrap(),
-						counterparty_node_id,
-						funding_txo,
-					})
-					.unwrap_or_else(|e| {
+
+				let event = Event::ChannelPending {
+					channel_id,
+					user_channel_id: UserChannelId(user_channel_id),
+					former_temporary_channel_id: former_temporary_channel_id.unwrap(),
+					counterparty_node_id,
+					funding_txo,
+				};
+				match self.event_queue.add_event(event) {
+					Ok(_) => {},
+					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
-						panic!("Failed to push to event queue");
-					});
+						return Err(ReplayEvent());
+					},
+				};
+
 				let network_graph = self.network_graph.read_only();
 				let channels =
 					self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
