@@ -502,7 +502,7 @@ where
 							Ok(_) => return Ok(()),
 							Err(e) => {
 								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent())
+								return Err(ReplayEvent());
 							},
 						};
 					}
@@ -526,7 +526,7 @@ where
 							Ok(_) => return Ok(()),
 							Err(e) => {
 								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent())
+								return Err(ReplayEvent());
 							},
 						};
 					}
@@ -567,7 +567,7 @@ where
 							Ok(_) => return Ok(()),
 							Err(e) => {
 								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent())
+								return Err(ReplayEvent());
 							},
 						};
 					}
@@ -583,22 +583,23 @@ where
 									"We would have registered the preimage if we knew"
 								);
 
-								self.event_queue
-									.add_event(Event::PaymentClaimable {
-										payment_id,
-										payment_hash,
-										claimable_amount_msat: amount_msat,
-										claim_deadline,
-									})
-									.unwrap_or_else(|e| {
+								let event = Event::PaymentClaimable {
+									payment_id,
+									payment_hash,
+									claimable_amount_msat: amount_msat,
+									claim_deadline,
+								};
+								match self.event_queue.add_event(event) {
+									Ok(_) => return Ok(()),
+									Err(e) => {
 										log_error!(
 											self.logger,
 											"Failed to push to event queue: {}",
 											e
 										);
-										panic!("Failed to push to event queue");
-									});
-								return Ok(());
+										return Err(ReplayEvent());
+									},
+								};
 							}
 						},
 						_ => {},
@@ -725,7 +726,7 @@ where
 						Ok(_) => return Ok(()),
 						Err(e) => {
 							log_error!(self.logger, "Failed to access payment store: {}", e);
-							return Err(ReplayEvent())
+							return Err(ReplayEvent());
 						},
 					};
 				}
