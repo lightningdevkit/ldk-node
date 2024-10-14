@@ -1210,17 +1210,21 @@ where
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
-				self.event_queue
-					.add_event(Event::ChannelClosed {
-						channel_id,
-						user_channel_id: UserChannelId(user_channel_id),
-						counterparty_node_id,
-						reason: Some(reason),
-					})
-					.unwrap_or_else(|e| {
+
+				let event = Event::ChannelClosed {
+					channel_id,
+					user_channel_id: UserChannelId(user_channel_id),
+					counterparty_node_id,
+					reason: Some(reason),
+				};
+
+				match self.event_queue.add_event(event) {
+					Ok(_) => {},
+					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
-						panic!("Failed to push to event queue");
-					});
+						return Err(ReplayEvent());
+					},
+				};
 			},
 			LdkEvent::DiscardFunding { .. } => {},
 			LdkEvent::HTLCIntercepted { .. } => {},
