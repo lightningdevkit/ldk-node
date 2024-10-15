@@ -841,6 +841,7 @@ impl ChainSource {
 			Self::BitcoindRpc {
 				bitcoind_rpc_client,
 				fee_estimator,
+				config,
 				kv_store,
 				logger,
 				node_metrics,
@@ -848,7 +849,7 @@ impl ChainSource {
 			} => {
 				macro_rules! get_fee_rate_update {
 					($estimation_fut: expr) => {{
-						tokio::time::timeout(
+						let update_res = tokio::time::timeout(
 							Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
 							$estimation_fut,
 						)
@@ -856,11 +857,8 @@ impl ChainSource {
 						.map_err(|e| {
 							log_error!(logger, "Updating fee rate estimates timed out: {}", e);
 							Error::FeerateEstimationUpdateTimeout
-						})?
-						.map_err(|e| {
-							log_error!(logger, "Failed to retrieve fee rate estimates: {}", e);
-							Error::FeerateEstimationUpdateFailed
-						})?
+						})?;
+						update_res
 					}};
 				}
 				let confirmation_targets = get_all_conf_targets();
@@ -868,7 +866,7 @@ impl ChainSource {
 				let mut new_fee_rate_cache = HashMap::with_capacity(10);
 				let now = Instant::now();
 				for target in confirmation_targets {
-					let fee_rate = match target {
+					let fee_rate_update_res = match target {
 						ConfirmationTarget::Lightning(
 							LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
 						) => {
@@ -900,6 +898,35 @@ impl ChainSource {
 							let estimation_fut = bitcoind_rpc_client
 								.get_fee_estimate_for_target(num_blocks, estimation_mode);
 							get_fee_rate_update!(estimation_fut)
+						},
+					};
+
+					let fee_rate = match (fee_rate_update_res, config.network) {
+						(Ok(rate), _) => rate,
+						(Err(e), Network::Bitcoin) => {
+							// Strictly fail on mainnet.
+							log_error!(logger, "Failed to retrieve fee rate estimates: {}", e);
+							return Err(Error::FeerateEstimationUpdateFailed);
+						},
+						(Err(e), n) if n == Network::Regtest || n == Network::Signet => {
+							// On regtest/signet we just fall back to the usual 1 sat/vb == 250
+							// sat/kwu default.
+							log_error!(
+								logger,
+								"Failed to retrieve fee rate estimates: {}. Falling back to default of 1 sat/vb.",
+								e,
+							);
+							FeeRate::from_sat_per_kwu(250)
+						},
+						(Err(e), _) => {
+							// On testnet `estimatesmartfee` can be unreliable so we just skip in
+							// case of a failure, which will have us falling back to defaults.
+							log_error!(
+								logger,
+								"Failed to retrieve fee rate estimates: {}. Falling back to defaults.",
+								e,
+							);
+							return Ok(());
 						},
 					};
 
