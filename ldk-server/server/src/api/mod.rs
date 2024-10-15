@@ -10,3 +10,4 @@ pub(crate) mod list_payments;
 pub(crate) mod onchain_receive;
 pub(crate) mod onchain_send;
 pub(crate) mod open_channel;
+pub(crate) mod update_channel_config;
