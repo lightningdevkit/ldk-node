@@ -8,11 +8,10 @@
 #![cfg(any(test, cln_test, vss_test))]
 #![allow(dead_code)]
 
+use ldk_node::config::{Config, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{
-	Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance,
-};
+use ldk_node::{Builder, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -218,8 +217,6 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	}
 
 	config.network = Network::Regtest;
-	config.onchain_wallet_sync_interval_secs = 100000;
-	config.wallet_sync_interval_secs = 100000;
 	println!("Setting network: {}", config.network);
 
 	let rand_dir = random_storage_path();
@@ -281,8 +278,11 @@ pub(crate) fn setup_two_nodes(
 
 pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.onchain_wallet_sync_interval_secs = 100000;
+	sync_config.lightning_wallet_sync_interval_secs = 100000;
 	setup_builder!(builder, config);
-	builder.set_esplora_server(esplora_url.clone());
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();

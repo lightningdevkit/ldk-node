@@ -9,7 +9,6 @@ use persist::KVStoreWalletPersister;
 
 use crate::logger::{log_error, log_info, log_trace, Logger};
 
-use crate::config::{BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::Error;
 
@@ -26,9 +25,9 @@ use lightning::sign::{
 use lightning::util::message_signing;
 use lightning_invoice::RawBolt11Invoice;
 
+use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_chain::ChainPosition;
-use bdk_esplora::EsploraAsyncExt;
-use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions};
+use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Update};
 
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -42,19 +41,11 @@ use bitcoin::{
 	Amount, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, WitnessProgram, WitnessVersion,
 };
 
-use esplora_client::AsyncClient as EsploraAsyncClient;
-
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 pub(crate) mod persist;
 pub(crate) mod ser;
-
-enum WalletSyncStatus {
-	Completed,
-	InProgress { subscribers: tokio::sync::broadcast::Sender<Result<(), Error>> },
-}
 
 pub(crate) struct Wallet<B: Deref, E: Deref, L: Deref>
 where
@@ -65,11 +56,8 @@ where
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
 	persister: Mutex<KVStoreWalletPersister>,
-	esplora_client: EsploraAsyncClient,
 	broadcaster: B,
 	fee_estimator: E,
-	// A Mutex holding the current sync status.
-	sync_status: Mutex<WalletSyncStatus>,
 	logger: L,
 }
 
@@ -81,86 +69,38 @@ where
 {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
-		wallet_persister: KVStoreWalletPersister, esplora_client: EsploraAsyncClient,
-		broadcaster: B, fee_estimator: E, logger: L,
+		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E, logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
-		let sync_status = Mutex::new(WalletSyncStatus::Completed);
-		Self { inner, persister, esplora_client, broadcaster, fee_estimator, sync_status, logger }
+		Self { inner, persister, broadcaster, fee_estimator, logger }
 	}
 
-	pub(crate) async fn sync(&self) -> Result<(), Error> {
-		if let Some(mut sync_receiver) = self.register_or_subscribe_pending_sync() {
-			log_info!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.recv().await.map_err(|e| {
-				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
-				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
-				Error::WalletOperationFailed
-			})?;
+	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
+		self.inner.lock().unwrap().start_full_scan().build()
+	}
+
+	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
+		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
+	}
+
+	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		match locked_wallet.apply_update(update) {
+			Ok(()) => {
+				let mut locked_persister = self.persister.lock().unwrap();
+				locked_wallet.persist(&mut locked_persister).map_err(|e| {
+					log_error!(self.logger, "Failed to persist wallet: {}", e);
+					Error::PersistenceFailed
+				})?;
+
+				Ok(())
+			},
+			Err(e) => {
+				log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
+				Err(Error::WalletOperationFailed)
+			},
 		}
-
-		let res = {
-			let full_scan_request = self.inner.lock().unwrap().start_full_scan().build();
-
-			let wallet_sync_timeout_fut = tokio::time::timeout(
-				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
-				self.esplora_client.full_scan(
-					full_scan_request,
-					BDK_CLIENT_STOP_GAP,
-					BDK_CLIENT_CONCURRENCY,
-				),
-			);
-
-			match wallet_sync_timeout_fut.await {
-				Ok(res) => match res {
-					Ok(update) => {
-						let mut locked_wallet = self.inner.lock().unwrap();
-						match locked_wallet.apply_update(update) {
-							Ok(()) => {
-								let mut locked_persister = self.persister.lock().unwrap();
-								locked_wallet.persist(&mut locked_persister).map_err(|e| {
-									log_error!(self.logger, "Failed to persist wallet: {}", e);
-									Error::PersistenceFailed
-								})?;
-
-								Ok(())
-							},
-							Err(e) => {
-								log_error!(
-									self.logger,
-									"Sync failed due to chain connection error: {}",
-									e
-								);
-								Err(Error::WalletOperationFailed)
-							},
-						}
-					},
-					Err(e) => match *e {
-						esplora_client::Error::Reqwest(he) => {
-							log_error!(
-								self.logger,
-								"Sync failed due to HTTP connection error: {}",
-								he
-							);
-							Err(Error::WalletOperationFailed)
-						},
-						_ => {
-							log_error!(self.logger, "Sync failed due to Esplora error: {}", e);
-							Err(Error::WalletOperationFailed)
-						},
-					},
-				},
-				Err(e) => {
-					log_error!(self.logger, "On-chain wallet sync timed out: {}", e);
-					Err(Error::WalletOperationTimeout)
-				},
-			}
-		};
-
-		self.propagate_result_to_subscribers(res);
-
-		res
 	}
 
 	pub(crate) fn create_funding_transaction(
@@ -342,59 +282,6 @@ where
 		}
 
 		Ok(txid)
-	}
-
-	fn register_or_subscribe_pending_sync(
-		&self,
-	) -> Option<tokio::sync::broadcast::Receiver<Result<(), Error>>> {
-		let mut sync_status_lock = self.sync_status.lock().unwrap();
-		match sync_status_lock.deref_mut() {
-			WalletSyncStatus::Completed => {
-				// We're first to register for a sync.
-				let (tx, _) = tokio::sync::broadcast::channel(1);
-				*sync_status_lock = WalletSyncStatus::InProgress { subscribers: tx };
-				None
-			},
-			WalletSyncStatus::InProgress { subscribers } => {
-				// A sync is in-progress, we subscribe.
-				let rx = subscribers.subscribe();
-				Some(rx)
-			},
-		}
-	}
-
-	fn propagate_result_to_subscribers(&self, res: Result<(), Error>) {
-		// Send the notification to any other tasks that might be waiting on it by now.
-		{
-			let mut sync_status_lock = self.sync_status.lock().unwrap();
-			match sync_status_lock.deref_mut() {
-				WalletSyncStatus::Completed => {
-					// No sync in-progress, do nothing.
-					return;
-				},
-				WalletSyncStatus::InProgress { subscribers } => {
-					// A sync is in-progress, we notify subscribers.
-					if subscribers.receiver_count() > 0 {
-						match subscribers.send(res) {
-							Ok(_) => (),
-							Err(e) => {
-								debug_assert!(
-									false,
-									"Failed to send wallet sync result to subscribers: {:?}",
-									e
-								);
-								log_error!(
-									self.logger,
-									"Failed to send wallet sync result to subscribers: {:?}",
-									e
-								);
-							},
-						}
-					}
-					*sync_status_lock = WalletSyncStatus::Completed;
-				},
-			}
-		}
 	}
 }
 

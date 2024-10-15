@@ -8,12 +8,17 @@
 use super::*;
 use crate::config::WALLET_KEYS_SEED_LEN;
 
+use crate::chain::ChainSource;
+use crate::fee_estimator::OnchainFeeEstimator;
+use crate::io::{
+	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+};
 use crate::logger::{log_error, FilesystemLogger};
 use crate::peer_store::PeerStore;
 use crate::sweep::DeprecatedSpendableOutputInfo;
-use crate::types::{Broadcaster, ChainSource, DynStore, FeeEstimator, KeysManager, Sweeper};
+use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{Error, EventQueue, PaymentDetails};
+use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
@@ -219,7 +224,7 @@ where
 
 /// Read `OutputSweeper` state from the store.
 pub(crate) fn read_output_sweeper(
-	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<FeeEstimator>,
+	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
 	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
 	logger: Arc<FilesystemLogger>,
 ) -> Result<Sweeper, std::io::Error> {
@@ -340,98 +345,44 @@ where
 	Ok(())
 }
 
-pub(crate) fn read_latest_rgs_sync_timestamp<L: Deref>(
+pub(crate) fn read_node_metrics<L: Deref>(
 	kv_store: Arc<DynStore>, logger: L,
-) -> Result<u32, std::io::Error>
+) -> Result<NodeMetrics, std::io::Error>
 where
 	L::Target: Logger,
 {
 	let mut reader = Cursor::new(kv_store.read(
-		LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-		LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-		LATEST_RGS_SYNC_TIMESTAMP_KEY,
+		NODE_METRICS_PRIMARY_NAMESPACE,
+		NODE_METRICS_SECONDARY_NAMESPACE,
+		NODE_METRICS_KEY,
 	)?);
-	u32::read(&mut reader).map_err(|e| {
-		log_error!(logger, "Failed to deserialize latest RGS sync timestamp: {}", e);
-		std::io::Error::new(
-			std::io::ErrorKind::InvalidData,
-			"Failed to deserialize latest RGS sync timestamp",
-		)
+	NodeMetrics::read(&mut reader).map_err(|e| {
+		log_error!(logger, "Failed to deserialize NodeMetrics: {}", e);
+		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NodeMetrics")
 	})
 }
 
-pub(crate) fn write_latest_rgs_sync_timestamp<L: Deref>(
-	updated_timestamp: u32, kv_store: Arc<DynStore>, logger: L,
+pub(crate) fn write_node_metrics<L: Deref>(
+	node_metrics: &NodeMetrics, kv_store: Arc<DynStore>, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: Logger,
 {
-	let data = updated_timestamp.encode();
+	let data = node_metrics.encode();
 	kv_store
 		.write(
-			LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_KEY,
+			NODE_METRICS_PRIMARY_NAMESPACE,
+			NODE_METRICS_SECONDARY_NAMESPACE,
+			NODE_METRICS_KEY,
 			&data,
 		)
 		.map_err(|e| {
 			log_error!(
 				logger,
 				"Writing data to key {}/{}/{} failed due to: {}",
-				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-				LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-				LATEST_RGS_SYNC_TIMESTAMP_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})
-}
-
-pub(crate) fn read_latest_node_ann_bcast_timestamp<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
-) -> Result<u64, std::io::Error>
-where
-	L::Target: Logger,
-{
-	let mut reader = Cursor::new(kv_store.read(
-		LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
-		LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
-		LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
-	)?);
-	u64::read(&mut reader).map_err(|e| {
-		log_error!(
-			logger,
-			"Failed to deserialize latest node announcement broadcast timestamp: {}",
-			e
-		);
-		std::io::Error::new(
-			std::io::ErrorKind::InvalidData,
-			"Failed to deserialize latest node announcement broadcast timestamp",
-		)
-	})
-}
-
-pub(crate) fn write_latest_node_ann_bcast_timestamp<L: Deref>(
-	updated_timestamp: u64, kv_store: Arc<DynStore>, logger: L,
-) -> Result<(), Error>
-where
-	L::Target: Logger,
-{
-	let data = updated_timestamp.encode();
-	kv_store
-		.write(
-			LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
-			LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
-			LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
-			&data,
-		)
-		.map_err(|e| {
-			log_error!(
-				logger,
-				"Writing data to key {}/{}/{} failed due to: {}",
-				LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
-				LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
-				LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
+				NODE_METRICS_PRIMARY_NAMESPACE,
+				NODE_METRICS_SECONDARY_NAMESPACE,
+				NODE_METRICS_KEY,
 				e
 			);
 			Error::PersistenceFailed
