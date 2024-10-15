@@ -631,6 +631,80 @@ impl ArcedNodeBuilder {
 		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
 	}
 
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [LNURL-auth] based authentication scheme as default method for authentication/authorization.
+	///
+	/// The LNURL challenge will be retrieved by making a request to the given `lnurl_auth_server_url`.
+	/// The returned JWT token in response to the signed LNURL request, will be used for
+	/// authentication/authorization of all the requests made to VSS.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store(
+		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store(vss_url, store_id, lnurl_auth_server_url, fixed_headers)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [`FixedHeaders`] as default method for authentication/authorization.
+	///
+	/// Given `fixed_headers` are included as it is in all the requests made to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store_and_fixed_headers(
+		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store_and_fixed_headers(vss_url, store_id, fixed_headers)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Given `header_provider` is used to attach headers to every request made
+	/// to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store_and_header_provider(
+		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+			.map(Arc::new)
+	}
+
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
