@@ -28,13 +28,13 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.0.124", features = ["std"] }
+lightning = { version = "0.0.125", features = ["std"] }
 lightning-invoice = { version = "0.32.0" }
-lightning-net-tokio = { version = "0.0.124" }
-lightning-persister = { version = "0.0.124" }
-lightning-background-processor = { version = "0.0.124", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.124" }
-lightning-transaction-sync = { version = "0.0.124", features = ["esplora-async-https", "time"] }
+lightning-net-tokio = { version = "0.0.125" }
+lightning-persister = { version = "0.0.125" }
+lightning-background-processor = { version = "0.0.125", features = ["futures"] }
+lightning-rapid-gossip-sync = { version = "0.0.125" }
+lightning-transaction-sync = { version = "0.0.125", features = ["esplora-async-https", "time"] }
 lightning-liquidity = { version = "0.1.0-alpha.5", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
@@ -80,7 +80,7 @@ prost = { version = "0.11.6", default-features = false}
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.0.124", features = ["std", "_test_utils"] }
+lightning = { version = "0.0.125", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
 electrum-client = { version = "0.21.0", default-features = true }
 bitcoincore-rpc = { version = "0.19.0", default-features = false }
