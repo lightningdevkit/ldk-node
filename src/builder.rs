@@ -477,7 +477,11 @@ impl NodeBuilder {
 
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
-		let vss_store = Arc::new(VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider));
+		let vss_store =
+			VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider).map_err(|e| {
+				log_error!(logger, "Failed to setup VssStore: {}", e);
+				BuildError::KVStoreSetupFailed
+			})?;
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -485,7 +489,7 @@ impl NodeBuilder {
 			self.liquidity_source_config.as_ref(),
 			seed_bytes,
 			logger,
-			vss_store,
+			Arc::new(vss_store),
 		)
 	}
 
