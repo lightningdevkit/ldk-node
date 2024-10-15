@@ -31,6 +31,7 @@ use lightning::util::ser::Writeable;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
+use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
 use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 use lightning_block_sync::SpvClient;
@@ -189,6 +190,13 @@ impl ChainSource {
 			config,
 			logger,
 			node_metrics,
+		}
+	}
+
+	pub(crate) fn as_utxo_source(&self) -> Option<Arc<dyn UtxoSource>> {
+		match self {
+			Self::BitcoindRpc { bitcoind_rpc_client, .. } => Some(bitcoind_rpc_client.rpc_client()),
+			_ => None,
 		}
 	}
 

@@ -45,6 +45,10 @@ impl BitcoindRpcClient {
 		Self { rpc_client, latest_mempool_timestamp }
 	}
 
+	pub(crate) fn rpc_client(&self) -> Arc<RpcClient> {
+		Arc::clone(&self.rpc_client)
+	}
+
 	pub(crate) async fn broadcast_transaction(&self, tx: &Transaction) -> std::io::Result<Txid> {
 		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
 		let tx_json = serde_json::json!(tx_serialized);

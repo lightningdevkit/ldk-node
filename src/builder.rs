@@ -1126,6 +1126,12 @@ fn build_with_store_internal(
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
+	gossip_source.set_gossip_verifier(
+		Arc::clone(&chain_source),
+		Arc::clone(&peer_manager),
+		Arc::clone(&runtime),
+	);
+
 	let connection_manager =
 		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
 
