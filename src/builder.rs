@@ -77,7 +77,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 #[cfg(any(vss, vss_test))]
-use vss_client::headers::{FixedHeaders, VssHeaderProvider};
+use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
@@ -364,7 +364,63 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
 	/// previously configured.
 	///
+	/// Uses [LNURL-auth] based authentication scheme as default method for authentication/authorization.
+	///
+	/// The LNURL challenge will be retrieved by making a request to the given `lnurl_auth_server_url`.
+	/// The returned JWT token in response to the signed LNURL request, will be used for
+	/// authentication/authorization of all the requests made to VSS.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store(
+		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Node, BuildError> {
+		use bitcoin::key::Secp256k1;
+
+		let logger = setup_logger(&self.config)?;
+
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
+
+		let config = Arc::new(self.config.clone());
+
+		let vss_xprv = derive_vss_xprv(config, &seed_bytes, Arc::clone(&logger))?;
+
+		let lnurl_auth_xprv = vss_xprv
+			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 138 }])
+			.map_err(|e| {
+				log_error!(logger, "Failed to derive VSS secret: {}", e);
+				BuildError::KVStoreSetupFailed
+			})?;
+
+		let lnurl_auth_jwt_provider =
+			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers)
+				.map_err(|e| {
+					log_error!(logger, "Failed to create LnurlAuthToJwtProvider: {}", e);
+					BuildError::KVStoreSetupFailed
+				})?;
+
+		let header_provider = Arc::new(lnurl_auth_jwt_provider);
+
+		self.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
 	/// Uses [`FixedHeaders`] as default method for authentication/authorization.
+	///
 	/// Given `fixed_headers` are included as it is in all the requests made to VSS.
 	///
 	/// **Caution**: VSS support is in **alpha** and is considered experimental.
