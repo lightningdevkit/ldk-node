@@ -72,7 +72,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros" ] }
 esplora-client = { version = "0.9", default-features = false }
 libc = "0.2"
-uniffi = { version = "0.26.0", features = ["build"], optional = true }
+uniffi = { version = "0.27.3", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.128", default-features = false, features = ["std"] }
 
@@ -101,7 +101,7 @@ electrsd = { version = "0.29.0", features = ["legacy"] }
 clightningrpc = { version = "0.3.0-beta.8", default-features = false }
 
 [build-dependencies]
-uniffi = { version = "0.26.0", features = ["build"], optional = true }
+uniffi = { version = "0.27.3", features = ["build"], optional = true }
 
 [profile.release]
 panic = "abort"
