@@ -52,6 +52,7 @@ interface Builder {
 };
 
 interface Node {
+	f64 get_balance_test();
 	[Throws=NodeError]
 	void start();
 	[Throws=NodeError]

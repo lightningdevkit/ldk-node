@@ -28,6 +28,13 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+retry = "1.3"
+futures = "0.3"
+async-trait = "0.1"
+hex = "0.4.3"
+
 lightning = { version = "0.0.125", features = ["std"] }
 lightning-invoice = { version = "0.32.0" }
 lightning-net-tokio = { version = "0.0.125" }
@@ -59,7 +66,7 @@ bdk_chain = { version = "=0.19.0", default-features = false, features = ["std"] 
 bdk_esplora = { version = "=0.18.0", default-features = false, features = ["async-https-rustls"]}
 bdk_wallet = { version = "=1.0.0-beta.4", default-features = false, features = ["std", "keys-bip39"]}
 
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.28.0", features = ["bundled"] }
 bitcoin = "0.32.2"
 bip39 = "2.0.0"
