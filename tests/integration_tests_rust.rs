@@ -196,17 +196,6 @@ fn multi_hop_sending() {
 }
 
 #[test]
-fn connect_to_public_testnet_esplora() {
-	let mut config = random_config(true);
-	config.network = Network::Testnet;
-	setup_builder!(builder, config);
-	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
-	let node = builder.build().unwrap();
-	node.start().unwrap();
-	node.stop().unwrap();
-}
-
-#[test]
 fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
