@@ -44,8 +44,17 @@ impl OnchainFeeEstimator {
 		Self { fee_rate_cache }
 	}
 
-	pub(crate) fn set_fee_rate_cache(&self, fee_rate_cache: HashMap<ConfirmationTarget, FeeRate>) {
-		*self.fee_rate_cache.write().unwrap() = fee_rate_cache;
+	// Updates the fee rate cache and returns if the new values changed.
+	pub(crate) fn set_fee_rate_cache(
+		&self, fee_rate_cache_update: HashMap<ConfirmationTarget, FeeRate>,
+	) -> bool {
+		let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
+		if fee_rate_cache_update != *locked_fee_rate_cache {
+			*locked_fee_rate_cache = fee_rate_cache_update;
+			true
+		} else {
+			false
+		}
 	}
 }
 
