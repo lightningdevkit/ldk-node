@@ -14,7 +14,6 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
-#[cfg(any(vss, vss_test))]
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
@@ -64,9 +63,7 @@ use bip39::Mnemonic;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 
-#[cfg(any(vss, vss_test))]
 use bitcoin::bip32::{ChildNumber, Xpriv};
-#[cfg(any(vss, vss_test))]
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::default::Default;
@@ -76,7 +73,6 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
-#[cfg(any(vss, vss_test))]
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
 #[derive(Debug, Clone)]
@@ -389,7 +385,6 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
-	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store(
 		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
 		fixed_headers: HashMap<String, String>,
@@ -439,7 +434,6 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store_and_fixed_headers(
 		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
@@ -459,7 +453,6 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store_and_header_provider(
 		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
@@ -676,7 +669,6 @@ impl ArcedNodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
-	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store(
 		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
 		fixed_headers: HashMap<String, String>,
@@ -700,7 +692,6 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store_and_fixed_headers(
 		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
@@ -722,7 +713,6 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	#[cfg(any(vss, vss_test))]
 	pub fn build_with_vss_store_and_header_provider(
 		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Arc<Node>, BuildError> {
@@ -1276,7 +1266,6 @@ fn seed_bytes_from_config(
 	}
 }
 
-#[cfg(any(vss, vss_test))]
 fn derive_vss_xprv(
 	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<FilesystemLogger>,
 ) -> Result<Xpriv, BuildError> {

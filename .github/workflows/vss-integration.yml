@@ -74,8 +74,8 @@ jobs:
         run: |
           cd ldk-node
           export TEST_VSS_BASE_URL="http://localhost:8080/vss"
-          RUSTFLAGS="--cfg vss_test --cfg vss" cargo build --verbose --color always
-          RUSTFLAGS="--cfg vss_test --cfg vss" cargo test --test integration_tests_vss
+          RUSTFLAGS="--cfg vss_test" cargo build --verbose --color always
+          RUSTFLAGS="--cfg vss_test" cargo test --test integration_tests_vss
 
       - name: Cleanup
         run: |
