@@ -99,6 +99,8 @@ mod wallet;
 pub use bip39;
 pub use bitcoin;
 pub use lightning;
+use lightning::ln::types::ChannelId;
+use lightning::offers::offer::Offer;
 pub use lightning_invoice;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
@@ -161,6 +163,7 @@ use rand::Rng;
 
 use std::default::Default;
 use std::net::ToSocketAddrs;
+use std::ops::{Div, Sub};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -316,6 +319,276 @@ pub fn calculate_median_price(
 	Ok(median_price)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+/// Got docs?
+pub struct Bitcoin {
+	/// Got docs?
+    pub sats: u64, // Stored in Satoshis for precision
+}
+
+impl Bitcoin {
+    const SATS_IN_BTC: u64 = 100_000_000;
+
+	/// Got docs
+    pub fn from_sats(sats: u64) -> Self {
+        Self { sats }
+    }
+
+	/// Got docs
+    pub fn from_btc(btc: f64) -> Self {
+        let sats = (btc * Self::SATS_IN_BTC as f64).round() as u64;
+        Self::from_sats(sats)
+    }
+
+	/// Got docs
+    pub fn to_btc(self) -> f64 {
+        self.sats as f64 / Self::SATS_IN_BTC as f64
+    }
+}
+
+impl Sub for Bitcoin {
+    type Output = Bitcoin;
+
+    fn sub(self, other: Bitcoin) -> Bitcoin {
+        Bitcoin::from_sats(self.sats.saturating_sub(other.sats))
+    }
+}
+
+impl std::fmt::Display for Bitcoin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let btc_value = self.to_btc();
+
+        // Format the value to 8 decimal places with spaces
+        let formatted_btc = format!("{:.8}", btc_value);
+        let with_spaces = formatted_btc
+            .chars()
+            .enumerate()
+            .map(|(i, c)| if i == 4 || i == 7 { format!(" {}", c) } else { c.to_string() })
+            .collect::<String>();
+
+        write!(f, "{}btc", with_spaces)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+/// Got docs?
+pub struct USD(pub f64);
+
+impl USD {
+    fn from_bitcoin(btc: Bitcoin, btcusd_price: f64) -> Self {
+        Self(btc.to_btc() * btcusd_price)
+    }
+
+	/// Got docs?
+    pub fn from_f64(amount: f64) -> Self {
+        Self(amount)
+    }
+
+	/// Got docs?
+    pub fn to_msats(self, btcusd_price: f64) -> u64 {
+        let btc_value = self.0 / btcusd_price;
+        let sats = btc_value * Bitcoin::SATS_IN_BTC as f64;
+        let millisats = sats * 1000.0;
+        millisats.abs().floor() as u64
+    }
+}
+
+impl Sub for USD {
+    type Output = USD;
+
+    fn sub(self, other: USD) -> USD {
+        USD(self.0 - other.0)
+    }
+}
+
+impl Div<f64> for USD {
+    type Output = USD;
+
+    fn div(self, scalar: f64) -> USD {
+        USD(self.0 / scalar)
+    }
+}
+
+impl Div for USD {
+    type Output = f64;
+
+    fn div(self, other: USD) -> f64 {
+        self.0 / other.0
+    }
+}
+
+impl std::fmt::Display for USD {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "${:.2}", self.0)
+    }
+}
+
+#[derive(Clone, Debug)]
+/// Main data structure
+/// Represents a stable channel with associated information.
+pub struct StableChannel {
+    /// Unique identifier for the channel.
+    pub channel_id: ChannelId,
+    /// Indicates if the counterparty is the Stable Receiver.
+    pub is_stable_receiver: bool,
+    /// The expected amount in USD.
+    pub expected_usd: USD,
+    /// The expected amount in Bitcoin.
+    pub expected_btc: Bitcoin,
+    /// The stable amount of Bitcoin for the receiver.
+    pub stable_receiver_btc: Bitcoin,
+    /// The stable amount of Bitcoin for the provider.
+    pub stable_provider_btc: Bitcoin,
+    /// The stable amount of USD for the receiver.
+    pub stable_receiver_usd: USD,
+    /// The stable amount of USD for the provider.
+    pub stable_provider_usd: USD,
+    /// The level of risk associated with the channel.
+    pub risk_level: i32,
+    /// Timestamp when the channel was created or updated.
+    pub timestamp: i64,
+    /// Human-readable formatted date and time.
+    pub formatted_datetime: String,
+    /// Indicates if a payment has been made in the channel.
+    pub payment_made: bool,
+    /// The latest price associated with the channel, typically in USD or Bitcoin.
+    pub latest_price: f64,
+    /// Serialized string of price-related information.
+    pub prices: String,
+    /// The counterparty's offer associated with the channel.
+    pub counterparty_offer: Option<Offer>,
+}
+
+/// Check stability
+fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
+    sc.latest_price = fetch_prices(&Client::new(), &set_price_feeds())
+        .and_then(|prices| calculate_median_price(prices))
+        .unwrap_or(0.0);
+
+        if let Some(channel) = node.list_channels().iter().find(|c| c.channel_id == sc.channel_id) {
+        sc = update_balances(sc, Some(channel.clone()));
+    }
+
+    let mut dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
+    let mut percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
+
+    println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
+    println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
+    println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
+
+    println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
+    println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
+
+    enum Action {
+        Wait,
+        Pay,
+        DoNothing,
+        HighRisk,
+    }
+
+    let action = if percent_from_par < 0.1 {
+        Action::DoNothing
+    } else {
+        let is_receiver_below_expected: bool = sc.stable_receiver_usd < sc.expected_usd;
+        
+        match (sc.is_stable_receiver, is_receiver_below_expected, sc.risk_level > 100) {
+            (_, _, true) => Action::HighRisk, // High risk scenario
+            (true, true, false) => Action::Wait,   // We are User and below peg, wait for payment
+            (true, false, false) => Action::Pay,   // We are User and above peg, need to pay
+            (false, true, false) => Action::Pay,   // We are LSP and below peg, need to pay
+            (false, false, false) => Action::Wait, // We are LSP and above peg, wait for payment
+        }
+    };
+
+    match action {
+        Action::DoNothing => println!("\nDifference from par less than 0.1%. Doing nothing."),
+        Action::Wait => {
+            println!("\nWaiting 10 seconds and checking on payment...\n");
+            std::thread::sleep(std::time::Duration::from_secs(10));
+
+            if let Some(channel) = node
+                .list_channels()
+                .iter()
+                .find(|c| c.channel_id == sc.channel_id) {sc = update_balances(sc, Some(channel.clone()));
+            }
+
+            println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
+            println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
+
+            dollars_from_par = sc.stable_receiver_usd - sc.expected_usd;
+            percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
+
+            println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
+
+            println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
+        },
+        Action::Pay => {
+            println!("\nPaying the difference...\n");
+            
+            let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+
+            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer.as_ref().unwrap(),amt, Some(1), Some("here ya go".to_string()));
+
+            // This is keysend / spontaenous payment code you can use if Bolt12 doesn't work
+            
+            // First, ensure we are connected
+            // let address = format!("127.0.0.1:9737").parse().unwrap();
+            // let result = node.connect(sc.counterparty, address, true);
+
+            // if let Err(e) = result {
+            //     println!("Failed to connect with : {}", e);
+            // } else {
+            //     println!("Successfully connected.");
+            // }
+
+            // let result = node
+            //     .spontaneous_payment()
+            //     .send(amt, sc.counterparty);
+            // match result {
+            //     Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
+            //     Err(e) => println!("Failed to send payment: {}", e),
+            // }
+
+            match result {
+                Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id.to_string()),
+                Err(e) => eprintln!("Failed to send payment: {:?}", e),
+            }
+        },
+        Action::HighRisk => {
+            println!("Risk level high. Current risk level: {}", sc.risk_level);
+        },
+    }
+
+    sc
+}
+
+fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails>) -> StableChannel {
+    let (our_balance, their_balance) = match channel_details {
+        Some(channel) => {
+            let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
+            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
+            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+            (our_balance_sats, their_balance_sats)
+        }
+        None => (0, 0), // Handle the case where channel_details is None
+    };
+
+    // Update balances based on whether this is a User or provider
+    if sc.is_stable_receiver {
+        sc.stable_receiver_btc = Bitcoin::from_sats(our_balance);
+        sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
+        sc.stable_provider_btc = Bitcoin::from_sats(their_balance);
+        sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
+    } else {
+        sc.stable_provider_btc = Bitcoin::from_sats(our_balance);
+        sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
+        sc.stable_receiver_btc = Bitcoin::from_sats(their_balance);
+        sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
+    }
+
+    sc // Return the modified StableChannel
+}
+
 /// END - Stable Channels code 
 
 #[cfg(feature = "uniffi")]
@@ -355,14 +628,42 @@ pub struct Node {
 
 impl Node {
 	/// Got docs?
-	pub fn get_balance_test(&self) -> f64 {
-		let latest_price = fetch_prices(&Client::new(), &set_price_feeds())
-        .and_then(|prices| calculate_median_price(prices))
-        .unwrap_or(0.0);
+	pub fn check_stability(&self, channel_id: ChannelId, expected_dollar_amount: f64) -> f64 {
+		// check if we are ready to go yet
+		// check the bolt12s
+		// if ready but no their bolt12, send a 21 msat keysend with your bolt12 in there
+		
 
-		print!("{}",latest_price);
-		return latest_price;
-    }
+		// Find from storage 
+
+
+
+		// OR
+
+		// Init stable channels object
+		let mut stable_channel = StableChannel {
+			channel_id: channel_id,
+			is_stable_receiver: true, // hardcode isStableReceiver  
+			expected_usd: USD::from_f64(expected_dollar_amount),
+			expected_btc: Bitcoin::from_btc(0.0), // hardcode to zero
+			stable_receiver_btc: Bitcoin::from_btc(0.0), 
+			stable_provider_btc: Bitcoin::from_btc(0.0),  
+			stable_receiver_usd: USD::from_f64(0.0),
+			stable_provider_usd: USD::from_f64(0.0),
+			risk_level: 0, 
+			timestamp: 0,
+			formatted_datetime: "2021-06-01 12:00:00".to_string(), 
+			payment_made: false,
+			latest_price: 0.0, 
+			prices: "".to_string(),
+			counterparty_offer: None,
+		};
+
+		check_stability(&self, stable_channel);
+
+		return 3.0; // Placeholder return value, adjust logic as needed
+	}
+	
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
