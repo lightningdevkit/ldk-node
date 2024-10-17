@@ -50,6 +50,12 @@ interface Builder {
 	Node build();
 	[Throws=BuildError]
 	Node build_with_fs_store();
+	[Throws=BuildError]
+	Node build_with_vss_store(string vss_url, string store_id, string lnurl_auth_server_url, record<string, string> fixed_headers);
+	[Throws=BuildError]
+	Node build_with_vss_store_and_fixed_headers(string vss_url, string store_id, record<string, string> fixed_headers);
+	[Throws=BuildError]
+	Node build_with_vss_store_and_header_provider(string vss_url, string store_id, VssHeaderProvider header_provider);
 };
 
 interface Node {
@@ -249,6 +255,20 @@ enum BuildError {
 	"KVStoreSetupFailed",
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
+};
+
+[Trait]
+interface VssHeaderProvider {
+	[Async, Throws=VssHeaderProviderError]
+	record<string, string> get_headers([ByRef]sequence<u8> request);
+};
+
+[Error]
+enum VssHeaderProviderError {
+	"InvalidData",
+	"RequestError",
+	"AuthorizationError",
+	"InternalError",
 };
 
 [Enum]

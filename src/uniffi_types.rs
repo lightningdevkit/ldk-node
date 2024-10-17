@@ -32,6 +32,8 @@ pub use bitcoin::{Address, BlockHash, Network, OutPoint, Txid};
 
 pub use bip39::Mnemonic;
 
+pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
+
 use crate::UniffiCustomTypeConverter;
 
 use crate::builder::sanitize_alias;
