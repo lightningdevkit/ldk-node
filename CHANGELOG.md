@@ -1,3 +1,45 @@
+# 0.4.0 - Oct 17, 2024
+
+Besides numerous API improvements and bugfixes this this fourth minor release notably adds support for sourcing chain and fee rate data from a Bitcoin Core RPC backend, as well as experimental support for the [VSS] remote storage backend.
+
+## Feature and API updates
+- Support for multiple chain sources has been added. To this end, Esplora-specific configuration options can now be given via `EsploraSyncConfig` to `Builder::set_chain_source_esplora`. Furthermore, all configuration objects (including the main `Config`) is now exposed via the `config` sub-module (#365).
+- Support for sourcing chain and fee estimation data from a Bitcoin Core RPC backed has been added (#370).
+- Initial experimental support for an encrypted [VSS] remote storage backend has been added (#369, #376, #378).
+    - **Caution**: VSS support is in **alpha** and is considered experimental. Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+- Support for setting the `NodeAlias` in public node announcements as been added. We now ensure that announced channels can only be opened and accepted when the required configuration options to operate as a public forwarding node are set (listening addresses and node alias). As part of this `Node::connect_open_channel` was split into `open_channel` and `open_announced_channel` API methods. (#330, #366).
+- The `Node` can now be started via a new `Node::start_with_runtime` call that allows to reuse an outer `tokio` runtime context, avoiding runtime stacking when run in `async` environments (#319).
+- Support for generating and paying unified QR codes has been added (#302).
+- Support for `quantity` and `payer_note` fields when sending or receiving BOLT12 payments has been added (#327).
+- Support for setting additional parameters when sending BOLT11 payments has been added (#336, #351).
+
+## Bug Fixes
+- The `ChannelConfig` object has been refactored, now allowing to query the currently applied `MaxDustHTLCExposure` limit (#350).
+- A bug potentially leading to panicking on shutdown when stacking `tokio` runtime contexts has been fixed (#373).
+- We now no longer panic when hitting a persistence failure during event handling. Instead, events will be replayed until successful (#374).
+,
+## Compatibility Notes
+- The LDK dependency has been updated to version 0.0.125 (#358, #375).
+- The BDK dependency has been updated to version 1.0-beta.4 (#358).
+    - Going forward, the BDK state will be persisted in the configured `KVStore` backend.
+    - **Note**: The old descriptor state will *not* be automatically migrated on upgrade, potentially leading to address reuse. Privacy-concious users might want to manually advance the descriptor by requesting new addresses until it reaches the previously observed height.
+    - After the node as been successfully upgraded users may safely delete `bdk_wallet_*.sqlite` from the storage path.
+- The `rust-bitcoin` dependency has been updated to version 0.32.2 (#358).
+- The UniFFI dependency has been updated to version 0.27.3 (#379).
+- The `bip21` dependency has been updated to version 0.5 (#358).
+- The `rust-esplora-client` has been updated to version 0.9 (#358).
+
+In total, this release features 55 files changed, 6134 insertions, 2184 deletions in 166 commits from 6 authors, in alphabetical order:
+
+- G8XSU
+- Ian Slane
+- jbesraa
+- Elias Rohrer
+- elnosh
+- Enigbe Ochekliye
+
+[VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+
 # 0.3.0 - June 21, 2024
 
 This third minor release notably adds support for BOLT12 payments, Anchor
