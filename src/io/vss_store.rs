@@ -8,6 +8,7 @@
 use lightning::io::{self, Error, ErrorKind};
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::io::utils::check_namespace_key_validity;
@@ -17,6 +18,7 @@ use rand::RngCore;
 use tokio::runtime::Runtime;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
+use vss_client::headers::VssHeaderProvider;
 use vss_client::types::{
 	DeleteObjectRequest, GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest,
 	Storable,
@@ -43,7 +45,10 @@ pub struct VssStore {
 }
 
 impl VssStore {
-	pub(crate) fn new(base_url: String, store_id: String, data_encryption_key: [u8; 32]) -> Self {
+	pub(crate) fn new(
+		base_url: String, store_id: String, data_encryption_key: [u8; 32],
+		header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
 		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
@@ -59,7 +64,7 @@ impl VssStore {
 				)
 			}) as _);
 
-		let client = VssClient::new(base_url, retry_policy);
+		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
 		Self { client, store_id, runtime, storable_builder }
 	}
 
@@ -238,6 +243,8 @@ mod tests {
 	use crate::io::test_utils::do_read_write_remove_list_persist;
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng, RngCore};
+	use std::collections::HashMap;
+	use vss_client::headers::FixedHeaders;
 
 	#[test]
 	fn read_write_remove_list_persist() {
@@ -246,7 +253,9 @@ mod tests {
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut data_encryption_key = [0u8; 32];
 		rng.fill_bytes(&mut data_encryption_key);
-		let vss_store = VssStore::new(vss_base_url, rand_store_id, data_encryption_key);
+		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let vss_store =
+			VssStore::new(vss_base_url, rand_store_id, data_encryption_key, header_provider);
 
 		do_read_write_remove_list_persist(&vss_store);
 	}

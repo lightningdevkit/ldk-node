@@ -65,7 +65,9 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 
 #[cfg(any(vss, vss_test))]
-use bitcoin::bip32::ChildNumber;
+use bitcoin::bip32::{ChildNumber, Xpriv};
+#[cfg(any(vss, vss_test))]
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::default::Default;
 use std::fmt;
@@ -74,6 +76,8 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
+#[cfg(any(vss, vss_test))]
+use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
@@ -368,10 +372,28 @@ impl NodeBuilder {
 		self.build_with_store(kv_store)
 	}
 
-	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
 	/// previously configured.
+	///
+	/// Uses [LNURL-auth] based authentication scheme as default method for authentication/authorization.
+	///
+	/// The LNURL challenge will be retrieved by making a request to the given `lnurl_auth_server_url`.
+	/// The returned JWT token in response to the signed LNURL request, will be used for
+	/// authentication/authorization of all the requests made to VSS.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
 	#[cfg(any(vss, vss_test))]
-	pub fn build_with_vss_store(&self, url: String, store_id: String) -> Result<Node, BuildError> {
+	pub fn build_with_vss_store(
+		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Node, BuildError> {
 		use bitcoin::key::Secp256k1;
 
 		let logger = setup_logger(&self.config)?;
@@ -381,23 +403,81 @@ impl NodeBuilder {
 			self.entropy_source_config.as_ref(),
 			Arc::clone(&logger),
 		)?;
+
 		let config = Arc::new(self.config.clone());
 
-		let xprv = bitcoin::bip32::Xpriv::new_master(config.network, &seed_bytes).map_err(|e| {
-			log_error!(logger, "Failed to derive master secret: {}", e);
-			BuildError::InvalidSeedBytes
-		})?;
+		let vss_xprv = derive_vss_xprv(config, &seed_bytes, Arc::clone(&logger))?;
 
-		let vss_xprv = xprv
-			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 877 }])
+		let lnurl_auth_xprv = vss_xprv
+			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 138 }])
 			.map_err(|e| {
 				log_error!(logger, "Failed to derive VSS secret: {}", e);
 				BuildError::KVStoreSetupFailed
 			})?;
 
+		let lnurl_auth_jwt_provider =
+			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers)
+				.map_err(|e| {
+					log_error!(logger, "Failed to create LnurlAuthToJwtProvider: {}", e);
+					BuildError::KVStoreSetupFailed
+				})?;
+
+		let header_provider = Arc::new(lnurl_auth_jwt_provider);
+
+		self.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [`FixedHeaders`] as default method for authentication/authorization.
+	///
+	/// Given `fixed_headers` are included as it is in all the requests made to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store_and_fixed_headers(
+		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
+	) -> Result<Node, BuildError> {
+		let header_provider = Arc::new(FixedHeaders::new(fixed_headers));
+
+		self.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Given `header_provider` is used to attach headers to every request made
+	/// to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store_and_header_provider(
+		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.config)?;
+
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
+
+		let config = Arc::new(self.config.clone());
+
+		let vss_xprv = derive_vss_xprv(config.clone(), &seed_bytes, Arc::clone(&logger))?;
+
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
-		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes));
+		let vss_store = Arc::new(VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider));
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -573,6 +653,80 @@ impl ArcedNodeBuilder {
 	/// previously configured.
 	pub fn build_with_fs_store(&self) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [LNURL-auth] based authentication scheme as default method for authentication/authorization.
+	///
+	/// The LNURL challenge will be retrieved by making a request to the given `lnurl_auth_server_url`.
+	/// The returned JWT token in response to the signed LNURL request, will be used for
+	/// authentication/authorization of all the requests made to VSS.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store(
+		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store(vss_url, store_id, lnurl_auth_server_url, fixed_headers)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [`FixedHeaders`] as default method for authentication/authorization.
+	///
+	/// Given `fixed_headers` are included as it is in all the requests made to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store_and_fixed_headers(
+		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store_and_fixed_headers(vss_url, store_id, fixed_headers)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Given `header_provider` is used to attach headers to every request made
+	/// to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(any(vss, vss_test))]
+	pub fn build_with_vss_store_and_header_provider(
+		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+			.map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
@@ -1116,6 +1270,23 @@ fn seed_bytes_from_config(
 				.map_err(|_| BuildError::InvalidSeedFile)?)
 		},
 	}
+}
+
+#[cfg(any(vss, vss_test))]
+fn derive_vss_xprv(
+	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<FilesystemLogger>,
+) -> Result<Xpriv, BuildError> {
+	use bitcoin::key::Secp256k1;
+
+	let xprv = Xpriv::new_master(config.network, seed_bytes).map_err(|e| {
+		log_error!(logger, "Failed to derive master secret: {}", e);
+		BuildError::InvalidSeedBytes
+	})?;
+
+	xprv.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 877 }]).map_err(|e| {
+		log_error!(logger, "Failed to derive VSS secret: {}", e);
+		BuildError::KVStoreSetupFailed
+	})
 }
 
 /// Sanitize the user-provided node alias to ensure that it is a valid protocol-specified UTF-8 string.
