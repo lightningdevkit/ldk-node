@@ -6,7 +6,7 @@ use crate::service::NodeService;
 
 use ldk_node::bitcoin::Network;
 use ldk_node::lightning::ln::msgs::SocketAddress;
-use ldk_node::{Builder, Config, Event, LogLevel};
+use ldk_node::{Builder, Event, LogLevel};
 
 use tokio::net::TcpListener;
 use tokio::signal::unix::SignalKind;
@@ -14,6 +14,7 @@ use tokio::signal::unix::SignalKind;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 
+use ldk_node::config::Config;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ fn main() {
 	};
 
 	let mut builder = Builder::from_config(config);
-	builder.set_esplora_server(args[5].clone());
+	builder.set_chain_source_esplora(args[5].clone(), None);
 
 	let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
 		Ok(runtime) => Arc::new(runtime),
