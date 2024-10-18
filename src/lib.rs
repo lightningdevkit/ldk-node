@@ -628,21 +628,22 @@ pub struct Node {
 
 impl Node {
 	/// Got docs?
-	pub fn check_stability(&self, channel_id: ChannelId, expected_dollar_amount: f64) -> f64 {
+	pub fn check_stability(&self, channel_id: String, expected_dollar_amount: f64) -> f64 {
 		// check if we are ready to go yet
 		// check the bolt12s
 		// if ready but no their bolt12, send a 21 msat keysend with your bolt12 in there
 		
-
 		// Find from storage 
 
-
-
 		// OR
+		let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
+			.expect("Invalid hex string")
+			.try_into()
+			.expect("Decoded channel ID has incorrect length");
 
 		// Init stable channels object
 		let mut stable_channel = StableChannel {
-			channel_id: channel_id,
+			channel_id: ChannelId::from_bytes(channel_id_bytes),
 			is_stable_receiver: true, // hardcode isStableReceiver  
 			expected_usd: USD::from_f64(expected_dollar_amount),
 			expected_btc: Bitcoin::from_btc(0.0), // hardcode to zero
