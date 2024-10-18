@@ -1,3 +1,7 @@
+# 0.4.1 - Oct 18, 2024
+
+Fixes a wallet syncing issue where full syncs were used instead of incremental syncs, and vice versa (#383).
+
 # 0.4.0 - Oct 17, 2024
 
 Besides numerous API improvements and bugfixes this fourth minor release notably adds support for sourcing chain and fee rate data from a Bitcoin Core RPC backend, as well as experimental support for the [VSS] remote storage backend.
