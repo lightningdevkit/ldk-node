@@ -14,8 +14,8 @@ pub(crate) fn handle_bolt11_send_request(
 		.map_err(|_| ldk_node::NodeError::InvalidInvoice)?;
 
 	let payment_id = match request.amount_msat {
-		None => node.bolt11_payment().send(&invoice),
-		Some(amount_msat) => node.bolt11_payment().send_using_amount(&invoice, amount_msat),
+		None => node.bolt11_payment().send(&invoice, None),
+		Some(amount_msat) => node.bolt11_payment().send_using_amount(&invoice, amount_msat, None),
 	}?;
 
 	let response = Bolt11SendResponse { payment_id: Bytes::from(payment_id.0.to_vec()) };
