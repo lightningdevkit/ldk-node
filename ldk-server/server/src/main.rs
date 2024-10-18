@@ -1,5 +1,6 @@
 mod api;
 mod service;
+mod util;
 
 use crate::service::NodeService;
 
