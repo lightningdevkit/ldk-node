@@ -18,11 +18,11 @@ message GetNodeInfoResponse {
   // Should be always set, will never be `None`.
   BestBlock current_best_block = 3;
 
-  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our Lightning wallet
-  // to the chain tip.
+  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our Lightning wallet to
+  // the chain tip.
   //
-  // Will be `None` if the wallet hasn’t been synced since the node was initialized.
-  optional uint64 latest_wallet_sync_timestamp = 4;
+  // Will be `None` if the wallet hasn't been synced yet.
+  optional uint64 latest_lightning_wallet_sync_timestamp = 4;
 
   // The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our on-chain
   // wallet to the chain tip.
@@ -147,6 +147,12 @@ message Bolt12ReceiveRequest {
 
   // The amount in millisatoshi to send. If unset, a "zero-amount" or variable-amount offer is returned.
   optional uint64 amount_msat = 2;
+
+  // Offer expiry time in seconds.
+  optional uint32 expiry_secs = 3;
+
+  // If set, it represents the number of items requested, can only be set for fixed-amount offers.
+  optional uint64 quantity = 4;
 }
 
 message Bolt12ReceiveResponse {
@@ -273,6 +279,9 @@ message CloseChannelRequest {
 
   // Whether to force close the specified channel.
   optional bool force_close = 3;
+
+  // The reason for force-closing, can only be set while force closing a channel.
+  optional string force_close_reason = 4;
 }
 
 message CloseChannelResponse {
@@ -364,7 +373,7 @@ message Channel {
   bool is_usable = 14;
 
   // Is `true` if this channel is (or will be) publicly-announced
-  bool is_public = 15;
+  bool is_announced = 15;
 
   // Set of configurable parameters set by self that affect channel operation.
   ChannelConfig channel_config = 16;
@@ -427,11 +436,9 @@ message OutPoint {
 }
 
 message BestBlock {
-
   // The block’s hash
   string block_hash = 1;
 
   // The height at which the block was confirmed.
   uint32 height = 2;
-
 }
