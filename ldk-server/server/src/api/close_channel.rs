@@ -17,7 +17,11 @@ pub(crate) fn handle_close_channel_request(
 		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;
 
 	match request.force_close {
-		Some(true) => node.force_close_channel(&user_channel_id, counterparty_node_id)?,
+		Some(true) => node.force_close_channel(
+			&user_channel_id,
+			counterparty_node_id,
+			request.force_close_reason,
+		)?,
 		_ => node.close_channel(&user_channel_id, counterparty_node_id)?,
 	};
 
