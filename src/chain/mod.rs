@@ -481,6 +481,13 @@ impl ChainSource {
 					}
 
 					if incremental_sync {
+						let sync_request = onchain_wallet.get_incremental_sync_request();
+						let wallet_sync_timeout_fut = tokio::time::timeout(
+							Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+							esplora_client.sync(sync_request, BDK_CLIENT_CONCURRENCY),
+						);
+						get_and_apply_wallet_update!(wallet_sync_timeout_fut)
+					} else {
 						let full_scan_request = onchain_wallet.get_full_scan_request();
 						let wallet_sync_timeout_fut = tokio::time::timeout(
 							Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
@@ -489,13 +496,6 @@ impl ChainSource {
 								BDK_CLIENT_STOP_GAP,
 								BDK_CLIENT_CONCURRENCY,
 							),
-						);
-						get_and_apply_wallet_update!(wallet_sync_timeout_fut)
-					} else {
-						let sync_request = onchain_wallet.get_incremental_sync_request();
-						let wallet_sync_timeout_fut = tokio::time::timeout(
-							Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
-							esplora_client.sync(sync_request, BDK_CLIENT_CONCURRENCY),
 						);
 						get_and_apply_wallet_update!(wallet_sync_timeout_fut)
 					}
