@@ -16,12 +16,12 @@ pub struct GetNodeInfoResponse {
 	/// Should be always set, will never be `None`.
 	#[prost(message, optional, tag = "3")]
 	pub current_best_block: ::core::option::Option<BestBlock>,
-	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our Lightning wallet
-	/// to the chain tip.
+	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our Lightning wallet to
+	/// the chain tip.
 	///
-	/// Will be `None` if the wallet hasn’t been synced since the node was initialized.
+	/// Will be `None` if the wallet hasn't been synced yet.
 	#[prost(uint64, optional, tag = "4")]
-	pub latest_wallet_sync_timestamp: ::core::option::Option<u64>,
+	pub latest_lightning_wallet_sync_timestamp: ::core::option::Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our on-chain
 	/// wallet to the chain tip.
 	///
@@ -152,6 +152,12 @@ pub struct Bolt12ReceiveRequest {
 	/// The amount in millisatoshi to send. If unset, a "zero-amount" or variable-amount offer is returned.
 	#[prost(uint64, optional, tag = "2")]
 	pub amount_msat: ::core::option::Option<u64>,
+	/// Offer expiry time in seconds.
+	#[prost(uint32, optional, tag = "3")]
+	pub expiry_secs: ::core::option::Option<u32>,
+	/// If set, it represents the number of items requested, can only be set for fixed-amount offers.
+	#[prost(uint64, optional, tag = "4")]
+	pub quantity: ::core::option::Option<u64>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -297,6 +303,9 @@ pub struct CloseChannelRequest {
 	/// Whether to force close the specified channel.
 	#[prost(bool, optional, tag = "3")]
 	pub force_close: ::core::option::Option<bool>,
+	/// The reason for force-closing, can only be set while force closing a channel.
+	#[prost(string, optional, tag = "4")]
+	pub force_close_reason: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -391,7 +400,7 @@ pub struct Channel {
 	pub is_usable: bool,
 	/// Is `true` if this channel is (or will be) publicly-announced
 	#[prost(bool, tag = "15")]
-	pub is_public: bool,
+	pub is_announced: bool,
 	/// Set of configurable parameters set by self that affect channel operation.
 	#[prost(message, optional, tag = "16")]
 	pub channel_config: ::core::option::Option<ChannelConfig>,

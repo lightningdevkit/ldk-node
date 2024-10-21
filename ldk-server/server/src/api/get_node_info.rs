@@ -17,7 +17,7 @@ pub(crate) fn handle_get_node_info_request(
 	let response = GetNodeInfoResponse {
 		node_id: node.node_id().to_string(),
 		current_best_block: Some(best_block),
-		latest_wallet_sync_timestamp: node_status.latest_wallet_sync_timestamp,
+		latest_lightning_wallet_sync_timestamp: node_status.latest_lightning_wallet_sync_timestamp,
 		latest_onchain_wallet_sync_timestamp: node_status.latest_onchain_wallet_sync_timestamp,
 		latest_fee_rate_cache_update_timestamp: node_status.latest_fee_rate_cache_update_timestamp,
 		latest_rgs_snapshot_timestamp: node_status.latest_rgs_snapshot_timestamp,

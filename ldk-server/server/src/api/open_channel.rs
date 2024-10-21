@@ -15,15 +15,26 @@ pub(crate) fn handle_open_channel(
 		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;
 	let address = SocketAddress::from_str(&request.address)
 		.map_err(|_| ldk_node::NodeError::InvalidSocketAddress)?;
-	let user_channel_id = node.connect_open_channel(
-		node_id,
-		address,
-		request.channel_amount_sats,
-		request.push_to_counterparty_msat,
-		// TODO: Allow setting ChannelConfig in open-channel.
-		None,
-		request.announce_channel,
-	)?;
+
+	let user_channel_id = if request.announce_channel {
+		node.open_announced_channel(
+			node_id,
+			address,
+			request.channel_amount_sats,
+			request.push_to_counterparty_msat,
+			// TODO: Allow setting ChannelConfig in open-channel.
+			None,
+		)?
+	} else {
+		node.open_channel(
+			node_id,
+			address,
+			request.channel_amount_sats,
+			request.push_to_counterparty_msat,
+			None,
+		)?
+	};
+
 	let response = OpenChannelResponse {
 		user_channel_id: Bytes::from(user_channel_id.0.to_be_bytes().to_vec()),
 	};

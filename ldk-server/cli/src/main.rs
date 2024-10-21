@@ -46,6 +46,10 @@ enum Commands {
 		description: String,
 		#[arg(long)]
 		amount_msat: Option<u64>,
+		#[arg(long)]
+		expiry_secs: Option<u32>,
+		#[arg(long)]
+		quantity: Option<u64>,
 	},
 	Bolt12Send {
 		#[arg(short, long)]
@@ -95,9 +99,16 @@ async fn main() {
 		Commands::Bolt11Send { invoice, amount_msat } => {
 			handle_response(client.bolt11_send(Bolt11SendRequest { invoice, amount_msat }).await);
 		},
-		Commands::Bolt12Receive { description, amount_msat } => {
+		Commands::Bolt12Receive { description, amount_msat, expiry_secs, quantity } => {
 			handle_response(
-				client.bolt12_receive(Bolt12ReceiveRequest { description, amount_msat }).await,
+				client
+					.bolt12_receive(Bolt12ReceiveRequest {
+						description,
+						amount_msat,
+						expiry_secs,
+						quantity,
+					})
+					.await,
 			);
 		},
 		Commands::Bolt12Send { offer, amount_msat, quantity, payer_note } => {

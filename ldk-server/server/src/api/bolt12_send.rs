@@ -14,10 +14,13 @@ pub(crate) fn handle_bolt12_send_request(
 		Offer::from_str(&request.offer.as_str()).map_err(|_| ldk_node::NodeError::InvalidOffer)?;
 
 	let payment_id = match request.amount_msat {
-		None => node.bolt12_payment().send(&offer, request.payer_note),
-		Some(amount_msat) => {
-			node.bolt12_payment().send_using_amount(&offer, request.payer_note, amount_msat)
-		},
+		None => node.bolt12_payment().send(&offer, request.quantity, request.payer_note),
+		Some(amount_msat) => node.bolt12_payment().send_using_amount(
+			&offer,
+			amount_msat,
+			request.quantity,
+			request.payer_note,
+		),
 	}?;
 
 	let response = Bolt12SendResponse { payment_id: Bytes::from(payment_id.0.to_vec()) };
