@@ -322,6 +322,202 @@ pub struct ListChannelsResponse {
 	#[prost(message, repeated, tag = "1")]
 	pub channels: ::prost::alloc::vec::Vec<Channel>,
 }
+/// Returns payment details for a given payment_id.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.payment>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPaymentDetailsRequest {
+	/// An identifier used to uniquely identify a payment in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPaymentDetailsResponse {
+	/// Represents a payment.
+	/// Will be `None` if payment doesn't exist.
+	#[prost(message, optional, tag = "1")]
+	pub payment: ::core::option::Option<Payment>,
+}
+/// Retrieves list of all payments.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_payments>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListPaymentsRequest {}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListPaymentsResponse {
+	/// List of payments.
+	#[prost(message, repeated, tag = "1")]
+	pub payments: ::prost::alloc::vec::Vec<Payment>,
+}
+/// Represents a payment.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/payment/struct.PaymentDetails.html>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Payment {
+	/// An identifier used to uniquely identify a payment in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub id: ::prost::alloc::string::String,
+	/// The kind of the payment.
+	#[prost(message, optional, tag = "2")]
+	pub kind: ::core::option::Option<PaymentKind>,
+	/// The amount transferred.
+	#[prost(uint64, optional, tag = "3")]
+	pub amount_msat: ::core::option::Option<u64>,
+	/// The direction of the payment.
+	#[prost(enumeration = "PaymentDirection", tag = "4")]
+	pub direction: i32,
+	/// The status of the payment.
+	#[prost(enumeration = "PaymentStatus", tag = "5")]
+	pub status: i32,
+	/// The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+	#[prost(uint64, tag = "6")]
+	pub latest_update_timestamp: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PaymentKind {
+	#[prost(oneof = "payment_kind::Kind", tags = "1, 2, 3, 4, 5, 6")]
+	pub kind: ::core::option::Option<payment_kind::Kind>,
+}
+/// Nested message and enum types in `PaymentKind`.
+pub mod payment_kind {
+	#[allow(clippy::derive_partial_eq_without_eq)]
+	#[derive(Clone, PartialEq, ::prost::Oneof)]
+	pub enum Kind {
+		#[prost(message, tag = "1")]
+		Onchain(super::Onchain),
+		#[prost(message, tag = "2")]
+		Bolt11(super::Bolt11),
+		#[prost(message, tag = "3")]
+		Bolt11Jit(super::Bolt11Jit),
+		#[prost(message, tag = "4")]
+		Bolt12Offer(super::Bolt12Offer),
+		#[prost(message, tag = "5")]
+		Bolt12Refund(super::Bolt12Refund),
+		#[prost(message, tag = "6")]
+		Spontaneous(super::Spontaneous),
+	}
+}
+/// Represents an on-chain payment.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Onchain {}
+/// Represents a BOLT 11 payment.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Bolt11 {
+	/// The payment hash, i.e., the hash of the preimage.
+	#[prost(string, tag = "1")]
+	pub hash: ::prost::alloc::string::String,
+	/// The pre-image used by the payment.
+	#[prost(string, optional, tag = "2")]
+	pub preimage: ::core::option::Option<::prost::alloc::string::String>,
+	/// The secret used by the payment.
+	#[prost(bytes = "bytes", optional, tag = "3")]
+	pub secret: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// Represents a BOLT 11 payment intended to open an LSPS 2 just-in-time channel.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Bolt11Jit {
+	/// The payment hash, i.e., the hash of the preimage.
+	#[prost(string, tag = "1")]
+	pub hash: ::prost::alloc::string::String,
+	/// The pre-image used by the payment.
+	#[prost(string, optional, tag = "2")]
+	pub preimage: ::core::option::Option<::prost::alloc::string::String>,
+	/// The secret used by the payment.
+	#[prost(bytes = "bytes", optional, tag = "3")]
+	pub secret: ::core::option::Option<::prost::bytes::Bytes>,
+	/// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+	///
+	/// Allowing them to deduct this fee from the first inbound payment will pay for the LSP’s channel opening fees.
+	///
+	/// See \[`LdkChannelConfig::accept_underpaying_htlcs`\](<https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs>)
+	/// for more information.
+	#[prost(message, optional, tag = "4")]
+	pub lsp_fee_limits: ::core::option::Option<LspFeeLimits>,
+}
+/// Represents a BOLT 12 ‘offer’ payment, i.e., a payment for an Offer.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Bolt12Offer {
+	/// The payment hash, i.e., the hash of the preimage.
+	#[prost(string, optional, tag = "1")]
+	pub hash: ::core::option::Option<::prost::alloc::string::String>,
+	/// The pre-image used by the payment.
+	#[prost(string, optional, tag = "2")]
+	pub preimage: ::core::option::Option<::prost::alloc::string::String>,
+	/// The secret used by the payment.
+	#[prost(bytes = "bytes", optional, tag = "3")]
+	pub secret: ::core::option::Option<::prost::bytes::Bytes>,
+	/// The hex-encoded ID of the offer this payment is for.
+	#[prost(string, tag = "4")]
+	pub offer_id: ::prost::alloc::string::String,
+	/// The payer's note for the payment.
+	/// Truncated to \[PAYER_NOTE_LIMIT\](<https://docs.rs/lightning/latest/lightning/offers/invoice_request/constant.PAYER_NOTE_LIMIT.html>).
+	///
+	/// **Caution**: The `payer_note` field may come from an untrusted source. To prevent potential misuse,
+	/// all non-printable characters will be sanitized and replaced with safe characters.
+	#[prost(string, optional, tag = "5")]
+	pub payer_note: ::core::option::Option<::prost::alloc::string::String>,
+	/// The quantity of an item requested in the offer.
+	#[prost(uint64, optional, tag = "6")]
+	pub quantity: ::core::option::Option<u64>,
+}
+/// Represents a BOLT 12 ‘refund’ payment, i.e., a payment for a Refund.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Bolt12Refund {
+	/// The payment hash, i.e., the hash of the preimage.
+	#[prost(string, optional, tag = "1")]
+	pub hash: ::core::option::Option<::prost::alloc::string::String>,
+	/// The pre-image used by the payment.
+	#[prost(string, optional, tag = "2")]
+	pub preimage: ::core::option::Option<::prost::alloc::string::String>,
+	/// The secret used by the payment.
+	#[prost(bytes = "bytes", optional, tag = "3")]
+	pub secret: ::core::option::Option<::prost::bytes::Bytes>,
+	/// The payer's note for the payment.
+	/// Truncated to \[PAYER_NOTE_LIMIT\](<https://docs.rs/lightning/latest/lightning/offers/invoice_request/constant.PAYER_NOTE_LIMIT.html>).
+	///
+	/// **Caution**: The `payer_note` field may come from an untrusted source. To prevent potential misuse,
+	/// all non-printable characters will be sanitized and replaced with safe characters.
+	#[prost(string, optional, tag = "5")]
+	pub payer_note: ::core::option::Option<::prost::alloc::string::String>,
+	/// The quantity of an item requested in the offer.
+	#[prost(uint64, optional, tag = "6")]
+	pub quantity: ::core::option::Option<u64>,
+}
+/// Represents a spontaneous (“keysend”) payment.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Spontaneous {
+	/// The payment hash, i.e., the hash of the preimage.
+	#[prost(string, tag = "1")]
+	pub hash: ::prost::alloc::string::String,
+	/// The pre-image used by the payment.
+	#[prost(string, optional, tag = "2")]
+	pub preimage: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+/// See \[`LdkChannelConfig::accept_underpaying_htlcs`\] for more information.
+///
+/// \[`LdkChannelConfig::accept_underpaying_htlcs`\]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LspFeeLimits {
+	/// The maximal total amount we allow any configured LSP withhold from us when forwarding the
+	/// payment.
+	#[prost(uint64, optional, tag = "1")]
+	pub max_total_opening_fee_msat: ::core::option::Option<u64>,
+	/// The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+	/// LSP withhold from us when forwarding the payment.
+	#[prost(uint64, optional, tag = "2")]
+	pub max_proportional_opening_fee_ppm_msat: ::core::option::Option<u64>,
+}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Channel {
@@ -472,4 +668,66 @@ pub struct BestBlock {
 	/// The height at which the block was confirmed.
 	#[prost(uint32, tag = "2")]
 	pub height: u32,
+}
+/// Represents the direction of a payment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PaymentDirection {
+	/// The payment is inbound.
+	Inbound = 0,
+	/// The payment is outbound.
+	Outbound = 1,
+}
+impl PaymentDirection {
+	/// String value of the enum field names used in the ProtoBuf definition.
+	///
+	/// The values are not transformed in any way and thus are considered stable
+	/// (if the ProtoBuf definition does not change) and safe for programmatic use.
+	pub fn as_str_name(&self) -> &'static str {
+		match self {
+			PaymentDirection::Inbound => "INBOUND",
+			PaymentDirection::Outbound => "OUTBOUND",
+		}
+	}
+	/// Creates an enum from field names used in the ProtoBuf definition.
+	pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+		match value {
+			"INBOUND" => Some(Self::Inbound),
+			"OUTBOUND" => Some(Self::Outbound),
+			_ => None,
+		}
+	}
+}
+/// Represents the current status of a payment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PaymentStatus {
+	/// The payment is still pending.
+	Pending = 0,
+	/// The payment succeeded.
+	Succeeded = 1,
+	/// The payment failed.
+	Failed = 2,
+}
+impl PaymentStatus {
+	/// String value of the enum field names used in the ProtoBuf definition.
+	///
+	/// The values are not transformed in any way and thus are considered stable
+	/// (if the ProtoBuf definition does not change) and safe for programmatic use.
+	pub fn as_str_name(&self) -> &'static str {
+		match self {
+			PaymentStatus::Pending => "PENDING",
+			PaymentStatus::Succeeded => "SUCCEEDED",
+			PaymentStatus::Failed => "FAILED",
+		}
+	}
+	/// Creates an enum from field names used in the ProtoBuf definition.
+	pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+		match value {
+			"PENDING" => Some(Self::Pending),
+			"SUCCEEDED" => Some(Self::Succeeded),
+			"FAILED" => Some(Self::Failed),
+			_ => None,
+		}
+	}
 }
