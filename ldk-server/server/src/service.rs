@@ -25,6 +25,9 @@ use crate::api::list_payments::{handle_list_payments_request, LIST_PAYMENTS_PATH
 use crate::api::onchain_receive::{handle_onchain_receive_request, ONCHAIN_RECEIVE_PATH};
 use crate::api::onchain_send::{handle_onchain_send_request, ONCHAIN_SEND_PATH};
 use crate::api::open_channel::{handle_open_channel, OPEN_CHANNEL_PATH};
+use crate::api::update_channel_config::{
+	handle_update_channel_config_request, UPDATE_CHANNEL_CONFIG_PATH,
+};
 
 #[derive(Clone)]
 pub struct NodeService {
@@ -62,6 +65,9 @@ impl Service<Request<Incoming>> for NodeService {
 			OPEN_CHANNEL_PATH => Box::pin(handle_request(node, req, handle_open_channel)),
 			CLOSE_CHANNEL_PATH => Box::pin(handle_request(node, req, handle_close_channel_request)),
 			LIST_CHANNELS_PATH => Box::pin(handle_request(node, req, handle_list_channels_request)),
+			UPDATE_CHANNEL_CONFIG_PATH => {
+				Box::pin(handle_request(node, req, handle_update_channel_config_request))
+			},
 			GET_PAYMENT_DETAILS_PATH => {
 				Box::pin(handle_request(node, req, handle_get_payment_details_request))
 			},

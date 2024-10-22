@@ -220,6 +220,23 @@ message OpenChannelResponse {
   bytes user_channel_id = 1;
 }
 
+// Update the config for a previously opened channel.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.update_channel_config
+message UpdateChannelConfigRequest {
+
+  // The hex-encoded local `user_channel_id` of this channel.
+  string user_channel_id = 1;
+
+  // The hex-encoded public key of the counterparty node to update channel config with.
+  string counterparty_node_id = 2;
+
+  // The updated channel configuration settings for a channel.
+  ChannelConfig channel_config = 3;
+}
+
+message UpdateChannelConfigResponse {
+}
+
 // ChannelConfig represents the configuration settings for a channel in a Lightning Network node.
 // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html
 message ChannelConfig {
