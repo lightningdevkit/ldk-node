@@ -173,6 +173,41 @@ use reqwest::blocking::Client;
 use serde_json::Value;
 use std::error::Error as OtherError;
 use retry::{retry, delay::Fixed};
+use lightning::ln::wire::Type;
+use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::ln::msgs::DecodeError;
+
+#[derive(Debug)]
+/// Got docs?
+pub struct StableChannelsMessage {
+	/// Got docs?
+    pub message: String,
+}
+
+
+impl StableChannelsMessage {
+	/// Got docs?
+    pub const TYPE_ID: u16 = 32770;
+}
+
+impl Type for StableChannelsMessage {
+    fn type_id(&self) -> u16 {
+        Self::TYPE_ID
+    }
+}
+
+impl Writeable for StableChannelsMessage {
+    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+        self.message.write(writer)
+    }
+}
+
+impl Readable for StableChannelsMessage {
+    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+        let message = String::read(reader)?;
+        Ok(StableChannelsMessage { message })
+    }
+}
 
 /// Price feeds used for Stable Channels calcualtions
 pub struct PriceFeed {
