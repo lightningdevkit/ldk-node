@@ -53,7 +53,7 @@ jobs:
 
       - name: Create database table
         run: |
-          psql -h localhost -U postgres -d postgres -f ./vss-server/app/src/main/java/org/vss/impl/postgres/sql/v0_create_vss_db.sql
+          psql -h localhost -U postgres -d postgres -f ./vss-server/java/app/src/main/java/org/vss/impl/postgres/sql/v0_create_vss_db.sql
         env:
           PGPASSWORD: YOU_MUST_CHANGE_THIS_PASSWORD
 
@@ -63,7 +63,7 @@ jobs:
           java -version
           gradle --version
 
-          cd vss-server
+          cd vss-server/java
           gradle wrapper --gradle-version 8.1.1
           ./gradlew --version
           ./gradlew build
