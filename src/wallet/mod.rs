@@ -387,10 +387,12 @@ where
 			let script_pubkey = u.txout.script_pubkey;
 			match script_pubkey.witness_version() {
 				Some(version @ WitnessVersion::V0) => {
-					let witness_program = WitnessProgram::new(version, script_pubkey.as_bytes())
-						.map_err(|e| {
-							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
-						})?;
+					let witness_program =
+						WitnessProgram::new(version, &script_pubkey.as_bytes()[2..]).map_err(
+							|e| {
+								log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							},
+						)?;
 
 					let wpkh = WPubkeyHash::from_slice(&witness_program.program().as_bytes())
 						.map_err(|e| {
@@ -400,10 +402,12 @@ where
 					utxos.push(utxo);
 				},
 				Some(version @ WitnessVersion::V1) => {
-					let witness_program = WitnessProgram::new(version, script_pubkey.as_bytes())
-						.map_err(|e| {
-							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
-						})?;
+					let witness_program =
+						WitnessProgram::new(version, &script_pubkey.as_bytes()[2..]).map_err(
+							|e| {
+								log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							},
+						)?;
 
 					XOnlyPublicKey::from_slice(&witness_program.program().as_bytes()).map_err(
 						|e| {
