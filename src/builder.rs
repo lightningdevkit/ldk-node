@@ -6,7 +6,9 @@
 // accordance with one or both of these licenses.
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
-use crate::config::{default_user_config, Config, EsploraSyncConfig, WALLET_KEYS_SEED_LEN};
+use crate::config::{
+	default_user_config, Config, EsploraSyncConfig, LoggingConfig, WALLET_KEYS_SEED_LEN,
+};
 
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -16,7 +18,9 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{
+	default_format, log_error, log_info, FilesystemLogWriter, LdkNodeLogger, Logger,
+};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -27,8 +31,8 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
+use crate::Node;
 use crate::{io, NodeMetrics};
-use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::io::Cursor;
@@ -331,12 +335,6 @@ impl NodeBuilder {
 
 		self.config.node_alias = Some(node_alias);
 		Ok(self)
-	}
-
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
-		self.config.log_level = level;
-		self
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -734,7 +732,7 @@ fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+	logger: Arc<LdkNodeLogger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	// Initialize the status fields.
 	let is_listening = Arc::new(AtomicBool::new(false));
@@ -1233,21 +1231,27 @@ fn build_with_store_internal(
 
 /// Sets up the node logger, creating a new log file if it does not exist, or utilizing
 /// the existing log file.
-fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
-	let log_file_path = match &config.log_file_path {
-		Some(log_dir) => String::from(log_dir),
-		None => format!("{}/{}", config.storage_dir_path.clone(), "ldk_node.log"),
-	};
-
-	Ok(Arc::new(
-		FilesystemLogger::new(log_file_path, config.log_level)
-			.map_err(|_| BuildError::LoggerSetupFailed)?,
-	))
+fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
+	match config.logging_config {
+		LoggingConfig::Custom(ref logger) => Ok(logger.clone()),
+		LoggingConfig::Filesystem { ref log_dir, log_level } => {
+			let filesystem_log_writer = FilesystemLogWriter::new(log_dir.clone())
+				.map_err(|_| BuildError::LoggerSetupFailed)?;
+			Ok(Arc::new(
+				LdkNodeLogger::new(
+					log_level,
+					Box::new(default_format),
+					Box::new(move |s| filesystem_log_writer.write(s)),
+				)
+				.map_err(|_| BuildError::LoggerSetupFailed)?,
+			))
+		},
+	}
 }
 
 fn seed_bytes_from_config(
 	config: &Config, entropy_source_config: Option<&EntropySourceConfig>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 ) -> Result<[u8; 64], BuildError> {
 	match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
@@ -1269,7 +1273,7 @@ fn seed_bytes_from_config(
 }
 
 fn derive_vss_xprv(
-	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<FilesystemLogger>,
+	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<LdkNodeLogger>,
 ) -> Result<Xpriv, BuildError> {
 	use bitcoin::key::Secp256k1;
 

@@ -12,53 +12,75 @@ use lightning::util::logger::{Level, Record};
 
 use chrono::Utc;
 
+use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::sync::Mutex;
 
-pub(crate) struct FilesystemLogger {
-	file_path: String,
+pub struct LdkNodeLogger {
 	level: Level,
+	formatter: Box<dyn Fn(&Record) -> String + Send + Sync>,
+	writer: Box<dyn Fn(&String) + Send + Sync>,
 }
 
-impl FilesystemLogger {
-	/// Creates a new filesystem logger given the path to the log file and the log level.
-	pub(crate) fn new(log_file_path: String, level: Level) -> Result<Self, ()> {
-		if let Some(parent_dir) = Path::new(&log_file_path).parent() {
-			fs::create_dir_all(parent_dir)
-				.map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {}", e))?;
-
-			// make sure the file exists.
-			fs::OpenOptions::new()
-				.create(true)
-				.append(true)
-				.open(&log_file_path)
-				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
-		}
-
-		Ok(Self { file_path: log_file_path, level })
+impl LdkNodeLogger {
+	pub fn new(
+		level: Level, formatter: Box<dyn Fn(&Record) -> String + Send + Sync>,
+		writer: Box<dyn Fn(&String) + Send + Sync>,
+	) -> Result<Self, ()> {
+		Ok(Self { level, formatter, writer })
 	}
 }
-impl Logger for FilesystemLogger {
+
+impl Debug for LdkNodeLogger {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "LdkNodeLogger level: {}", self.level)
+	}
+}
+
+impl Logger for LdkNodeLogger {
 	fn log(&self, record: Record) {
 		if record.level < self.level {
 			return;
 		}
-		let raw_log = record.args.to_string();
-		let log = format!(
-			"{} {:<5} [{}:{}] {}\n",
-			Utc::now().format("%Y-%m-%d %H:%M:%S"),
-			record.level.to_string(),
-			record.module_path,
-			record.line,
-			raw_log
+		(self.writer)(&(self.formatter)(&record))
+	}
+}
+
+pub(crate) struct FilesystemLogWriter {
+	log_file: Mutex<fs::File>,
+}
+
+impl FilesystemLogWriter {
+	/// Creates a new filesystem logger.
+	pub(crate) fn new(log_file_path: String) -> Result<Self, ()> {
+		let log_file = Mutex::new(
+			fs::OpenOptions::new()
+				.create(true)
+				.append(true)
+				.open(log_file_path.clone())
+				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?,
 		);
-		fs::OpenOptions::new()
-			.create(true)
-			.append(true)
-			.open(self.file_path.clone())
-			.expect("Failed to open log file")
+		Ok(Self { log_file })
+	}
+
+	pub fn write(&self, log: &String) {
+		self.log_file
+			.lock()
+			.expect("log file lock poisoned")
 			.write_all(log.as_bytes())
 			.expect("Failed to write to log file")
 	}
+}
+
+pub(crate) fn default_format(record: &Record) -> String {
+	let raw_log = record.args.to_string();
+	format!(
+		"{} {:<5} [{}:{}] {}\n",
+		Utc::now().format("%Y-%m-%d %H:%M:%S"),
+		record.level.to_string(),
+		record.module_path,
+		record.line,
+		raw_log
+	)
 }

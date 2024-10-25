@@ -12,7 +12,7 @@
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use crate::error::Error;
-use crate::logger::{log_error, FilesystemLogger, Logger};
+use crate::logger::{log_error, LdkNodeLogger, Logger};
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
 use crate::Config;
 
@@ -50,13 +50,13 @@ pub struct UnifiedQrPayment {
 	bolt11_invoice: Arc<Bolt11Payment>,
 	bolt12_payment: Arc<Bolt12Payment>,
 	config: Arc<Config>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 }
 
 impl UnifiedQrPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
-		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
+		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<LdkNodeLogger>,
 	) -> Self {
 		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger }
 	}
