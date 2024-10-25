@@ -16,7 +16,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, LdkNodeLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -734,7 +734,7 @@ fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+	logger: Arc<LdkNodeLogger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	// Initialize the status fields.
 	let is_listening = Arc::new(AtomicBool::new(false));
@@ -1231,21 +1231,20 @@ fn build_with_store_internal(
 	})
 }
 
-fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
+fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
 	let log_dir = match &config.log_dir_path {
 		Some(log_dir) => String::from(log_dir),
 		None => config.storage_dir_path.clone() + "/logs",
 	};
 
 	Ok(Arc::new(
-		FilesystemLogger::new(log_dir, config.log_level)
-			.map_err(|_| BuildError::LoggerSetupFailed)?,
+		LdkNodeLogger::new(log_dir, config.log_level).map_err(|_| BuildError::LoggerSetupFailed)?,
 	))
 }
 
 fn seed_bytes_from_config(
 	config: &Config, entropy_source_config: Option<&EntropySourceConfig>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 ) -> Result<[u8; 64], BuildError> {
 	match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
@@ -1267,7 +1266,7 @@ fn seed_bytes_from_config(
 }
 
 fn derive_vss_xprv(
-	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<FilesystemLogger>,
+	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<LdkNodeLogger>,
 ) -> Result<Xpriv, BuildError> {
 	use bitcoin::key::Secp256k1;
 

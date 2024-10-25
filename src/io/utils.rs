@@ -13,7 +13,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::{
 	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, FilesystemLogger};
+use crate::logger::{log_error, LdkNodeLogger};
 use crate::peer_store::PeerStore;
 use crate::sweep::DeprecatedSpendableOutputInfo;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
@@ -226,7 +226,7 @@ where
 pub(crate) fn read_output_sweeper(
 	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
 	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 ) -> Result<Sweeper, std::io::Error> {
 	let mut reader = Cursor::new(kv_store.read(
 		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -600,7 +600,7 @@ impl_read_write_change_set_type!(
 
 // Reads the full BdkWalletChangeSet or returns default fields
 pub(crate) fn read_bdk_wallet_change_set(
-	kv_store: Arc<DynStore>, logger: Arc<FilesystemLogger>,
+	kv_store: Arc<DynStore>, logger: Arc<LdkNodeLogger>,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 

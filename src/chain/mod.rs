@@ -21,7 +21,7 @@ use crate::fee_estimator::{
 	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::write_node_metrics;
-use crate::logger::{log_bytes, log_error, log_info, log_trace, FilesystemLogger, Logger};
+use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkNodeLogger, Logger};
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
@@ -112,13 +112,13 @@ pub(crate) enum ChainSource {
 		esplora_client: EsploraAsyncClient,
 		onchain_wallet: Arc<Wallet>,
 		onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
-		tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+		tx_sync: Arc<EsploraSyncClient<Arc<LdkNodeLogger>>>,
 		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 		fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>,
 		config: Arc<Config>,
-		logger: Arc<FilesystemLogger>,
+		logger: Arc<LdkNodeLogger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	},
 	BitcoindRpc {
@@ -131,7 +131,7 @@ pub(crate) enum ChainSource {
 		tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>,
 		config: Arc<Config>,
-		logger: Arc<FilesystemLogger>,
+		logger: Arc<LdkNodeLogger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	},
 }
@@ -140,7 +140,7 @@ impl ChainSource {
 	pub(crate) fn new_esplora(
 		server_url: String, sync_config: EsploraSyncConfig, onchain_wallet: Arc<Wallet>,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<LdkNodeLogger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
@@ -170,7 +170,7 @@ impl ChainSource {
 		host: String, port: u16, rpc_user: String, rpc_password: String,
 		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<FilesystemLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		logger: Arc<LdkNodeLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let bitcoind_rpc_client =
 			Arc::new(BitcoindRpcClient::new(host, port, rpc_user, rpc_password));
@@ -1118,7 +1118,7 @@ impl Filter for ChainSource {
 
 fn periodically_archive_fully_resolved_monitors(
 	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-	kv_store: Arc<DynStore>, logger: Arc<FilesystemLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+	kv_store: Arc<DynStore>, logger: Arc<LdkNodeLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 ) -> Result<(), Error> {
 	let mut locked_node_metrics = node_metrics.write().unwrap();
 	let cur_height = channel_manager.current_best_block().height;

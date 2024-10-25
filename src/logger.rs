@@ -18,12 +18,12 @@ use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-pub(crate) struct FilesystemLogger {
+pub(crate) struct LdkNodeLogger {
 	file_path: String,
 	level: Level,
 }
 
-impl FilesystemLogger {
+impl LdkNodeLogger {
 	pub(crate) fn new(log_dir: String, level: Level) -> Result<Self, ()> {
 		let log_file_name =
 			format!("ldk_node_{}.log", chrono::offset::Local::now().format("%Y_%m_%d"));
@@ -56,7 +56,7 @@ impl FilesystemLogger {
 		Ok(Self { file_path: log_file_path, level })
 	}
 }
-impl Logger for FilesystemLogger {
+impl Logger for LdkNodeLogger {
 	fn log(&self, record: Record) {
 		if record.level < self.level {
 			return;
