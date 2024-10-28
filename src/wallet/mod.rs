@@ -205,6 +205,16 @@ where
 	) -> Result<(u64, u64), Error> {
 		let balance = self.inner.lock().unwrap().balance();
 
+		// Make sure `list_confirmed_utxos` returns at least one `Utxo` we could use to spend/bump
+		// Anchors if we have any confirmed amounts.
+		#[cfg(debug_assertions)]
+		if balance.confirmed != Amount::ZERO {
+			debug_assert!(
+				self.list_confirmed_utxos().map_or(false, |v| !v.is_empty()),
+				"Confirmed amounts should always be available for Anchor spending"
+			);
+		}
+
 		let (total, spendable) = (
 			balance.total().to_sat(),
 			balance.trusted_spendable().to_sat().saturating_sub(total_anchor_channels_reserve_sats),
@@ -387,12 +397,23 @@ where
 			let script_pubkey = u.txout.script_pubkey;
 			match script_pubkey.witness_version() {
 				Some(version @ WitnessVersion::V0) => {
+					// According to the SegWit rules of [BIP 141] a witness program is defined as:
+					// > A scriptPubKey (or redeemScript as defined in BIP16/P2SH) that consists of
+					// > a 1-byte push opcode (one of OP_0,OP_1,OP_2,.. .,OP_16) followed by a direct
+					// > data push between 2 and 40 bytes gets a new special meaning. The value of
+					// > the first push is called the "version byte". The following byte vector
+					// > pushed is called the "witness program"."
+					//
+					// We therefore skip the first byte we just read via `witness_version` and use
+					// the rest (i.e., the data push) as the raw bytes to construct the
+					// `WitnessProgram` below.
+					//
+					// [BIP 141]: https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#witness-program
+					let witness_bytes = &script_pubkey.as_bytes()[2..];
 					let witness_program =
-						WitnessProgram::new(version, &script_pubkey.as_bytes()[2..]).map_err(
-							|e| {
-								log_error!(self.logger, "Failed to retrieve script payload: {}", e);
-							},
-						)?;
+						WitnessProgram::new(version, witness_bytes).map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+						})?;
 
 					let wpkh = WPubkeyHash::from_slice(&witness_program.program().as_bytes())
 						.map_err(|e| {
@@ -402,12 +423,23 @@ where
 					utxos.push(utxo);
 				},
 				Some(version @ WitnessVersion::V1) => {
+					// According to the SegWit rules of [BIP 141] a witness program is defined as:
+					// > A scriptPubKey (or redeemScript as defined in BIP16/P2SH) that consists of
+					// > a 1-byte push opcode (one of OP_0,OP_1,OP_2,.. .,OP_16) followed by a direct
+					// > data push between 2 and 40 bytes gets a new special meaning. The value of
+					// > the first push is called the "version byte". The following byte vector
+					// > pushed is called the "witness program"."
+					//
+					// We therefore skip the first byte we just read via `witness_version` and use
+					// the rest (i.e., the data push) as the raw bytes to construct the
+					// `WitnessProgram` below.
+					//
+					// [BIP 141]: https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#witness-program
+					let witness_bytes = &script_pubkey.as_bytes()[2..];
 					let witness_program =
-						WitnessProgram::new(version, &script_pubkey.as_bytes()[2..]).map_err(
-							|e| {
-								log_error!(self.logger, "Failed to retrieve script payload: {}", e);
-							},
-						)?;
+						WitnessProgram::new(version, witness_bytes).map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+						})?;
 
 					XOnlyPublicKey::from_slice(&witness_program.program().as_bytes()).map_err(
 						|e| {

@@ -1,6 +1,22 @@
+# 0.4.2 - Oct 28, 2024
+
+This patch release fixes an issue that prohibited the node from using available confirmed on-chain funds to spend/bump Anchor outputs (#387).
+
+In total, this release features 1 files changed, 40 insertions, 4 deletions in 3 commits from 3 authors, in alphabetical order:
+
+- Fuyin
+- Elias Rohrer
+
+
 # 0.4.1 - Oct 18, 2024
 
-Fixes a wallet syncing issue where full syncs were used instead of incremental syncs, and vice versa (#383).
+This patch release fixes a wallet syncing issue where full syncs were used instead of incremental syncs, and vice versa (#383).
+
+In total, this release features 3 files changed, 13 insertions, 9 deletions in 6 commits from 3 authors, in alphabetical order:
+
+- Jeffrey Czyz
+- Elias Rohrer
+- Tommy Volk
 
 # 0.4.0 - Oct 17, 2024
 
