@@ -16,7 +16,9 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, LdkNodeLogger, Logger};
+use crate::logger::{
+	default_format, log_error, log_info, FilesystemLogWriter, LdkNodeLogger, Logger,
+};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -1236,9 +1238,15 @@ fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
 		Some(log_dir) => String::from(log_dir),
 		None => config.storage_dir_path.clone() + "/logs",
 	};
-
+	let filesystem_log_writer =
+		FilesystemLogWriter::new(log_dir.clone()).map_err(|_| BuildError::LoggerSetupFailed)?;
 	Ok(Arc::new(
-		LdkNodeLogger::new(log_dir, config.log_level).map_err(|_| BuildError::LoggerSetupFailed)?,
+		LdkNodeLogger::new(
+			config.log_level,
+			Box::new(default_format),
+			Box::new(move |s| filesystem_log_writer.write(s)),
+		)
+		.map_err(|_| BuildError::LoggerSetupFailed)?,
 	))
 }
 
