@@ -6,7 +6,9 @@
 // accordance with one or both of these licenses.
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
-use crate::config::{default_user_config, Config, EsploraSyncConfig, WALLET_KEYS_SEED_LEN};
+use crate::config::{
+	default_user_config, Config, EsploraSyncConfig, LoggingConfig, WALLET_KEYS_SEED_LEN,
+};
 
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -29,8 +31,8 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
+use crate::Node;
 use crate::{io, NodeMetrics};
-use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::io::Cursor;
@@ -300,12 +302,6 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Sets the log dir path if logs need to live separate from the storage directory path.
-	pub fn set_log_dir_path(&mut self, log_dir_path: String) -> &mut Self {
-		self.config.log_dir_path = Some(log_dir_path);
-		self
-	}
-
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&mut self, network: Network) -> &mut Self {
 		self.config.network = network;
@@ -333,12 +329,6 @@ impl NodeBuilder {
 
 		self.config.node_alias = Some(node_alias);
 		Ok(self)
-	}
-
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
-		self.config.log_level = level;
-		self
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1234,20 +1224,21 @@ fn build_with_store_internal(
 }
 
 fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
-	let log_dir = match &config.log_dir_path {
-		Some(log_dir) => String::from(log_dir),
-		None => config.storage_dir_path.clone() + "/logs",
-	};
-	let filesystem_log_writer =
-		FilesystemLogWriter::new(log_dir.clone()).map_err(|_| BuildError::LoggerSetupFailed)?;
-	Ok(Arc::new(
-		LdkNodeLogger::new(
-			config.log_level,
-			Box::new(default_format),
-			Box::new(move |s| filesystem_log_writer.write(s)),
-		)
-		.map_err(|_| BuildError::LoggerSetupFailed)?,
-	))
+	match config.logging_config {
+		LoggingConfig::Custom(ref logger) => Ok(logger.clone()),
+		LoggingConfig::Filesystem { ref log_dir, log_level } => {
+			let filesystem_log_writer = FilesystemLogWriter::new(log_dir.clone())
+				.map_err(|_| BuildError::LoggerSetupFailed)?;
+			Ok(Arc::new(
+				LdkNodeLogger::new(
+					log_level,
+					Box::new(default_format),
+					Box::new(move |s| filesystem_log_writer.write(s)),
+				)
+				.map_err(|_| BuildError::LoggerSetupFailed)?,
+			))
+		},
+	}
 }
 
 fn seed_bytes_from_config(

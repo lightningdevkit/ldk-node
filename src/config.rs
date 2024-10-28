@@ -7,6 +7,7 @@
 
 //! Objects for configuring the node.
 
+use crate::logger::LdkNodeLogger;
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
@@ -105,8 +106,9 @@ pub struct Config {
 	pub storage_dir_path: String,
 	/// The path where logs are stored.
 	///
-	/// If set to `None`, logs can be found in the `logs` subdirectory in [`Config::storage_dir_path`].
-	pub log_dir_path: Option<String>,
+	/// In the default configuration logs can be found in the `logs` subdirectory in
+	/// [`Config::storage_dir_path`], and the log level is set to [`DEFAULT_LOG_LEVEL`].
+	pub logging_config: LoggingConfig,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
@@ -132,10 +134,6 @@ pub struct Config {
 	/// Channels with available liquidity less than the required amount times this value won't be
 	/// used to send pre-flight probes.
 	pub probing_liquidity_limit_multiplier: u64,
-	/// The level at which we log messages.
-	///
-	/// Any messages below this level will be excluded from the logs.
-	pub log_level: LogLevel,
 	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
 	/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
 	///
@@ -167,15 +165,42 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
-			log_dir_path: None,
+			logging_config: LoggingConfig::default(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
-			log_level: DEFAULT_LOG_LEVEL,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
 			node_alias: None,
+		}
+	}
+}
+
+/// Configuration options for logging.
+#[derive(Debug, Clone)]
+pub enum LoggingConfig {
+	/// An opinionated filesystem logger.
+	///
+	/// This logger will always write at `{log_dir}/ldk_node_latest.log`, which is a symlink to the
+	/// most recent log file, which is created and timestamped at initialization.
+	Filesystem {
+		/// The absolute path where logs are stored.
+		log_dir: String,
+		/// The level at which we log messages.
+		///
+		/// Any messages below this level will be excluded from the logs.
+		log_level: LogLevel,
+	},
+	/// A custom logger.
+	Custom(std::sync::Arc<LdkNodeLogger>),
+}
+
+impl Default for LoggingConfig {
+	fn default() -> Self {
+		Self::Filesystem {
+			log_dir: format!("{}/{}", DEFAULT_STORAGE_DIR_PATH, "logs"),
+			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
 }
