@@ -32,7 +32,7 @@ use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
-use lightning::ln::PaymentHash;
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
@@ -65,6 +65,12 @@ pub enum Event {
 		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
+		/// The preimage to the `payment_hash`.
+		///
+		/// Note that this serves as a payment receipt.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.4.2 or prior.
+		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
 	},
@@ -163,6 +169,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
 		(3, payment_id, option),
+		(5, payment_preimage, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, option),
@@ -870,6 +877,7 @@ where
 				let event = Event::PaymentSuccessful {
 					payment_id: Some(payment_id),
 					payment_hash,
+					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
 				};
 
