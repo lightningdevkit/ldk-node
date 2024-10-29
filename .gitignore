@@ -27,3 +27,7 @@ swift.swiftdoc
 /bindings/kotlin/ldk-node-android/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
 /bindings/kotlin/ldk-node-jvm/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
 /bindings/kotlin/ldk-node-jvm/lib/src/main/resources/
+.build/workspace-state.json
+.build/arm64-apple-macosx/debug/index/db/v13/p69904--d2c184/data.mdb
+.build/arm64-apple-macosx/debug/index/db/v13/p69904--d2c184/lock.mdb
+.build/arm64-apple-macosx/debug/LDKNode.build/module.modulemap

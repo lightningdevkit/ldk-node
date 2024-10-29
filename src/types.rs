@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::FilesystemLogger;
+use crate::logger::LdkNodeLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
 use lightning::chain::chainmonitor;
@@ -38,7 +38,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<ChainSource>,
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 	Arc<DynStore>,
 >;
 
@@ -47,12 +47,12 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<ChannelManager>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
-	Arc<FilesystemLogger>,
-	Arc<NodeCustomMessageHandler<Arc<FilesystemLogger>>>,
+	Arc<LdkNodeLogger>,
+	Arc<NodeCustomMessageHandler<Arc<LdkNodeLogger>>>,
 	Arc<KeysManager>,
 >;
 
-pub(crate) type ChainSource = EsploraSyncClient<Arc<FilesystemLogger>>;
+pub(crate) type ChainSource = EsploraSyncClient<Arc<LdkNodeLogger>>;
 
 pub(crate) type LiquidityManager =
 	lightning_liquidity::LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<ChainSource>>;
@@ -65,58 +65,58 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<KeysManager>,
 	Arc<FeeEstimator>,
 	Arc<Router>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 >;
 
-pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<FilesystemLogger>>;
+pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<LdkNodeLogger>>;
 
-pub(crate) type FeeEstimator = crate::fee_estimator::OnchainFeeEstimator<Arc<FilesystemLogger>>;
+pub(crate) type FeeEstimator = crate::fee_estimator::OnchainFeeEstimator<Arc<LdkNodeLogger>>;
 
 pub(crate) type Wallet = crate::wallet::Wallet<
 	bdk::database::SqliteDatabase,
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 >;
 
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
 	bdk::database::SqliteDatabase,
 	Arc<Broadcaster>,
 	Arc<FeeEstimator>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 >;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<Graph>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 	Arc<KeysManager>,
 	Arc<Mutex<Scorer>>,
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
-pub(crate) type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<FilesystemLogger>>;
+pub(crate) type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<LdkNodeLogger>>;
 
-pub(crate) type Graph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
+pub(crate) type Graph = gossip::NetworkGraph<Arc<LdkNodeLogger>>;
 
 pub(crate) type UtxoLookup = dyn lightning::routing::utxo::UtxoLookup + Send + Sync;
 
 pub(crate) type P2PGossipSync =
-	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<FilesystemLogger>>;
+	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<LdkNodeLogger>>;
 pub(crate) type RapidGossipSync =
-	lightning_rapid_gossip_sync::RapidGossipSync<Arc<Graph>, Arc<FilesystemLogger>>;
+	lightning_rapid_gossip_sync::RapidGossipSync<Arc<Graph>, Arc<LdkNodeLogger>>;
 
 pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 	Arc<P2PGossipSync>,
 	Arc<RapidGossipSync>,
 	Arc<Graph>,
 	Arc<UtxoLookup>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 >;
 
 pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
@@ -125,7 +125,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 	Arc<KeysManager>,
 >;
 
@@ -135,16 +135,16 @@ pub(crate) type Sweeper = OutputSweeper<
 	Arc<FeeEstimator>,
 	Arc<ChainSource>,
 	Arc<DynStore>,
-	Arc<FilesystemLogger>,
+	Arc<LdkNodeLogger>,
 	Arc<KeysManager>,
 >;
 
 pub(crate) type BumpTransactionEventHandler =
 	lightning::events::bump_transaction::BumpTransactionEventHandler<
 		Arc<Broadcaster>,
-		Arc<lightning::events::bump_transaction::Wallet<Arc<Wallet>, Arc<FilesystemLogger>>>,
+		Arc<lightning::events::bump_transaction::Wallet<Arc<Wallet>, Arc<LdkNodeLogger>>>,
 		Arc<KeysManager>,
-		Arc<FilesystemLogger>,
+		Arc<LdkNodeLogger>,
 	>;
 
 /// A local, potentially user-provided, identifier of a channel.

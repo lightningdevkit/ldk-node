@@ -16,7 +16,7 @@ use std::{
 use crate::{
 	error::Error,
 	event::EventQueue,
-	logger::FilesystemLogger,
+	logger::LdkNodeLogger,
 	types::{ChannelManager, Router, Scorer},
 	Event,
 };
@@ -62,17 +62,17 @@ pub struct ProbeResult {
 /// The Prober can be used to send probes to a destination node outside of regular payment flows.
 pub struct Prober {
 	channel_manager: Arc<ChannelManager>,
-	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
+	event_queue: Arc<EventQueue<Arc<LdkNodeLogger>>>,
 	router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 	node_id: PublicKey,
 }
 
 impl Prober {
 	pub(crate) fn new(
-		channel_manager: Arc<ChannelManager>, event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
-		router: Arc<Router>, scorer: Arc<Mutex<Scorer>>, logger: Arc<FilesystemLogger>,
+		channel_manager: Arc<ChannelManager>, event_queue: Arc<EventQueue<Arc<LdkNodeLogger>>>,
+		router: Arc<Router>, scorer: Arc<Mutex<Scorer>>, logger: Arc<LdkNodeLogger>,
 		node_id: PublicKey,
 	) -> Self {
 		Self { channel_manager, event_queue, router, scorer, logger, node_id }

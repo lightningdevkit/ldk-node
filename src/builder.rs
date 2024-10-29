@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use crate::config::{
-	default_user_config, Config, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
+	default_user_config, Config, LoggingConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS, DEFAULT_ESPLORA_SERVER_URL, WALLET_KEYS_SEED_LEN,
 };
 use crate::connection::ConnectionManager;
@@ -16,7 +16,9 @@ use crate::gossip::GossipSource;
 use crate::io;
 use crate::io::sqlite_store::SqliteStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{
+	default_format, log_error, log_info, FilesystemLogWriter, LdkNodeLogger, Logger,
+};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -26,7 +28,7 @@ use crate::types::{
 	OnionMessenger, PeerManager,
 };
 use crate::wallet::Wallet;
-use crate::{LogLevel, Node};
+use crate::Node;
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
@@ -279,12 +281,6 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Sets the log dir path if logs need to live separate from the storage directory path.
-	pub fn set_log_dir_path(&mut self, log_dir_path: String) -> &mut Self {
-		self.config.log_dir_path = Some(log_dir_path);
-		self
-	}
-
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&mut self, network: Network) -> &mut Self {
 		self.config.network = network;
@@ -301,12 +297,6 @@ impl NodeBuilder {
 
 		self.config.listening_addresses = Some(listening_addresses);
 		Ok(self)
-	}
-
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
-		self.config.log_level = level;
-		self
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -529,7 +519,7 @@ fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+	logger: Arc<LdkNodeLogger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
@@ -1016,21 +1006,27 @@ fn build_with_store_internal(
 	})
 }
 
-fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
-	let log_dir = match &config.log_dir_path {
-		Some(log_dir) => String::from(log_dir),
-		None => config.storage_dir_path.clone() + "/logs",
-	};
-
-	Ok(Arc::new(
-		FilesystemLogger::new(log_dir, config.log_level)
-			.map_err(|_| BuildError::LoggerSetupFailed)?,
-	))
+fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
+	match config.logging_config {
+		LoggingConfig::Custom(ref logger) => Ok(logger.clone()),
+		LoggingConfig::Filesystem { ref log_dir, log_level } => {
+			let filesystem_log_writer = FilesystemLogWriter::new(log_dir.clone())
+				.map_err(|_| BuildError::LoggerSetupFailed)?;
+			Ok(Arc::new(
+				LdkNodeLogger::new(
+					log_level,
+					Box::new(default_format),
+					Box::new(move |s| filesystem_log_writer.write(s)),
+				)
+				.map_err(|_| BuildError::LoggerSetupFailed)?,
+			))
+		},
+	}
 }
 
 fn seed_bytes_from_config(
 	config: &Config, entropy_source_config: Option<&EntropySourceConfig>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 ) -> Result<[u8; 64], BuildError> {
 	match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),

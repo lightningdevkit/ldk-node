@@ -8,7 +8,7 @@
 use super::*;
 use crate::config::WALLET_KEYS_SEED_LEN;
 
-use crate::logger::{log_error, FilesystemLogger};
+use crate::logger::{log_error, LdkNodeLogger};
 use crate::peer_store::PeerStore;
 use crate::sweep::DeprecatedSpendableOutputInfo;
 use crate::types::{Broadcaster, ChainSource, DynStore, FeeEstimator, KeysManager, Sweeper};
@@ -210,7 +210,7 @@ where
 pub(crate) fn read_output_sweeper(
 	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<FeeEstimator>,
 	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 ) -> Result<Sweeper, std::io::Error> {
 	let mut reader = Cursor::new(kv_store.read(
 		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,

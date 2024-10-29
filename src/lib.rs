@@ -144,7 +144,7 @@ use types::{
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
-use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
+use logger::{log_error, log_info, log_trace, LdkNodeLogger, Logger};
 
 use lightning::chain::{BestBlock, Confirm};
 use lightning::events::bump_transaction::Wallet as LdkWallet;
@@ -179,25 +179,25 @@ pub struct Node {
 	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
-	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+	tx_sync: Arc<EsploraSyncClient<Arc<LdkNodeLogger>>>,
 	tx_broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<FeeEstimator>,
-	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
+	event_queue: Arc<EventQueue<Arc<LdkNodeLogger>>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
-	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
+	connection_manager: Arc<ConnectionManager<Arc<LdkNodeLogger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<LdkNodeLogger>>>>,
 	kv_store: Arc<DynStore>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 	router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
-	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
-	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
+	peer_store: Arc<PeerStore<Arc<LdkNodeLogger>>>,
+	payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>,
 	is_listening: Arc<AtomicBool>,
 	latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,

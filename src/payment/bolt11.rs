@@ -13,7 +13,7 @@ use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::error::Error;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, LdkNodeLogger, Logger};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus, PaymentStore,
@@ -43,25 +43,25 @@ use std::time::SystemTime;
 pub struct Bolt11Payment {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
-	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
+	connection_manager: Arc<ConnectionManager<Arc<LdkNodeLogger>>>,
 	keys_manager: Arc<KeysManager>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
-	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
-	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<LdkNodeLogger>>>>,
+	payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>,
+	peer_store: Arc<PeerStore<Arc<LdkNodeLogger>>>,
 	config: Arc<Config>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<LdkNodeLogger>,
 }
 
 impl Bolt11Payment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>,
-		connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
+		connection_manager: Arc<ConnectionManager<Arc<LdkNodeLogger>>>,
 		keys_manager: Arc<KeysManager>,
-		liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
-		payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
-		peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>, config: Arc<Config>,
-		logger: Arc<FilesystemLogger>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<LdkNodeLogger>>>>,
+		payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>,
+		peer_store: Arc<PeerStore<Arc<LdkNodeLogger>>>, config: Arc<Config>,
+		logger: Arc<LdkNodeLogger>,
 	) -> Self {
 		Self {
 			runtime,
