@@ -112,7 +112,7 @@ impl Bolt12Payment {
 				let payment = PaymentDetails::new(
 					payment_id,
 					kind,
-					Some(*offer_amount_msat),
+					Some(offer_amount_msat),
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -136,7 +136,7 @@ impl Bolt12Payment {
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
-							Some(*offer_amount_msat),
+							Some(offer_amount_msat),
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -172,7 +172,7 @@ impl Bolt12Payment {
 		let max_total_routing_fee_msat = None;
 
 		let offer_amount_msat = match offer.amount() {
-			Some(Amount::Bitcoin { amount_msats }) => *amount_msats,
+			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
 			Some(_) => {
 				log_error!(self.logger, "Failed to send payment as the provided offer was denominated in an unsupported currency.");
 				return Err(Error::UnsupportedCurrency);
@@ -255,12 +255,19 @@ impl Bolt12Payment {
 	/// Returns a payable offer that can be used to request and receive a payment of the amount
 	/// given.
 	pub fn receive(
-		&self, amount_msat: u64, description: &str, quantity: Option<u64>,
+		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<Offer, Error> {
-		let offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
-			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-			Error::OfferCreationFailed
-		})?;
+		let absolute_expiry = expiry_secs.map(|secs| {
+			(SystemTime::now() + Duration::from_secs(secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.unwrap()
+		});
+
+		let offer_builder =
+			self.channel_manager.create_offer_builder(absolute_expiry).map_err(|e| {
+				log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+				Error::OfferCreationFailed
+			})?;
 
 		let mut offer =
 			offer_builder.amount_msats(amount_msat).description(description.to_string());
@@ -284,11 +291,20 @@ impl Bolt12Payment {
 
 	/// Returns a payable offer that can be used to request and receive a payment for which the
 	/// amount is to be determined by the user, also known as a "zero-amount" offer.
-	pub fn receive_variable_amount(&self, description: &str) -> Result<Offer, Error> {
-		let offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
-			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-			Error::OfferCreationFailed
-		})?;
+	pub fn receive_variable_amount(
+		&self, description: &str, expiry_secs: Option<u32>,
+	) -> Result<Offer, Error> {
+		let absolute_expiry = expiry_secs.map(|secs| {
+			(SystemTime::now() + Duration::from_secs(secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.unwrap()
+		});
+
+		let offer_builder =
+			self.channel_manager.create_offer_builder(absolute_expiry).map_err(|e| {
+				log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+				Error::OfferCreationFailed
+			})?;
 		let offer = offer_builder.description(description.to_string()).build().map_err(|e| {
 			log_error!(self.logger, "Failed to create offer: {:?}", e);
 			Error::OfferCreationFailed
@@ -340,7 +356,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 
-		let expiration = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
@@ -350,7 +366,7 @@ impl Bolt12Payment {
 			.channel_manager
 			.create_refund_builder(
 				amount_msat,
-				expiration,
+				absolute_expiry,
 				payment_id,
 				retry_strategy,
 				max_total_routing_fee_msat,

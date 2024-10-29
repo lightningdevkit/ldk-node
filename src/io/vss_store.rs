@@ -5,24 +5,25 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use io::Error;
-use std::io;
-use std::io::ErrorKind;
-#[cfg(test)]
-use std::panic::RefUnwindSafe;
-use std::time::Duration;
-
 use crate::io::utils::check_namespace_key_validity;
+use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+use lightning::io::{self, Error, ErrorKind};
 use lightning::util::persist::KVStore;
 use prost::Message;
 use rand::RngCore;
+#[cfg(test)]
+use std::panic::RefUnwindSafe;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
+use vss_client::headers::VssHeaderProvider;
 use vss_client::types::{
 	DeleteObjectRequest, GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest,
 	Storable,
 };
+use vss_client::util::key_obfuscator::KeyObfuscator;
 use vss_client::util::retry::{
 	ExponentialBackoffRetryPolicy, FilteredRetryPolicy, JitteredRetryPolicy,
 	MaxAttemptsRetryPolicy, MaxTotalDelayRetryPolicy, RetryPolicy,
@@ -42,16 +43,23 @@ pub struct VssStore {
 	store_id: String,
 	runtime: Runtime,
 	storable_builder: StorableBuilder<RandEntropySource>,
+	key_obfuscator: KeyObfuscator,
 }
 
 impl VssStore {
-	pub(crate) fn new(base_url: String, store_id: String, data_encryption_key: [u8; 32]) -> Self {
-		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+	pub(crate) fn new(
+		base_url: String, store_id: String, vss_seed: [u8; 32],
+		header_provider: Arc<dyn VssHeaderProvider>,
+	) -> io::Result<Self> {
+		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+		let (data_encryption_key, obfuscation_master_key) =
+			derive_data_encryption_and_obfuscation_keys(&vss_seed);
+		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
 		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
-		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(100))
-			.with_max_attempts(3)
-			.with_max_total_delay(Duration::from_secs(2))
-			.with_max_jitter(Duration::from_millis(50))
+		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
+			.with_max_attempts(10)
+			.with_max_total_delay(Duration::from_secs(15))
+			.with_max_jitter(Duration::from_millis(10))
 			.skip_retry_on_error(Box::new(|e: &VssError| {
 				matches!(
 					e,
@@ -61,17 +69,18 @@ impl VssStore {
 				)
 			}) as _);
 
-		let client = VssClient::new(base_url, retry_policy);
-		Self { client, store_id, runtime, storable_builder }
+		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
+		Ok(Self { client, store_id, runtime, storable_builder, key_obfuscator })
 	}
 
 	fn build_key(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<String> {
+		let obfuscated_key = self.key_obfuscator.obfuscate(key);
 		if primary_namespace.is_empty() {
-			Ok(key.to_string())
+			Ok(obfuscated_key)
 		} else {
-			Ok(format!("{}#{}#{}", primary_namespace, secondary_namespace, key))
+			Ok(format!("{}#{}#{}", primary_namespace, secondary_namespace, obfuscated_key))
 		}
 	}
 
@@ -79,7 +88,10 @@ impl VssStore {
 		let mut parts = unified_key.splitn(3, '#');
 		let (_primary_namespace, _secondary_namespace) = (parts.next(), parts.next());
 		match parts.next() {
-			Some(actual_key) => Ok(actual_key.to_string()),
+			Some(obfuscated_key) => {
+				let actual_key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
+				Ok(actual_key)
+			},
 			None => Err(Error::new(ErrorKind::InvalidData, "Invalid key format")),
 		}
 	}
@@ -139,7 +151,14 @@ impl KVStore for VssStore {
 				})?;
 		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
 		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
-		let storable = Storable::decode(&resp.value.unwrap().value[..])?;
+		let storable = Storable::decode(&resp.value.unwrap().value[..]).map_err(|e| {
+			let msg = format!(
+				"Failed to decode data read from key {}/{}/{}: {}",
+				primary_namespace, secondary_namespace, key, e
+			);
+			Error::new(ErrorKind::Other, msg)
+		})?;
+
 		Ok(self.storable_builder.deconstruct(storable)?.0)
 	}
 
@@ -214,6 +233,19 @@ impl KVStore for VssStore {
 	}
 }
 
+fn derive_data_encryption_and_obfuscation_keys(vss_seed: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+	let hkdf = |initial_key_material: &[u8], salt: &[u8]| -> [u8; 32] {
+		let mut engine = HmacEngine::<sha256::Hash>::new(salt);
+		engine.input(initial_key_material);
+		Hmac::from_engine(engine).to_byte_array()
+	};
+
+	let prk = hkdf(vss_seed, b"pseudo_random_key");
+	let k1 = hkdf(&prk, b"data_encryption_key");
+	let k2 = hkdf(&prk, &[&k1[..], b"obfuscation_key"].concat());
+	(k1, k2)
+}
+
 /// A source for generating entropy/randomness using [`rand`].
 pub(crate) struct RandEntropySource;
 
@@ -233,15 +265,19 @@ mod tests {
 	use crate::io::test_utils::do_read_write_remove_list_persist;
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng, RngCore};
+	use std::collections::HashMap;
+	use vss_client::headers::FixedHeaders;
 
 	#[test]
 	fn read_write_remove_list_persist() {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = thread_rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let mut data_encryption_key = [0u8; 32];
-		rng.fill_bytes(&mut data_encryption_key);
-		let vss_store = VssStore::new(vss_base_url, rand_store_id, data_encryption_key);
+		let mut vss_seed = [0u8; 32];
+		rng.fill_bytes(&mut vss_seed);
+		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let vss_store =
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
 
 		do_read_write_remove_list_persist(&vss_store);
 	}

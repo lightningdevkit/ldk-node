@@ -130,9 +130,9 @@ class LibraryTest {
         println("Config 2: $config2")
 
         val builder1 = Builder.fromConfig(config1)
-        builder1.setEsploraServer(esploraEndpoint)
+        builder1.setChainSourceEsplora(esploraEndpoint, null)
         val builder2 = Builder.fromConfig(config2)
-        builder2.setEsploraServer(esploraEndpoint)
+        builder2.setChainSourceEsplora(esploraEndpoint, null)
 
         val node1 = builder1.build()
         val node2 = builder2.build()
@@ -175,7 +175,7 @@ class LibraryTest {
         assertEquals(100000uL, totalBalance1)
         assertEquals(100000uL, totalBalance2)
 
-        node1.connectOpenChannel(nodeId2, listenAddress2, 50000u, null, null, true)
+        node1.openChannel(nodeId2, listenAddress2, 50000u, null, null)
 
         val channelPendingEvent1 = node1.waitNextEvent()
         println("Got event: $channelPendingEvent1")

@@ -1,6 +1,6 @@
 [package]
 name = "ldk-node"
-version = "0.3.0"
+version = "0.4.2"
 authors = ["Elias Rohrer <dev@tnull.de>"]
 homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
@@ -26,17 +26,17 @@ panic = 'abort'     # Abort on panic
 
 [features]
 default = []
-serde = ["dep:serde"]
 
 [dependencies]
-lightning = { version = "0.0.123", features = ["std"] }
-lightning-invoice = { version = "0.31.0" }
-lightning-net-tokio = { version = "0.0.123" }
-lightning-persister = { version = "0.0.123" }
-lightning-background-processor = { version = "0.0.123", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.123" }
-lightning-transaction-sync = { version = "0.0.123", features = ["esplora-async-https", "time"] }
-lightning-liquidity = { version = "=0.1.0-alpha.4", features = ["std"] }
+lightning = { version = "0.0.125", features = ["std"] }
+lightning-invoice = { version = "0.32.0" }
+lightning-net-tokio = { version = "0.0.125" }
+lightning-persister = { version = "0.0.125" }
+lightning-background-processor = { version = "0.0.125", features = ["futures"] }
+lightning-rapid-gossip-sync = { version = "0.0.125" }
+lightning-block-sync = { version = "0.0.125", features = ["rpc-client", "tokio"] }
+lightning-transaction-sync = { version = "0.0.125", features = ["esplora-async-https", "time"] }
+lightning-liquidity = { version = "0.1.0-alpha.6", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -56,23 +56,26 @@ lightning-liquidity = { version = "=0.1.0-alpha.4", features = ["std"] }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
 #lightning-liquidity = { path = "../lightning-liquidity", features = ["std"] }
 
-bdk = { version = "0.29.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
+bdk_chain = { version = "=0.19.0", default-features = false, features = ["std"] }
+bdk_esplora = { version = "=0.18.0", default-features = false, features = ["async-https-rustls"]}
+bdk_wallet = { version = "=1.0.0-beta.4", default-features = false, features = ["std", "keys-bip39"]}
 
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.28.0", features = ["bundled"] }
-bitcoin = "0.30.2"
+bitcoin = "0.32.2"
 bip39 = "2.0.0"
-bip21 = { version = "0.3.1", features = ["std"], default-features = false }
+bip21 = { version = "0.5", features = ["std"], default-features = false }
 
+base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
-esplora-client = { version = "0.6", default-features = false }
+tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros" ] }
+esplora-client = { version = "0.9", default-features = false }
 libc = "0.2"
-uniffi = { version = "0.26.0", features = ["build"], optional = true }
-serde = { version = "1.0.210", default-features = false, features = ["derive"], optional =  true }
+uniffi = { version = "0.27.3", features = ["build"], optional = true }
+serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1.0.128", default-features = false, features = ["std"] }
 
-[target.'cfg(vss)'.dependencies]
 vss-client = "0.3"
 prost = { version = "0.11.6", default-features = false}
 
@@ -80,24 +83,24 @@ prost = { version = "0.11.6", default-features = false}
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.0.123", features = ["std", "_test_utils"] }
+lightning = { version = "0.0.125", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
-electrum-client = { version = "0.15.1", default-features = true }
-bitcoincore-rpc = { version = "0.17.0", default-features = false }
+electrum-client = { version = "0.21.0", default-features = true }
+bitcoincore-rpc = { version = "0.19.0", default-features = false }
 proptest = "1.0.0"
 regex = "1.5.6"
 
 [target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.26.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_25_0"] }
+electrsd = { version = "0.29.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_25_0"] }
 
 [target.'cfg(no_download)'.dev-dependencies]
-electrsd = { version = "0.26.0", features = ["legacy"] }
+electrsd = { version = "0.29.0", features = ["legacy"] }
 
 [target.'cfg(cln_test)'.dev-dependencies]
 clightningrpc = { version = "0.3.0-beta.8", default-features = false }
 
 [build-dependencies]
-uniffi = { version = "0.26.0", features = ["build"], optional = true }
+uniffi = { version = "0.27.3", features = ["build"], optional = true }
 
 [profile.release]
 panic = "abort"
@@ -109,7 +112,6 @@ panic = "abort"
 level = "forbid"
 # When adding a new cfg attribute, ensure that it is added to this list.
 check-cfg = [
-	"cfg(vss)",
 	"cfg(vss_test)",
 	"cfg(ldk_bench)",
 	"cfg(tokio_unstable)",

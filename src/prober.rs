@@ -22,7 +22,7 @@ use crate::{
 };
 use bitcoin::secp256k1::PublicKey;
 use lightning::{
-	ln::{channelmanager, msgs::LightningError},
+	ln::{channel_state::ChannelDetails, msgs::LightningError},
 	log_error, log_info,
 	routing::{
 		router::{PaymentParameters, Route, RouteParameters, Router as _},
@@ -30,11 +30,9 @@ use lightning::{
 	},
 	util::logger::Logger as _,
 };
-#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// This representing a hop in a route between two nodes.
 pub struct RouteHop {
 	/// The short channel id used for the hop
@@ -43,8 +41,7 @@ pub struct RouteHop {
 	pub pubkey: PublicKey,
 }
 
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 /// The result of a probe.
 pub struct ProbeResult {
 	/// Indicates if the probe was successful.
@@ -195,7 +192,7 @@ impl Prober {
 		let route_params =
 			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
 		let usable_channels = self.channel_manager.list_usable_channels();
-		let first_hops: Vec<&channelmanager::ChannelDetails> = usable_channels.iter().collect();
+		let first_hops: Vec<&ChannelDetails> = usable_channels.iter().collect();
 		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
 		self.router.find_route(&self.node_id, &route_params, Some(&first_hops[..]), inflight_htlcs)
 	}

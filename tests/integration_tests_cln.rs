@@ -45,7 +45,7 @@ fn test_cln() {
 	// Setup LDK Node
 	let config = common::random_config(true);
 	let mut builder = Builder::from_config(config);
-	builder.set_esplora_server("http://127.0.0.1:3002".to_string());
+	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
 
 	let node = builder.build().unwrap();
 	node.start().unwrap();
@@ -82,15 +82,8 @@ fn test_cln() {
 	// Open the channel
 	let funding_amount_sat = 1_000_000;
 
-	node.connect_open_channel(
-		cln_node_id,
-		cln_address,
-		funding_amount_sat,
-		Some(500_000_000),
-		None,
-		false,
-	)
-	.unwrap();
+	node.open_channel(cln_node_id, cln_address, funding_amount_sat, Some(500_000_000), None)
+		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
 	common::wait_for_tx(&electrs_client, funding_txo.txid);

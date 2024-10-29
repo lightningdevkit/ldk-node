@@ -5,10 +5,17 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+//! Objects for configuring the node.
+
+//! Objects for configuring the node.
+
 use crate::logger::LdkNodeLogger;
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
+use lightning::util::config::ChannelConfig as LdkChannelConfig;
+use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::config::UserConfig;
 use lightning::util::logger::Level as LogLevel;
 
@@ -32,13 +39,7 @@ const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 pub(crate) const BDK_CLIENT_STOP_GAP: usize = 20;
 
 // The number of concurrent requests made against the API provider.
-pub(crate) const BDK_CLIENT_CONCURRENCY: u8 = 4;
-
-// The default Esplora server we're using.
-pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
-
-// The default Esplora client timeout we're using.
-pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
+pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
 
 // The timeout after which we abandon retrying failed payments.
 pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -87,6 +88,7 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `log_dir_path`                         | None               |
 /// | `network`                              | Bitcoin            |
 /// | `listening_addresses`                  | None               |
+/// | `node_alias`                           | None               |
 /// | `default_cltv_expiry_delta`            | 144                |
 /// | `onchain_wallet_sync_interval_secs`    | 80                 |
 /// | `wallet_sync_interval_secs`            | 30                 |
@@ -110,19 +112,17 @@ pub struct Config {
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
+	///
+	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
+	/// `listening_addresses` are set.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
-	/// The time in-between background sync attempts of the onchain wallet, in seconds.
+	/// The node alias that will be used when broadcasting announcements to the gossip network.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
-	pub onchain_wallet_sync_interval_secs: u64,
-	/// The time in-between background sync attempts of the LDK wallet, in seconds.
+	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
-	pub wallet_sync_interval_secs: u64,
-	/// The time in-between background update attempts to our fee rate cache, in seconds.
-	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
-	pub fee_rate_cache_update_interval_secs: u64,
+	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
+	/// `listening_addresses` are set.
+	pub node_alias: Option<NodeAlias>,
 	/// A list of peers that we allow to establish zero confirmation channels to us.
 	///
 	/// **Note:** Allowing payments via zero-confirmation channels is potentially insecure if the
@@ -168,13 +168,11 @@ impl Default for Config {
 			logging_config: LoggingConfig::default(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
-			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
-			wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
-			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
+			node_alias: None,
 		}
 	}
 }
@@ -288,17 +286,217 @@ pub fn default_config() -> Config {
 	Config::default()
 }
 
+pub(crate) fn may_announce_channel(config: &Config) -> bool {
+	config.node_alias.is_some()
+		&& config.listening_addresses.as_ref().map_or(false, |addrs| !addrs.is_empty())
+}
+
 pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// Initialize the default config values.
 	//
-	// Note that methods such as Node::connect_open_channel might override some of the values set
-	// here, e.g. the ChannelHandshakeConfig, meaning these default values will mostly be relevant
-	// for inbound channels.
+	// Note that methods such as Node::open_channel and Node::open_announced_channel might override
+	// some of the values set here, e.g. the ChannelHandshakeConfig, meaning these default values
+	// will mostly be relevant for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
 	user_config.manually_accept_inbound_channels = true;
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 
+	if !may_announce_channel(config) {
+		user_config.accept_forwards_to_priv_channels = false;
+		user_config.channel_handshake_config.announce_for_forwarding = false;
+		user_config.channel_handshake_limits.force_announced_channel_preference = true;
+	}
+
 	user_config
+}
+
+/// Options related to syncing the Lightning and on-chain wallets via an Esplora backend.
+///
+/// ### Defaults
+///
+/// | Parameter                              | Value              |
+/// |----------------------------------------|--------------------|
+/// | `onchain_wallet_sync_interval_secs`    | 80                 |
+/// | `lightning_wallet_sync_interval_secs`  | 30                 |
+/// | `fee_rate_cache_update_interval_secs`  | 600                |
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct EsploraSyncConfig {
+	/// The time in-between background sync attempts of the onchain wallet, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub onchain_wallet_sync_interval_secs: u64,
+	/// The time in-between background sync attempts of the LDK wallet, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub lightning_wallet_sync_interval_secs: u64,
+	/// The time in-between background update attempts to our fee rate cache, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is always enforced.
+	pub fee_rate_cache_update_interval_secs: u64,
+}
+
+impl Default for EsploraSyncConfig {
+	fn default() -> Self {
+		Self {
+			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
+			lightning_wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
+			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
+		}
+	}
+}
+
+/// Options which apply on a per-channel basis and may change at runtime or based on negotiation
+/// with our counterparty.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ChannelConfig {
+	/// Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
+	/// over the channel.
+	/// This may be allowed to change at runtime in a later update, however doing so must result in
+	/// update messages sent to notify all nodes of our updated relay fee.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub forwarding_fee_proportional_millionths: u32,
+	/// Amount (in milli-satoshi) charged for payments forwarded outbound over the channel, in
+	/// excess of [`ChannelConfig::forwarding_fee_proportional_millionths`].
+	/// This may be allowed to change at runtime in a later update, however doing so must result in
+	/// update messages sent to notify all nodes of our updated relay fee.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub forwarding_fee_base_msat: u32,
+	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
+	/// the channel this config applies to.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub cltv_expiry_delta: u16,
+	/// Limit our total exposure to potential loss to on-chain fees on close, including in-flight
+	/// HTLCs which are burned to fees as they are too small to claim on-chain and fees on
+	/// commitment transaction(s) broadcasted by our counterparty in excess of our own fee estimate.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub max_dust_htlc_exposure: MaxDustHTLCExposure,
+	/// The additional fee we're willing to pay to avoid waiting for the counterparty's
+	/// `to_self_delay` to reclaim funds.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub force_close_avoidance_max_fee_satoshis: u64,
+	/// If set, allows this channel's counterparty to skim an additional fee off this node's inbound
+	/// HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
+	///
+	/// Please refer to [`LdkChannelConfig`] for further details.
+	pub accept_underpaying_htlcs: bool,
+}
+
+impl From<LdkChannelConfig> for ChannelConfig {
+	fn from(value: LdkChannelConfig) -> Self {
+		Self {
+			forwarding_fee_proportional_millionths: value.forwarding_fee_proportional_millionths,
+			forwarding_fee_base_msat: value.forwarding_fee_base_msat,
+			cltv_expiry_delta: value.cltv_expiry_delta,
+			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
+			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
+			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
+		}
+	}
+}
+
+impl From<ChannelConfig> for LdkChannelConfig {
+	fn from(value: ChannelConfig) -> Self {
+		Self {
+			forwarding_fee_proportional_millionths: value.forwarding_fee_proportional_millionths,
+			forwarding_fee_base_msat: value.forwarding_fee_base_msat,
+			cltv_expiry_delta: value.cltv_expiry_delta,
+			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
+			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
+			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
+		}
+	}
+}
+
+impl Default for ChannelConfig {
+	fn default() -> Self {
+		LdkChannelConfig::default().into()
+	}
+}
+
+/// Options for how to set the max dust exposure allowed on a channel.
+///
+/// See [`LdkChannelConfig::max_dust_htlc_exposure`] for details.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MaxDustHTLCExposure {
+	/// This sets a fixed limit on the total dust exposure in millisatoshis.
+	///
+	/// Please refer to [`LdkMaxDustHTLCExposure`] for further details.
+	FixedLimit {
+		/// The fixed limit, in millisatoshis.
+		limit_msat: u64,
+	},
+	/// This sets a multiplier on the feerate to determine the maximum allowed dust exposure.
+	///
+	/// Please refer to [`LdkMaxDustHTLCExposure`] for further details.
+	FeeRateMultiplier {
+		/// The applied fee rate multiplier.
+		multiplier: u64,
+	},
+}
+
+impl From<LdkMaxDustHTLCExposure> for MaxDustHTLCExposure {
+	fn from(value: LdkMaxDustHTLCExposure) -> Self {
+		match value {
+			LdkMaxDustHTLCExposure::FixedLimitMsat(limit_msat) => Self::FixedLimit { limit_msat },
+			LdkMaxDustHTLCExposure::FeeRateMultiplier(multiplier) => {
+				Self::FeeRateMultiplier { multiplier }
+			},
+		}
+	}
+}
+
+impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
+	fn from(value: MaxDustHTLCExposure) -> Self {
+		match value {
+			MaxDustHTLCExposure::FixedLimit { limit_msat } => Self::FixedLimitMsat(limit_msat),
+			MaxDustHTLCExposure::FeeRateMultiplier { multiplier } => {
+				Self::FeeRateMultiplier(multiplier)
+			},
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::str::FromStr;
+
+	use super::may_announce_channel;
+	use super::Config;
+	use super::NodeAlias;
+	use super::SocketAddress;
+
+	#[test]
+	fn node_announce_channel() {
+		// Default configuration with node alias and listening addresses unset
+		let mut node_config = Config::default();
+		assert!(!may_announce_channel(&node_config));
+
+		// Set node alias with listening addresses unset
+		let alias_frm_str = |alias: &str| {
+			let mut bytes = [0u8; 32];
+			bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+			NodeAlias(bytes)
+		};
+		node_config.node_alias = Some(alias_frm_str("LDK_Node"));
+		assert!(!may_announce_channel(&node_config));
+
+		// Set node alias with an empty list of listening addresses
+		node_config.listening_addresses = Some(vec![]);
+		assert!(!may_announce_channel(&node_config));
+
+		// Set node alias with a non-empty list of listening addresses
+		let socket_address =
+			SocketAddress::from_str("localhost:8000").expect("Socket address conversion failed.");
+		if let Some(ref mut addresses) = node_config.listening_addresses {
+			addresses.push(socket_address);
+		}
+		assert!(may_announce_channel(&node_config));
+	}
 }

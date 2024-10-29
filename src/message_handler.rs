@@ -99,4 +99,24 @@ where
 			},
 		}
 	}
+
+	fn peer_connected(
+		&self, their_node_id: &PublicKey, msg: &lightning::ln::msgs::Init, inbound: bool,
+	) -> Result<(), ()> {
+		match self {
+			Self::Ignoring => Ok(()),
+			Self::Liquidity { liquidity_source, .. } => {
+				liquidity_source.liquidity_manager().peer_connected(their_node_id, msg, inbound)
+			},
+		}
+	}
+
+	fn peer_disconnected(&self, their_node_id: &PublicKey) {
+		match self {
+			Self::Ignoring => {},
+			Self::Liquidity { liquidity_source, .. } => {
+				liquidity_source.liquidity_manager().peer_disconnected(their_node_id)
+			},
+		}
+	}
 }

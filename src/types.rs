@@ -5,26 +5,26 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use crate::chain::ChainSource;
+use crate::config::ChannelConfig;
+use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::LdkNodeLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
 use lightning::chain::chainmonitor;
-use lightning::ln::channelmanager::ChannelDetails as LdkChannelDetails;
+use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::peer_handler::IgnoringMessageHandler;
-use lightning::ln::ChannelId;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::config::ChannelConfig as LdkChannelConfig;
-use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_net_tokio::SocketDescriptor;
-use lightning_transaction_sync::EsploraSyncClient;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
@@ -37,7 +37,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<ChainSource>,
 	Arc<Broadcaster>,
-	Arc<FeeEstimator>,
+	Arc<OnchainFeeEstimator>,
 	Arc<LdkNodeLogger>,
 	Arc<DynStore>,
 >;
@@ -52,8 +52,6 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<KeysManager>,
 >;
 
-pub(crate) type ChainSource = EsploraSyncClient<Arc<LdkNodeLogger>>;
-
 pub(crate) type LiquidityManager =
 	lightning_liquidity::LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<ChainSource>>;
 
@@ -63,26 +61,19 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
-	Arc<FeeEstimator>,
+	Arc<OnchainFeeEstimator>,
 	Arc<Router>,
 	Arc<LdkNodeLogger>,
 >;
 
 pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<LdkNodeLogger>>;
 
-pub(crate) type FeeEstimator = crate::fee_estimator::OnchainFeeEstimator<Arc<LdkNodeLogger>>;
-
-pub(crate) type Wallet = crate::wallet::Wallet<
-	bdk::database::SqliteDatabase,
-	Arc<Broadcaster>,
-	Arc<FeeEstimator>,
-	Arc<LdkNodeLogger>,
->;
+pub(crate) type Wallet =
+	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<LdkNodeLogger>>;
 
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
-	bdk::database::SqliteDatabase,
 	Arc<Broadcaster>,
-	Arc<FeeEstimator>,
+	Arc<OnchainFeeEstimator>,
 	Arc<LdkNodeLogger>,
 >;
 
@@ -121,6 +112,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
 	IgnoringMessageHandler,
+	IgnoringMessageHandler,
 >;
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
@@ -132,7 +124,7 @@ pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMess
 pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,
 	Arc<KeysManager>,
-	Arc<FeeEstimator>,
+	Arc<OnchainFeeEstimator>,
 	Arc<ChainSource>,
 	Arc<DynStore>,
 	Arc<LdkNodeLogger>,
@@ -234,7 +226,7 @@ pub struct ChannelDetails {
 	/// This is a strict superset of `is_channel_ready`.
 	pub is_usable: bool,
 	/// Returns `true` if this channel is (or will be) publicly-announced
-	pub is_public: bool,
+	pub is_announced: bool,
 	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
 	/// the channel.
 	pub cltv_expiry_delta: Option<u16>,
@@ -308,7 +300,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			is_outbound: value.is_outbound,
 			is_channel_ready: value.is_channel_ready,
 			is_usable: value.is_usable,
-			is_public: value.is_public,
+			is_announced: value.is_announced,
 			cltv_expiry_delta: value.config.map(|c| c.cltv_expiry_delta),
 			counterparty_unspendable_punishment_reserve: value
 				.counterparty
@@ -355,120 +347,4 @@ pub struct PeerDetails {
 	pub is_persisted: bool,
 	/// Indicates whether we currently have an active connection with the peer.
 	pub is_connected: bool,
-}
-
-/// Options which apply on a per-channel basis and may change at runtime or based on negotiation
-/// with our counterparty.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ChannelConfig {
-	/// Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
-	/// over the channel.
-	/// This may be allowed to change at runtime in a later update, however doing so must result in
-	/// update messages sent to notify all nodes of our updated relay fee.
-	///
-	/// Please refer to [`LdkChannelConfig`] for further details.
-	pub forwarding_fee_proportional_millionths: u32,
-	/// Amount (in milli-satoshi) charged for payments forwarded outbound over the channel, in
-	/// excess of [`ChannelConfig::forwarding_fee_proportional_millionths`].
-	/// This may be allowed to change at runtime in a later update, however doing so must result in
-	/// update messages sent to notify all nodes of our updated relay fee.
-	///
-	/// Please refer to [`LdkChannelConfig`] for further details.
-	pub forwarding_fee_base_msat: u32,
-	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
-	/// the channel this config applies to.
-	///
-	/// Please refer to [`LdkChannelConfig`] for further details.
-	pub cltv_expiry_delta: u16,
-	/// Limit our total exposure to potential loss to on-chain fees on close, including in-flight
-	/// HTLCs which are burned to fees as they are too small to claim on-chain and fees on
-	/// commitment transaction(s) broadcasted by our counterparty in excess of our own fee estimate.
-	///
-	/// Please refer to [`LdkChannelConfig`] for further details.
-	pub max_dust_htlc_exposure: MaxDustHTLCExposure,
-	/// The additional fee we're willing to pay to avoid waiting for the counterparty's
-	/// `to_self_delay` to reclaim funds.
-	///
-	/// Please refer to [`LdkChannelConfig`] for further details.
-	pub force_close_avoidance_max_fee_satoshis: u64,
-	/// If set, allows this channel's counterparty to skim an additional fee off this node's inbound
-	/// HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
-	///
-	/// Please refer to [`LdkChannelConfig`] for further details.
-	pub accept_underpaying_htlcs: bool,
-}
-
-impl From<LdkChannelConfig> for ChannelConfig {
-	fn from(value: LdkChannelConfig) -> Self {
-		Self {
-			forwarding_fee_proportional_millionths: value.forwarding_fee_proportional_millionths,
-			forwarding_fee_base_msat: value.forwarding_fee_base_msat,
-			cltv_expiry_delta: value.cltv_expiry_delta,
-			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
-			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
-			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
-		}
-	}
-}
-
-impl From<ChannelConfig> for LdkChannelConfig {
-	fn from(value: ChannelConfig) -> Self {
-		Self {
-			forwarding_fee_proportional_millionths: value.forwarding_fee_proportional_millionths,
-			forwarding_fee_base_msat: value.forwarding_fee_base_msat,
-			cltv_expiry_delta: value.cltv_expiry_delta,
-			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
-			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
-			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
-		}
-	}
-}
-
-impl Default for ChannelConfig {
-	fn default() -> Self {
-		LdkChannelConfig::default().into()
-	}
-}
-
-/// Options for how to set the max dust exposure allowed on a channel.
-///
-/// See [`LdkChannelConfig::max_dust_htlc_exposure`] for details.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum MaxDustHTLCExposure {
-	/// This sets a fixed limit on the total dust exposure in millisatoshis.
-	///
-	/// Please refer to [`LdkMaxDustHTLCExposure`] for further details.
-	FixedLimit {
-		/// The fixed limit, in millisatoshis.
-		limit_msat: u64,
-	},
-	/// This sets a multiplier on the feerate to determine the maximum allowed dust exposure.
-	///
-	/// Please refer to [`LdkMaxDustHTLCExposure`] for further details.
-	FeeRateMultiplier {
-		/// The applied fee rate multiplier.
-		multiplier: u64,
-	},
-}
-
-impl From<LdkMaxDustHTLCExposure> for MaxDustHTLCExposure {
-	fn from(value: LdkMaxDustHTLCExposure) -> Self {
-		match value {
-			LdkMaxDustHTLCExposure::FixedLimitMsat(limit_msat) => Self::FixedLimit { limit_msat },
-			LdkMaxDustHTLCExposure::FeeRateMultiplier(multiplier) => {
-				Self::FeeRateMultiplier { multiplier }
-			},
-		}
-	}
-}
-
-impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
-	fn from(value: MaxDustHTLCExposure) -> Self {
-		match value {
-			MaxDustHTLCExposure::FixedLimit { limit_msat } => Self::FixedLimitMsat(limit_msat),
-			MaxDustHTLCExposure::FeeRateMultiplier { multiplier } => {
-				Self::FeeRateMultiplier(multiplier)
-			},
-		}
-	}
 }

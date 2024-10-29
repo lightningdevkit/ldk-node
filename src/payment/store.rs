@@ -150,7 +150,7 @@ pub enum PaymentDirection {
 
 impl_writeable_tlv_based_enum!(PaymentDirection,
 	(0, Inbound) => {},
-	(1, Outbound) => {};
+	(1, Outbound) => {}
 );
 
 /// Represents the current status of a payment.
@@ -167,7 +167,7 @@ pub enum PaymentStatus {
 impl_writeable_tlv_based_enum!(PaymentStatus,
 	(0, Pending) => {},
 	(2, Succeeded) => {},
-	(4, Failed) => {};
+	(4, Failed) => {}
 );
 
 /// Represents the kind of a payment.
@@ -293,7 +293,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(3, quantity, option),
 		(4, secret, option),
-	};
+	}
 );
 
 /// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
@@ -499,11 +499,11 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use bitcoin::io::Cursor;
 	use lightning::util::{
 		ser::Readable,
 		test_utils::{TestLogger, TestStore},
 	};
-	use std::io::Cursor;
 	use std::sync::Arc;
 
 	/// We refactored `PaymentDetails` to hold a payment id and moved some required fields into

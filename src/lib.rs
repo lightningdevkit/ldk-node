@@ -20,8 +20,7 @@
 //!
 //! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
 //! and configuring a [`Builder`] to your liking and calling [`build`]. `Node` can then be
-//! controlled via commands such as [`start`], [`stop`], [`connect_open_channel`],
-//! [`send`], etc.:
+//! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`send`], etc.:
 //!
 //! ```no_run
 //! use ldk_node::Builder;
@@ -34,7 +33,7 @@
 //! fn main() {
 //! 	let mut builder = Builder::new();
 //! 	builder.set_network(Network::Testnet);
-//! 	builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+//! 	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
 //! 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
 //!
 //! 	let node = builder.build().unwrap();
@@ -47,7 +46,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.connect_open_channel(node_id, node_addr, 10000, None, None, false).unwrap();
+//! 	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -63,7 +62,7 @@
 //! [`build`]: Builder::build
 //! [`start`]: Node::start
 //! [`stop`]: Node::stop
-//! [`connect_open_channel`]: Node::connect_open_channel
+//! [`open_channel`]: Node::open_channel
 //! [`send`]: Bolt11Payment::send
 //!
 #![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
@@ -75,7 +74,8 @@
 
 mod balance;
 mod builder;
-mod config;
+mod chain;
+pub mod config;
 mod connection;
 mod error;
 mod event;
@@ -101,14 +101,14 @@ pub use bip39;
 pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
+use prober::Prober;
+pub use vss_client;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
-pub use config::{default_config, AnchorChannelsConfig, Config, LoggingConfig};
 pub use error::Error as NodeError;
 use error::Error;
 
 pub use event::Event;
-pub use types::{ChannelConfig, MaxDustHTLCExposure};
 
 pub use io::utils::generate_entropy_mnemonic;
 
@@ -121,15 +121,16 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 
+use chain::ChainSource;
 use config::{
-	default_user_config, LDK_WALLET_SYNC_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, RGS_SYNC_INTERVAL,
-	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	default_user_config, may_announce_channel, ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL,
+	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use graph::NetworkGraph;
+use io::utils::write_node_metrics;
 use liquidity::LiquiditySource;
 use payment::store::PaymentStore;
 use payment::{
@@ -137,25 +138,26 @@ use payment::{
 	UnifiedQrPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
-use prober::Prober;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, FeeEstimator,
-	Graph, KeysManager, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
+	KeysManager, OnionMessenger, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 
-use logger::{log_error, log_info, log_trace, LdkNodeLogger, Logger};
+pub use logger::LdkNodeLogger;
+use logger::{log_error, log_info, log_trace, Logger};
 
-use lightning::chain::{BestBlock, Confirm};
+use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
-use lightning::ln::channelmanager::{ChannelShutdownState, PaymentId};
+use lightning::impl_writeable_tlv_based;
+use lightning::ln::channel_state::ChannelShutdownState;
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
 
 pub use lightning::util::logger::Level as LogLevel;
 
 use lightning_background_processor::process_events_async;
-
-use lightning_transaction_sync::EsploraSyncClient;
 
 use bitcoin::secp256k1::PublicKey;
 
@@ -179,14 +181,14 @@ pub struct Node {
 	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
-	tx_sync: Arc<EsploraSyncClient<Arc<LdkNodeLogger>>>,
+	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
-	fee_estimator: Arc<FeeEstimator>,
 	event_queue: Arc<EventQueue<Arc<LdkNodeLogger>>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
+	onion_messenger: Arc<OnionMessenger>,
 	connection_manager: Arc<ConnectionManager<Arc<LdkNodeLogger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
@@ -199,12 +201,7 @@ pub struct Node {
 	peer_store: Arc<PeerStore<Arc<LdkNodeLogger>>>,
 	payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>,
 	is_listening: Arc<AtomicBool>,
-	latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_fee_rate_cache_update_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_rgs_snapshot_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_node_announcement_broadcast_timestamp: Arc<RwLock<Option<u64>>>,
-	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
+	node_metrics: Arc<RwLock<NodeMetrics>>,
 }
 
 impl Node {
@@ -243,205 +240,29 @@ impl Node {
 		);
 
 		// Block to ensure we update our fee rate cache once on startup
-		let fee_estimator = Arc::clone(&self.fee_estimator);
-		let sync_logger = Arc::clone(&self.logger);
-		let sync_fee_rate_update_timestamp =
-			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
+		let chain_source = Arc::clone(&self.chain_source);
 		let runtime_ref = &runtime;
 		tokio::task::block_in_place(move || {
-			runtime_ref.block_on(async move {
-				let now = Instant::now();
-				match fee_estimator.update_fee_estimates().await {
-					Ok(()) => {
-						log_info!(
-							sync_logger,
-							"Initial fee rate cache update finished in {}ms.",
-							now.elapsed().as_millis()
-						);
-						let unix_time_secs_opt =
-							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-						*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
-						Ok(())
-					},
-					Err(e) => {
-						log_error!(sync_logger, "Initial fee rate cache update failed: {}", e,);
-						Err(e)
-					},
-				}
-			})
+			runtime_ref.block_on(async move { chain_source.update_fee_rate_estimates().await })
 		})?;
 
-		// Setup wallet sync
-		let wallet = Arc::clone(&self.wallet);
-		let sync_logger = Arc::clone(&self.logger);
-		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
-		let mut stop_sync = self.stop_sender.subscribe();
-		let onchain_wallet_sync_interval_secs = self
-			.config
-			.onchain_wallet_sync_interval_secs
-			.max(config::WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-		std::thread::spawn(move || {
-			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
-				async move {
-					let mut onchain_wallet_sync_interval = tokio::time::interval(
-						Duration::from_secs(onchain_wallet_sync_interval_secs),
-					);
-					onchain_wallet_sync_interval
-						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-					loop {
-						tokio::select! {
-							_ = stop_sync.changed() => {
-								log_trace!(
-									sync_logger,
-									"Stopping background syncing on-chain wallet.",
-									);
-								return;
-							}
-							_ = onchain_wallet_sync_interval.tick() => {
-								let now = Instant::now();
-								match wallet.sync().await {
-									Ok(()) => {
-										log_trace!(
-										sync_logger,
-										"Background sync of on-chain wallet finished in {}ms.",
-										now.elapsed().as_millis()
-										);
-										let unix_time_secs_opt =
-											SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-										*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-									}
-									Err(err) => {
-										log_error!(
-											sync_logger,
-											"Background sync of on-chain wallet failed: {}",
-											err
-											)
-									}
-								}
-							}
-						}
-					}
-				},
-			);
-		});
-
-		let mut stop_fee_updates = self.stop_sender.subscribe();
-		let fee_update_logger = Arc::clone(&self.logger);
-		let fee_update_timestamp = Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
-		let fee_estimator = Arc::clone(&self.fee_estimator);
-		let fee_rate_cache_update_interval_secs =
-			self.config.fee_rate_cache_update_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-		runtime.spawn(async move {
-			let mut fee_rate_update_interval =
-				tokio::time::interval(Duration::from_secs(fee_rate_cache_update_interval_secs));
-			// We just blocked on updating, so skip the first tick.
-			fee_rate_update_interval.reset();
-			fee_rate_update_interval
-				.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-					_ = stop_fee_updates.changed() => {
-						log_trace!(
-							fee_update_logger,
-							"Stopping background updates of fee rate cache.",
-						);
-						return;
-					}
-					_ = fee_rate_update_interval.tick() => {
-						let now = Instant::now();
-						match fee_estimator.update_fee_estimates().await {
-							Ok(()) => {
-								log_trace!(
-								fee_update_logger,
-								"Background update of fee rate cache finished in {}ms.",
-								now.elapsed().as_millis()
-								);
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								*fee_update_timestamp.write().unwrap() = unix_time_secs_opt;
-							}
-							Err(err) => {
-								log_error!(
-									fee_update_logger,
-									"Background update of fee rate cache failed: {}",
-									err
-									)
-							}
-						}
-					}
-				}
-			}
-		});
-
-		let tx_sync = Arc::clone(&self.tx_sync);
+		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
+		let stop_sync_receiver = self.stop_sender.subscribe();
+		let chain_source = Arc::clone(&self.chain_source);
 		let sync_cman = Arc::clone(&self.channel_manager);
-		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
-		let archive_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		let sync_logger = Arc::clone(&self.logger);
-		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
-		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
-		let mut stop_sync = self.stop_sender.subscribe();
-		let wallet_sync_interval_secs =
-			self.config.wallet_sync_interval_secs.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
 		runtime.spawn(async move {
-			let mut wallet_sync_interval =
-				tokio::time::interval(Duration::from_secs(wallet_sync_interval_secs));
-			wallet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-					_ = stop_sync.changed() => {
-						log_trace!(
-							sync_logger,
-							"Stopping background syncing Lightning wallet.",
-						);
-						return;
-					}
-					_ = wallet_sync_interval.tick() => {
-						let confirmables = vec![
-							&*sync_cman as &(dyn Confirm + Sync + Send),
-							&*sync_cmon as &(dyn Confirm + Sync + Send),
-							&*sync_sweeper as &(dyn Confirm + Sync + Send),
-						];
-						let now = Instant::now();
-						let timeout_fut = tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), tx_sync.sync(confirmables));
-						match timeout_fut.await {
-							Ok(res) => match res {
-								Ok(()) => {
-									log_trace!(
-										sync_logger,
-										"Background sync of Lightning wallet finished in {}ms.",
-										now.elapsed().as_millis()
-										);
-									let unix_time_secs_opt =
-										SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-									*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-
-									periodically_archive_fully_resolved_monitors(
-										Arc::clone(&archive_cman),
-										Arc::clone(&archive_cmon),
-										Arc::clone(&sync_monitor_archival_height)
-									);
-								}
-								Err(e) => {
-									log_error!(sync_logger, "Background sync of Lightning wallet failed: {}", e)
-								}
-							}
-							Err(e) => {
-								log_error!(sync_logger, "Background sync of Lightning wallet timed out: {}", e)
-							}
-						}
-					}
-				}
-			}
+			chain_source
+				.continuously_sync_wallets(stop_sync_receiver, sync_cman, sync_cmon, sync_sweeper)
+				.await;
 		});
 
 		if self.gossip_source.is_rgs() {
 			let gossip_source = Arc::clone(&self.gossip_source);
 			let gossip_sync_store = Arc::clone(&self.kv_store);
 			let gossip_sync_logger = Arc::clone(&self.logger);
-			let gossip_rgs_sync_timestamp = Arc::clone(&self.latest_rgs_snapshot_timestamp);
+			let gossip_node_metrics = Arc::clone(&self.node_metrics);
 			let mut stop_gossip_sync = self.stop_sender.subscribe();
 			runtime.spawn(async move {
 				let mut interval = tokio::time::interval(RGS_SYNC_INTERVAL);
@@ -464,22 +285,22 @@ impl Node {
 										"Background sync of RGS gossip data finished in {}ms.",
 										now.elapsed().as_millis()
 										);
-									io::utils::write_latest_rgs_sync_timestamp(
-										updated_timestamp,
-										Arc::clone(&gossip_sync_store),
-										Arc::clone(&gossip_sync_logger),
-										)
-										.unwrap_or_else(|e| {
-											log_error!(gossip_sync_logger, "Persistence failed: {}", e);
-											panic!("Persistence failed");
-										});
-									*gossip_rgs_sync_timestamp.write().unwrap() = Some(updated_timestamp as u64);
+									{
+										let mut locked_node_metrics = gossip_node_metrics.write().unwrap();
+										locked_node_metrics.latest_rgs_snapshot_timestamp = Some(updated_timestamp);
+										write_node_metrics(&*locked_node_metrics, Arc::clone(&gossip_sync_store), Arc::clone(&gossip_sync_logger))
+											.unwrap_or_else(|e| {
+												log_error!(gossip_sync_logger, "Persistence failed: {}", e);
+											});
+									}
 								}
-								Err(e) => log_error!(
-									gossip_sync_logger,
-									"Background sync of RGS gossip data failed: {}",
-									e
-									),
+								Err(e) => {
+									log_error!(
+										gossip_sync_logger,
+										"Background sync of RGS gossip data failed: {}",
+										e
+									)
+								}
 							}
 						}
 					}
@@ -601,31 +422,33 @@ impl Node {
 		let bcast_config = Arc::clone(&self.config);
 		let bcast_store = Arc::clone(&self.kv_store);
 		let bcast_logger = Arc::clone(&self.logger);
-		let bcast_ann_timestamp = Arc::clone(&self.latest_node_announcement_broadcast_timestamp);
+		let bcast_node_metrics = Arc::clone(&self.node_metrics);
 		let mut stop_bcast = self.stop_sender.subscribe();
-		runtime.spawn(async move {
-			// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
-			#[cfg(not(test))]
-			let mut interval = tokio::time::interval(Duration::from_secs(30));
-			#[cfg(test)]
-			let mut interval = tokio::time::interval(Duration::from_secs(5));
-			loop {
-				tokio::select! {
+		let node_alias = self.config.node_alias.clone();
+		if may_announce_channel(&self.config) {
+			runtime.spawn(async move {
+				// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
+				#[cfg(not(test))]
+				let mut interval = tokio::time::interval(Duration::from_secs(30));
+				#[cfg(test)]
+				let mut interval = tokio::time::interval(Duration::from_secs(5));
+				loop {
+					tokio::select! {
 						_ = stop_bcast.changed() => {
 							log_trace!(
 								bcast_logger,
 								"Stopping broadcasting node announcements.",
-							);
+								);
 							return;
 						}
 						_ = interval.tick() => {
-							let skip_broadcast = match io::utils::read_latest_node_ann_bcast_timestamp(Arc::clone(&bcast_store), Arc::clone(&bcast_logger)) {
-								Ok(latest_bcast_time_secs) => {
+							let skip_broadcast = match bcast_node_metrics.read().unwrap().latest_node_announcement_broadcast_timestamp {
+								Some(latest_bcast_time_secs) => {
 									// Skip if the time hasn't elapsed yet.
 									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
 									next_bcast_unix_time.elapsed().is_err()
 								}
-								Err(_) => {
+								None => {
 									// Don't skip if we haven't broadcasted before.
 									false
 								}
@@ -635,7 +458,7 @@ impl Node {
 								continue;
 							}
 
-							if !bcast_cm.list_channels().iter().any(|chan| chan.is_public && chan.is_channel_ready) {
+							if !bcast_cm.list_channels().iter().any(|chan| chan.is_announced && chan.is_channel_ready) {
 								// Skip if we don't have any public channels that are ready.
 								continue;
 							}
@@ -645,33 +468,38 @@ impl Node {
 								continue;
 							}
 
-							let addresses = bcast_config.listening_addresses.clone().unwrap_or(Vec::new());
-
-							if addresses.is_empty() {
-								// Skip if we are not listening on any addresses.
+							let addresses = if let Some(addresses) = bcast_config.listening_addresses.clone() {
+								addresses
+							} else {
+								debug_assert!(false, "We checked whether the node may announce, so listening addresses should always be set");
 								continue;
-							}
+							};
 
-							bcast_pm.broadcast_node_announcement([0; 3], [0; 32], addresses);
+							if let Some(node_alias) = node_alias.as_ref() {
+								bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
 
-							let unix_time_secs_opt =
-								SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-							*bcast_ann_timestamp.write().unwrap() = unix_time_secs_opt;
-
-							if let Some(unix_time_secs) = unix_time_secs_opt {
-								io::utils::write_latest_node_ann_bcast_timestamp(unix_time_secs, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
-									.unwrap_or_else(|e| {
-										log_error!(bcast_logger, "Persistence failed: {}", e);
-										panic!("Persistence failed");
-									});
+								let unix_time_secs_opt =
+									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+								{
+									let mut locked_node_metrics = bcast_node_metrics.write().unwrap();
+									locked_node_metrics.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt;
+									write_node_metrics(&*locked_node_metrics, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
+										.unwrap_or_else(|e| {
+											log_error!(bcast_logger, "Persistence failed: {}", e);
+										});
+								}
+							} else {
+								debug_assert!(false, "We checked whether the node may announce, so node alias should always be set");
+								continue
 							}
 						}
+					}
 				}
-			}
-		});
+			});
+		}
 
 		let mut stop_tx_bcast = self.stop_sender.subscribe();
-		let tx_bcaster = Arc::clone(&self.tx_broadcaster);
+		let chain_source = Arc::clone(&self.chain_source);
 		let tx_bcast_logger = Arc::clone(&self.logger);
 		runtime.spawn(async move {
 			// Every second we try to clear our broadcasting queue.
@@ -687,7 +515,7 @@ impl Node {
 							return;
 						}
 						_ = interval.tick() => {
-							tx_bcaster.process_queue().await;
+							chain_source.process_broadcast_queue().await;
 						}
 				}
 			}
@@ -722,6 +550,7 @@ impl Node {
 		let background_chan_man = Arc::clone(&self.channel_manager);
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
+		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
@@ -754,6 +583,7 @@ impl Node {
 				|e| background_event_handler.handle_event(e),
 				background_chain_mon,
 				background_chan_man,
+				Some(background_onion_messenger),
 				background_gossip_sync,
 				background_peer_man,
 				background_logger,
@@ -839,12 +669,14 @@ impl Node {
 		// FIXME: For now, we wait up to 100 secs (BDK_WALLET_SYNC_TIMEOUT_SECS + 10) to allow
 		// event handling to exit gracefully even if it was blocked on the BDK wallet syncing. We
 		// should drop this considerably post upgrading to BDK 1.0.
-		let timeout_res = runtime.block_on(async {
-			tokio::time::timeout(
-				Duration::from_secs(100),
-				event_handling_stopped_receiver.changed(),
-			)
-			.await
+		let timeout_res = tokio::task::block_in_place(move || {
+			runtime.block_on(async {
+				tokio::time::timeout(
+					Duration::from_secs(100),
+					event_handling_stopped_receiver.changed(),
+				)
+				.await
+			})
 		});
 
 		match timeout_res {
@@ -886,24 +718,30 @@ impl Node {
 		let is_running = self.runtime.read().unwrap().is_some();
 		let is_listening = self.is_listening.load(Ordering::Acquire);
 		let current_best_block = self.channel_manager.current_best_block().into();
-		let latest_wallet_sync_timestamp = *self.latest_wallet_sync_timestamp.read().unwrap();
+		let locked_node_metrics = self.node_metrics.read().unwrap();
+		let latest_lightning_wallet_sync_timestamp =
+			locked_node_metrics.latest_lightning_wallet_sync_timestamp;
 		let latest_onchain_wallet_sync_timestamp =
-			*self.latest_onchain_wallet_sync_timestamp.read().unwrap();
+			locked_node_metrics.latest_onchain_wallet_sync_timestamp;
 		let latest_fee_rate_cache_update_timestamp =
-			*self.latest_fee_rate_cache_update_timestamp.read().unwrap();
-		let latest_rgs_snapshot_timestamp = *self.latest_rgs_snapshot_timestamp.read().unwrap();
+			locked_node_metrics.latest_fee_rate_cache_update_timestamp;
+		let latest_rgs_snapshot_timestamp =
+			locked_node_metrics.latest_rgs_snapshot_timestamp.map(|val| val as u64);
 		let latest_node_announcement_broadcast_timestamp =
-			*self.latest_node_announcement_broadcast_timestamp.read().unwrap();
+			locked_node_metrics.latest_node_announcement_broadcast_timestamp;
+		let latest_channel_monitor_archival_height =
+			locked_node_metrics.latest_channel_monitor_archival_height;
 
 		NodeStatus {
 			is_running,
 			is_listening,
 			current_best_block,
-			latest_wallet_sync_timestamp,
+			latest_lightning_wallet_sync_timestamp,
 			latest_onchain_wallet_sync_timestamp,
 			latest_fee_rate_cache_update_timestamp,
 			latest_rgs_snapshot_timestamp,
 			latest_node_announcement_broadcast_timestamp,
+			latest_channel_monitor_archival_height,
 		}
 	}
 
@@ -961,6 +799,11 @@ impl Node {
 	/// Returns our own listening addresses.
 	pub fn listening_addresses(&self) -> Option<Vec<SocketAddress>> {
 		self.config.listening_addresses.clone()
+	}
+
+	/// Returns our node alias.
+	pub fn node_alias(&self) -> Option<NodeAlias> {
+		self.config.node_alias
 	}
 
 	/// Returns a payment handler allowing to create and pay [BOLT 11] invoices.
@@ -1184,23 +1027,10 @@ impl Node {
 		Ok(())
 	}
 
-	/// Connect to a node and open a new channel. Disconnects and re-connects are handled automatically
-	///
-	/// Disconnects and reconnects are handled automatically.
-	///
-	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
-	/// channel counterparty on channel open. This can be useful to start out with the balance not
-	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
-	///
-	/// If Anchor channels are enabled, this will ensure the configured
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
-	/// opening the channel.
-	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
-	pub fn connect_open_channel(
+	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_channel: bool,
+		announce_for_forwarding: bool,
 	) -> Result<UserChannelId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1262,12 +1092,12 @@ impl Node {
 		}
 
 		let mut user_config = default_user_config(&self.config);
-		user_config.channel_handshake_config.announced_channel = announce_channel;
+		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
 		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
 		// We set the max inflight to 100% for private channels.
 		// FIXME: LDK will default to this behavior soon, too, at which point we should drop this
 		// manual override.
-		if !announce_channel {
+		if !announce_for_forwarding {
 			user_config
 				.channel_handshake_config
 				.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
@@ -1300,123 +1130,117 @@ impl Node {
 		}
 	}
 
+	/// Connect to a node and open a new unannounced channel.
+	///
+	/// To open an announced channel, see [`Node::open_announced_channel`].
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+		)
+	}
+
+	/// Connect to a node and open a new announced channel.
+	///
+	/// This will return an error if the node has not been sufficiently configured to operate as a
+	/// forwarding node that can properly announce its existence to the publip network graph, i.e.,
+	/// [`Config::listening_addresses`] and [`Config::node_alias`] are unset.
+	///
+	/// To open an unannounced channel, see [`Node::open_channel`].
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_announced_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		if may_announce_channel(&self.config) {
+			self.open_channel_inner(
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				true,
+			)
+		} else {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node. Please make sure to configure listening addreesses and node alias");
+			return Err(Error::ChannelCreationFailed);
+		}
+	}
+
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
 	/// cache.
 	///
-	/// **Note:** The wallets are regularly synced in the background, which is configurable via
-	/// [`Config::onchain_wallet_sync_interval_secs`] and [`Config::wallet_sync_interval_secs`].
-	/// Therefore, using this blocking sync method is almost always redundant and should be avoided
-	/// where possible.
+	/// **Note:** The wallets are regularly synced in the background, which is configurable via the
+	/// respective config object, e.g., via
+	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`] and
+	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]. Therefore, using this blocking
+	/// sync method is almost always redundant and should be avoided where possible.
+	///
+	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::onchain_wallet_sync_interval_secs
+	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::lightning_wallet_sync_interval_secs
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 
-		let wallet = Arc::clone(&self.wallet);
-		let tx_sync = Arc::clone(&self.tx_sync);
+		let chain_source = Arc::clone(&self.chain_source);
 		let sync_cman = Arc::clone(&self.channel_manager);
-		let archive_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
-		let archive_cmon = Arc::clone(&self.chain_monitor);
-		let fee_estimator = Arc::clone(&self.fee_estimator);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		let sync_logger = Arc::clone(&self.logger);
-		let confirmables = vec![
-			&*sync_cman as &(dyn Confirm + Sync + Send),
-			&*sync_cmon as &(dyn Confirm + Sync + Send),
-			&*sync_sweeper as &(dyn Confirm + Sync + Send),
-		];
-		let sync_wallet_timestamp = Arc::clone(&self.latest_wallet_sync_timestamp);
-		let sync_fee_rate_update_timestamp =
-			Arc::clone(&self.latest_fee_rate_cache_update_timestamp);
-		let sync_onchain_wallet_timestamp = Arc::clone(&self.latest_onchain_wallet_sync_timestamp);
-		let sync_monitor_archival_height = Arc::clone(&self.latest_channel_monitor_archival_height);
-
 		tokio::task::block_in_place(move || {
 			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
 				async move {
-					let now = Instant::now();
-					// We don't add an additional timeout here, as `Wallet::sync` already returns
-					// after a timeout.
-					match wallet.sync().await {
-						Ok(()) => {
-							log_info!(
-								sync_logger,
-								"Sync of on-chain wallet finished in {}ms.",
-								now.elapsed().as_millis()
-							);
-							let unix_time_secs_opt = SystemTime::now()
-								.duration_since(UNIX_EPOCH)
-								.ok()
-								.map(|d| d.as_secs());
-							*sync_onchain_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
+					match chain_source.as_ref() {
+						ChainSource::Esplora { .. } => {
+							chain_source.update_fee_rate_estimates().await?;
+							chain_source
+								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
+								.await?;
+							chain_source.sync_onchain_wallet().await?;
 						},
-						Err(e) => {
-							log_error!(sync_logger, "Sync of on-chain wallet failed: {}", e);
-							return Err(e);
-						},
-					};
-
-					let now = Instant::now();
-					// We don't add an additional timeout here, as
-					// `FeeEstimator::update_fee_estimates` already returns after a timeout.
-					match fee_estimator.update_fee_estimates().await {
-						Ok(()) => {
-							log_info!(
-								sync_logger,
-								"Fee rate cache update finished in {}ms.",
-								now.elapsed().as_millis()
-							);
-							let unix_time_secs_opt = SystemTime::now()
-								.duration_since(UNIX_EPOCH)
-								.ok()
-								.map(|d| d.as_secs());
-							*sync_fee_rate_update_timestamp.write().unwrap() = unix_time_secs_opt;
-						},
-						Err(e) => {
-							log_error!(sync_logger, "Fee rate cache update failed: {}", e,);
-							return Err(e);
+						ChainSource::BitcoindRpc { .. } => {
+							chain_source.update_fee_rate_estimates().await?;
+							chain_source
+								.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper)
+								.await?;
 						},
 					}
-
-					let now = Instant::now();
-					let tx_sync_timeout_fut = tokio::time::timeout(
-						Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
-						tx_sync.sync(confirmables),
-					);
-					match tx_sync_timeout_fut.await {
-						Ok(res) => match res {
-							Ok(()) => {
-								log_info!(
-									sync_logger,
-									"Sync of Lightning wallet finished in {}ms.",
-									now.elapsed().as_millis()
-								);
-
-								let unix_time_secs_opt = SystemTime::now()
-									.duration_since(UNIX_EPOCH)
-									.ok()
-									.map(|d| d.as_secs());
-								*sync_wallet_timestamp.write().unwrap() = unix_time_secs_opt;
-
-								periodically_archive_fully_resolved_monitors(
-									archive_cman,
-									archive_cmon,
-									sync_monitor_archival_height,
-								);
-								Ok(())
-							},
-							Err(e) => {
-								log_error!(sync_logger, "Sync of Lightning wallet failed: {}", e);
-								Err(e.into())
-							},
-						},
-						Err(e) => {
-							log_error!(sync_logger, "Sync of Lightning wallet timed out: {}", e);
-							Err(Error::TxSyncTimeout)
-						},
-					}
+					Ok(())
 				},
 			)
 		})
@@ -1429,7 +1253,7 @@ impl Node {
 	pub fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, false)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
 	}
 
 	/// Force-close a previously opened channel.
@@ -1443,15 +1267,23 @@ impl Node {
 	/// Broadcasting the closing transactions will be omitted for Anchor channels if we trust the
 	/// counterparty to broadcast for us (see [`AnchorChannelsConfig::trusted_peers_no_reserve`]
 	/// for more information).
+	///
+	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
 	pub fn force_close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		reason: Option<String>,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, true)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason)
 	}
 
 	fn close_channel_internal(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
+		force_close_reason: Option<String>,
 	) -> Result<(), Error> {
+		debug_assert!(
+			force_close_reason.is_none() || force,
+			"Reason can only be set for force closures"
+		);
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -1465,6 +1297,7 @@ impl Node {
 						.force_close_without_broadcasting_txn(
 							&channel_details.channel_id,
 							&counterparty_node_id,
+							force_close_reason.unwrap_or_default(),
 						)
 						.map_err(|e| {
 							log_error!(
@@ -1479,6 +1312,7 @@ impl Node {
 						.force_close_broadcasting_latest_txn(
 							&channel_details.channel_id,
 							&counterparty_node_id,
+							force_close_reason.unwrap_or_default(),
 						)
 						.map_err(|e| {
 							log_error!(self.logger, "Failed to force-close channel: {:?}", e);
@@ -1591,7 +1425,8 @@ impl Node {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
-	/// # use ldk_node::{Builder, Config};
+	/// # use ldk_node::Builder;
+	/// # use ldk_node::config::Config;
 	/// # use ldk_node::payment::PaymentDirection;
 	/// # use ldk_node::bitcoin::Network;
 	/// # let mut config = Config::default();
@@ -1672,7 +1507,7 @@ impl Node {
 	/// can be sure that the signature was generated by the caller.
 	/// Signatures are EC recoverable, meaning that given the message and the
 	/// signature the `PublicKey` of the signer can be extracted.
-	pub fn sign_message(&self, msg: &[u8]) -> Result<String, Error> {
+	pub fn sign_message(&self, msg: &[u8]) -> String {
 		self.keys_manager.sign_message(msg)
 	}
 
@@ -1702,29 +1537,66 @@ pub struct NodeStatus {
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
 	/// our Lightning wallet to the chain tip.
 	///
-	/// Will be `None` if the wallet hasn't been synced since the [`Node`] was initialized.
-	pub latest_wallet_sync_timestamp: Option<u64>,
+	/// Will be `None` if the wallet hasn't been synced yet.
+	pub latest_lightning_wallet_sync_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
 	/// our on-chain wallet to the chain tip.
 	///
-	/// Will be `None` if the wallet hasn't been synced since the [`Node`] was initialized.
+	/// Will be `None` if the wallet hasn't been synced yet.
 	pub latest_onchain_wallet_sync_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully update
 	/// our fee rate cache.
 	///
-	/// Will be `None` if the cache hasn't been updated since the [`Node`] was initialized.
+	/// Will be `None` if the cache hasn't been updated yet.
 	pub latest_fee_rate_cache_update_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when the last rapid gossip sync
 	/// (RGS) snapshot we successfully applied was generated.
 	///
-	/// Will be `None` if RGS isn't configured or the snapshot hasn't been updated since the [`Node`] was initialized.
+	/// Will be `None` if RGS isn't configured or the snapshot hasn't been updated yet.
 	pub latest_rgs_snapshot_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node
 	/// announcement.
 	///
-	/// Will be `None` if we have no public channels or we haven't broadcasted since the [`Node`] was initialized.
+	/// Will be `None` if we have no public channels or we haven't broadcasted yet.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
+	/// The block height when we last archived closed channel monitor data.
+	///
+	/// Will be `None` if we haven't archived any monitors of closed channels yet.
+	pub latest_channel_monitor_archival_height: Option<u32>,
 }
+
+/// Status fields that are persisted across restarts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NodeMetrics {
+	latest_lightning_wallet_sync_timestamp: Option<u64>,
+	latest_onchain_wallet_sync_timestamp: Option<u64>,
+	latest_fee_rate_cache_update_timestamp: Option<u64>,
+	latest_rgs_snapshot_timestamp: Option<u32>,
+	latest_node_announcement_broadcast_timestamp: Option<u64>,
+	latest_channel_monitor_archival_height: Option<u32>,
+}
+
+impl Default for NodeMetrics {
+	fn default() -> Self {
+		Self {
+			latest_lightning_wallet_sync_timestamp: None,
+			latest_onchain_wallet_sync_timestamp: None,
+			latest_fee_rate_cache_update_timestamp: None,
+			latest_rgs_snapshot_timestamp: None,
+			latest_node_announcement_broadcast_timestamp: None,
+			latest_channel_monitor_archival_height: None,
+		}
+	}
+}
+
+impl_writeable_tlv_based!(NodeMetrics, {
+	(0, latest_lightning_wallet_sync_timestamp, option),
+	(2, latest_onchain_wallet_sync_timestamp, option),
+	(4, latest_fee_rate_cache_update_timestamp, option),
+	(6, latest_rgs_snapshot_timestamp, option),
+	(8, latest_node_announcement_broadcast_timestamp, option),
+	(10, latest_channel_monitor_archival_height, option),
+});
 
 pub(crate) fn total_anchor_channels_reserve_sats(
 	channel_manager: &ChannelManager, config: &Config,
@@ -1744,20 +1616,4 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
-}
-
-fn periodically_archive_fully_resolved_monitors(
-	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-	latest_channel_monitor_archival_height: Arc<RwLock<Option<u32>>>,
-) {
-	let mut latest_archival_height_lock = latest_channel_monitor_archival_height.write().unwrap();
-	let cur_height = channel_manager.current_best_block().height;
-	let should_archive = latest_archival_height_lock
-		.as_ref()
-		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
-
-	if should_archive {
-		chain_monitor.archive_fully_resolved_channel_monitors();
-		*latest_archival_height_lock = Some(cur_height);
-	}
 }

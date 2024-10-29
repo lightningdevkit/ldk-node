@@ -20,6 +20,7 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// A logger for LDK Node.
 pub struct LdkNodeLogger {
 	level: Level,
 	formatter: Box<dyn Fn(&Record) -> String + Send + Sync>,
@@ -27,6 +28,7 @@ pub struct LdkNodeLogger {
 }
 
 impl LdkNodeLogger {
+	/// Creates a new `LdkNodeLogger`.
 	pub fn new(
 		level: Level, formatter: Box<dyn Fn(&Record) -> String + Send + Sync>,
 		writer: Box<dyn Fn(&String) + Send + Sync>,

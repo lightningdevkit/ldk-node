@@ -132,7 +132,7 @@ impl SqliteStore {
 impl KVStore for SqliteStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> std::io::Result<Vec<u8>> {
+	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
 
 		let locked_conn = self.connection.lock().unwrap();
@@ -142,7 +142,7 @@ impl KVStore for SqliteStore {
 
 		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
 			let msg = format!("Failed to prepare statement: {}", e);
-			std::io::Error::new(std::io::ErrorKind::Other, msg)
+			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
 		let res = stmt
@@ -162,7 +162,7 @@ impl KVStore for SqliteStore {
 						PrintableString(secondary_namespace),
 						PrintableString(key)
 					);
-					std::io::Error::new(std::io::ErrorKind::NotFound, msg)
+					io::Error::new(io::ErrorKind::NotFound, msg)
 				},
 				e => {
 					let msg = format!(
@@ -172,7 +172,7 @@ impl KVStore for SqliteStore {
 						PrintableString(key),
 						e
 					);
-					std::io::Error::new(std::io::ErrorKind::Other, msg)
+					io::Error::new(io::ErrorKind::Other, msg)
 				},
 			})?;
 		Ok(res)
@@ -180,7 +180,7 @@ impl KVStore for SqliteStore {
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
-	) -> std::io::Result<()> {
+	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
 
 		let locked_conn = self.connection.lock().unwrap();
@@ -192,7 +192,7 @@ impl KVStore for SqliteStore {
 
 		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
 			let msg = format!("Failed to prepare statement: {}", e);
-			std::io::Error::new(std::io::ErrorKind::Other, msg)
+			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
 		stmt.execute(named_params! {
@@ -210,13 +210,13 @@ impl KVStore for SqliteStore {
 				PrintableString(key),
 				e
 			);
-			std::io::Error::new(std::io::ErrorKind::Other, msg)
+			io::Error::new(io::ErrorKind::Other, msg)
 		})
 	}
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
-	) -> std::io::Result<()> {
+	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
 
 		let locked_conn = self.connection.lock().unwrap();
@@ -225,7 +225,7 @@ impl KVStore for SqliteStore {
 
 		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
 			let msg = format!("Failed to prepare statement: {}", e);
-			std::io::Error::new(std::io::ErrorKind::Other, msg)
+			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
 		stmt.execute(named_params! {
@@ -241,14 +241,12 @@ impl KVStore for SqliteStore {
 				PrintableString(key),
 				e
 			);
-			std::io::Error::new(std::io::ErrorKind::Other, msg)
+			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 		Ok(())
 	}
 
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> std::io::Result<Vec<String>> {
+	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
 
 		let locked_conn = self.connection.lock().unwrap();
@@ -259,7 +257,7 @@ impl KVStore for SqliteStore {
 		);
 		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
 			let msg = format!("Failed to prepare statement: {}", e);
-			std::io::Error::new(std::io::ErrorKind::Other, msg)
+			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
 		let mut keys = Vec::new();
@@ -274,13 +272,13 @@ impl KVStore for SqliteStore {
 			)
 			.map_err(|e| {
 				let msg = format!("Failed to retrieve queried rows: {}", e);
-				std::io::Error::new(std::io::ErrorKind::Other, msg)
+				io::Error::new(io::ErrorKind::Other, msg)
 			})?;
 
 		for k in rows_iter {
 			keys.push(k.map_err(|e| {
 				let msg = format!("Failed to retrieve queried rows: {}", e);
-				std::io::Error::new(std::io::ErrorKind::Other, msg)
+				io::Error::new(io::ErrorKind::Other, msg)
 			})?);
 		}
 

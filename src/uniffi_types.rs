@@ -10,16 +10,20 @@
 //
 // Make sure to add any re-exported items that need to be used in uniffi below.
 
+pub use crate::config::{
+	default_config, AnchorChannelsConfig, EsploraSyncConfig, MaxDustHTLCExposure,
+};
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus};
 pub use crate::payment::{MaxTotalRoutingFeeLimit, QrPaymentResult, SendingParameters};
 
+pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
-pub use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
+pub use lightning::ln::types::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::{Offer, OfferId};
 pub use lightning::offers::refund::Refund;
-pub use lightning::routing::gossip::{NodeId, RoutingFees};
+pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
 
 pub use lightning_invoice::Bolt11Invoice;
@@ -28,8 +32,11 @@ pub use bitcoin::{Address, BlockHash, Network, OutPoint, Txid};
 
 pub use bip39::Mnemonic;
 
+pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
+
 use crate::UniffiCustomTypeConverter;
 
+use crate::builder::sanitize_alias;
 use crate::error::Error;
 use crate::hex_utils;
 use crate::{SocketAddress, UserChannelId};
@@ -318,6 +325,18 @@ impl UniffiCustomTypeConverter for UntrustedString {
 	type Builtin = String;
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
 		Ok(UntrustedString(val))
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for NodeAlias {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(sanitize_alias(&val).map_err(|_| Error::InvalidNodeAlias)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {

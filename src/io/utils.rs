@@ -8,12 +8,20 @@
 use super::*;
 use crate::config::WALLET_KEYS_SEED_LEN;
 
+use crate::chain::ChainSource;
+use crate::fee_estimator::OnchainFeeEstimator;
+use crate::io::{
+	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+};
 use crate::logger::{log_error, LdkNodeLogger};
 use crate::peer_store::PeerStore;
 use crate::sweep::DeprecatedSpendableOutputInfo;
-use crate::types::{Broadcaster, ChainSource, DynStore, FeeEstimator, KeysManager, Sweeper};
-use crate::{Error, EventQueue, PaymentDetails};
+use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
+use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
+use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
+use lightning::io::Cursor;
+use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::util::logger::Logger;
@@ -26,13 +34,21 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::string::PrintableString;
+use lightning::util::sweep::{OutputSpendStatus, OutputSweeper};
+
+use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
+use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
+use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
+use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
+use bdk_chain::ConfirmationBlockTime;
+use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 
 use bip39::Mnemonic;
-use lightning::util::sweep::{OutputSpendStatus, OutputSweeper};
+use bitcoin::Network;
 use rand::{thread_rng, RngCore};
 
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::Write;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
@@ -208,7 +224,7 @@ where
 
 /// Read `OutputSweeper` state from the store.
 pub(crate) fn read_output_sweeper(
-	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<FeeEstimator>,
+	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
 	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
 	logger: Arc<LdkNodeLogger>,
 ) -> Result<Sweeper, std::io::Error> {
@@ -329,98 +345,44 @@ where
 	Ok(())
 }
 
-pub(crate) fn read_latest_rgs_sync_timestamp<L: Deref>(
+pub(crate) fn read_node_metrics<L: Deref>(
 	kv_store: Arc<DynStore>, logger: L,
-) -> Result<u32, std::io::Error>
+) -> Result<NodeMetrics, std::io::Error>
 where
 	L::Target: Logger,
 {
 	let mut reader = Cursor::new(kv_store.read(
-		LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-		LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-		LATEST_RGS_SYNC_TIMESTAMP_KEY,
+		NODE_METRICS_PRIMARY_NAMESPACE,
+		NODE_METRICS_SECONDARY_NAMESPACE,
+		NODE_METRICS_KEY,
 	)?);
-	u32::read(&mut reader).map_err(|e| {
-		log_error!(logger, "Failed to deserialize latest RGS sync timestamp: {}", e);
-		std::io::Error::new(
-			std::io::ErrorKind::InvalidData,
-			"Failed to deserialize latest RGS sync timestamp",
-		)
+	NodeMetrics::read(&mut reader).map_err(|e| {
+		log_error!(logger, "Failed to deserialize NodeMetrics: {}", e);
+		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NodeMetrics")
 	})
 }
 
-pub(crate) fn write_latest_rgs_sync_timestamp<L: Deref>(
-	updated_timestamp: u32, kv_store: Arc<DynStore>, logger: L,
+pub(crate) fn write_node_metrics<L: Deref>(
+	node_metrics: &NodeMetrics, kv_store: Arc<DynStore>, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: Logger,
 {
-	let data = updated_timestamp.encode();
+	let data = node_metrics.encode();
 	kv_store
 		.write(
-			LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-			LATEST_RGS_SYNC_TIMESTAMP_KEY,
+			NODE_METRICS_PRIMARY_NAMESPACE,
+			NODE_METRICS_SECONDARY_NAMESPACE,
+			NODE_METRICS_KEY,
 			&data,
 		)
 		.map_err(|e| {
 			log_error!(
 				logger,
 				"Writing data to key {}/{}/{} failed due to: {}",
-				LATEST_RGS_SYNC_TIMESTAMP_PRIMARY_NAMESPACE,
-				LATEST_RGS_SYNC_TIMESTAMP_SECONDARY_NAMESPACE,
-				LATEST_RGS_SYNC_TIMESTAMP_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})
-}
-
-pub(crate) fn read_latest_node_ann_bcast_timestamp<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
-) -> Result<u64, std::io::Error>
-where
-	L::Target: Logger,
-{
-	let mut reader = Cursor::new(kv_store.read(
-		LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
-		LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
-		LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
-	)?);
-	u64::read(&mut reader).map_err(|e| {
-		log_error!(
-			logger,
-			"Failed to deserialize latest node announcement broadcast timestamp: {}",
-			e
-		);
-		std::io::Error::new(
-			std::io::ErrorKind::InvalidData,
-			"Failed to deserialize latest node announcement broadcast timestamp",
-		)
-	})
-}
-
-pub(crate) fn write_latest_node_ann_bcast_timestamp<L: Deref>(
-	updated_timestamp: u64, kv_store: Arc<DynStore>, logger: L,
-) -> Result<(), Error>
-where
-	L::Target: Logger,
-{
-	let data = updated_timestamp.encode();
-	kv_store
-		.write(
-			LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
-			LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
-			LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
-			&data,
-		)
-		.map_err(|e| {
-			log_error!(
-				logger,
-				"Writing data to key {}/{}/{} failed due to: {}",
-				LATEST_NODE_ANN_BCAST_TIMESTAMP_PRIMARY_NAMESPACE,
-				LATEST_NODE_ANN_BCAST_TIMESTAMP_SECONDARY_NAMESPACE,
-				LATEST_NODE_ANN_BCAST_TIMESTAMP_KEY,
+				NODE_METRICS_PRIMARY_NAMESPACE,
+				NODE_METRICS_SECONDARY_NAMESPACE,
+				NODE_METRICS_KEY,
 				e
 			);
 			Error::PersistenceFailed
@@ -516,6 +478,164 @@ pub(crate) fn check_namespace_key_validity(
 	}
 
 	Ok(())
+}
+
+macro_rules! impl_read_write_change_set_type {
+	( $read_name: ident, $write_name: ident, $change_set_type:ty, $primary_namespace: expr, $secondary_namespace: expr, $key: expr ) => {
+		pub(crate) fn $read_name<L: Deref>(
+			kv_store: Arc<DynStore>, logger: L,
+		) -> Result<Option<$change_set_type>, std::io::Error>
+		where
+			L::Target: Logger,
+		{
+			let bytes = match kv_store.read($primary_namespace, $secondary_namespace, $key) {
+				Ok(bytes) => bytes,
+				Err(e) => {
+					if e.kind() == lightning::io::ErrorKind::NotFound {
+						return Ok(None);
+					} else {
+						log_error!(
+							logger,
+							"Reading data from key {}/{}/{} failed due to: {}",
+							$primary_namespace,
+							$secondary_namespace,
+							$key,
+							e
+						);
+						return Err(e.into());
+					}
+				},
+			};
+
+			let mut reader = Cursor::new(bytes);
+			let res: Result<ChangeSetDeserWrapper<$change_set_type>, DecodeError> =
+				Readable::read(&mut reader);
+			match res {
+				Ok(res) => Ok(Some(res.0)),
+				Err(e) => {
+					log_error!(logger, "Failed to deserialize BDK wallet field: {}", e);
+					Err(std::io::Error::new(
+						std::io::ErrorKind::InvalidData,
+						"Failed to deserialize BDK wallet field",
+					))
+				},
+			}
+		}
+
+		pub(crate) fn $write_name<L: Deref>(
+			value: &$change_set_type, kv_store: Arc<DynStore>, logger: L,
+		) -> Result<(), std::io::Error>
+		where
+			L::Target: Logger,
+		{
+			let data = ChangeSetSerWrapper(value).encode();
+			kv_store.write($primary_namespace, $secondary_namespace, $key, &data).map_err(|e| {
+				log_error!(
+					logger,
+					"Writing data to key {}/{}/{} failed due to: {}",
+					$primary_namespace,
+					$secondary_namespace,
+					$key,
+					e
+				);
+				e.into()
+			})
+		}
+	};
+}
+
+impl_read_write_change_set_type!(
+	read_bdk_wallet_descriptor,
+	write_bdk_wallet_descriptor,
+	Descriptor<DescriptorPublicKey>,
+	BDK_WALLET_DESCRIPTOR_PRIMARY_NAMESPACE,
+	BDK_WALLET_DESCRIPTOR_SECONDARY_NAMESPACE,
+	BDK_WALLET_DESCRIPTOR_KEY
+);
+
+impl_read_write_change_set_type!(
+	read_bdk_wallet_change_descriptor,
+	write_bdk_wallet_change_descriptor,
+	Descriptor<DescriptorPublicKey>,
+	BDK_WALLET_CHANGE_DESCRIPTOR_PRIMARY_NAMESPACE,
+	BDK_WALLET_CHANGE_DESCRIPTOR_SECONDARY_NAMESPACE,
+	BDK_WALLET_CHANGE_DESCRIPTOR_KEY
+);
+
+impl_read_write_change_set_type!(
+	read_bdk_wallet_network,
+	write_bdk_wallet_network,
+	Network,
+	BDK_WALLET_NETWORK_PRIMARY_NAMESPACE,
+	BDK_WALLET_NETWORK_SECONDARY_NAMESPACE,
+	BDK_WALLET_NETWORK_KEY
+);
+
+impl_read_write_change_set_type!(
+	read_bdk_wallet_local_chain,
+	write_bdk_wallet_local_chain,
+	BdkLocalChainChangeSet,
+	BDK_WALLET_LOCAL_CHAIN_PRIMARY_NAMESPACE,
+	BDK_WALLET_LOCAL_CHAIN_SECONDARY_NAMESPACE,
+	BDK_WALLET_LOCAL_CHAIN_KEY
+);
+
+impl_read_write_change_set_type!(
+	read_bdk_wallet_tx_graph,
+	write_bdk_wallet_tx_graph,
+	BdkTxGraphChangeSet<ConfirmationBlockTime>,
+	BDK_WALLET_TX_GRAPH_PRIMARY_NAMESPACE,
+	BDK_WALLET_TX_GRAPH_SECONDARY_NAMESPACE,
+	BDK_WALLET_TX_GRAPH_KEY
+);
+
+impl_read_write_change_set_type!(
+	read_bdk_wallet_indexer,
+	write_bdk_wallet_indexer,
+	BdkIndexerChangeSet,
+	BDK_WALLET_INDEXER_PRIMARY_NAMESPACE,
+	BDK_WALLET_INDEXER_SECONDARY_NAMESPACE,
+	BDK_WALLET_INDEXER_KEY
+);
+
+// Reads the full BdkWalletChangeSet or returns default fields
+pub(crate) fn read_bdk_wallet_change_set(
+	kv_store: Arc<DynStore>, logger: Arc<LdkNodeLogger>,
+) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
+	let mut change_set = BdkWalletChangeSet::default();
+
+	// We require a descriptor and return `None` to signal creation of a new wallet otherwise.
+	if let Some(descriptor) =
+		read_bdk_wallet_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
+	{
+		change_set.descriptor = Some(descriptor);
+	} else {
+		return Ok(None);
+	}
+
+	// We require a change_descriptor and return `None` to signal creation of a new wallet otherwise.
+	if let Some(change_descriptor) =
+		read_bdk_wallet_change_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
+	{
+		change_set.change_descriptor = Some(change_descriptor);
+	} else {
+		return Ok(None);
+	}
+
+	// We require a network and return `None` to signal creation of a new wallet otherwise.
+	if let Some(network) = read_bdk_wallet_network(Arc::clone(&kv_store), Arc::clone(&logger))? {
+		change_set.network = Some(network);
+	} else {
+		return Ok(None);
+	}
+
+	read_bdk_wallet_local_chain(Arc::clone(&kv_store), Arc::clone(&logger))?
+		.map(|local_chain| change_set.local_chain = local_chain);
+	read_bdk_wallet_tx_graph(Arc::clone(&kv_store), Arc::clone(&logger))?
+		.map(|tx_graph| change_set.tx_graph = tx_graph);
+	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger))?
+		.map(|indexer| change_set.indexer = indexer);
+	Ok(Some(change_set))
 }
 
 #[cfg(test)]

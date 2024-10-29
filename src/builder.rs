@@ -5,16 +5,16 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::config::{
-	default_user_config, Config, LoggingConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
-	DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS, DEFAULT_ESPLORA_SERVER_URL, WALLET_KEYS_SEED_LEN,
-};
+use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
+use crate::config::{default_user_config, Config, EsploraSyncConfig, LoggingConfig, WALLET_KEYS_SEED_LEN};
+
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
-use crate::io;
 use crate::io::sqlite_store::SqliteStore;
+use crate::io::utils::{read_node_metrics, write_node_metrics};
+use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{
 	default_format, log_error, log_info, FilesystemLogWriter, LdkNodeLogger, Logger,
@@ -27,13 +27,17 @@ use crate::types::{
 	ChainMonitor, ChannelManager, DynStore, GossipSync, Graph, KeysManager, MessageRouter,
 	OnionMessenger, PeerManager,
 };
+use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
-use crate::Node;
+use crate::{io, NodeMetrics};
+use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
+use lightning::io::Cursor;
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
 	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
@@ -49,38 +53,34 @@ use lightning::util::sweep::OutputSweeper;
 
 use lightning_persister::fs_store::FilesystemStore;
 
-use lightning_transaction_sync::EsploraSyncClient;
-
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityManager};
 
-#[cfg(any(vss, vss_test))]
-use crate::io::vss_store::VssStore;
-use bdk::bitcoin::secp256k1::Secp256k1;
-use bdk::blockchain::esplora::EsploraBlockchain;
-use bdk::database::SqliteDatabase;
-use bdk::template::Bip84;
+use bdk_wallet::template::Bip84;
+use bdk_wallet::KeychainKind;
+use bdk_wallet::Wallet as BdkWallet;
 
 use bip39::Mnemonic;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 
-#[cfg(any(vss, vss_test))]
-use bitcoin::bip32::ChildNumber;
+use bitcoin::bip32::{ChildNumber, Xpriv};
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::default::Default;
 use std::fmt;
 use std::fs;
-use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
+use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
-	Esplora(String),
+	Esplora { server_url: String, sync_config: Option<EsploraSyncConfig> },
+	BitcoindRpc { rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String },
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +111,7 @@ impl Default for LiquiditySourceConfig {
 /// An error encountered during building a [`Node`].
 ///
 /// [`Node`]: crate::Node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BuildError {
 	/// The given seed bytes are invalid, e.g., have invalid length.
 	InvalidSeedBytes,
@@ -123,6 +123,8 @@ pub enum BuildError {
 	InvalidChannelMonitor,
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
+	/// The provided alias is invalid.
+	InvalidNodeAlias,
 	/// We failed to read data from the [`KVStore`].
 	///
 	/// [`KVStore`]: lightning::util::persist::KVStore
@@ -161,6 +163,7 @@ impl fmt::Display for BuildError {
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
+			Self::InvalidNodeAlias => write!(f, "Given node alias is invalid."),
 		}
 	}
 }
@@ -237,8 +240,24 @@ impl NodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
-	pub fn set_esplora_server(&mut self, esplora_server_url: String) -> &mut Self {
-		self.chain_data_source_config = Some(ChainDataSourceConfig::Esplora(esplora_server_url));
+	///
+	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_esplora(
+		&mut self, server_url: String, sync_config: Option<EsploraSyncConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::Esplora { server_url, sync_config });
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data from the given Bitcoin Core RPC
+	/// endpoint.
+	pub fn set_chain_source_bitcoind_rpc(
+		&mut self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::BitcoindRpc { rpc_host, rpc_port, rpc_user, rpc_password });
 		self
 	}
 
@@ -299,6 +318,17 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Sets the node alias that will be used when broadcasting announcements to the gossip
+	/// network.
+	///
+	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
+	pub fn set_node_alias(&mut self, node_alias: String) -> Result<&mut Self, BuildError> {
+		let node_alias = sanitize_alias(&node_alias)?;
+
+		self.config.node_alias = Some(node_alias);
+		Ok(self)
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Result<Node, BuildError> {
@@ -328,10 +358,29 @@ impl NodeBuilder {
 		self.build_with_store(kv_store)
 	}
 
-	/// Builds a [`Node`] instance with a [`VssStore`] backend and according to the options
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
 	/// previously configured.
-	#[cfg(any(vss, vss_test))]
-	pub fn build_with_vss_store(&self, url: String, store_id: String) -> Result<Node, BuildError> {
+	///
+	/// Uses [LNURL-auth] based authentication scheme as default method for authentication/authorization.
+	///
+	/// The LNURL challenge will be retrieved by making a request to the given `lnurl_auth_server_url`.
+	/// The returned JWT token in response to the signed LNURL request, will be used for
+	/// authentication/authorization of all the requests made to VSS.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	pub fn build_with_vss_store(
+		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Node, BuildError> {
+		use bitcoin::key::Secp256k1;
+
 		let logger = setup_logger(&self.config)?;
 
 		let seed_bytes = seed_bytes_from_config(
@@ -339,24 +388,83 @@ impl NodeBuilder {
 			self.entropy_source_config.as_ref(),
 			Arc::clone(&logger),
 		)?;
+
 		let config = Arc::new(self.config.clone());
 
-		let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
-			.map_err(|e| {
-				log_error!(logger, "Failed to derive master secret: {}", e);
-				BuildError::InvalidSeedBytes
-			})?;
+		let vss_xprv = derive_vss_xprv(config, &seed_bytes, Arc::clone(&logger))?;
 
-		let vss_xprv = xprv
-			.ckd_priv(&Secp256k1::new(), ChildNumber::Hardened { index: 877 })
+		let lnurl_auth_xprv = vss_xprv
+			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 138 }])
 			.map_err(|e| {
 				log_error!(logger, "Failed to derive VSS secret: {}", e);
 				BuildError::KVStoreSetupFailed
 			})?;
 
+		let lnurl_auth_jwt_provider =
+			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers)
+				.map_err(|e| {
+					log_error!(logger, "Failed to create LnurlAuthToJwtProvider: {}", e);
+					BuildError::KVStoreSetupFailed
+				})?;
+
+		let header_provider = Arc::new(lnurl_auth_jwt_provider);
+
+		self.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [`FixedHeaders`] as default method for authentication/authorization.
+	///
+	/// Given `fixed_headers` are included as it is in all the requests made to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_vss_store_and_fixed_headers(
+		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
+	) -> Result<Node, BuildError> {
+		let header_provider = Arc::new(FixedHeaders::new(fixed_headers));
+
+		self.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Given `header_provider` is used to attach headers to every request made
+	/// to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_vss_store_and_header_provider(
+		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.config)?;
+
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
+
+		let config = Arc::new(self.config.clone());
+
+		let vss_xprv = derive_vss_xprv(config.clone(), &seed_bytes, Arc::clone(&logger))?;
+
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
-		let vss_store = Arc::new(VssStore::new(url, store_id, vss_seed_bytes));
+		let vss_store =
+			VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider).map_err(|e| {
+				log_error!(logger, "Failed to setup VssStore: {}", e);
+				BuildError::KVStoreSetupFailed
+			})?;
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -364,7 +472,7 @@ impl NodeBuilder {
 			self.liquidity_source_config.as_ref(),
 			seed_bytes,
 			logger,
-			vss_store,
+			Arc::new(vss_store),
 		)
 	}
 
@@ -440,8 +548,26 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
-	pub fn set_esplora_server(&self, esplora_server_url: String) {
-		self.inner.write().unwrap().set_esplora_server(esplora_server_url);
+	///
+	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_esplora(
+		&self, server_url: String, sync_config: Option<EsploraSyncConfig>,
+	) {
+		self.inner.write().unwrap().set_chain_source_esplora(server_url, sync_config);
+	}
+
+	/// Configures the [`Node`] instance to source its chain data from the given Bitcoin Core RPC
+	/// endpoint.
+	pub fn set_chain_source_bitcoind_rpc(
+		&self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
+	) {
+		self.inner.write().unwrap().set_chain_source_bitcoind_rpc(
+			rpc_host,
+			rpc_port,
+			rpc_user,
+			rpc_password,
+		);
 	}
 
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
@@ -491,6 +617,14 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
 	}
 
+	/// Sets the node alias that will be used when broadcasting announcements to the gossip
+	/// network.
+	///
+	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
+	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
+	}
+
 	/// Sets the level at which [`Node`] will log messages.
 	pub fn set_log_level(&self, level: LogLevel) {
 		self.inner.write().unwrap().set_log_level(level);
@@ -508,6 +642,77 @@ impl ArcedNodeBuilder {
 		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
 	}
 
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [LNURL-auth] based authentication scheme as default method for authentication/authorization.
+	///
+	/// The LNURL challenge will be retrieved by making a request to the given `lnurl_auth_server_url`.
+	/// The returned JWT token in response to the signed LNURL request, will be used for
+	/// authentication/authorization of all the requests made to VSS.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	pub fn build_with_vss_store(
+		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store(vss_url, store_id, lnurl_auth_server_url, fixed_headers)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Uses [`FixedHeaders`] as default method for authentication/authorization.
+	///
+	/// Given `fixed_headers` are included as it is in all the requests made to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_vss_store_and_fixed_headers(
+		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store_and_fixed_headers(vss_url, store_id, fixed_headers)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
+	/// previously configured.
+	///
+	/// Given `header_provider` is used to attach headers to every request made
+	/// to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_vss_store_and_header_provider(
+		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+			.map(Arc::new)
+	}
+
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
@@ -521,92 +726,113 @@ fn build_with_store_internal(
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
 	logger: Arc<LdkNodeLogger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
-	// Initialize the on-chain wallet and chain access
-	let xprv = bitcoin::bip32::ExtendedPrivKey::new_master(config.network.into(), &seed_bytes)
-		.map_err(|e| {
-			log_error!(logger, "Failed to derive master secret: {}", e);
-			BuildError::InvalidSeedBytes
-		})?;
-
-	let wallet_name = bdk::wallet::wallet_name_from_descriptor(
-		Bip84(xprv, bdk::KeychainKind::External),
-		Some(Bip84(xprv, bdk::KeychainKind::Internal)),
-		config.network.into(),
-		&Secp256k1::new(),
-	)
-	.map_err(|e| {
-		log_error!(logger, "Failed to derive wallet name: {}", e);
-		BuildError::WalletSetupFailed
-	})?;
-
-	let database_path = format!("{}/bdk_wallet_{}.sqlite", config.storage_dir_path, wallet_name);
-	let database = SqliteDatabase::new(database_path);
-
-	let bdk_wallet = bdk::Wallet::new(
-		Bip84(xprv, bdk::KeychainKind::External),
-		Some(Bip84(xprv, bdk::KeychainKind::Internal)),
-		config.network.into(),
-		database,
-	)
-	.map_err(|e| {
-		log_error!(logger, "Failed to set up wallet: {}", e);
-		BuildError::WalletSetupFailed
-	})?;
-
-	let (blockchain, tx_sync, tx_broadcaster, fee_estimator) = match chain_data_source_config {
-		Some(ChainDataSourceConfig::Esplora(server_url)) => {
-			let mut client_builder = esplora_client::Builder::new(&server_url.clone());
-			client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
-			let esplora_client = client_builder.build_async().unwrap();
-			let tx_sync = Arc::new(EsploraSyncClient::from_client(
-				esplora_client.clone(),
-				Arc::clone(&logger),
-			));
-			let blockchain = EsploraBlockchain::from_client(esplora_client, BDK_CLIENT_STOP_GAP)
-				.with_concurrency(BDK_CLIENT_CONCURRENCY);
-			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
-				tx_sync.client().clone(),
-				Arc::clone(&logger),
-			));
-			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-				tx_sync.client().clone(),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-			));
-			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
-		},
-		None => {
-			// Default to Esplora client.
-			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
-			let tx_sync = Arc::new(EsploraSyncClient::new(server_url, Arc::clone(&logger)));
-			let blockchain =
-				EsploraBlockchain::from_client(tx_sync.client().clone(), BDK_CLIENT_STOP_GAP)
-					.with_concurrency(BDK_CLIENT_CONCURRENCY);
-			let tx_broadcaster = Arc::new(TransactionBroadcaster::new(
-				tx_sync.client().clone(),
-				Arc::clone(&logger),
-			));
-			let fee_estimator = Arc::new(OnchainFeeEstimator::new(
-				tx_sync.client().clone(),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-			));
-			(blockchain, tx_sync, tx_broadcaster, fee_estimator)
+	// Initialize the status fields.
+	let is_listening = Arc::new(AtomicBool::new(false));
+	let node_metrics = match read_node_metrics(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(metrics) => Arc::new(RwLock::new(metrics)),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(RwLock::new(NodeMetrics::default()))
+			} else {
+				return Err(BuildError::ReadFailed);
+			}
 		},
 	};
 
-	let runtime = Arc::new(RwLock::new(None));
+	// Initialize the on-chain wallet and chain access
+	let xprv = bitcoin::bip32::Xpriv::new_master(config.network, &seed_bytes).map_err(|e| {
+		log_error!(logger, "Failed to derive master secret: {}", e);
+		BuildError::InvalidSeedBytes
+	})?;
+
+	let descriptor = Bip84(xprv, KeychainKind::External);
+	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
+	let mut wallet_persister =
+		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
+	let wallet_opt = BdkWallet::load()
+		.descriptor(KeychainKind::External, Some(descriptor.clone()))
+		.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
+		.extract_keys()
+		.check_network(config.network)
+		.load_wallet(&mut wallet_persister)
+		.map_err(|e| {
+			log_error!(logger, "Failed to set up wallet: {}", e);
+			BuildError::WalletSetupFailed
+		})?;
+	let bdk_wallet = match wallet_opt {
+		Some(wallet) => wallet,
+		None => BdkWallet::create(descriptor, change_descriptor)
+			.network(config.network)
+			.create_wallet(&mut wallet_persister)
+			.map_err(|e| {
+				log_error!(logger, "Failed to set up wallet: {}", e);
+				BuildError::WalletSetupFailed
+			})?,
+	};
+
+	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
+	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 	let wallet = Arc::new(Wallet::new(
-		blockchain,
 		bdk_wallet,
+		wallet_persister,
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
 		Arc::clone(&logger),
 	));
 
+	let chain_source = match chain_data_source_config {
+		Some(ChainDataSourceConfig::Esplora { server_url, sync_config }) => {
+			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
+			Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				sync_config,
+				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+		Some(ChainDataSourceConfig::BitcoindRpc { rpc_host, rpc_port, rpc_user, rpc_password }) => {
+			Arc::new(ChainSource::new_bitcoind_rpc(
+				rpc_host.clone(),
+				*rpc_port,
+				rpc_user.clone(),
+				rpc_password.clone(),
+				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+		None => {
+			// Default to Esplora client.
+			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+			let sync_config = EsploraSyncConfig::default();
+			Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				sync_config,
+				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+	};
+
+	let runtime = Arc::new(RwLock::new(None));
+
 	// Initialize the ChainMonitor
 	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
-		Some(Arc::clone(&tx_sync)),
+		Some(Arc::clone(&chain_source)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
 		Arc::clone(&fee_estimator),
@@ -678,7 +904,7 @@ fn build_with_store_internal(
 	) {
 		Ok(monitors) => monitors,
 		Err(e) => {
-			if e.kind() == std::io::ErrorKind::NotFound {
+			if e.kind() == lightning::io::ErrorKind::NotFound {
 				Vec::new()
 			} else {
 				log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
@@ -731,7 +957,7 @@ fn build_with_store_internal(
 		} else {
 			// We're starting a fresh node.
 			let genesis_block_hash =
-				bitcoin::blockdata::constants::genesis_block(config.network.into()).block_hash();
+				bitcoin::blockdata::constants::genesis_block(config.network).block_hash();
 
 			let chain_params = ChainParameters {
 				network: config.network.into(),
@@ -775,6 +1001,7 @@ fn build_with_store_internal(
 		Arc::new(message_router),
 		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
+		IgnoringMessageHandler {},
 	));
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
 
@@ -788,23 +1015,24 @@ fn build_with_store_internal(
 				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)));
 
 			// Reset the RGS sync timestamp in case we somehow switch gossip sources
-			io::utils::write_latest_rgs_sync_timestamp(
-				0,
-				Arc::clone(&kv_store),
-				Arc::clone(&logger),
-			)
-			.map_err(|e| {
-				log_error!(logger, "Failed writing to store: {}", e);
-				BuildError::WriteFailed
-			})?;
+			{
+				let mut locked_node_metrics = node_metrics.write().unwrap();
+				locked_node_metrics.latest_rgs_snapshot_timestamp = None;
+				write_node_metrics(
+					&*locked_node_metrics,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				)
+				.map_err(|e| {
+					log_error!(logger, "Failed writing to store: {}", e);
+					BuildError::WriteFailed
+				})?;
+			}
 			p2p_source
 		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
-			let latest_sync_timestamp = io::utils::read_latest_rgs_sync_timestamp(
-				Arc::clone(&kv_store),
-				Arc::clone(&logger),
-			)
-			.unwrap_or(0);
+			let latest_sync_timestamp =
+				node_metrics.read().unwrap().latest_rgs_snapshot_timestamp.unwrap_or(0);
 			Arc::new(GossipSource::new_rgs(
 				rgs_server.clone(),
 				latest_sync_timestamp,
@@ -821,7 +1049,7 @@ fn build_with_store_internal(
 			let liquidity_manager = Arc::new(LiquidityManager::new(
 				Arc::clone(&keys_manager),
 				Arc::clone(&channel_manager),
-				Some(Arc::clone(&tx_sync)),
+				Some(Arc::clone(&chain_source)),
 				None,
 				None,
 				liquidity_client_config,
@@ -850,14 +1078,14 @@ fn build_with_store_internal(
 			chan_handler: Arc::clone(&channel_manager),
 			route_handler: Arc::clone(&p2p_gossip_sync)
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
-			onion_message_handler: onion_messenger,
+			onion_message_handler: Arc::clone(&onion_messenger),
 			custom_message_handler,
 		},
 		GossipSync::Rapid(_) => MessageHandler {
 			chan_handler: Arc::clone(&channel_manager),
 			route_handler: Arc::new(IgnoringMessageHandler {})
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
-			onion_message_handler: onion_messenger,
+			onion_message_handler: Arc::clone(&onion_messenger),
 			custom_message_handler,
 		},
 		GossipSync::None => {
@@ -889,7 +1117,7 @@ fn build_with_store_internal(
 	let output_sweeper = match io::utils::read_output_sweeper(
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
-		Arc::clone(&tx_sync),
+		Arc::clone(&chain_source),
 		Arc::clone(&keys_manager),
 		Arc::clone(&kv_store),
 		Arc::clone(&logger),
@@ -901,7 +1129,7 @@ fn build_with_store_internal(
 					channel_manager.current_best_block(),
 					Arc::clone(&tx_broadcaster),
 					Arc::clone(&fee_estimator),
-					Some(Arc::clone(&tx_sync)),
+					Some(Arc::clone(&chain_source)),
 					Arc::clone(&keys_manager),
 					Arc::clone(&keys_manager),
 					Arc::clone(&kv_store),
@@ -963,28 +1191,20 @@ fn build_with_store_internal(
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
 
-	let is_listening = Arc::new(AtomicBool::new(false));
-	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
-	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
-	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
-	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
-
 	Ok(Node {
 		runtime,
 		stop_sender,
 		event_handling_stopped_sender,
 		config,
 		wallet,
-		tx_sync,
+		chain_source,
 		tx_broadcaster,
-		fee_estimator,
 		event_queue,
 		channel_manager,
 		chain_monitor,
 		output_sweeper,
 		peer_manager,
+		onion_messenger,
 		connection_manager,
 		keys_manager,
 		network_graph,
@@ -997,12 +1217,7 @@ fn build_with_store_internal(
 		peer_store,
 		payment_store,
 		is_listening,
-		latest_wallet_sync_timestamp,
-		latest_onchain_wallet_sync_timestamp,
-		latest_fee_rate_cache_update_timestamp,
-		latest_rgs_snapshot_timestamp,
-		latest_node_announcement_broadcast_timestamp,
-		latest_channel_monitor_archival_height,
+		node_metrics,
 	})
 }
 
@@ -1044,5 +1259,76 @@ fn seed_bytes_from_config(
 			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
 				.map_err(|_| BuildError::InvalidSeedFile)?)
 		},
+	}
+}
+
+fn derive_vss_xprv(
+	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<LdkNodeLogger>,
+) -> Result<Xpriv, BuildError> {
+	use bitcoin::key::Secp256k1;
+
+	let xprv = Xpriv::new_master(config.network, seed_bytes).map_err(|e| {
+		log_error!(logger, "Failed to derive master secret: {}", e);
+		BuildError::InvalidSeedBytes
+	})?;
+
+	xprv.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 877 }]).map_err(|e| {
+		log_error!(logger, "Failed to derive VSS secret: {}", e);
+		BuildError::KVStoreSetupFailed
+	})
+}
+
+/// Sanitize the user-provided node alias to ensure that it is a valid protocol-specified UTF-8 string.
+pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
+	let alias = alias_str.trim();
+
+	// Alias must be 32-bytes long or less.
+	if alias.as_bytes().len() > 32 {
+		return Err(BuildError::InvalidNodeAlias);
+	}
+
+	let mut bytes = [0u8; 32];
+	bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+	Ok(NodeAlias(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{sanitize_alias, BuildError, NodeAlias};
+
+	#[test]
+	fn sanitize_empty_node_alias() {
+		// Empty node alias
+		let alias = "";
+		let mut buf = [0u8; 32];
+		buf[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+
+		let expected_node_alias = NodeAlias([0; 32]);
+		let node_alias = sanitize_alias(alias).unwrap();
+		assert_eq!(node_alias, expected_node_alias);
+	}
+
+	#[test]
+	fn sanitize_alias_with_sandwiched_null() {
+		// Alias with emojis
+		let alias = "I\u{1F496}LDK-Node!";
+		let mut buf = [0u8; 32];
+		buf[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+		let expected_alias = NodeAlias(buf);
+
+		let user_provided_alias = "I\u{1F496}LDK-Node!\0\u{26A1}";
+		let node_alias = sanitize_alias(user_provided_alias).unwrap();
+
+		let node_alias_display = format!("{}", node_alias);
+
+		assert_eq!(alias, &node_alias_display);
+		assert_ne!(expected_alias, node_alias);
+	}
+
+	#[test]
+	fn sanitize_alias_gt_32_bytes() {
+		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
+		let node = sanitize_alias(alias);
+		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
 	}
 }

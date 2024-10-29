@@ -8,15 +8,15 @@
 #![cfg(any(test, cln_test, vss_test))]
 #![allow(dead_code)]
 
+use ldk_node::config::{Config, EsploraSyncConfig, LoggingConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{
-	Builder, Config, Event, LightningBalance, LogLevel, LoggingConfig, Node, NodeError,
-	PendingSweepBalance,
-};
+use ldk_node::{Builder, Event, LightningBalance, LogLevel, Node, NodeError,
+	PendingSweepBalance};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStore;
 use lightning::util::test_utils::TestStore;
 use lightning_persister::fs_store::FilesystemStore;
@@ -201,6 +201,15 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 	listening_addresses
 }
 
+pub(crate) fn random_node_alias() -> Option<NodeAlias> {
+	let mut rng = thread_rng();
+	let rand_val = rng.gen_range(0..1000);
+	let alias = format!("ldk-node-{}", rand_val);
+	let mut bytes = [0u8; 32];
+	bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+	Some(NodeAlias(bytes))
+}
+
 pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let mut config = Config::default();
 
@@ -209,8 +218,6 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	}
 
 	config.network = Network::Regtest;
-	config.onchain_wallet_sync_interval_secs = 100000;
-	config.wallet_sync_interval_secs = 100000;
 	println!("Setting network: {}", config.network);
 
 	let rand_dir = random_storage_path();
@@ -220,6 +227,14 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let rand_listening_addresses = random_listening_addresses();
 	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
 	config.listening_addresses = Some(rand_listening_addresses);
+
+	let alias = random_node_alias();
+	println!("Setting random LDK node alias: {:?}", alias);
+	config.node_alias = alias;
+
+	let alias = random_node_alias();
+	println!("Setting random LDK node alias: {:?}", alias);
+	config.node_alias = alias;
 
 	config.logging_config = LoggingConfig::Filesystem {
 		log_dir: rand_dir.join("logs").to_str().unwrap().to_owned(),
@@ -234,6 +249,12 @@ type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
 type TestNode = Node;
 
+#[derive(Clone)]
+pub(crate) enum TestChainSource<'a> {
+	Esplora(&'a ElectrsD),
+	BitcoindRpc(&'a BitcoinD),
+}
+
 macro_rules! setup_builder {
 	($builder: ident, $config: expr) => {
 		#[cfg(feature = "uniffi")]
@@ -246,11 +267,12 @@ macro_rules! setup_builder {
 pub(crate) use setup_builder;
 
 pub(crate) fn setup_two_nodes(
-	electrsd: &ElectrsD, allow_0conf: bool, anchor_channels: bool, anchors_trusted_no_reserve: bool,
+	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
+	anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config(anchor_channels);
-	let node_a = setup_node(electrsd, config_a);
+	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
@@ -265,14 +287,29 @@ pub(crate) fn setup_two_nodes(
 			.trusted_peers_no_reserve
 			.push(node_a.node_id());
 	}
-	let node_b = setup_node(electrsd, config_b);
+	let node_b = setup_node(chain_source, config_b);
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(electrsd: &ElectrsD, config: Config) -> TestNode {
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+pub(crate) fn setup_node(chain_source: &TestChainSource, config: Config) -> TestNode {
 	setup_builder!(builder, config);
-	builder.set_esplora_server(esplora_url.clone());
+	match chain_source {
+		TestChainSource::Esplora(electrsd) => {
+			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+			let mut sync_config = EsploraSyncConfig::default();
+			sync_config.onchain_wallet_sync_interval_secs = 100000;
+			sync_config.lightning_wallet_sync_interval_secs = 100000;
+			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+		},
+		TestChainSource::BitcoindRpc(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
+		},
+	}
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
@@ -389,19 +426,30 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 }
 
 pub fn open_channel(
-	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, announce: bool,
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
 ) {
-	node_a
-		.connect_open_channel(
-			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
-			funding_amount_sat,
-			None,
-			None,
-			announce,
-		)
-		.unwrap();
+	if should_announce {
+		node_a
+			.open_announced_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				None,
+				None,
+			)
+			.unwrap();
+	} else {
+		node_a
+			.open_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				None,
+				None,
+			)
+			.unwrap();
+	}
 	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
 
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
@@ -434,17 +482,16 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
 
-	println!("\nA -- connect_open_channel -> B");
+	println!("\nA -- open_channel -> B");
 	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
 	node_a
-		.connect_open_channel(
+		.open_announced_channel(
 			node_b.node_id(),
 			node_b.listening_addresses().unwrap().first().unwrap().clone(),
 			funding_amount_sat,
 			Some(push_msat),
 			None,
-			true,
 		)
 		.unwrap();
 
@@ -463,7 +510,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	let onchain_fee_buffer_sat = 1500;
+	let onchain_fee_buffer_sat = 5000;
 	let node_a_anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
 	let node_a_upper_bound_sat =
 		premine_amount_sat - node_a_anchor_reserve_sat - funding_amount_sat;
@@ -739,7 +786,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
 		std::thread::sleep(Duration::from_secs(1));
-		node_a.force_close_channel(&user_channel_id, node_b.node_id()).unwrap();
+		node_a.force_close_channel(&user_channel_id, node_b.node_id(), None).unwrap();
 	} else {
 		node_a.close_channel(&user_channel_id, node_b.node_id()).unwrap();
 	}
@@ -893,7 +940,7 @@ impl TestSyncStore {
 
 	fn do_list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> std::io::Result<Vec<String>> {
+	) -> lightning::io::Result<Vec<String>> {
 		let fs_res = self.fs_store.list(primary_namespace, secondary_namespace);
 		let sqlite_res = self.sqlite_store.list(primary_namespace, secondary_namespace);
 		let test_res = self.test_store.list(primary_namespace, secondary_namespace);
@@ -924,7 +971,7 @@ impl TestSyncStore {
 impl KVStore for TestSyncStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> std::io::Result<Vec<u8>> {
+	) -> lightning::io::Result<Vec<u8>> {
 		let _guard = self.serializer.read().unwrap();
 
 		let fs_res = self.fs_store.read(primary_namespace, secondary_namespace, key);
@@ -949,7 +996,7 @@ impl KVStore for TestSyncStore {
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
-	) -> std::io::Result<()> {
+	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
 		let fs_res = self.fs_store.write(primary_namespace, secondary_namespace, key, buf);
 		let sqlite_res = self.sqlite_store.write(primary_namespace, secondary_namespace, key, buf);
@@ -976,7 +1023,7 @@ impl KVStore for TestSyncStore {
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> std::io::Result<()> {
+	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
 		let fs_res = self.fs_store.remove(primary_namespace, secondary_namespace, key, lazy);
 		let sqlite_res =
@@ -1004,7 +1051,7 @@ impl KVStore for TestSyncStore {
 
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> std::io::Result<Vec<String>> {
+	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().unwrap();
 		self.do_list(primary_namespace, secondary_namespace)
 	}
