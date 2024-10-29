@@ -11,7 +11,8 @@
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, Config, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance,
+	Builder, Config, Event, LightningBalance, LogLevel, LoggingConfig, Node, NodeError,
+	PendingSweepBalance,
 };
 
 use lightning::ln::msgs::SocketAddress;
@@ -220,7 +221,10 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
 	config.listening_addresses = Some(rand_listening_addresses);
 
-	config.log_level = LogLevel::Gossip;
+	config.logging_config = LoggingConfig::Filesystem {
+		log_dir: rand_dir.join("logs").to_str().unwrap().to_owned(),
+		log_level: LogLevel::Gossip,
+	};
 
 	config
 }
