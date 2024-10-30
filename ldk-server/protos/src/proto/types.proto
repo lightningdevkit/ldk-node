@@ -1,0 +1,352 @@
+syntax = "proto3";
+package types;
+
+// Represents a payment.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.PaymentDetails.html
+message Payment {
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string id = 1;
+
+  // The kind of the payment.
+  PaymentKind kind = 2;
+
+  // The amount transferred.
+  optional uint64 amount_msat = 3;
+
+  // The direction of the payment.
+  PaymentDirection direction = 4;
+
+  // The status of the payment.
+  PaymentStatus status = 5;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+  uint64 latest_update_timestamp = 6;
+}
+
+message PaymentKind {
+  oneof kind {
+    Onchain onchain = 1;
+    Bolt11 bolt11 = 2;
+    Bolt11Jit bolt11_jit = 3;
+    Bolt12Offer bolt12_offer = 4;
+    Bolt12Refund bolt12_refund = 5;
+    Spontaneous spontaneous = 6;
+  }
+}
+
+// Represents an on-chain payment.
+message Onchain {}
+
+// Represents a BOLT 11 payment.
+message Bolt11 {
+  // The payment hash, i.e., the hash of the preimage.
+  string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+}
+
+// Represents a BOLT 11 payment intended to open an LSPS 2 just-in-time channel.
+message Bolt11Jit {
+  // The payment hash, i.e., the hash of the preimage.
+  string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+
+  // Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+  //
+  // Allowing them to deduct this fee from the first inbound payment will pay for the LSP’s channel opening fees.
+  //
+  // See [`LdkChannelConfig::accept_underpaying_htlcs`](https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs)
+  // for more information.
+  LSPFeeLimits lsp_fee_limits = 4;
+}
+
+// Represents a BOLT 12 ‘offer’ payment, i.e., a payment for an Offer.
+message Bolt12Offer {
+  // The payment hash, i.e., the hash of the preimage.
+  optional string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+
+  // The hex-encoded ID of the offer this payment is for.
+  string offer_id = 4;
+
+  // The payer's note for the payment.
+  // Truncated to [PAYER_NOTE_LIMIT](https://docs.rs/lightning/latest/lightning/offers/invoice_request/constant.PAYER_NOTE_LIMIT.html).
+  //
+  // **Caution**: The `payer_note` field may come from an untrusted source. To prevent potential misuse,
+  // all non-printable characters will be sanitized and replaced with safe characters.
+  optional string payer_note = 5;
+
+  // The quantity of an item requested in the offer.
+  optional uint64 quantity = 6;
+}
+
+// Represents a BOLT 12 ‘refund’ payment, i.e., a payment for a Refund.
+message Bolt12Refund {
+  // The payment hash, i.e., the hash of the preimage.
+  optional string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+
+  // The secret used by the payment.
+  optional bytes secret = 3;
+
+  // The payer's note for the payment.
+  // Truncated to [PAYER_NOTE_LIMIT](https://docs.rs/lightning/latest/lightning/offers/invoice_request/constant.PAYER_NOTE_LIMIT.html).
+  //
+  // **Caution**: The `payer_note` field may come from an untrusted source. To prevent potential misuse,
+  // all non-printable characters will be sanitized and replaced with safe characters.
+  optional string payer_note = 5;
+
+  // The quantity of an item requested in the offer.
+  optional uint64 quantity = 6;
+
+}
+
+// Represents a spontaneous (“keysend”) payment.
+message Spontaneous {
+  // The payment hash, i.e., the hash of the preimage.
+  string hash = 1;
+
+  // The pre-image used by the payment.
+  optional string preimage = 2;
+}
+
+// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
+//
+// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
+message LSPFeeLimits {
+  // The maximal total amount we allow any configured LSP withhold from us when forwarding the
+  // payment.
+  optional uint64 max_total_opening_fee_msat = 1;
+
+  // The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+  // LSP withhold from us when forwarding the payment.
+  optional uint64 max_proportional_opening_fee_ppm_msat = 2;
+}
+
+// Represents the direction of a payment.
+enum PaymentDirection {
+  // The payment is inbound.
+  INBOUND = 0;
+
+  // The payment is outbound.
+  OUTBOUND = 1;
+}
+
+// Represents the current status of a payment.
+enum PaymentStatus {
+  // The payment is still pending.
+  PENDING = 0;
+
+  // The payment succeeded.
+  SUCCEEDED = 1;
+
+  // The payment failed.
+  FAILED = 2;
+}
+
+message Channel {
+  // The channel ID (prior to funding transaction generation, this is a random 32-byte
+  // identifier, afterwards this is the transaction ID of the funding transaction XOR the
+  // funding transaction output).
+  //
+  // Note that this means this value is *not* persistent - it can change once during the
+  // lifetime of the channel.
+  string channel_id = 1;
+
+  // The node ID of our the channel's remote counterparty.
+  string counterparty_node_id = 2;
+
+  // The channel's funding transaction output, if we've negotiated the funding transaction with
+  // our counterparty already.
+  optional OutPoint funding_txo = 3;
+
+  // The hex-encoded local `user_channel_id` of this channel.
+  string user_channel_id = 4;
+
+  // The value, in satoshis, that must always be held as a reserve in the channel for us. This
+  // value ensures that if we broadcast a revoked state, our counterparty can punish us by
+  // claiming at least this value on chain.
+  //
+  // This value is not included in [`outbound_capacity_msat`] as it can never be spent.
+  //
+  // This value will be `None` for outbound channels until the counterparty accepts the channel.
+  optional uint64 unspendable_punishment_reserve = 5;
+
+  // The value, in satoshis, of this channel as it appears in the funding output.
+  uint64 channel_value_sats = 6;
+
+  // The currently negotiated fee rate denominated in satoshi per 1000 weight units,
+  // which is applied to commitment and HTLC transactions.
+  uint32 feerate_sat_per_1000_weight = 7;
+
+  // The available outbound capacity for sending HTLCs to the remote peer.
+  //
+  // The amount does not include any pending HTLCs which are not yet resolved (and, thus, whose
+  // balance is not available for inclusion in new outbound HTLCs). This further does not include
+  // any pending outgoing HTLCs which are awaiting some other resolution to be sent.
+  uint64 outbound_capacity_msat = 8;
+
+  // The available outbound capacity for sending HTLCs to the remote peer.
+  //
+  // The amount does not include any pending HTLCs which are not yet resolved
+  // (and, thus, whose balance is not available for inclusion in new inbound HTLCs). This further
+  // does not include any pending outgoing HTLCs which are awaiting some other resolution to be
+  // sent.
+  uint64 inbound_capacity_msat = 9;
+
+  // The number of required confirmations on the funding transactions before the funding is
+  // considered "locked". The amount is selected by the channel fundee.
+  //
+  // The value will be `None` for outbound channels until the counterparty accepts the channel.
+  optional uint32 confirmations_required = 10;
+
+  // The current number of confirmations on the funding transaction.
+  optional uint32 confirmations = 11;
+
+  // Is `true` if the channel was initiated (and therefore funded) by us.
+  bool is_outbound = 12;
+
+  // Is `true` if both parties have exchanged `channel_ready` messages, and the channel is
+  // not currently being shut down. Both parties exchange `channel_ready` messages upon
+  // independently verifying that the required confirmations count provided by
+  // `confirmations_required` has been reached.
+  bool is_channel_ready = 13;
+
+  // Is `true` if the channel (a) `channel_ready` messages have been exchanged, (b) the
+  // peer is connected, and (c) the channel is not currently negotiating shutdown.
+  //
+  // This is a strict superset of `is_channel_ready`.
+  bool is_usable = 14;
+
+  // Is `true` if this channel is (or will be) publicly-announced
+  bool is_announced = 15;
+
+  // Set of configurable parameters set by self that affect channel operation.
+  ChannelConfig channel_config = 16;
+
+  // The available outbound capacity for sending a single HTLC to the remote peer. This is
+  // similar to `outbound_capacity_msat` but it may be further restricted by
+  // the current state and per-HTLC limit(s). This is intended for use when routing, allowing us
+  // to use a limit as close as possible to the HTLC limit we can currently send.
+  uint64 next_outbound_htlc_limit_msat = 17;
+
+  // The minimum value for sending a single HTLC to the remote peer. This is the equivalent of
+  // `next_outbound_htlc_limit_msat` but represents a lower-bound, rather than
+  // an upper-bound. This is intended for use when routing, allowing us to ensure we pick a
+  // route which is valid.
+  uint64 next_outbound_htlc_minimum_msat = 18;
+
+  // The number of blocks (after our commitment transaction confirms) that we will need to wait
+  // until we can claim our funds after we force-close the channel. During this time our
+  // counterparty is allowed to punish us if we broadcasted a stale state. If our counterparty
+  // force-closes the channel and broadcasts a commitment transaction we do not have to wait any
+  // time to claim our non-HTLC-encumbered funds.
+  //
+  // This value will be `None` for outbound channels until the counterparty accepts the channel.
+  optional uint32 force_close_spend_delay = 19;
+
+  // The smallest value HTLC (in msat) the remote peer will accept, for this channel.
+  //
+  // This field is only `None` before we have received either the `OpenChannel` or
+  // `AcceptChannel` message from the remote peer.
+  optional uint64 counterparty_outbound_htlc_minimum_msat = 20;
+
+  // The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
+  optional uint64 counterparty_outbound_htlc_maximum_msat = 21;
+
+  // The value, in satoshis, that must always be held in the channel for our counterparty. This
+  // value ensures that if our counterparty broadcasts a revoked state, we can punish them by
+  // claiming at least this value on chain.
+  //
+  // This value is not included in `inbound_capacity_msat` as it can never be spent.
+  uint64 counterparty_unspendable_punishment_reserve = 22;
+
+  // Base routing fee in millisatoshis.
+  optional uint32 counterparty_forwarding_info_fee_base_msat = 23;
+
+  // Proportional fee, in millionths of a satoshi the channel will charge per transferred satoshi.
+  optional uint32 counterparty_forwarding_info_fee_proportional_millionths = 24;
+
+  // The minimum difference in CLTV expiry between an ingoing HTLC and its outgoing counterpart,
+  // such that the outgoing HTLC is forwardable to this counterparty.
+  optional uint32 counterparty_forwarding_info_cltv_expiry_delta = 25;
+}
+
+// ChannelConfig represents the configuration settings for a channel in a Lightning Network node.
+// See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html
+message ChannelConfig {
+  // Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
+  // over the channel.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_proportional_millionths
+  optional uint32 forwarding_fee_proportional_millionths = 1;
+
+  // Amount (in milli-satoshi) charged for payments forwarded outbound over the channel,
+  // in excess of forwarding_fee_proportional_millionths.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.forwarding_fee_base_msat
+  optional uint32 forwarding_fee_base_msat = 2;
+
+  // The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded
+  // over the channel this config applies to.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.cltv_expiry_delta
+  optional uint32 cltv_expiry_delta = 3;
+
+  // The maximum additional fee we’re willing to pay to avoid waiting for the counterparty’s
+  // to_self_delay to reclaim funds.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.force_close_avoidance_max_fee_satoshis
+  optional uint64 force_close_avoidance_max_fee_satoshis = 4;
+
+  // If set, allows this channel’s counterparty to skim an additional fee off this node’s
+  // inbound HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs
+  optional bool accept_underpaying_htlcs = 5;
+
+  // Limit our total exposure to potential loss to on-chain fees on close, including
+  // in-flight HTLCs which are burned to fees as they are too small to claim on-chain
+  // and fees on commitment transaction(s) broadcasted by our counterparty in excess of
+  // our own fee estimate.
+  // See more: https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.max_dust_htlc_exposure
+  oneof max_dust_htlc_exposure {
+
+    // This sets a fixed limit on the total dust exposure in millisatoshis.
+    // See more: https://docs.rs/lightning/latest/lightning/util/config/enum.MaxDustHTLCExposure.html#variant.FixedLimitMsat
+    uint64 fixed_limit_msat = 6;
+
+    // This sets a multiplier on the ConfirmationTarget::OnChainSweep feerate (in sats/KW) to determine the maximum allowed dust exposure.
+    // See more: https://docs.rs/lightning/latest/lightning/util/config/enum.MaxDustHTLCExposure.html#variant.FeeRateMultiplier
+    uint64 fee_rate_multiplier = 7;
+  }
+}
+
+// Represent a transaction outpoint.
+message OutPoint {
+  // The referenced transaction's txid.
+  string txid = 1;
+
+  // The index of the referenced output in its transaction's vout.
+  uint32 vout = 2;
+}
+
+message BestBlock {
+  // The block’s hash
+  string block_hash = 1;
+
+  // The height at which the block was confirmed.
+  uint32 height = 2;
+}
