@@ -1230,8 +1230,7 @@ fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
 			Ok(Arc::new(
 				LdkNodeLogger::new(
 					log_level,
-					Box::new(default_format),
-					Box::new(move |s| filesystem_log_writer.write(s)),
+					Box::new(move |record| filesystem_log_writer.write(&default_format(record))),
 				)
 				.map_err(|_| BuildError::LoggerSetupFailed)?,
 			))

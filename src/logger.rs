@@ -23,17 +23,16 @@ use std::sync::Mutex;
 /// A logger for LDK Node.
 pub struct LdkNodeLogger {
 	level: Level,
-	formatter: Box<dyn Fn(&Record) -> String + Send + Sync>,
-	writer: Box<dyn Fn(&String) + Send + Sync>,
+	writer: Box<dyn Fn(&Record) + Send + Sync>,
 }
 
 impl LdkNodeLogger {
 	/// Creates a new `LdkNodeLogger`.
 	pub fn new(
-		level: Level, formatter: Box<dyn Fn(&Record) -> String + Send + Sync>,
-		writer: Box<dyn Fn(&String) + Send + Sync>,
+		level: Level,
+		writer: Box<dyn Fn(&Record) + Send + Sync>,
 	) -> Result<Self, ()> {
-		Ok(Self { level, formatter, writer })
+		Ok(Self { level, writer })
 	}
 }
 
@@ -48,7 +47,7 @@ impl Logger for LdkNodeLogger {
 		if record.level < self.level {
 			return;
 		}
-		(self.writer)(&(self.formatter)(&record))
+		(self.writer)(&record)
 	}
 }
 
