@@ -1,6 +1,6 @@
 use crate::util::proto_adapter::channel_to_proto;
 use ldk_node::Node;
-use protos::{ListChannelsRequest, ListChannelsResponse};
+use protos::api::{ListChannelsRequest, ListChannelsResponse};
 use std::sync::Arc;
 
 pub(crate) const LIST_CHANNELS_PATH: &str = "ListChannels";

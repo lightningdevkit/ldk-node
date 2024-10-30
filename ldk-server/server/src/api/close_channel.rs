@@ -1,6 +1,6 @@
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::{Node, UserChannelId};
-use protos::{CloseChannelRequest, CloseChannelResponse};
+use protos::api::{CloseChannelRequest, CloseChannelResponse};
 use std::str::FromStr;
 use std::sync::Arc;
 

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::Node;
-use protos::{Bolt12SendRequest, Bolt12SendResponse};
+use protos::api::{Bolt12SendRequest, Bolt12SendResponse};
 use std::str::FromStr;
 use std::sync::Arc;
 

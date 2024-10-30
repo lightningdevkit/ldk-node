@@ -1,6 +1,6 @@
 use crate::util::proto_adapter::payment_to_proto;
 use ldk_node::Node;
-use protos::{ListPaymentsRequest, ListPaymentsResponse};
+use protos::api::{ListPaymentsRequest, ListPaymentsResponse};
 use std::sync::Arc;
 
 pub(crate) const LIST_PAYMENTS_PATH: &str = "ListPayments";

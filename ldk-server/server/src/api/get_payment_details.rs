@@ -2,7 +2,7 @@ use crate::util::proto_adapter::payment_to_proto;
 use hex::FromHex;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::Node;
-use protos::{GetPaymentDetailsRequest, GetPaymentDetailsResponse};
+use protos::api::{GetPaymentDetailsRequest, GetPaymentDetailsResponse};
 use std::sync::Arc;
 
 pub(crate) const GET_PAYMENT_DETAILS_PATH: &str = "GetPaymentDetails";
