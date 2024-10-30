@@ -1,7 +1,7 @@
 use prost::Message;
 
 use crate::error::LdkNodeServerError;
-use protos::{
+use protos::api::{
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11SendRequest, Bolt11SendResponse,
 	Bolt12ReceiveRequest, Bolt12ReceiveResponse, Bolt12SendRequest, Bolt12SendResponse,
 	CloseChannelRequest, CloseChannelResponse, ListChannelsRequest, ListChannelsResponse,
