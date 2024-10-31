@@ -1231,6 +1231,8 @@ fn build_with_store_internal(
 	})
 }
 
+/// Sets up the node logger, creating a new log file if it does not exist, or utilizing
+/// the existing log file.
 fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
 	let log_dir = match &config.log_dir_path {
 		Some(log_dir) => String::from(log_dir),
