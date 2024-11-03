@@ -1236,7 +1236,7 @@ fn build_with_store_internal(
 fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
 	let log_dir = match &config.log_dir_path {
 		Some(log_dir) => String::from(log_dir),
-		None => config.storage_dir_path.clone() + "/logs",
+		None => config.storage_dir_path.clone(),
 	};
 
 	Ok(Arc::new(
