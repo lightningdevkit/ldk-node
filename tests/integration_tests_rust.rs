@@ -320,7 +320,7 @@ fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, config);
+	let node = setup_node(&chain_source, config, None);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
