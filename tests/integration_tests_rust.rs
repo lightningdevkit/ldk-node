@@ -21,6 +21,8 @@ use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::util::persist::KVStore;
 
+use bitcoincore_rpc::RpcApi;
+
 use bitcoin::Amount;
 
 use std::sync::Arc;
@@ -313,6 +315,98 @@ fn onchain_spend_receive() {
 	assert_eq!(node_a.list_balances().total_onchain_balance_sats, 0);
 	assert!(node_b.list_balances().spendable_onchain_balance_sats > 99000);
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
+}
+
+#[test]
+fn onchain_wallet_recovery() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let seed_bytes = vec![42u8; 64];
+
+	let original_config = random_config(true);
+	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
+
+	let premine_amount_sat = 100_000;
+
+	let addr_1 = original_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_1],
+		Amount::from_sat(premine_amount_sat),
+	);
+	original_node.sync_wallets().unwrap();
+	assert_eq!(original_node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let addr_2 = original_node.onchain_payment().new_address().unwrap();
+
+	let txid = bitcoind
+		.client
+		.send_to_address(
+			&addr_2,
+			Amount::from_sat(premine_amount_sat),
+			None,
+			None,
+			None,
+			None,
+			None,
+			None,
+		)
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1);
+
+	original_node.sync_wallets().unwrap();
+	assert_eq!(
+		original_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2
+	);
+
+	original_node.stop().unwrap();
+	drop(original_node);
+
+	// Now we start from scratch, only the seed remains the same.
+	let recovered_config = random_config(true);
+	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
+
+	recovered_node.sync_wallets().unwrap();
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2
+	);
+
+	// Check we sync even when skipping some addresses.
+	let _addr_3 = recovered_node.onchain_payment().new_address().unwrap();
+	let _addr_4 = recovered_node.onchain_payment().new_address().unwrap();
+	let _addr_5 = recovered_node.onchain_payment().new_address().unwrap();
+	let addr_6 = recovered_node.onchain_payment().new_address().unwrap();
+
+	let txid = bitcoind
+		.client
+		.send_to_address(
+			&addr_6,
+			Amount::from_sat(premine_amount_sat),
+			None,
+			None,
+			None,
+			None,
+			None,
+			None,
+		)
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1);
+
+	recovered_node.sync_wallets().unwrap();
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 3
+	);
 }
 
 #[test]
