@@ -51,6 +51,7 @@ jobs:
           cargo update -p home --precise "0.5.5" --verbose # home v0.5.9 requires rustc 1.70 or newer
           cargo update -p tokio --precise "1.38.1" --verbose # tokio v1.39.0 requires rustc 1.70 or newer
           cargo update -p tokio-util --precise "0.7.11" --verbose # tokio-util v0.7.12 requires rustc 1.70 or newer
+          cargo update -p idna_adapter --precise "1.1.0" --verbose # url 2.5.3 switched to idna 1.0.3 and ICU4X, which requires rustc 1.67 or newer. Here we opt to keep using unicode-rs by pinning idna_adapter as described here: https://docs.rs/crate/idna_adapter/1.2.0
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
