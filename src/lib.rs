@@ -640,6 +640,8 @@ impl Node {
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
 		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
+		#[cfg(tokio_unstable)]
+		let metrics_runtime = Arc::clone(&runtime);
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
@@ -702,7 +704,7 @@ impl Node {
 			log_trace!(
 				self.logger,
 				"Active runtime tasks left prior to shutdown: {}",
-				runtime.metrics().active_tasks_count()
+				metrics_runtime.metrics().active_tasks_count()
 			);
 		}
 
