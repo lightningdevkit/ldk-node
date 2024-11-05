@@ -22,9 +22,9 @@ use std::sync::Arc;
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
 
-	if args.len() < 6 {
+	if args.len() < 8 {
 		eprintln!(
-			"Usage: {} storage_path listening_addr rest_svc_addr network esplora_server_url",
+			"Usage: {} storage_path listening_addr rest_svc_addr network bitcoind_rpc_addr bitcoind_rpc_user bitcoind_rpc_password",
 			args[0]
 		);
 		std::process::exit(-1);
@@ -59,7 +59,21 @@ fn main() {
 	};
 
 	let mut builder = Builder::from_config(config);
-	builder.set_chain_source_esplora(args[5].clone(), None);
+
+	let bitcoind_rpc_addr = match SocketAddr::from_str(&args[5]) {
+		Ok(addr) => addr,
+		Err(_) => {
+			eprintln!("Failed to parse bitcoind_rpc_addr: {}", args[3]);
+			std::process::exit(-1);
+		},
+	};
+
+	builder.set_chain_source_bitcoind_rpc(
+		bitcoind_rpc_addr.ip().to_string(),
+		bitcoind_rpc_addr.port(),
+		args[6].clone(),
+		args[7].clone(),
+	);
 
 	let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
 		Ok(runtime) => Arc::new(runtime),
