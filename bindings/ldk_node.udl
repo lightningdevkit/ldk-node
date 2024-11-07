@@ -5,7 +5,7 @@ namespace ldk_node {
 
 dictionary Config {
 	string storage_dir_path;
-	string? log_dir_path;
+	string? log_file_path;
 	Network network;
 	sequence<SocketAddress>? listening_addresses;
 	NodeAlias? node_alias;

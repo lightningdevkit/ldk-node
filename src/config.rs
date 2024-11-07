@@ -105,8 +105,8 @@ pub struct Config {
 	pub storage_dir_path: String,
 	/// The path where logs are stored.
 	///
-	/// If set to `None`, logs can be found in the `logs` subdirectory in [`Config::storage_dir_path`].
-	pub log_dir_path: Option<String>,
+	/// If set to `None`, logs can be found in [`Config::storage_dir_path`] directory.
+	pub log_file_path: Option<String>,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
@@ -167,7 +167,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
-			log_dir_path: None,
+			log_file_path: None,
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
 			trusted_peers_0conf: Vec::new(),
