@@ -105,7 +105,8 @@ pub struct Config {
 	pub storage_dir_path: String,
 	/// The path where logs are stored.
 	///
-	/// If set to `None`, logs can be found in [`Config::storage_dir_path`] directory.
+	/// If set to `None`, logs can be found in `ldk_node.log` in the [`Config::storage_dir_path`]
+	/// directory.
 	pub log_file_path: Option<String>,
 	/// The used Bitcoin network.
 	pub network: Network,

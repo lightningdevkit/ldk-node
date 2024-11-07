@@ -610,7 +610,7 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
 	}
 
-	/// Sets the log dir path if logs need to live separate from the storage directory path.
+	/// Sets the log file path if logs need to live separate from the storage directory path.
 	pub fn set_log_file_path(&self, log_file_path: String) {
 		self.inner.write().unwrap().set_log_file_path(log_file_path);
 	}
