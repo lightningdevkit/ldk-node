@@ -1,8 +1,8 @@
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
 use ldk_node::{Node, UserChannelId};
-use protos::channel_config::MaxDustHtlcExposure;
-use protos::{UpdateChannelConfigRequest, UpdateChannelConfigResponse};
+use protos::api::{UpdateChannelConfigRequest, UpdateChannelConfigResponse};
+use protos::types::channel_config::MaxDustHtlcExposure;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -38,7 +38,7 @@ pub(crate) fn handle_update_channel_config_request(
 }
 
 fn build_updated_channel_config(
-	current_config: ChannelConfig, proto_channel_config: protos::ChannelConfig,
+	current_config: ChannelConfig, proto_channel_config: protos::types::ChannelConfig,
 ) -> ChannelConfig {
 	let max_dust_htlc_exposure = proto_channel_config
 		.max_dust_htlc_exposure
@@ -53,7 +53,8 @@ fn build_updated_channel_config(
 		.unwrap_or(current_config.max_dust_htlc_exposure);
 
 	let cltv_expiry_delta = proto_channel_config
-		.cltv_expiry_delta.map(|c| u16::try_from(c).unwrap())
+		.cltv_expiry_delta
+		.map(|c| u16::try_from(c).unwrap())
 		.unwrap_or(current_config.cltv_expiry_delta);
 
 	ChannelConfig {

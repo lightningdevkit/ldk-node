@@ -1,6 +1,6 @@
 use ldk_node::bitcoin::Address;
 use ldk_node::Node;
-use protos::{OnchainSendRequest, OnchainSendResponse};
+use protos::api::{OnchainSendRequest, OnchainSendResponse};
 use std::str::FromStr;
 use std::sync::Arc;
 

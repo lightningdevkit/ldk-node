@@ -1,5 +1,6 @@
 use ldk_node::Node;
-use protos::{BestBlock, GetNodeInfoRequest, GetNodeInfoResponse};
+use protos::api::{GetNodeInfoRequest, GetNodeInfoResponse};
+use protos::types::BestBlock;
 use std::sync::Arc;
 
 pub(crate) const GET_NODE_INFO: &str = "GetNodeInfo";

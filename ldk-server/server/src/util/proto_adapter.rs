@@ -3,10 +3,10 @@ use hex::prelude::*;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
 use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::ChannelDetails;
-use protos::payment_kind::Kind::{
+use protos::types::payment_kind::Kind::{
 	Bolt11, Bolt11Jit, Bolt12Offer, Bolt12Refund, Onchain, Spontaneous,
 };
-use protos::{Channel, LspFeeLimits, OutPoint, Payment};
+use protos::types::{Channel, LspFeeLimits, OutPoint, Payment};
 
 pub(crate) fn channel_to_proto(channel: ChannelDetails) -> Channel {
 	Channel {
@@ -45,8 +45,10 @@ pub(crate) fn channel_to_proto(channel: ChannelDetails) -> Channel {
 	}
 }
 
-pub(crate) fn channel_config_to_proto(channel_config: ChannelConfig) -> protos::ChannelConfig {
-	protos::ChannelConfig {
+pub(crate) fn channel_config_to_proto(
+	channel_config: ChannelConfig,
+) -> protos::types::ChannelConfig {
+	protos::types::ChannelConfig {
 		forwarding_fee_proportional_millionths: Some(
 			channel_config.forwarding_fee_proportional_millionths,
 		),
@@ -58,11 +60,11 @@ pub(crate) fn channel_config_to_proto(channel_config: ChannelConfig) -> protos::
 		accept_underpaying_htlcs: Some(channel_config.accept_underpaying_htlcs),
 		max_dust_htlc_exposure: match channel_config.max_dust_htlc_exposure {
 			MaxDustHTLCExposure::FixedLimit { limit_msat } => {
-				Some(protos::channel_config::MaxDustHtlcExposure::FixedLimitMsat(limit_msat))
+				Some(protos::types::channel_config::MaxDustHtlcExposure::FixedLimitMsat(limit_msat))
 			},
-			MaxDustHTLCExposure::FeeRateMultiplier { multiplier } => {
-				Some(protos::channel_config::MaxDustHtlcExposure::FeeRateMultiplier(multiplier))
-			},
+			MaxDustHTLCExposure::FeeRateMultiplier { multiplier } => Some(
+				protos::types::channel_config::MaxDustHtlcExposure::FeeRateMultiplier(multiplier),
+			),
 		},
 	}
 }
@@ -73,43 +75,47 @@ pub(crate) fn payment_to_proto(payment: PaymentDetails) -> Payment {
 		kind: Some(payment_kind_to_proto(payment.kind)),
 		amount_msat: payment.amount_msat,
 		direction: match payment.direction {
-			PaymentDirection::Inbound => protos::PaymentDirection::Inbound.into(),
-			PaymentDirection::Outbound => protos::PaymentDirection::Outbound.into(),
+			PaymentDirection::Inbound => protos::types::PaymentDirection::Inbound.into(),
+			PaymentDirection::Outbound => protos::types::PaymentDirection::Outbound.into(),
 		},
 		status: match payment.status {
-			PaymentStatus::Pending => protos::PaymentStatus::Pending.into(),
-			PaymentStatus::Succeeded => protos::PaymentStatus::Succeeded.into(),
-			PaymentStatus::Failed => protos::PaymentStatus::Failed.into(),
+			PaymentStatus::Pending => protos::types::PaymentStatus::Pending.into(),
+			PaymentStatus::Succeeded => protos::types::PaymentStatus::Succeeded.into(),
+			PaymentStatus::Failed => protos::types::PaymentStatus::Failed.into(),
 		},
 		latest_update_timestamp: payment.latest_update_timestamp,
 	}
 }
 
-pub(crate) fn payment_kind_to_proto(payment_kind: PaymentKind) -> protos::PaymentKind {
+pub(crate) fn payment_kind_to_proto(payment_kind: PaymentKind) -> protos::types::PaymentKind {
 	match payment_kind {
-		PaymentKind::Onchain => protos::PaymentKind { kind: Some(Onchain(protos::Onchain {})) },
-		PaymentKind::Bolt11 { hash, preimage, secret } => protos::PaymentKind {
-			kind: Some(Bolt11(protos::Bolt11 {
+		PaymentKind::Onchain => {
+			protos::types::PaymentKind { kind: Some(Onchain(protos::types::Onchain {})) }
+		},
+		PaymentKind::Bolt11 { hash, preimage, secret } => protos::types::PaymentKind {
+			kind: Some(Bolt11(protos::types::Bolt11 {
 				hash: hash.to_string(),
 				preimage: preimage.map(|p| p.to_string()),
 				secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
 			})),
 		},
-		PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits } => protos::PaymentKind {
-			kind: Some(Bolt11Jit(protos::Bolt11Jit {
-				hash: hash.to_string(),
-				preimage: preimage.map(|p| p.to_string()),
-				secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
-				lsp_fee_limits: Some(LspFeeLimits {
-					max_total_opening_fee_msat: lsp_fee_limits.max_total_opening_fee_msat,
-					max_proportional_opening_fee_ppm_msat: lsp_fee_limits
-						.max_proportional_opening_fee_ppm_msat,
-				}),
-			})),
+		PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits } => {
+			protos::types::PaymentKind {
+				kind: Some(Bolt11Jit(protos::types::Bolt11Jit {
+					hash: hash.to_string(),
+					preimage: preimage.map(|p| p.to_string()),
+					secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
+					lsp_fee_limits: Some(LspFeeLimits {
+						max_total_opening_fee_msat: lsp_fee_limits.max_total_opening_fee_msat,
+						max_proportional_opening_fee_ppm_msat: lsp_fee_limits
+							.max_proportional_opening_fee_ppm_msat,
+					}),
+				})),
+			}
 		},
 		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, payer_note, quantity } => {
-			protos::PaymentKind {
-				kind: Some(Bolt12Offer(protos::Bolt12Offer {
+			protos::types::PaymentKind {
+				kind: Some(Bolt12Offer(protos::types::Bolt12Offer {
 					hash: hash.map(|h| h.to_string()),
 					preimage: preimage.map(|p| p.to_string()),
 					secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
@@ -120,8 +126,8 @@ pub(crate) fn payment_kind_to_proto(payment_kind: PaymentKind) -> protos::Paymen
 			}
 		},
 		PaymentKind::Bolt12Refund { hash, preimage, secret, payer_note, quantity } => {
-			protos::PaymentKind {
-				kind: Some(Bolt12Refund(protos::Bolt12Refund {
+			protos::types::PaymentKind {
+				kind: Some(Bolt12Refund(protos::types::Bolt12Refund {
 					hash: hash.map(|h| h.to_string()),
 					preimage: preimage.map(|p| p.to_string()),
 					secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
@@ -130,8 +136,8 @@ pub(crate) fn payment_kind_to_proto(payment_kind: PaymentKind) -> protos::Paymen
 				})),
 			}
 		},
-		PaymentKind::Spontaneous { hash, preimage } => protos::PaymentKind {
-			kind: Some(Spontaneous(protos::Spontaneous {
+		PaymentKind::Spontaneous { hash, preimage } => protos::types::PaymentKind {
+			kind: Some(Spontaneous(protos::types::Spontaneous {
 				hash: hash.to_string(),
 				preimage: preimage.map(|p| p.to_string()),
 			})),

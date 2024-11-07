@@ -1,5 +1,5 @@
 use ldk_node::Node;
-use protos::{OnchainReceiveRequest, OnchainReceiveResponse};
+use protos::api::{OnchainReceiveRequest, OnchainReceiveResponse};
 use std::sync::Arc;
 
 pub(crate) const ONCHAIN_RECEIVE_PATH: &str = "OnchainReceive";

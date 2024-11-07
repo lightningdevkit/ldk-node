@@ -2,7 +2,7 @@ use bytes::Bytes;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::Node;
-use protos::{OpenChannelRequest, OpenChannelResponse};
+use protos::api::{OpenChannelRequest, OpenChannelResponse};
 use std::str::FromStr;
 use std::sync::Arc;
 

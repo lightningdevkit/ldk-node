@@ -1,5 +1,5 @@
 use ldk_node::Node;
-use protos::{Bolt11ReceiveRequest, Bolt11ReceiveResponse};
+use protos::api::{Bolt11ReceiveRequest, Bolt11ReceiveResponse};
 use std::sync::Arc;
 
 pub(crate) const BOLT11_RECEIVE_PATH: &str = "Bolt11Receive";

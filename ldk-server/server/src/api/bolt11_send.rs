@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_node::Node;
-use protos::{Bolt11SendRequest, Bolt11SendResponse};
+use protos::api::{Bolt11SendRequest, Bolt11SendResponse};
 use std::str::FromStr;
 use std::sync::Arc;
 

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use client::client::LdkNodeServerClient;
 use client::error::LdkNodeServerError;
-use client::protos::{
+use client::protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
 	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
 };
