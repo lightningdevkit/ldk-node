@@ -25,7 +25,8 @@ impl FilesystemLogger {
 	/// Creates a new filesystem logger given the path to the log file and the log level.
 	pub(crate) fn new(log_file_path: String, level: Level) -> Result<Self, ()> {
 		if let Some(parent_dir) = Path::new(&log_file_path).parent() {
-			fs::create_dir_all(parent_dir).expect("Failed to create log parent directory");
+			fs::create_dir_all(parent_dir)
+				.map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {}", e))?;
 
 			// make sure the file exists.
 			fs::OpenOptions::new()
