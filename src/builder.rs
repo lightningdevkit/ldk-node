@@ -298,9 +298,9 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Sets the log dir path if logs need to live separate from the storage directory path.
-	pub fn set_log_dir_path(&mut self, log_dir_path: String) -> &mut Self {
-		self.config.log_dir_path = Some(log_dir_path);
+	/// Sets the log file path if the log file needs to live separate from the storage directory path.
+	pub fn set_log_file_path(&mut self, log_dir_path: String) -> &mut Self {
+		self.config.log_file_path = Some(log_dir_path);
 		self
 	}
 
@@ -610,9 +610,9 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
 	}
 
-	/// Sets the log dir path if logs need to live separate from the storage directory path.
-	pub fn set_log_dir_path(&self, log_dir_path: String) {
-		self.inner.write().unwrap().set_log_dir_path(log_dir_path);
+	/// Sets the log file path if logs need to live separate from the storage directory path.
+	pub fn set_log_file_path(&self, log_file_path: String) {
+		self.inner.write().unwrap().set_log_file_path(log_file_path);
 	}
 
 	/// Sets the Bitcoin network used.
@@ -1231,14 +1231,16 @@ fn build_with_store_internal(
 	})
 }
 
+/// Sets up the node logger, creating a new log file if it does not exist, or utilizing
+/// the existing log file.
 fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
-	let log_dir = match &config.log_dir_path {
+	let log_file_path = match &config.log_file_path {
 		Some(log_dir) => String::from(log_dir),
-		None => config.storage_dir_path.clone() + "/logs",
+		None => format!("{}/{}", config.storage_dir_path.clone(), "ldk_node.log"),
 	};
 
 	Ok(Arc::new(
-		FilesystemLogger::new(log_dir, config.log_level)
+		FilesystemLogger::new(log_file_path, config.log_level)
 			.map_err(|_| BuildError::LoggerSetupFailed)?,
 	))
 }
