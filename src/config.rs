@@ -7,7 +7,7 @@
 
 //! Objects for configuring the node.
 
-use crate::logger::LdkNodeLogger;
+use crate::logger::LogWriter;
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
@@ -15,21 +15,23 @@ use lightning::routing::gossip::NodeAlias;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::config::UserConfig;
-use lightning::util::logger::Level as LogLevel;
+use lightning::util::logger::Level;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 // Config defaults
 const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
+const DEFAULT_LOG_FILE_PATH: &str = "/tmp/ldk_node/ldk_node.log";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
-const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
+const DEFAULT_LOG_LEVEL: Level = Level::Debug;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
@@ -104,9 +106,8 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
-	/// In the default configuration logs can be found in the [`DEFAULT_STORAGE_DIR_PATH`] subdirectory in
-	/// [`Config::storage_dir_path`], and the log level is set to [`DEFAULT_LOG_LEVEL`].
-	pub logging_config: LoggingConfig,
+	/// The configuration options for the logger.
+	pub logger_config: LoggerConfig,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
@@ -163,7 +164,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
-			logging_config: LoggingConfig::default(),
+			logger_config: LoggerConfig::default(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
 			trusted_peers_0conf: Vec::new(),
@@ -175,32 +176,107 @@ impl Default for Config {
 	}
 }
 
-/// Configuration options for logging.
+/// Logger configuration.
 #[derive(Debug, Clone)]
-pub enum LoggingConfig {
-	/// An opinionated filesystem logger.
-	///
-	/// This logger will always write at `{log_dir}/ldk_node_latest.log`, which is a symlink to the
-	/// most recent log file, which is created and timestamped at initialization.
-	Filesystem {
-		/// The absolute path where logs are stored.
-		log_file_path: String,
-		/// The level at which we log messages.
-		///
-		/// Any messages below this level will be excluded from the logs.
-		log_level: LogLevel,
-	},
-	/// A custom logger.
-	Custom(std::sync::Arc<LdkNodeLogger>),
+pub struct LoggerConfig {
+	/// Writer configuration.
+	pub writer: WriterConfig,
+	/// Formatter configuration.
+	pub formatter: FormatterConfig,
 }
 
-impl Default for LoggingConfig {
+impl Default for LoggerConfig {
 	fn default() -> Self {
-		Self::Filesystem {
-			log_file_path: format!("{}/{}", DEFAULT_STORAGE_DIR_PATH, "ldk_node.log"),
-			log_level: DEFAULT_LOG_LEVEL,
+		Self { writer: WriterConfig::default(), formatter: FormatterConfig::default() }
+	}
+}
+
+/// Logger formatter configuration.
+#[derive(Debug, Clone)]
+pub struct FormatterConfig {
+	/// Specifies if timestamps should be included in the log messages.
+	pub include_timestamp: bool,
+	/// Specifies timestamp format , e.g., "%Y-%m-%d %H:%M:%S".
+	pub timestamp_format: Option<String>,
+	/// Specifies if log levels should be included in the log messages.
+	pub include_level: bool,
+	/// Specifies the template for log message format, e.g., "{timestamp} [{level}] {message}".
+	pub message_template: Option<String>,
+}
+
+impl Default for FormatterConfig {
+	fn default() -> Self {
+		Self {
+			include_timestamp: true,
+			timestamp_format: Some("%Y-%m-%d %H:%M:%S".to_string()),
+			include_level: true,
+			message_template: Some(
+				"{timestamp} {level} [{module_path}:{line}] {message}\n".to_string(),
+			),
 		}
 	}
+}
+
+/// Logger writer configuration.
+#[derive(Debug, Clone)]
+pub struct WriterConfig {
+	/// Writer type for the logger.
+	pub writer_type: WriterType,
+}
+
+impl Default for WriterConfig {
+	fn default() -> Self {
+		WriterConfig {
+			writer_type: WriterType::File(FileWriterConfig::new(
+				DEFAULT_LOG_FILE_PATH,
+				DEFAULT_LOG_LEVEL,
+			)),
+		}
+	}
+}
+
+/// Log writer configuration type.
+#[derive(Debug, Clone)]
+pub enum WriterType {
+	/// Wraps configuration options for logging to the filesystem.
+	File(FileWriterConfig),
+	/// Wraps configuration options for relaying logs to [`log`].
+	LogRelay(LogRelayWriterConfig),
+	/// Wraps configuration options for relaying logs to a custom logger.
+	Custom(CustomWriterConfig),
+}
+
+/// Configuration for writing to the filesystem.
+#[derive(Debug, Clone)]
+pub struct FileWriterConfig {
+	/// Specifies the file path for the logs.
+	pub log_file_path: String,
+	/// Specifies the log level.
+	pub level: Level,
+}
+
+impl FileWriterConfig {
+	/// Creates a new configuration given the path to the log file
+	/// and the log level.
+	pub fn new(log_file_path: &str, level: Level) -> Self {
+		Self { log_file_path: log_file_path.to_string(), level }
+	}
+}
+
+/// Configuration options for [`log`]'s writer.
+#[derive(Debug, Clone)]
+pub struct LogRelayWriterConfig {
+	/// Specifies the log level.
+	pub level: Level,
+}
+
+/// Configuration options for a custom log writer.
+#[derive(Debug, Clone)]
+pub struct CustomWriterConfig {
+	/// Pointer to any custom log writer.
+	pub inner: Arc<dyn LogWriter + Send + Sync>,
+	/// Specifies the log level.
+	pub level: Level,
 }
 
 /// Configuration options pertaining to 'Anchor' channels, i.e., channels for which the

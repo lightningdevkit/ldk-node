@@ -7,7 +7,8 @@
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{
-	default_user_config, Config, EsploraSyncConfig, LoggingConfig, WALLET_KEYS_SEED_LEN,
+	default_user_config, Config, EsploraSyncConfig, FormatterConfig, LoggerConfig, WriterConfig,
+	WriterType, WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
@@ -18,7 +19,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{default_format, log_error, log_info, FileWriter, LdkNodeLogger, Logger};
+use crate::logger::{build_formatter, log_error, log_info, LdkNodeLogger, Logger, Writer};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -300,6 +301,18 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Sets the logger's writer config.
+	pub fn set_log_writer_config(&mut self, writer_config: WriterConfig) -> &mut Self {
+		self.config.logger_config.writer = writer_config;
+		self
+	}
+
+	/// Sets the logger's formatter config.
+	pub fn set_log_formatter_config(&mut self, formatter_config: FormatterConfig) -> &mut Self {
+		self.config.logger_config.formatter = formatter_config;
+		self
+	}
+
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&mut self, network: Network) -> &mut Self {
 		self.config.network = network;
@@ -381,7 +394,7 @@ impl NodeBuilder {
 	) -> Result<Node, BuildError> {
 		use bitcoin::key::Secp256k1;
 
-		let logger = setup_logger(&self.config)?;
+		let logger = setup_logger(&self.config.logger_config)?;
 
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -446,7 +459,7 @@ impl NodeBuilder {
 	pub fn build_with_vss_store_and_header_provider(
 		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
-		let logger = setup_logger(&self.config)?;
+		let logger = setup_logger(&self.config.logger_config)?;
 
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -478,7 +491,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Node, BuildError> {
-		let logger = setup_logger(&self.config)?;
+		let logger = setup_logger(&self.config.logger_config)?;
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
 			self.entropy_source_config.as_ref(),
@@ -598,6 +611,16 @@ impl ArcedNodeBuilder {
 	/// Sets the used storage directory path.
 	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
+	}
+
+	/// Sets the logger's writer config.
+	pub fn set_log_writer_config(&mut self, writer_config: WriterConfig) -> &mut Self {
+		self.inner.write().unwrap().set_log_writer_config(writer_config);
+	}
+
+	/// Sets the logger's formatter config.
+	pub fn set_log_formatter_config(&mut self, formatter_config: FormatterConfig) -> &mut Self {
+		self.inner.write().unwrap().set_log_formatter_config(formatter_config);
 	}
 
 	/// Sets the Bitcoin network used.
@@ -1211,24 +1234,23 @@ fn build_with_store_internal(
 	})
 }
 
-/// Sets up the node logger, creating a new log file if it does not exist, or utilizing
-/// the existing log file.
-fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
-	match config.logging_config {
-		LoggingConfig::Custom(ref logger) => Ok(logger.clone()),
-		LoggingConfig::Filesystem { ref log_file_path, log_level } => {
-			let filesystem_log_writer = FileWriter::new(log_file_path.clone())
-				.map_err(|_| BuildError::LoggerSetupFailed)?;
-			Ok(Arc::new(
-				LdkNodeLogger::new(
-					log_level,
-					Box::new(default_format),
-					Box::new(move |s| filesystem_log_writer.write(s)),
-				)
-				.map_err(|_| BuildError::LoggerSetupFailed)?,
-			))
-		},
-	}
+/// Sets up the node logger.
+fn setup_logger(config: &LoggerConfig) -> Result<Arc<LdkNodeLogger>, BuildError> {
+	let level = match &config.writer.writer_type {
+		WriterType::File(file_writer_config) => file_writer_config.level,
+		WriterType::LogRelay(log_relay_writer_config) => log_relay_writer_config.level,
+		WriterType::Custom(custom_writer_config) => custom_writer_config.level,
+	};
+
+	let writer =
+		Writer::new(&config.writer.writer_type).map_err(|_e| BuildError::LoggerSetupFailed)?;
+
+	let formatter = build_formatter(config.formatter.clone());
+
+	let ldk_node_logger =
+		LdkNodeLogger::new(level, formatter, writer).map_err(|_e| BuildError::LoggerSetupFailed)?;
+
+	Ok(Arc::new(ldk_node_logger))
 }
 
 fn seed_bytes_from_config(
