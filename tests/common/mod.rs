@@ -11,7 +11,7 @@
 use ldk_node::config::{Config, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{Builder, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance};
+use ldk_node::{Builder, Event, LightningBalance, Node, NodeError, PendingSweepBalance};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -230,8 +230,6 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	let alias = random_node_alias();
 	println!("Setting random LDK node alias: {:?}", alias);
 	config.node_alias = alias;
-
-	config.log_level = LogLevel::Gossip;
 
 	config
 }

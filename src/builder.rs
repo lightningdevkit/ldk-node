@@ -18,9 +18,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{
-	default_format, log_error, log_info, FilesystemLogWriter, LdkNodeLogger, Logger,
-};
+use crate::logger::{default_format, log_error, log_info, FileWriter, LdkNodeLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -299,12 +297,6 @@ impl NodeBuilder {
 	/// Sets the used storage directory path.
 	pub fn set_storage_dir_path(&mut self, storage_dir_path: String) -> &mut Self {
 		self.config.storage_dir_path = storage_dir_path;
-		self
-	}
-
-	/// Sets the log file path if the log file needs to live separate from the storage directory path.
-	pub fn set_log_file_path(&mut self, log_dir_path: String) -> &mut Self {
-		self.config.log_file_path = Some(log_dir_path);
 		self
 	}
 
@@ -608,11 +600,6 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
 	}
 
-	/// Sets the log file path if logs need to live separate from the storage directory path.
-	pub fn set_log_file_path(&self, log_file_path: String) {
-		self.inner.write().unwrap().set_log_file_path(log_file_path);
-	}
-
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&self, network: Network) {
 		self.inner.write().unwrap().set_network(network);
@@ -631,11 +618,6 @@ impl ArcedNodeBuilder {
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
-	}
-
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&self, level: LogLevel) {
-		self.inner.write().unwrap().set_log_level(level);
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1234,8 +1216,8 @@ fn build_with_store_internal(
 fn setup_logger(config: &Config) -> Result<Arc<LdkNodeLogger>, BuildError> {
 	match config.logging_config {
 		LoggingConfig::Custom(ref logger) => Ok(logger.clone()),
-		LoggingConfig::Filesystem { ref log_dir, log_level } => {
-			let filesystem_log_writer = FilesystemLogWriter::new(log_dir.clone())
+		LoggingConfig::Filesystem { ref log_file_path, log_level } => {
+			let filesystem_log_writer = FileWriter::new(log_file_path.clone())
 				.map_err(|_| BuildError::LoggerSetupFailed)?;
 			Ok(Arc::new(
 				LdkNodeLogger::new(

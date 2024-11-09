@@ -23,7 +23,7 @@ use bitcoin::Network;
 use std::time::Duration;
 
 // Config defaults
-const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
+const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
@@ -104,12 +104,7 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
-	/// The path where logs are stored.
-	///
-	/// If set to `None`, logs can be found in `ldk_node.log` in the [`Config::storage_dir_path`]
-	/// directory.
-	pub log_file_path: Option<String>,
-	/// In the default configuration logs can be found in the `logs` subdirectory in
+	/// In the default configuration logs can be found in the [`DEFAULT_STORAGE_DIR_PATH`] subdirectory in
 	/// [`Config::storage_dir_path`], and the log level is set to [`DEFAULT_LOG_LEVEL`].
 	pub logging_config: LoggingConfig,
 	/// The used Bitcoin network.
@@ -168,7 +163,6 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
-			log_file_path: None,
 			logging_config: LoggingConfig::default(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
@@ -190,7 +184,7 @@ pub enum LoggingConfig {
 	/// most recent log file, which is created and timestamped at initialization.
 	Filesystem {
 		/// The absolute path where logs are stored.
-		log_dir: String,
+		log_file_path: String,
 		/// The level at which we log messages.
 		///
 		/// Any messages below this level will be excluded from the logs.
@@ -203,7 +197,7 @@ pub enum LoggingConfig {
 impl Default for LoggingConfig {
 	fn default() -> Self {
 		Self::Filesystem {
-			log_dir: format!("{}/{}", DEFAULT_STORAGE_DIR_PATH, "logs"),
+			log_file_path: format!("{}/{}", DEFAULT_STORAGE_DIR_PATH, "ldk_node.log"),
 			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}

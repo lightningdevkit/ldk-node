@@ -15,6 +15,7 @@ use chrono::Utc;
 use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::sync::Mutex;
 
 pub struct LdkNodeLogger {
@@ -47,20 +48,27 @@ impl Logger for LdkNodeLogger {
 	}
 }
 
-pub(crate) struct FilesystemLogWriter {
+pub(crate) struct FileWriter {
 	log_file: Mutex<fs::File>,
 }
 
-impl FilesystemLogWriter {
-	/// Creates a new filesystem logger.
+impl FileWriter {
+	/// Creates a new filesystem writer.
 	pub(crate) fn new(log_file_path: String) -> Result<Self, ()> {
+		if let Some(parent_dir) = Path::new(&log_file_path).parent() {
+			fs::create_dir_all(parent_dir).map_err(|e| {
+				eprintln!("ERROR: Failed to create log file directory: {}", e);
+				()
+			})?;
+		}
+
 		let log_file = Mutex::new(
-			fs::OpenOptions::new()
-				.create(true)
-				.append(true)
-				.open(log_file_path.clone())
-				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?,
+			fs::OpenOptions::new().create(true).append(true).open(&log_file_path).map_err(|e| {
+				eprintln!("ERROR: Failed to open log file: {}", e);
+				()
+			})?,
 		);
+
 		Ok(Self { log_file })
 	}
 
