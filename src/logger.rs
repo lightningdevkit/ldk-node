@@ -11,6 +11,7 @@ pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace}
 use lightning::util::logger::{Level, Record};
 
 use chrono::Utc;
+#[cfg(feature = "log_relay")]
 use log::{debug, error, info, trace, warn};
 
 use std::fmt::Debug;
@@ -34,6 +35,7 @@ pub enum Writer {
 	/// Writes logs to filesystem.
 	FileWriter { log_file: Mutex<fs::File> },
 	/// Relays logs to [`log`] logger.
+	#[cfg(feature = "log_relay")]
 	LogRelayWriter,
 	/// Forwards logs to a custom logger.
 	CustomWriter { inner: Arc<dyn LogWriter + Send + Sync> },
@@ -68,10 +70,16 @@ impl Writer {
 			},
 			// Initial logic for Writer that forwards to any logger that
 			// implements the `log` facade.
+			#[cfg(feature = "log_relay")]
 			WriterType::LogRelay(_log_relay_writer_config) => Ok(Writer::LogRelayWriter),
 			// Initial logic for Writer that forwards to any custom logger.
 			WriterType::Custom(custom_writer_config) => {
 				Ok(Writer::CustomWriter { inner: custom_writer_config.inner.clone() })
+			},
+			#[cfg(not(feature = "log_relay"))]
+			_ => {
+				eprintln!("ERROR: log_relay feature is not enabled");
+				Err(())
 			},
 		}
 	}
@@ -85,6 +93,7 @@ impl LogWriter for Writer {
 				.expect("log file lock poisoned")
 				.write_all(message.as_bytes())
 				.expect("Failed to write to log file"),
+			#[cfg(feature = "log_relay")]
 			Writer::LogRelayWriter => match level {
 				Level::Gossip => {
 					// trace!(..) used for gossip logs here.
