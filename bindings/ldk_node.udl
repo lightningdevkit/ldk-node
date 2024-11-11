@@ -161,7 +161,7 @@ interface OnchainPayment {
 	[Throws=NodeError]
 	Txid send_to_address([ByRef]Address address, u64 amount_sats);
 	[Throws=NodeError]
-	Txid send_all_to_address([ByRef]Address address);
+	Txid send_all_to_address([ByRef]Address address, boolean retain_reserve);
 };
 
 interface UnifiedQrPayment {

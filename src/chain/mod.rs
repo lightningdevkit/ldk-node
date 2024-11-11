@@ -993,11 +993,16 @@ impl ChainSource {
 								Err(e) => match e {
 									esplora_client::Error::Reqwest(err) => {
 										if err.status() == reqwest::StatusCode::from_u16(400).ok() {
-											// Ignore 400, as this just means bitcoind already knows the
+											// Log 400 at lesser level, as this often just means bitcoind already knows the
 											// transaction.
 											// FIXME: We can further differentiate here based on the error
 											// message which will be available with rust-esplora-client 0.7 and
 											// later.
+											log_trace!(
+												logger,
+												"Failed to broadcast due to HTTP connection error: {}",
+												err
+											);
 										} else {
 											log_error!(
 												logger,
