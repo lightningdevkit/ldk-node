@@ -918,11 +918,10 @@ impl Node {
 		))
 	}
 
-	/// Send a probe
+	/// Returns a probe handler for probing the network.
 	pub fn prober(&self) -> Prober {
 		Prober::new(
 			Arc::clone(&self.channel_manager),
-			Arc::clone(&self.event_queue),
 			Arc::clone(&self.router),
 			Arc::clone(&self.scorer),
 			Arc::clone(&self.logger),

@@ -34,6 +34,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::ln::PaymentHash;
 use lightning::routing::gossip::NodeId;
+use lightning::routing::router::RouteHop;
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
@@ -162,8 +163,8 @@ pub enum Event {
 		payment_id: PaymentId,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
-		// The path that the probe took.
-		// path: Path,
+		/// The path that the probe took.
+		hops: Vec<RouteHop>,
 	},
 	/// Indicates that a probe payment we sent failed at an intermediary node on the path.
 	ProbeFailed {
@@ -171,8 +172,8 @@ pub enum Event {
 		payment_id: PaymentId,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
-		// The payment path that failed.
-		// path: Path,
+		/// The probe path that failed.
+		hops: Vec<RouteHop>,
 		/// The channel responsible for the failed probe.
 		///
 		/// Note that for route hints or for the first hop in a path this may be an SCID alias and
@@ -225,15 +226,14 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(7, ProbeSuccessful) => {
 		(0, payment_id, required),
-		(1, payment_hash, required),
-		// (2, path.hops, required_vec),
-		// (3, path.blinded_tail, option),
+		(2, payment_hash, required),
+		(4, hops, required_vec),
 	},
 	(8, ProbeFailed) => {
 		(0, payment_id, required),
-		(1, payment_hash, required),
-		// (2, path.hops, required_vec),
-		(3, short_channel_id, option),
+		(2, payment_hash, required),
+		(4, hops, required_vec),
+		(5, short_channel_id, option),
 	},
 );
 
@@ -952,17 +952,22 @@ where
 
 			LdkEvent::PaymentPathSuccessful { .. } => {},
 			LdkEvent::PaymentPathFailed { .. } => {},
-			LdkEvent::ProbeSuccessful { payment_id, payment_hash, .. } => {
+			LdkEvent::ProbeSuccessful { payment_id, payment_hash, path } => {
 				self.event_queue
-					.add_event(Event::ProbeSuccessful { payment_id, payment_hash })
+					.add_event(Event::ProbeSuccessful { payment_id, payment_hash, hops: path.hops })
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");
 					});
 			},
-			LdkEvent::ProbeFailed { payment_id, payment_hash, short_channel_id, .. } => {
+			LdkEvent::ProbeFailed { payment_id, payment_hash, short_channel_id, path } => {
 				self.event_queue
-					.add_event(Event::ProbeFailed { payment_id, payment_hash, short_channel_id })
+					.add_event(Event::ProbeFailed {
+						payment_id,
+						payment_hash,
+						short_channel_id,
+						hops: path.hops,
+					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						panic!("Failed to push to event queue");

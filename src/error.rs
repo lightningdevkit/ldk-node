@@ -113,6 +113,8 @@ pub enum Error {
 	LiquiditySourceUnavailable,
 	/// The given operation failed due to the LSP's required opening fee being too high.
 	LiquidityFeeTooHigh,
+	/// The router failed to find a route to the given destination.
+	RouteNotFound,
 }
 
 impl fmt::Display for Error {
@@ -182,6 +184,9 @@ impl fmt::Display for Error {
 			},
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
+			},
+			Self::RouteNotFound => {
+				write!(f, "The router failed to find a route to the given destination.")
 			},
 		}
 	}

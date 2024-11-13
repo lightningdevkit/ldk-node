@@ -148,7 +148,7 @@ deletions in 26 commits from 3 authors, in alphabetical order:
 - An inconsistent state of the log file symlink no longer results in an error during startup (#153).
 
 ## Compatibility Notes
-- Our currently supported minimum Rust version (MSRV) is 1.63.0.
+- Our currently supported minimum Rust version (MSRV) is 1.67.0.
 - The Rust crate edition has been bumped to 2021.
 - Building on Windows is now supported (#160).
 - LDK has been updated to version 0.0.118 (#105, #151, #175).

@@ -28,10 +28,7 @@ pub struct LdkNodeLogger {
 
 impl LdkNodeLogger {
 	/// Creates a new `LdkNodeLogger`.
-	pub fn new(
-		level: Level,
-		writer: Box<dyn Fn(&Record) + Send + Sync>,
-	) -> Result<Self, ()> {
+	pub fn new(level: Level, writer: Box<dyn Fn(&Record) + Send + Sync>) -> Result<Self, ()> {
 		Ok(Self { level, writer })
 	}
 }
