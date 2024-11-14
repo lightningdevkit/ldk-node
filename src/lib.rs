@@ -754,6 +754,9 @@ impl Node {
 	/// Will return `Some(..)` if an event is available and `None` otherwise.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	///
+	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
+	/// which can increase the memory footprint of [`Node`].
 	pub fn next_event(&self) -> Option<Event> {
 		self.event_queue.next_event()
 	}
@@ -763,6 +766,9 @@ impl Node {
 	/// Will asynchronously poll the event queue until the next event is ready.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	///
+	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
+	/// which can increase the memory footprint of [`Node`].
 	pub async fn next_event_async(&self) -> Event {
 		self.event_queue.next_event_async().await
 	}
@@ -772,6 +778,9 @@ impl Node {
 	/// Will block the current thread until the next event is available.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	///
+	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
+	/// which can increase the memory footprint of [`Node`].
 	pub fn wait_next_event(&self) -> Event {
 		self.event_queue.wait_next_event()
 	}
