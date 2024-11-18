@@ -9,7 +9,7 @@
 
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
@@ -38,17 +38,16 @@ pub struct SpontaneousPayment {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
-	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
+	payment_store: Arc<PaymentStore<Arc<Logger>>>,
 	config: Arc<Config>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<Logger>,
 }
 
 impl SpontaneousPayment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>, config: Arc<Config>,
-		logger: Arc<FilesystemLogger>,
+		payment_store: Arc<PaymentStore<Arc<Logger>>>, config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self { runtime, channel_manager, keys_manager, payment_store, config, logger }
 	}

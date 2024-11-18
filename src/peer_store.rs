@@ -9,7 +9,7 @@ use crate::io::{
 	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, Logger};
+use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::{Error, SocketAddress};
 
@@ -24,7 +24,7 @@ use std::sync::{Arc, RwLock};
 
 pub struct PeerStore<L: Deref>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	peers: RwLock<HashMap<PublicKey, PeerInfo>>,
 	kv_store: Arc<DynStore>,
@@ -33,7 +33,7 @@ where
 
 impl<L: Deref> PeerStore<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let peers = RwLock::new(HashMap::new());
@@ -92,7 +92,7 @@ where
 
 impl<L: Deref> ReadableArgs<(Arc<DynStore>, L)> for PeerStore<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(

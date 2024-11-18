@@ -6,7 +6,9 @@
 // accordance with one or both of these licenses.
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
-use crate::config::{default_user_config, Config, EsploraSyncConfig, WALLET_KEYS_SEED_LEN};
+use crate::config::{
+	default_user_config, Config, EsploraSyncConfig, FilesystemLoggerConfig, WALLET_KEYS_SEED_LEN,
+};
 
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -16,7 +18,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -27,8 +29,8 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
+use crate::Node;
 use crate::{io, NodeMetrics};
-use crate::{LogLevel, Node};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::io::Cursor;
@@ -103,6 +105,17 @@ struct LiquiditySourceConfig {
 impl Default for LiquiditySourceConfig {
 	fn default() -> Self {
 		Self { lsps2_service: None }
+	}
+}
+
+#[derive(Debug)]
+enum LogWriterConfig {
+	File(FilesystemLoggerConfig),
+}
+
+impl Default for LogWriterConfig {
+	fn default() -> Self {
+		Self::File(FilesystemLoggerConfig::default())
 	}
 }
 
@@ -182,6 +195,7 @@ pub struct NodeBuilder {
 	chain_data_source_config: Option<ChainDataSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
+	log_writer_config: Option<LogWriterConfig>,
 }
 
 impl NodeBuilder {
@@ -197,12 +211,14 @@ impl NodeBuilder {
 		let chain_data_source_config = None;
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
+		let log_writer_config = None;
 		Self {
 			config,
 			entropy_source_config,
 			chain_data_source_config,
 			gossip_source_config,
 			liquidity_source_config,
+			log_writer_config,
 		}
 	}
 
@@ -298,9 +314,9 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Sets the log file path if the log file needs to live separate from the storage directory path.
-	pub fn set_log_file_path(&mut self, log_dir_path: String) -> &mut Self {
-		self.config.log_file_path = Some(log_dir_path);
+	/// Configures the [`Node`] instance to write logs to the filesystem.
+	pub fn set_filesystem_logger(&mut self, fs_config: FilesystemLoggerConfig) -> &mut Self {
+		self.log_writer_config = Some(LogWriterConfig::File(fs_config));
 		self
 	}
 
@@ -331,12 +347,6 @@ impl NodeBuilder {
 
 		self.config.node_alias = Some(node_alias);
 		Ok(self)
-	}
-
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&mut self, level: LogLevel) -> &mut Self {
-		self.config.log_level = level;
-		self
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -391,7 +401,10 @@ impl NodeBuilder {
 	) -> Result<Node, BuildError> {
 		use bitcoin::key::Secp256k1;
 
-		let logger = setup_logger(&self.config)?;
+		let writer = LogWriterConfig::default();
+		let log_writer_config =
+			if let Some(config) = &self.log_writer_config { config } else { &writer };
+		let logger = setup_logger(&log_writer_config)?;
 
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -456,7 +469,10 @@ impl NodeBuilder {
 	pub fn build_with_vss_store_and_header_provider(
 		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
-		let logger = setup_logger(&self.config)?;
+		let writer = LogWriterConfig::default();
+		let log_writer_config =
+			if let Some(config) = &self.log_writer_config { config } else { &writer };
+		let logger = setup_logger(&log_writer_config)?;
 
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -488,7 +504,11 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Node, BuildError> {
-		let logger = setup_logger(&self.config)?;
+		let writer = LogWriterConfig::default();
+		let log_writer_config =
+			if let Some(config) = &self.log_writer_config { config } else { &writer };
+		let logger = setup_logger(&log_writer_config)?;
+
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
 			self.entropy_source_config.as_ref(),
@@ -610,9 +630,9 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
 	}
 
-	/// Sets the log file path if logs need to live separate from the storage directory path.
-	pub fn set_log_file_path(&self, log_file_path: String) {
-		self.inner.write().unwrap().set_log_file_path(log_file_path);
+	/// Configures the [`Node`] instance to write logs to the filesystem.
+	pub fn set_filesystem_logger(&self, fs_config: FilesystemLoggerConfig) {
+		self.inner.write().unwrap().set_filesystem_logger(fs_config);
 	}
 
 	/// Sets the Bitcoin network used.
@@ -633,11 +653,6 @@ impl ArcedNodeBuilder {
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
-	}
-
-	/// Sets the level at which [`Node`] will log messages.
-	pub fn set_log_level(&self, level: LogLevel) {
-		self.inner.write().unwrap().set_log_level(level);
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -734,7 +749,7 @@ fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<FilesystemLogger>, kv_store: Arc<DynStore>,
+	logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	// Initialize the status fields.
 	let is_listening = Arc::new(AtomicBool::new(false));
@@ -1242,23 +1257,22 @@ fn build_with_store_internal(
 	})
 }
 
-/// Sets up the node logger, creating a new log file if it does not exist, or utilizing
-/// the existing log file.
-fn setup_logger(config: &Config) -> Result<Arc<FilesystemLogger>, BuildError> {
-	let log_file_path = match &config.log_file_path {
-		Some(log_dir) => String::from(log_dir),
-		None => format!("{}/{}", config.storage_dir_path.clone(), "ldk_node.log"),
-	};
+/// Sets up the node logger.
+fn setup_logger(config: &LogWriterConfig) -> Result<Arc<Logger>, BuildError> {
+	match config {
+		LogWriterConfig::File(fs_logger_config) => {
+			let log_file_path = &fs_logger_config.log_file_path;
 
-	Ok(Arc::new(
-		FilesystemLogger::new(log_file_path, config.log_level)
-			.map_err(|_| BuildError::LoggerSetupFailed)?,
-	))
+			Ok(Arc::new(
+				Logger::new_fs_writer(log_file_path.to_string(), fs_logger_config.level)
+					.map_err(|_| BuildError::LoggerSetupFailed)?,
+			))
+		},
+	}
 }
 
 fn seed_bytes_from_config(
-	config: &Config, entropy_source_config: Option<&EntropySourceConfig>,
-	logger: Arc<FilesystemLogger>,
+	config: &Config, entropy_source_config: Option<&EntropySourceConfig>, logger: Arc<Logger>,
 ) -> Result<[u8; 64], BuildError> {
 	match entropy_source_config {
 		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
@@ -1280,7 +1294,7 @@ fn seed_bytes_from_config(
 }
 
 fn derive_vss_xprv(
-	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<FilesystemLogger>,
+	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<Logger>,
 ) -> Result<Xpriv, BuildError> {
 	use bitcoin::key::Secp256k1;
 

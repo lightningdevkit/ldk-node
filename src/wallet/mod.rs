@@ -7,7 +7,7 @@
 
 use persist::KVStoreWalletPersister;
 
-use crate::logger::{log_debug, log_error, log_info, log_trace, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::Error;
@@ -59,7 +59,7 @@ pub(crate) struct Wallet<B: Deref, E: Deref, L: Deref>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
@@ -73,7 +73,7 @@ impl<B: Deref, E: Deref, L: Deref> Wallet<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
@@ -450,7 +450,7 @@ impl<B: Deref, E: Deref, L: Deref> Listen for Wallet<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn filtered_block_connected(
 		&self, _header: &bitcoin::block::Header,
@@ -510,7 +510,7 @@ impl<B: Deref, E: Deref, L: Deref> WalletSource for Wallet<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
@@ -652,7 +652,7 @@ pub(crate) struct WalletKeysManager<B: Deref, E: Deref, L: Deref>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	inner: KeysManager,
 	wallet: Arc<Wallet<B, E, L>>,
@@ -663,7 +663,7 @@ impl<B: Deref, E: Deref, L: Deref> WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
 	///
@@ -694,7 +694,7 @@ impl<B: Deref, E: Deref, L: Deref> NodeSigner for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
 		self.inner.get_node_id(recipient)
@@ -731,7 +731,7 @@ impl<B: Deref, E: Deref, L: Deref> OutputSpender for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
 	fn spend_spendable_outputs<C: Signing>(
@@ -754,7 +754,7 @@ impl<B: Deref, E: Deref, L: Deref> EntropySource for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
 		self.inner.get_secure_random_bytes()
@@ -765,7 +765,7 @@ impl<B: Deref, E: Deref, L: Deref> SignerProvider for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	type EcdsaSigner = InMemorySigner;
 
@@ -816,7 +816,7 @@ impl<B: Deref, E: Deref, L: Deref> ChangeDestinationSource for WalletKeysManager
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
 		let address = self.wallet.get_new_internal_address().map_err(|e| {

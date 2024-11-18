@@ -9,7 +9,7 @@ use crate::chain::ChainSource;
 use crate::config::ChannelConfig;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::RuntimeSpawner;
-use crate::logger::FilesystemLogger;
+use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 
 use lightning::chain::chainmonitor;
@@ -43,7 +43,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<ChainSource>,
 	Arc<Broadcaster>,
 	Arc<OnchainFeeEstimator>,
-	Arc<FilesystemLogger>,
+	Arc<Logger>,
 	Arc<DynStore>,
 >;
 
@@ -52,8 +52,8 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<ChannelManager>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
-	Arc<FilesystemLogger>,
-	Arc<NodeCustomMessageHandler<Arc<FilesystemLogger>>>,
+	Arc<Logger>,
+	Arc<NodeCustomMessageHandler<Arc<Logger>>>,
 	Arc<KeysManager>,
 >;
 
@@ -69,52 +69,48 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<OnchainFeeEstimator>,
 	Arc<Router>,
 	Arc<MessageRouter>,
-	Arc<FilesystemLogger>,
+	Arc<Logger>,
 >;
 
-pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<FilesystemLogger>>;
+pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<Logger>>;
 
 pub(crate) type Wallet =
-	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<FilesystemLogger>>;
+	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
 
-pub(crate) type KeysManager = crate::wallet::WalletKeysManager<
-	Arc<Broadcaster>,
-	Arc<OnchainFeeEstimator>,
-	Arc<FilesystemLogger>,
->;
+pub(crate) type KeysManager =
+	crate::wallet::WalletKeysManager<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<Graph>,
-	Arc<FilesystemLogger>,
+	Arc<Logger>,
 	Arc<KeysManager>,
 	Arc<Mutex<Scorer>>,
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
-pub(crate) type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<FilesystemLogger>>;
+pub(crate) type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<Logger>>;
 
-pub(crate) type Graph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
+pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
 
-pub(crate) type UtxoLookup =
-	GossipVerifier<RuntimeSpawner, Arc<dyn UtxoSource>, Arc<FilesystemLogger>>;
+pub(crate) type UtxoLookup = GossipVerifier<RuntimeSpawner, Arc<dyn UtxoSource>, Arc<Logger>>;
 
 pub(crate) type P2PGossipSync =
-	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<FilesystemLogger>>;
+	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<Logger>>;
 pub(crate) type RapidGossipSync =
-	lightning_rapid_gossip_sync::RapidGossipSync<Arc<Graph>, Arc<FilesystemLogger>>;
+	lightning_rapid_gossip_sync::RapidGossipSync<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type GossipSync = lightning_background_processor::GossipSync<
 	Arc<P2PGossipSync>,
 	Arc<RapidGossipSync>,
 	Arc<Graph>,
 	Arc<UtxoLookup>,
-	Arc<FilesystemLogger>,
+	Arc<Logger>,
 >;
 
 pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
-	Arc<FilesystemLogger>,
+	Arc<Logger>,
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
@@ -125,7 +121,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
-	Arc<FilesystemLogger>,
+	Arc<Logger>,
 	Arc<KeysManager>,
 >;
 
@@ -135,16 +131,16 @@ pub(crate) type Sweeper = OutputSweeper<
 	Arc<OnchainFeeEstimator>,
 	Arc<ChainSource>,
 	Arc<DynStore>,
-	Arc<FilesystemLogger>,
+	Arc<Logger>,
 	Arc<KeysManager>,
 >;
 
 pub(crate) type BumpTransactionEventHandler =
 	lightning::events::bump_transaction::BumpTransactionEventHandler<
 		Arc<Broadcaster>,
-		Arc<lightning::events::bump_transaction::Wallet<Arc<Wallet>, Arc<FilesystemLogger>>>,
+		Arc<lightning::events::bump_transaction::Wallet<Arc<Wallet>, Arc<Logger>>>,
 		Arc<KeysManager>,
-		Arc<FilesystemLogger>,
+		Arc<Logger>,
 	>;
 
 /// A local, potentially user-provided, identifier of a channel.

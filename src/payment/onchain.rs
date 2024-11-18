@@ -9,7 +9,7 @@
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::logger::{log_info, FilesystemLogger, Logger};
+use crate::logger::{log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, Wallet};
 use crate::wallet::OnchainSendAmount;
 
@@ -45,13 +45,13 @@ pub struct OnchainPayment {
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	config: Arc<Config>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<Logger>,
 }
 
 impl OnchainPayment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, wallet: Arc<Wallet>,
-		channel_manager: Arc<ChannelManager>, config: Arc<Config>, logger: Arc<FilesystemLogger>,
+		channel_manager: Arc<ChannelManager>, config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self { runtime, wallet, channel_manager, config, logger }
 	}

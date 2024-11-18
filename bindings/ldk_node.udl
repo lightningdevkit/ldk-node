@@ -5,13 +5,11 @@ namespace ldk_node {
 
 dictionary Config {
 	string storage_dir_path;
-	string? log_file_path;
 	Network network;
 	sequence<SocketAddress>? listening_addresses;
 	NodeAlias? node_alias;
 	sequence<PublicKey> trusted_peers_0conf;
 	u64 probing_liquidity_limit_multiplier;
-	LogLevel log_level;
 	AnchorChannelsConfig? anchor_channels_config;
 	SendingParameters? sending_parameters;
 };
@@ -25,6 +23,20 @@ dictionary EsploraSyncConfig {
 	u64 onchain_wallet_sync_interval_secs;
 	u64 lightning_wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;
+};
+
+enum LdkLevel {
+	"Gossip",
+	"Trace",
+	"Debug",
+	"Info",
+	"Warn",
+	"Error",
+};
+
+dictionary FilesystemLoggerConfig {
+	string log_file_path;
+	LdkLevel level;
 };
 
 interface Builder {
@@ -41,6 +53,7 @@ interface Builder {
 	void set_gossip_source_rgs(string rgs_server_url);
 	void set_liquidity_source_lsps2(SocketAddress address, PublicKey node_id, string? token);
 	void set_storage_dir_path(string storage_dir_path);
+	void set_filesystem_logger(FilesystemLoggerConfig fs_config);
 	void set_network(Network network);
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
@@ -533,15 +546,6 @@ dictionary ChannelConfig {
 interface MaxDustHTLCExposure {
 	FixedLimit ( u64 limit_msat );
 	FeeRateMultiplier ( u64 multiplier );
-};
-
-enum LogLevel {
-	"Gossip",
-	"Trace",
-	"Debug",
-	"Info",
-	"Warn",
-	"Error",
 };
 
 interface NetworkGraph {

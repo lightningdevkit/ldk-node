@@ -7,6 +7,7 @@
 
 //! Objects for configuring the node.
 
+use crate::logger::LdkLevel;
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
@@ -14,7 +15,6 @@ use lightning::routing::gossip::NodeAlias;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::config::UserConfig;
-use lightning::util::logger::Level as LogLevel;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
@@ -22,14 +22,15 @@ use bitcoin::Network;
 use std::time::Duration;
 
 // Config defaults
-const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
+const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
-const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
+const DEFAULT_LOG_FILE_PATH: &'static str = "ldk_node.log";
+const DEFAULT_LOG_LEVEL: LdkLevel = LdkLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
@@ -103,11 +104,6 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
-	/// The path where logs are stored.
-	///
-	/// If set to `None`, logs can be found in `ldk_node.log` in the [`Config::storage_dir_path`]
-	/// directory.
-	pub log_file_path: Option<String>,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
@@ -133,10 +129,6 @@ pub struct Config {
 	/// Channels with available liquidity less than the required amount times this value won't be
 	/// used to send pre-flight probes.
 	pub probing_liquidity_limit_multiplier: u64,
-	/// The level at which we log messages.
-	///
-	/// Any messages below this level will be excluded from the logs.
-	pub log_level: LogLevel,
 	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
 	/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
 	///
@@ -168,12 +160,10 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
-			log_file_path: None,
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
-			log_level: DEFAULT_LOG_LEVEL,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
 			node_alias: None,
@@ -436,6 +426,25 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 				Self::FeeRateMultiplier(multiplier)
 			},
 		}
+	}
+}
+
+/// Configuration options for logging to the filesystem.
+#[derive(Debug)]
+pub struct FilesystemLoggerConfig {
+	/// The log file path.
+	///
+	/// This specifies the log file path if a destination other than the storage
+	/// directory, i.e. [`Config::storage_dir_path`], is preferred.
+	pub log_file_path: String,
+	/// This specifies the log level.
+	pub level: LdkLevel,
+}
+
+impl Default for FilesystemLoggerConfig {
+	fn default() -> Self {
+		let log_file_path = format!("{}/{}", DEFAULT_STORAGE_DIR_PATH, DEFAULT_LOG_FILE_PATH);
+		Self { log_file_path, level: DEFAULT_LOG_LEVEL }
 	}
 }
 

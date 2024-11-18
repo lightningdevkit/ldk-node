@@ -9,7 +9,7 @@ use crate::hex_utils;
 use crate::io::{
 	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, Logger};
+use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::Error;
 
@@ -344,7 +344,7 @@ impl PaymentDetailsUpdate {
 
 pub(crate) struct PaymentStore<L: Deref>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	payments: Mutex<HashMap<PaymentId, PaymentDetails>>,
 	kv_store: Arc<DynStore>,
@@ -353,7 +353,7 @@ where
 
 impl<L: Deref> PaymentStore<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(payments: Vec<PaymentDetails>, kv_store: Arc<DynStore>, logger: L) -> Self {
 		let payments = Mutex::new(HashMap::from_iter(

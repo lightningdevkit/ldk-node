@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::{log_debug, log_error, log_info, Logger};
+use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager};
 use crate::{Config, Error};
 
@@ -41,7 +41,7 @@ struct LSPS2Service {
 
 pub(crate) struct LiquiditySource<L: Deref>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	lsps2_service: Option<LSPS2Service>,
 	channel_manager: Arc<ChannelManager>,
@@ -53,7 +53,7 @@ where
 
 impl<L: Deref> LiquiditySource<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new_lsps2(
 		address: SocketAddress, node_id: PublicKey, token: Option<String>,
