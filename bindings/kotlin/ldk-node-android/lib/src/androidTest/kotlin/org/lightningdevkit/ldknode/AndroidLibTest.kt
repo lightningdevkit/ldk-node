@@ -28,13 +28,11 @@ class AndroidLibTest {
         config1.storageDirPath = tmpDir1
         config1.listeningAddresses = listOf(listenAddress1)
         config1.network = Network.REGTEST
-        config1.logLevel = LogLevel.TRACE
 
         val config2 = defaultConfig()
         config2.storageDirPath = tmpDir2
         config2.listeningAddresses = listOf(listenAddress2)
         config2.network = Network.REGTEST
-        config2.logLevel = LogLevel.TRACE
 
         val builder1 = Builder.fromConfig(config1)
         val builder2 = Builder.fromConfig(config2)

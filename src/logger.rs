@@ -5,17 +5,47 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-pub(crate) use lightning::util::logger::Logger as LdkLogger;
+pub(crate) use lightning::util::logger::{Logger as LdkLogger, Record};
 pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace};
 
 pub use lightning::util::logger::Level as LdkLevel;
-use lightning::util::logger::Record;
 
 use chrono::Utc;
 
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+
+/// A unit of logging output with Metadata to enable filtering Module_path,
+/// file, line to inform on log's source.
+pub struct LogRecord {
+	/// The verbosity level of the message.
+	pub level: LdkLevel,
+	/// The message body.
+	pub args: String,
+	/// The module path of the message.
+	pub module_path: String,
+	/// The line containing the message.
+	pub line: u32,
+}
+
+impl<'a> From<Record<'a>> for LogRecord {
+	fn from(record: Record) -> Self {
+		Self {
+			level: record.level,
+			args: record.args.to_string(),
+			module_path: record.module_path.to_string(),
+			line: record.line,
+		}
+	}
+}
+
+/// LogWriter trait encapsulating the operations required of a
+/// logger's writer.
+pub trait LogWriter: Send + Sync {
+	/// Log the record.
+	fn log(&self, record: LogRecord);
+}
 
 pub(crate) struct FilesystemLogger {
 	file_path: String,
@@ -26,6 +56,36 @@ pub(crate) struct FilesystemLogger {
 pub(crate) enum Writer {
 	/// Writes logs to the file system.
 	FileWriter(FilesystemLogger),
+}
+
+impl LogWriter for Writer {
+	fn log(&self, record: LogRecord) {
+		let raw_log = record.args.to_string();
+		let log = format!(
+			"{} {:<5} [{}:{}] {}\n",
+			Utc::now().format("%Y-%m-%d %H:%M:%S"),
+			record.level.to_string(),
+			record.module_path,
+			record.line,
+			raw_log
+		);
+
+		match self {
+			Writer::FileWriter(fs_logger) => {
+				if record.level < fs_logger.level {
+					return;
+				}
+
+				fs::OpenOptions::new()
+					.create(true)
+					.append(true)
+					.open(fs_logger.file_path.clone())
+					.expect("Failed to open log file")
+					.write_all(log.as_bytes())
+					.expect("Failed to write to log file")
+			},
+		}
+	}
 }
 
 pub(crate) struct Logger {
@@ -57,30 +117,6 @@ impl Logger {
 
 impl LdkLogger for Logger {
 	fn log(&self, record: Record) {
-		let raw_log = record.args.to_string();
-		let log = format!(
-			"{} {:<5} [{}:{}] {}\n",
-			Utc::now().format("%Y-%m-%d %H:%M:%S"),
-			record.level.to_string(),
-			record.module_path,
-			record.line,
-			raw_log
-		);
-
-		match &self.writer {
-			Writer::FileWriter(fs_logger) => {
-				if record.level < fs_logger.level {
-					return;
-				}
-
-				fs::OpenOptions::new()
-					.create(true)
-					.append(true)
-					.open(fs_logger.file_path.clone())
-					.expect("Failed to open log file")
-					.write_all(log.as_bytes())
-					.expect("Failed to write to log file")
-			},
-		}
+		self.writer.log(record.into());
 	}
 }

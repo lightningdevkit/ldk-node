@@ -588,6 +588,18 @@ dictionary NodeAnnouncementInfo {
 	sequence<SocketAddress> addresses;
 };
 
+dictionary LogRecord {
+	LdkLevel level;
+	string args;
+	string module_path;
+	u32 line;
+};
+
+[Trait]
+interface LogWriter {
+    void log(LogRecord record);
+};
+
 [Custom]
 typedef string Txid;
 
