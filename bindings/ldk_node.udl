@@ -39,6 +39,10 @@ dictionary FilesystemLoggerConfig {
 	LdkLevel level;
 };
 
+dictionary LogFacadeLoggerConfig {
+	LdkLevel level;
+};
+
 interface Builder {
 	constructor();
 	[Name=from_config]
@@ -54,6 +58,7 @@ interface Builder {
 	void set_liquidity_source_lsps2(SocketAddress address, PublicKey node_id, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(FilesystemLoggerConfig fs_config);
+	void set_log_facade_logger(LogFacadeLoggerConfig lf_config);
 	void set_network(Network network);
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);

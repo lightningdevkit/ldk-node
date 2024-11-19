@@ -9,14 +9,15 @@ mod common;
 
 use common::{
 	do_channel_full_cycle, expect_channel_ready_event, expect_event, expect_payment_received_event,
-	expect_payment_successful_event, generate_blocks_and_wait, open_channel,
+	expect_payment_successful_event, generate_blocks_and_wait, init_mock_logger, open_channel,
 	premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestLogWriter, TestSyncStore,
 };
 
 use ldk_node::config::{EsploraSyncConfig, FilesystemLoggerConfig};
 use ldk_node::payment::{PaymentKind, QrPaymentResult, SendingParameters};
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::LdkLevel;
+use ldk_node::{Builder, Event, LogFacadeLoggerConfig, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::util::logger::Level;
@@ -33,7 +34,8 @@ use std::sync::Arc;
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
 
@@ -41,7 +43,8 @@ fn channel_full_cycle() {
 fn channel_full_cycle_bitcoind() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::BitcoindRpc(&bitcoind);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
 
@@ -49,7 +52,8 @@ fn channel_full_cycle_bitcoind() {
 fn channel_full_cycle_force_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
 }
 
@@ -57,7 +61,8 @@ fn channel_full_cycle_force_close() {
 fn channel_full_cycle_force_close_trusted_no_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true, log_writer);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
 }
 
@@ -65,7 +70,8 @@ fn channel_full_cycle_force_close_trusted_no_reserve() {
 fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false, log_writer);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true, true, false)
 }
 
@@ -73,7 +79,8 @@ fn channel_full_cycle_0conf() {
 fn channel_full_cycle_legacy_staticremotekey() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, log_writer);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false);
 }
 
@@ -81,7 +88,8 @@ fn channel_full_cycle_legacy_staticremotekey() {
 fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -286,7 +294,8 @@ fn start_stop_reinit() {
 fn onchain_spend_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -388,7 +397,9 @@ fn onchain_wallet_recovery() {
 	let seed_bytes = vec![42u8; 64];
 
 	let original_config = random_config(true);
-	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let original_node =
+		setup_node(&chain_source, original_config, Some(seed_bytes.clone()), log_writer);
 
 	let premine_amount_sat = 100_000;
 
@@ -433,7 +444,8 @@ fn onchain_wallet_recovery() {
 
 	// Now we start from scratch, only the seed remains the same.
 	let recovered_config = random_config(true);
-	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes), log_writer);
 
 	recovered_node.sync_wallets().unwrap();
 	assert_eq!(
@@ -476,7 +488,8 @@ fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, config, None);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let node = setup_node(&chain_source, config, None, log_writer);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
@@ -494,7 +507,8 @@ fn connection_restart_behavior() {
 fn do_connection_restart_behavior(persist: bool) {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, log_writer);
 
 	let node_id_a = node_a.node_id();
 	let node_id_b = node_b.node_id();
@@ -546,7 +560,8 @@ fn do_connection_restart_behavior(persist: bool) {
 fn concurrent_connections_succeed() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let node_a = Arc::new(node_a);
 	let node_b = Arc::new(node_b);
@@ -577,7 +592,8 @@ fn concurrent_connections_succeed() {
 fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -785,7 +801,8 @@ fn simple_bolt12_send_receive() {
 fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -827,7 +844,10 @@ fn generate_bip21_uri() {
 fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let mock_logger = init_mock_logger(log::LevelFilter::Trace);
+	let log_writer = TestLogWriter::LogFacade(LogFacadeLoggerConfig { level: LdkLevel::Trace });
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -930,4 +950,10 @@ fn unified_qr_send_receive() {
 
 	assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
+
+	assert!(mock_logger
+		.retrieve_logs()
+		.last()
+		.unwrap()
+		.contains("Incremental sync of on-chain wallet finished"),);
 }

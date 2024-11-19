@@ -7,7 +7,8 @@
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{
-	default_user_config, Config, EsploraSyncConfig, FilesystemLoggerConfig, WALLET_KEYS_SEED_LEN,
+	default_user_config, Config, EsploraSyncConfig, FilesystemLoggerConfig, LogFacadeLoggerConfig,
+	WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
@@ -111,6 +112,7 @@ impl Default for LiquiditySourceConfig {
 #[derive(Debug)]
 enum LogWriterConfig {
 	File(FilesystemLoggerConfig),
+	Log(LogFacadeLoggerConfig),
 }
 
 impl Default for LogWriterConfig {
@@ -317,6 +319,12 @@ impl NodeBuilder {
 	/// Configures the [`Node`] instance to write logs to the filesystem.
 	pub fn set_filesystem_logger(&mut self, fs_config: FilesystemLoggerConfig) -> &mut Self {
 		self.log_writer_config = Some(LogWriterConfig::File(fs_config));
+		self
+	}
+
+	/// Configures the [`Node`] instance to write logs to the `log` facade.
+	pub fn set_log_facade_logger(&mut self, lf_config: LogFacadeLoggerConfig) -> &mut Self {
+		self.log_writer_config = Some(LogWriterConfig::Log(lf_config));
 		self
 	}
 
@@ -633,6 +641,11 @@ impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to write logs to the filesystem.
 	pub fn set_filesystem_logger(&self, fs_config: FilesystemLoggerConfig) {
 		self.inner.write().unwrap().set_filesystem_logger(fs_config);
+	}
+
+	/// Configures the [`Node`] instance to write logs to the `log` facade.
+	pub fn set_log_facade_logger(&self, lf_config: LogFacadeLoggerConfig) {
+		self.inner.write().unwrap().set_log_facade_logger(lf_config);
 	}
 
 	/// Sets the Bitcoin network used.
@@ -1268,6 +1281,10 @@ fn setup_logger(config: &LogWriterConfig) -> Result<Arc<Logger>, BuildError> {
 					.map_err(|_| BuildError::LoggerSetupFailed)?,
 			))
 		},
+		LogWriterConfig::Log(log_facade_logger_config) => Ok(Arc::new(
+			Logger::new_log_facade(log_facade_logger_config.level)
+				.map_err(|_| BuildError::LoggerSetupFailed)?,
+		)),
 	}
 }
 

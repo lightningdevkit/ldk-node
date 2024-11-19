@@ -11,6 +11,7 @@ pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace}
 pub use lightning::util::logger::Level as LdkLevel;
 
 use chrono::Utc;
+use log::{debug, error, info, trace, warn};
 
 use std::fs;
 use std::io::Write;
@@ -52,10 +53,16 @@ pub(crate) struct FilesystemLogger {
 	level: LdkLevel,
 }
 
+pub(crate) struct LogFacadeLogger {
+	level: LdkLevel,
+}
+
 /// Defines a writer for [`Logger`].
 pub(crate) enum Writer {
 	/// Writes logs to the file system.
 	FileWriter(FilesystemLogger),
+	/// Forwards logs to the `log` facade.
+	LogFacadeWriter(LogFacadeLogger),
 }
 
 impl LogWriter for Writer {
@@ -83,6 +90,14 @@ impl LogWriter for Writer {
 					.expect("Failed to open log file")
 					.write_all(log.as_bytes())
 					.expect("Failed to write to log file")
+			},
+			Writer::LogFacadeWriter(log_facade_logger) => match log_facade_logger.level {
+				LdkLevel::Gossip => trace!("{}", log),
+				LdkLevel::Trace => trace!("{}", log),
+				LdkLevel::Debug => debug!("{}", log),
+				LdkLevel::Info => info!("{}", log),
+				LdkLevel::Warn => warn!("{}", log),
+				LdkLevel::Error => error!("{}", log),
 			},
 		}
 	}
@@ -112,6 +127,12 @@ impl Logger {
 		let fs_writer = FilesystemLogger { file_path: log_file_path, level };
 
 		Ok(Self { writer: Writer::FileWriter(fs_writer) })
+	}
+
+	pub fn new_log_facade(level: LdkLevel) -> Result<Self, ()> {
+		let log_facade_writer = LogFacadeLogger { level };
+
+		Ok(Self { writer: Writer::LogFacadeWriter(log_facade_writer) })
 	}
 }
 
