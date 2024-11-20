@@ -8,12 +8,13 @@
 #![cfg(any(test, cln_test, vss_test))]
 #![allow(dead_code)]
 
+use chrono::Utc;
 use ldk_node::config::{Config, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, FilesystemLoggerConfig, LightningBalance,
-	LogFacadeLoggerConfig, Node, NodeError, PendingSweepBalance,
+	LogFacadeLoggerConfig, LogRecord, LogWriter, Node, NodeError, PendingSweepBalance,
 };
 
 use lightning::ln::msgs::SocketAddress;
@@ -257,9 +258,11 @@ pub(crate) enum TestChainSource<'a> {
 pub(crate) enum TestLogWriter {
 	File(FilesystemLoggerConfig),
 	LogFacade(LogFacadeLoggerConfig),
+	Custom(Arc<dyn LogWriter + Send + Sync>),
 }
 
 /// Simple in-memory mock `log` logger for tests.
+#[derive(Debug)]
 pub(crate) struct MockLogger {
 	logs: Arc<Mutex<Vec<String>>>,
 }
@@ -274,9 +277,18 @@ impl MockLogger {
 	}
 }
 
+/// [`MockLogger`] as `log` logger - destination for [`Writer::LogFacadeWriter`]
+/// to write logs to.
+///
+/// [`Writer::LogFacadeWriter`]: ldk_node::logger::Writer::LogFacadeWriter
 impl Log for MockLogger {
 	fn log(&self, record: &log::Record) {
-		let message = format!("[{}] {}", record.level(), record.args());
+		let message = format!(
+			"{} [{}] {}",
+			Utc::now().format("%Y-%m-%d %H:%M:%S"),
+			record.level(),
+			record.args()
+		);
 		self.logs.lock().unwrap().push(message);
 	}
 
@@ -287,10 +299,31 @@ impl Log for MockLogger {
 	fn flush(&self) {}
 }
 
-pub(crate) fn init_mock_logger(level: LevelFilter) -> Arc<MockLogger> {
+/// [`MockLogger`] as custom logger - a destination for [`Writer::CustomWriter`]
+/// to write logs to.
+///
+/// [`Writer::CustomWriter`]: ldk_node::logger::Writer::CustomWriter
+impl LogWriter for MockLogger {
+	fn log(&self, record: LogRecord) {
+		let message = format!(
+			"{} [{}] {}",
+			Utc::now().format("%Y-%m-%d %H:%M:%S"),
+			record.level,
+			record.args
+		);
+		self.logs.lock().unwrap().push(message);
+	}
+}
+
+pub(crate) fn init_log_logger(level: LevelFilter) -> Arc<MockLogger> {
 	let logger = Arc::new(MockLogger::new());
 	log::set_boxed_logger(Box::new(logger.clone())).unwrap();
 	log::set_max_level(level);
+	logger
+}
+
+pub(crate) fn init_custom_logger() -> Arc<MockLogger> {
+	let logger = Arc::new(MockLogger::new());
 	logger
 }
 
@@ -359,6 +392,9 @@ pub(crate) fn setup_node(
 		},
 		TestLogWriter::LogFacade(lf_config) => {
 			builder.set_log_facade_logger(lf_config);
+		},
+		TestLogWriter::Custom(log_writer) => {
+			builder.set_custom_logger(log_writer);
 		},
 	}
 

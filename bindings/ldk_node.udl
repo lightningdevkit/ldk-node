@@ -25,7 +25,7 @@ dictionary EsploraSyncConfig {
 	u64 fee_rate_cache_update_interval_secs;
 };
 
-enum LdkLevel {
+enum LogLevel {
 	"Gossip",
 	"Trace",
 	"Debug",
@@ -36,11 +36,11 @@ enum LdkLevel {
 
 dictionary FilesystemLoggerConfig {
 	string log_file_path;
-	LdkLevel level;
+	LogLevel level;
 };
 
 dictionary LogFacadeLoggerConfig {
-	LdkLevel level;
+	LogLevel level;
 };
 
 interface Builder {
@@ -594,7 +594,7 @@ dictionary NodeAnnouncementInfo {
 };
 
 dictionary LogRecord {
-	LdkLevel level;
+	LogLevel level;
 	string args;
 	string module_path;
 	u32 line;

@@ -7,7 +7,7 @@
 
 //! Objects for configuring the node.
 
-use crate::logger::LdkLevel;
+use crate::logger::LogLevel;
 use crate::payment::SendingParameters;
 
 use lightning::ln::msgs::SocketAddress;
@@ -30,7 +30,7 @@ const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 const DEFAULT_LOG_FILE_PATH: &'static str = "ldk_node.log";
-const DEFAULT_LOG_LEVEL: LdkLevel = LdkLevel::Debug;
+const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
@@ -438,14 +438,14 @@ pub struct FilesystemLoggerConfig {
 	/// directory, i.e. [`Config::storage_dir_path`], is preferred.
 	pub log_file_path: String,
 	/// This specifies the log level.
-	pub level: LdkLevel,
+	pub level: LogLevel,
 }
 
 /// Configuration options for logging to the `log` facade.
 #[derive(Debug, Clone)]
 pub struct LogFacadeLoggerConfig {
 	/// This specifies the log level.
-	pub level: LdkLevel,
+	pub level: LogLevel,
 }
 
 impl Default for FilesystemLoggerConfig {

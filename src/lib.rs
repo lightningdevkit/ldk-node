@@ -112,7 +112,7 @@ pub use event::Event;
 pub use io::utils::generate_entropy_mnemonic;
 
 pub use config::{FilesystemLoggerConfig, LogFacadeLoggerConfig};
-pub use logger::{LdkLevel, LogRecord, LogWriter};
+pub use logger::{LogLevel, LogRecord, LogWriter};
 
 #[cfg(feature = "uniffi")]
 use uniffi_types::*;

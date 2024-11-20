@@ -19,7 +19,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, LdkLogger, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
 use crate::peer_store::PeerStore;
@@ -113,6 +113,7 @@ impl Default for LiquiditySourceConfig {
 enum LogWriterConfig {
 	File(FilesystemLoggerConfig),
 	Log(LogFacadeLoggerConfig),
+	Custom(Arc<dyn LogWriter + Send + Sync>),
 }
 
 impl Default for LogWriterConfig {
@@ -325,6 +326,12 @@ impl NodeBuilder {
 	/// Configures the [`Node`] instance to write logs to the `log` facade.
 	pub fn set_log_facade_logger(&mut self, lf_config: LogFacadeLoggerConfig) -> &mut Self {
 		self.log_writer_config = Some(LogWriterConfig::Log(lf_config));
+		self
+	}
+
+	/// Configures the [`Node`] instance to write logs to the provided custom log writer.
+	pub fn set_custom_logger(&mut self, log_writer: Arc<dyn LogWriter + Send + Sync>) -> &mut Self {
+		self.log_writer_config = Some(LogWriterConfig::Custom(log_writer));
 		self
 	}
 
@@ -646,6 +653,11 @@ impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to write logs to the `log` facade.
 	pub fn set_log_facade_logger(&self, lf_config: LogFacadeLoggerConfig) {
 		self.inner.write().unwrap().set_log_facade_logger(lf_config);
+	}
+
+	/// Configures the [`Node`] instance to write logs to the provided custom log writer.
+	pub fn set_custom_logger(&self, log_writer: Arc<dyn LogWriter + Send + Sync>) {
+		self.inner.write().unwrap().set_custom_logger(log_writer);
 	}
 
 	/// Sets the Bitcoin network used.
@@ -1283,6 +1295,10 @@ fn setup_logger(config: &LogWriterConfig) -> Result<Arc<Logger>, BuildError> {
 		},
 		LogWriterConfig::Log(log_facade_logger_config) => Ok(Arc::new(
 			Logger::new_log_facade(log_facade_logger_config.level)
+				.map_err(|_| BuildError::LoggerSetupFailed)?,
+		)),
+		LogWriterConfig::Custom(custom_log_writer) => Ok(Arc::new(
+			Logger::new_custom_writer(custom_log_writer.clone())
 				.map_err(|_| BuildError::LoggerSetupFailed)?,
 		)),
 	}

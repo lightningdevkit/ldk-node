@@ -9,14 +9,15 @@ mod common;
 
 use common::{
 	do_channel_full_cycle, expect_channel_ready_event, expect_event, expect_payment_received_event,
-	expect_payment_successful_event, generate_blocks_and_wait, init_mock_logger, open_channel,
-	premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestLogWriter, TestSyncStore,
+	expect_payment_successful_event, generate_blocks_and_wait, init_custom_logger, init_log_logger,
+	open_channel, premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd,
+	setup_builder, setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestLogWriter,
+	TestSyncStore,
 };
 
 use ldk_node::config::{EsploraSyncConfig, FilesystemLoggerConfig};
 use ldk_node::payment::{PaymentKind, QrPaymentResult, SendingParameters};
-use ldk_node::LdkLevel;
+use ldk_node::LogLevel;
 use ldk_node::{Builder, Event, LogFacadeLoggerConfig, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
@@ -801,7 +802,10 @@ fn simple_bolt12_send_receive() {
 fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let log_writer = TestLogWriter::File(FilesystemLoggerConfig::default());
+
+	// Setup custom logger.
+	let mock_logger = init_custom_logger();
+	let log_writer = TestLogWriter::Custom(mock_logger.clone());
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
@@ -838,6 +842,10 @@ fn generate_bip21_uri() {
 		},
 		Err(e) => panic!("Failed to generate URI: {:?}", e),
 	}
+
+	let logs = mock_logger.retrieve_logs();
+	let last_log_entry = logs.last().unwrap();
+	assert!(last_log_entry.contains("[INFO] Invoice created:"));
 }
 
 #[test]
@@ -845,8 +853,9 @@ fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let mock_logger = init_mock_logger(log::LevelFilter::Trace);
-	let log_writer = TestLogWriter::LogFacade(LogFacadeLoggerConfig { level: LdkLevel::Trace });
+	// Setup `log` facade logger.
+	let mock_logger = init_log_logger(log::LevelFilter::Trace);
+	let log_writer = TestLogWriter::LogFacade(LogFacadeLoggerConfig { level: LogLevel::Trace });
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, log_writer);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
