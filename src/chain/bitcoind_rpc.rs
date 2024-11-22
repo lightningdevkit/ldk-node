@@ -51,7 +51,7 @@ impl BitcoindRpcClient {
 	pub(crate) async fn broadcast_transaction(&self, tx: &Transaction) -> std::io::Result<Txid> {
 		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
 		let tx_json = serde_json::json!(tx_serialized);
-		self.rpc_client.call_method::<Txid>("sendrawtransaction", &vec![tx_json]).await
+		self.rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
 	}
 
 	pub(crate) async fn get_fee_estimate_for_target(
@@ -62,7 +62,7 @@ impl BitcoindRpcClient {
 		self.rpc_client
 			.call_method::<FeeResponse>(
 				"estimatesmartfee",
-				&vec![num_blocks_json, estimation_mode_json],
+				&[num_blocks_json, estimation_mode_json],
 			)
 			.await
 			.map(|resp| resp.0)
@@ -70,7 +70,7 @@ impl BitcoindRpcClient {
 
 	pub(crate) async fn get_mempool_minimum_fee_rate(&self) -> std::io::Result<FeeRate> {
 		self.rpc_client
-			.call_method::<MempoolMinFeeResponse>("getmempoolinfo", &vec![])
+			.call_method::<MempoolMinFeeResponse>("getmempoolinfo", &[])
 			.await
 			.map(|resp| resp.0)
 	}
@@ -82,7 +82,7 @@ impl BitcoindRpcClient {
 		let txid_json = serde_json::json!(txid_hex);
 		match self
 			.rpc_client
-			.call_method::<GetRawTransactionResponse>("getrawtransaction", &vec![txid_json])
+			.call_method::<GetRawTransactionResponse>("getrawtransaction", &[txid_json])
 			.await
 		{
 			Ok(resp) => Ok(Some(resp.0)),
@@ -116,7 +116,7 @@ impl BitcoindRpcClient {
 	pub(crate) async fn get_raw_mempool(&self) -> std::io::Result<Vec<Txid>> {
 		let verbose_flag_json = serde_json::json!(false);
 		self.rpc_client
-			.call_method::<GetRawMempoolResponse>("getrawmempool", &vec![verbose_flag_json])
+			.call_method::<GetRawMempoolResponse>("getrawmempool", &[verbose_flag_json])
 			.await
 			.map(|resp| resp.0)
 	}
@@ -125,7 +125,7 @@ impl BitcoindRpcClient {
 		let txid_hex = bitcoin::consensus::encode::serialize_hex(&txid);
 		let txid_json = serde_json::json!(txid_hex);
 		self.rpc_client
-			.call_method::<GetMempoolEntryResponse>("getmempoolentry", &vec![txid_json])
+			.call_method::<GetMempoolEntryResponse>("getmempoolentry", &[txid_json])
 			.await
 			.map(|resp| MempoolEntry { txid, height: resp.height, time: resp.time })
 	}
