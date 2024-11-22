@@ -121,19 +121,19 @@ impl BitcoindRpcClient {
 			.map(|resp| resp.0)
 	}
 
-	pub(crate) async fn get_mempool_entry(&self, txid: &Txid) -> std::io::Result<MempoolEntry> {
-		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
+	pub(crate) async fn get_mempool_entry(&self, txid: Txid) -> std::io::Result<MempoolEntry> {
+		let txid_hex = bitcoin::consensus::encode::serialize_hex(&txid);
 		let txid_json = serde_json::json!(txid_hex);
 		self.rpc_client
 			.call_method::<GetMempoolEntryResponse>("getmempoolentry", &vec![txid_json])
 			.await
-			.map(|resp| MempoolEntry { txid: txid.clone(), height: resp.height, time: resp.time })
+			.map(|resp| MempoolEntry { txid, height: resp.height, time: resp.time })
 	}
 
 	pub(crate) async fn get_mempool_entries(&self) -> std::io::Result<Vec<MempoolEntry>> {
 		let mempool_txids = self.get_raw_mempool().await?;
 		let mut mempool_entries = Vec::with_capacity(mempool_txids.len());
-		for txid in &mempool_txids {
+		for txid in mempool_txids {
 			let entry = self.get_mempool_entry(txid).await?;
 			mempool_entries.push(entry);
 		}

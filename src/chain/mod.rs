@@ -51,7 +51,7 @@ pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/ap
 // The default Esplora client timeout we're using.
 pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
 
-const CHAIN_POLLING_INTERVAL_SECS: u64 = 1;
+const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 
 pub(crate) enum WalletSyncStatus {
 	Completed,
