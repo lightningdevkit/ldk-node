@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use client::client::LdkNodeServerClient;
-use client::error::LdkNodeServerError;
+use client::client::LdkServerClient;
+use client::error::LdkServerError;
 use client::protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
 	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
@@ -78,7 +78,7 @@ enum Commands {
 #[tokio::main]
 async fn main() {
 	let cli = Cli::parse();
-	let client = LdkNodeServerClient::new(cli.base_url);
+	let client = LdkServerClient::new(cli.base_url);
 
 	match cli.command {
 		Commands::OnchainReceive => {
@@ -141,7 +141,7 @@ async fn main() {
 	}
 }
 
-fn handle_response<Rs: ::prost::Message>(response: Result<Rs, LdkNodeServerError>) {
+fn handle_response<Rs: ::prost::Message>(response: Result<Rs, LdkServerError>) {
 	match response {
 		Ok(response) => {
 			println!("{:?}", response);

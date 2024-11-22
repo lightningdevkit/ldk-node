@@ -955,7 +955,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ldk-node-server"
+name = "ldk-server"
 version = "0.1.0"
 dependencies = [
  "bytes",
