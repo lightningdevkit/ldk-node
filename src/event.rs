@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::types::{DynStore, Sweeper, Wallet};
+use crate::types::{CustomTlvRecord, DynStore, Sweeper, Wallet};
 
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, Graph, PeerInfo,
@@ -102,6 +102,8 @@ pub enum Event {
 		payment_hash: PaymentHash,
 		/// The value, in thousandths of a satoshi, that has been received.
 		amount_msat: u64,
+		/// Custom TLV records received on the payment
+		custom_records: Vec<CustomTlvRecord>,
 	},
 	/// A payment has been forwarded.
 	PaymentForwarded {
@@ -168,6 +170,8 @@ pub enum Event {
 		/// The block height at which this payment will be failed back and will no longer be
 		/// eligible for claiming.
 		claim_deadline: Option<u32>,
+		/// Custom TLV records attached to the payment
+		custom_records: Vec<CustomTlvRecord>,
 	},
 	/// A channel has been created and is pending confirmation on-chain.
 	ChannelPending {
@@ -224,6 +228,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, payment_hash, required),
 		(1, payment_id, option),
 		(2, amount_msat, required),
+		(3, custom_records, optional_vec),
 	},
 	(3, ChannelReady) => {
 		(0, channel_id, required),
@@ -248,6 +253,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(2, payment_id, required),
 		(4, claimable_amount_msat, required),
 		(6, claim_deadline, option),
+		(7, custom_records, optional_vec),
 	},
 	(7, PaymentForwarded) => {
 		(0, prev_channel_id, required),
@@ -542,7 +548,7 @@ where
 				via_channel_id: _,
 				via_user_channel_id: _,
 				claim_deadline,
-				onion_fields: _,
+				onion_fields,
 				counterparty_skimmed_fee_msat,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
@@ -644,11 +650,17 @@ where
 									"We would have registered the preimage if we knew"
 								);
 
+								let custom_records = onion_fields
+									.map(|cf| {
+										cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect()
+									})
+									.unwrap_or_default();
 								let event = Event::PaymentClaimable {
 									payment_id,
 									payment_hash,
 									claimable_amount_msat: amount_msat,
 									claim_deadline,
+									custom_records,
 								};
 								match self.event_queue.add_event(event) {
 									Ok(_) => return Ok(()),
@@ -799,7 +811,7 @@ where
 				receiver_node_id: _,
 				htlcs: _,
 				sender_intended_total_msat: _,
-				onion_fields: _,
+				onion_fields,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				log_info!(
@@ -875,6 +887,9 @@ where
 					payment_id: Some(payment_id),
 					payment_hash,
 					amount_msat,
+					custom_records: onion_fields
+						.map(|cf| cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect())
+						.unwrap_or_default(),
 				};
 				match self.event_queue.add_event(event) {
 					Ok(_) => return Ok(()),

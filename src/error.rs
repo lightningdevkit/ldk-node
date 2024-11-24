@@ -34,6 +34,8 @@ pub enum Error {
 	RefundCreationFailed,
 	/// Sending a payment has failed.
 	PaymentSendingFailed,
+	/// Sending of spontaneous payment with custom TLVs failed.
+	InvalidCustomTlvs,
 	/// Sending a payment probe has failed.
 	ProbeSendingFailed,
 	/// A channel could not be opened.
@@ -130,6 +132,7 @@ impl fmt::Display for Error {
 			Self::OfferCreationFailed => write!(f, "Failed to create offer."),
 			Self::RefundCreationFailed => write!(f, "Failed to create refund."),
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
+			Self::InvalidCustomTlvs => write!(f, "Failed to construct payment with custom TLVs."),
 			Self::ProbeSendingFailed => write!(f, "Failed to send the given payment probe."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
