@@ -1,0 +1,12 @@
+[package]
+name = "ldk-server-protos"
+version = "0.1.0"
+edition = "2021"
+
+build = "build.rs"
+
+[dependencies]
+prost = { version = "0.11.6", default-features = false, features = ["std", "prost-derive"] }
+
+[target.'cfg(genproto)'.build-dependencies]
+prost-build = { version = "0.11.6" , default-features = false}
