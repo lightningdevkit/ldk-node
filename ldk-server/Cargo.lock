@@ -386,26 +386,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "client",
- "prost",
- "tokio",
-]
-
-[[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "prost",
- "protos",
- "reqwest",
- "tokio",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -964,11 +944,39 @@ dependencies = [
  "hyper 1.4.1",
  "hyper-util",
  "ldk-node",
+ "ldk-server-protos",
  "prost",
- "protos",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "ldk-server-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ldk-server-client",
+ "prost",
+ "tokio",
+]
+
+[[package]]
+name = "ldk-server-client"
+version = "0.1.0"
+dependencies = [
+ "ldk-server-protos",
+ "prost",
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
+name = "ldk-server-protos"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
 ]
 
 [[package]]
@@ -1349,14 +1357,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "213622a1460818959ac1181aaeb2dc9c7f63df720db7d788b3e24eacd1983e13"
 dependencies = [
  "prost",
-]
-
-[[package]]
-name = "protos"
-version = "0.1.0"
-dependencies = [
- "prost",
- "prost-build",
 ]
 
 [[package]]
