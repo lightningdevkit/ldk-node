@@ -946,6 +946,8 @@ dependencies = [
  "ldk-node",
  "ldk-server-protos",
  "prost",
+ "rand",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",
