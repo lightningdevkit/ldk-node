@@ -21,7 +21,7 @@ message ErrorResponse {
 
 enum ErrorCode {
 
-  // Will neve be used as `error_code` by server.
+  // Will never be used as `error_code` by server.
   //
   // **Caution**: If a new type of `error_code` is introduced in the `ErrorCode` enum, `error_code` field will be set to
   // `UnknownError`.

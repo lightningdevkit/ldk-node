@@ -20,7 +20,7 @@ pub struct ErrorResponse {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum ErrorCode {
-	/// Will neve be used as `error_code` by ldk-server.
+	/// Will never be used as `error_code` by server.
 	///
 	/// **Caution**: If a new type of `error_code` is introduced in the `ErrorCode` enum, `error_code` field will be set to
 	/// `UnknownError`.
@@ -35,7 +35,7 @@ pub enum ErrorCode {
 	AuthError = 2,
 	/// Used to represent an error while doing a Lightning operation.
 	LightningError = 3,
-	/// Used when an internal ldk-server error occurred. The ldk-ldk-server-client is probably at no fault.
+	/// Used when an internal server error occurred. The client is probably at no fault.
 	InternalServerError = 4,
 }
 impl ErrorCode {
