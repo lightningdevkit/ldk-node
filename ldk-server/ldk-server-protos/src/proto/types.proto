@@ -350,3 +350,232 @@ message BestBlock {
   // The height at which the block was confirmed.
   uint32 height = 2;
 }
+
+// Details about the status of a known Lightning balance.
+message LightningBalance {
+  oneof balance_type {
+    ClaimableOnChannelClose claimable_on_channel_close = 1;
+    ClaimableAwaitingConfirmations claimable_awaiting_confirmations = 2;
+    ContentiousClaimable contentious_claimable = 3;
+    MaybeTimeoutClaimableHTLC maybe_timeout_claimable_htlc = 4;
+    MaybePreimageClaimableHTLC maybe_preimage_claimable_htlc = 5;
+    CounterpartyRevokedOutputClaimable counterparty_revoked_output_claimable = 6;
+  }
+}
+
+// The channel is not yet closed (or the commitment or closing transaction has not yet appeared in a block).
+// The given balance is claimable (less on-chain fees) if the channel is force-closed now.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ClaimableOnChannelClose
+message ClaimableOnChannelClose {
+  // The identifier of the channel this balance belongs to.
+  string channel_id = 1;
+
+  // The identifier of our channel counterparty.
+  string counterparty_node_id = 2;
+
+  // The amount available to claim, in satoshis, excluding the on-chain fees which will be required to do so.
+  uint64 amount_satoshis = 3;
+
+  // The transaction fee we pay for the closing commitment transaction.
+  // This amount is not included in the `amount_satoshis` value.
+  //
+  // Note that if this channel is inbound (and thus our counterparty pays the commitment transaction fee) this value
+  // will be zero.
+  uint64 transaction_fee_satoshis = 4;
+
+  // The amount of millisatoshis which has been burned to fees from HTLCs which are outbound from us and are related to
+  // a payment which was sent by us. This is the sum of the millisatoshis part of all HTLCs which are otherwise
+  // represented by `LightningBalance::MaybeTimeoutClaimableHTLC` with their
+  // `LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment` flag set, as well as any dust HTLCs which would
+  // otherwise be represented the same.
+  //
+  // This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+  uint64 outbound_payment_htlc_rounded_msat = 5;
+
+  // The amount of millisatoshis which has been burned to fees from HTLCs which are outbound from us and are related to
+  // a forwarded HTLC. This is the sum of the millisatoshis part of all HTLCs which are otherwise represented by
+  // `LightningBalance::MaybeTimeoutClaimableHTLC` with their `LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment`
+  // flag not set, as well as any dust HTLCs which would otherwise be represented the same.
+  //
+  // This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+  uint64 outbound_forwarded_htlc_rounded_msat = 6;
+
+  // The amount of millisatoshis which has been burned to fees from HTLCs which are inbound to us and for which we know
+  // the preimage. This is the sum of the millisatoshis part of all HTLCs which would be represented by
+  // `LightningBalance::ContentiousClaimable` on channel close, but whose current value is included in `amount_satoshis`,
+  // as well as any dust HTLCs which would otherwise be represented the same.
+  //
+  // This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+  uint64 inbound_claiming_htlc_rounded_msat = 7;
+
+  // The amount of millisatoshis which has been burned to fees from HTLCs which are inbound to us and for which we do
+  // not know the preimage. This is the sum of the millisatoshis part of all HTLCs which would be represented by
+  // `LightningBalance::MaybePreimageClaimableHTLC` on channel close, as well as any dust HTLCs which would otherwise be
+  // represented the same.
+  //
+  // This amount (rounded up to a whole satoshi value) will not be included in the counterparty’s `amount_satoshis`.
+  uint64 inbound_htlc_rounded_msat = 8;
+}
+
+// The channel has been closed, and the given balance is ours but awaiting confirmations until we consider it spendable.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ClaimableAwaitingConfirmations
+message ClaimableAwaitingConfirmations {
+  // The identifier of the channel this balance belongs to.
+  string channel_id = 1;
+
+  // The identifier of our channel counterparty.
+  string counterparty_node_id = 2;
+
+  // The amount available to claim, in satoshis, possibly excluding the on-chain fees which were spent in broadcasting
+  // the transaction.
+  uint64 amount_satoshis = 3;
+
+  // The height at which we start tracking it as  `SpendableOutput`.
+  uint32 confirmation_height = 4;
+}
+
+// The channel has been closed, and the given balance should be ours but awaiting spending transaction confirmation.
+// If the spending transaction does not confirm in time, it is possible our counterparty can take the funds by
+// broadcasting an HTLC timeout on-chain.
+//
+// Once the spending transaction confirms, before it has reached enough confirmations to be considered safe from chain
+// reorganizations, the balance will instead be provided via `LightningBalance::ClaimableAwaitingConfirmations`.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ContentiousClaimable
+message ContentiousClaimable {
+  // The identifier of the channel this balance belongs to.
+  string channel_id = 1;
+
+  // The identifier of our channel counterparty.
+  string counterparty_node_id = 2;
+
+  // The amount available to claim, in satoshis, excluding the on-chain fees which were spent in broadcasting
+  // the transaction.
+  uint64 amount_satoshis = 3;
+
+  // The height at which the counterparty may be able to claim the balance if we have not done so.
+  uint32 timeout_height = 4;
+
+  // The payment hash that locks this HTLC.
+  string payment_hash = 5;
+
+  // The preimage that can be used to claim this HTLC.
+  string payment_preimage = 6;
+}
+
+// HTLCs which we sent to our counterparty which are claimable after a timeout (less on-chain fees) if the counterparty
+// does not know the preimage for the HTLCs. These are somewhat likely to be claimed by our counterparty before we do.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.MaybeTimeoutClaimableHTLC
+message MaybeTimeoutClaimableHTLC {
+  // The identifier of the channel this balance belongs to.
+  string channel_id = 1;
+
+  // The identifier of our channel counterparty.
+  string counterparty_node_id = 2;
+
+  // The amount available to claim, in satoshis, excluding the on-chain fees which were spent in broadcasting
+  // the transaction.
+  uint64 amount_satoshis = 3;
+
+  // The height at which we will be able to claim the balance if our counterparty has not done so.
+  uint32 claimable_height = 4;
+
+  // The payment hash whose preimage our counterparty needs to claim this HTLC.
+  string payment_hash = 5;
+
+  // Indicates whether this HTLC represents a payment which was sent outbound from us.
+  bool outbound_payment = 6;
+}
+
+// HTLCs which we received from our counterparty which are claimable with a preimage which we do not currently have.
+// This will only be claimable if we receive the preimage from the node to which we forwarded this HTLC before the
+// timeout.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.MaybePreimageClaimableHTLC
+message MaybePreimageClaimableHTLC {
+  // The identifier of the channel this balance belongs to.
+  string channel_id = 1;
+
+  // The identifier of our channel counterparty.
+  string counterparty_node_id = 2;
+
+  // The amount available to claim, in satoshis, excluding the on-chain fees which were spent in broadcasting
+  // the transaction.
+  uint64 amount_satoshis = 3;
+
+  // The height at which our counterparty will be able to claim the balance if we have not yet received the preimage and
+  // claimed it ourselves.
+  uint32 expiry_height = 4;
+
+  // The payment hash whose preimage we need to claim this HTLC.
+  string payment_hash = 5;
+}
+// The channel has been closed, and our counterparty broadcasted a revoked commitment transaction.
+//
+// Thus, we’re able to claim all outputs in the commitment transaction, one of which has the following amount.
+//
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.CounterpartyRevokedOutputClaimable
+message CounterpartyRevokedOutputClaimable {
+  // The identifier of the channel this balance belongs to.
+  string channel_id = 1;
+
+  // The identifier of our channel counterparty.
+  string counterparty_node_id = 2;
+
+  // The amount, in satoshis, of the output which we can claim.
+  uint64 amount_satoshis = 3;
+}
+
+// Details about the status of a known balance currently being swept to our on-chain wallet.
+message PendingSweepBalance {
+  oneof balance_type {
+    PendingBroadcast pending_broadcast = 1;
+    BroadcastAwaitingConfirmation broadcast_awaiting_confirmation = 2;
+    AwaitingThresholdConfirmations awaiting_threshold_confirmations = 3;
+  }
+}
+
+// The spendable output is about to be swept, but a spending transaction has yet to be generated and broadcast.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.PendingBroadcast
+message PendingBroadcast {
+  // The identifier of the channel this balance belongs to.
+  optional string channel_id = 1;
+
+  // The amount, in satoshis, of the output being swept.
+  uint64 amount_satoshis = 2;
+}
+
+// A spending transaction has been generated and broadcast and is awaiting confirmation on-chain.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.BroadcastAwaitingConfirmation
+message BroadcastAwaitingConfirmation {
+  // The identifier of the channel this balance belongs to.
+  optional string channel_id = 1;
+
+  // The best height when we last broadcast a transaction spending the output being swept.
+  uint32 latest_broadcast_height = 2;
+
+  // The identifier of the transaction spending the swept output we last broadcast.
+  string latest_spending_txid = 3;
+
+  // The amount, in satoshis, of the output being swept.
+  uint64 amount_satoshis = 4;
+}
+
+// A spending transaction has been confirmed on-chain and is awaiting threshold confirmations.
+//
+// It will be considered irrevocably confirmed after reaching `ANTI_REORG_DELAY`.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.AwaitingThresholdConfirmations
+message AwaitingThresholdConfirmations {
+  // The identifier of the channel this balance belongs to.
+  optional string channel_id = 1;
+
+  // The identifier of the confirmed transaction spending the swept output.
+  string latest_spending_txid = 2;
+
+  // The hash of the block in which the spending transaction was confirmed.
+  string confirmation_hash = 3;
+
+  // The height at which the spending transaction was confirmed.
+  uint32 confirmation_height = 4;
+
+  // The amount, in satoshis, of the output being swept.
+  uint64 amount_satoshis = 5;
+}
