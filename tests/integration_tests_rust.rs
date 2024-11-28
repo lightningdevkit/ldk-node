@@ -192,6 +192,9 @@ fn multi_hop_sending() {
 	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
 	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
 
+	expect_event!(nodes[1], PaymentForwarded);
+	expect_event!(nodes[2], PaymentForwarded);
+
 	let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);
 	expect_payment_successful_event!(nodes[0], payment_id, Some(fee_paid_msat));
