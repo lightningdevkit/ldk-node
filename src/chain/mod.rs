@@ -273,43 +273,76 @@ impl ChainSource {
 					}
 				}
 
-				let channel_manager_best_block_hash =
+				let mut channel_manager_best_block_hash =
 					channel_manager.current_best_block().block_hash;
-				let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
-				let onchain_wallet_best_block_hash = onchain_wallet.current_best_block().block_hash;
+				let mut sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
+				let mut onchain_wallet_best_block_hash =
+					onchain_wallet.current_best_block().block_hash;
 
-				let mut chain_listeners = vec![
-					(
-						onchain_wallet_best_block_hash,
-						&**onchain_wallet as &(dyn Listen + Send + Sync),
-					),
-					(
-						channel_manager_best_block_hash,
-						&*channel_manager as &(dyn Listen + Send + Sync),
-					),
-					(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
-				];
+				let genesis_block_hash =
+					bitcoin::blockdata::constants::genesis_block(config.network).block_hash();
 
-				// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
-				// before giving them to `ChainMonitor` it the first place. However, this isn't
-				// trivial as we load them on initialization (in the `Builder`) and only gain
-				// network access during `start`. For now, we just make sure we get the worst known
-				// block hash and sychronize them via `ChainMonitor`.
-				if let Some(worst_channel_monitor_block_hash) = chain_monitor
-					.list_monitors()
-					.iter()
-					.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
-					.map(|m| m.current_best_block())
-					.min_by_key(|b| b.height)
-					.map(|b| b.block_hash)
-				{
-					chain_listeners.push((
-						worst_channel_monitor_block_hash,
-						&*chain_monitor as &(dyn Listen + Send + Sync),
-					));
-				}
+				'initial_listener_sync: loop {
+					if channel_manager_best_block_hash == genesis_block_hash
+						&& sweeper_best_block_hash == genesis_block_hash
+						&& onchain_wallet_best_block_hash == genesis_block_hash
+					{
+						// If all chain listeners are still at the genesis we're positive this is a
+						// newly setup node that was never synced to tip before. So we query the best
+						// tip and continue with it, avoiding to validate the entire header chain back to genesis.
+						let chain_tip =
+							match validate_best_block_header(bitcoind_rpc_client.as_ref()).await {
+								Ok(tip) => {
+									*latest_chain_tip.write().unwrap() = Some(tip);
+									tip
+								},
+								Err(e) => {
+									log_error!(logger, "Failed to poll for chain data: {:?}", e);
+									tokio::time::sleep(Duration::from_secs(
+										CHAIN_POLLING_INTERVAL_SECS,
+									))
+									.await;
+									continue 'initial_listener_sync;
+								},
+							};
 
-				loop {
+						let tip_hash = chain_tip.to_best_block().block_hash;
+						channel_manager_best_block_hash = tip_hash;
+						sweeper_best_block_hash = tip_hash;
+						onchain_wallet_best_block_hash = tip_hash;
+					}
+
+					let mut chain_listeners = vec![
+						(
+							onchain_wallet_best_block_hash,
+							&**onchain_wallet as &(dyn Listen + Send + Sync),
+						),
+						(
+							channel_manager_best_block_hash,
+							&*channel_manager as &(dyn Listen + Send + Sync),
+						),
+						(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
+					];
+
+					// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
+					// before giving them to `ChainMonitor` it the first place. However, this isn't
+					// trivial as we load them on initialization (in the `Builder`) and only gain
+					// network access during `start`. For now, we just make sure we get the worst known
+					// block hash and sychronize them via `ChainMonitor`.
+					if let Some(worst_channel_monitor_block_hash) = chain_monitor
+						.list_monitors()
+						.iter()
+						.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
+						.map(|m| m.current_best_block())
+						.min_by_key(|b| b.height)
+						.map(|b| b.block_hash)
+					{
+						chain_listeners.push((
+							worst_channel_monitor_block_hash,
+							&*chain_monitor as &(dyn Listen + Send + Sync),
+						));
+					}
+
 					let mut locked_header_cache = header_cache.lock().await;
 					match synchronize_listeners(
 						bitcoind_rpc_client.as_ref(),
@@ -347,6 +380,7 @@ impl ChainSource {
 							log_error!(logger, "Failed to synchronize chain listeners: {:?}", e);
 							tokio::time::sleep(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS))
 								.await;
+							continue 'initial_listener_sync;
 						},
 					}
 				}
