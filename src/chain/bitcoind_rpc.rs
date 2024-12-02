@@ -201,7 +201,7 @@ impl BlockSource for BitcoindRpcClient {
 		Box::pin(async move { self.rpc_client.get_block(header_hash).await })
 	}
 
-	fn get_best_block<'a>(&'a self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
+	fn get_best_block(&self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
 		Box::pin(async move { self.rpc_client.get_best_block().await })
 	}
 }
