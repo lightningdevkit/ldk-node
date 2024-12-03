@@ -991,8 +991,8 @@ impl ChainSource {
 									);
 								},
 								Err(e) => match e {
-									esplora_client::Error::Reqwest(err) => {
-										if err.status() == reqwest::StatusCode::from_u16(400).ok() {
+									esplora_client::Error::HttpResponse { status, message } => {
+										if status == 400 {
 											// Log 400 at lesser level, as this often just means bitcoind already knows the
 											// transaction.
 											// FIXME: We can further differentiate here based on the error
@@ -1001,13 +1001,13 @@ impl ChainSource {
 											log_trace!(
 												logger,
 												"Failed to broadcast due to HTTP connection error: {}",
-												err
+												message
 											);
 										} else {
 											log_error!(
 												logger,
-												"Failed to broadcast due to HTTP connection error: {}",
-												err
+												"Failed to broadcast due to HTTP connection error: {} - {}",
+												status, message
 											);
 										}
 										log_trace!(
