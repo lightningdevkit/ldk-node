@@ -10,6 +10,8 @@ import 'types.proto';
 message GetNodeInfoRequest {
 }
 
+// The response `content` for the `GetNodeInfo` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message GetNodeInfoResponse {
 
   // The hex-encoded `node-id` or public key for our own lightning node.
@@ -54,6 +56,8 @@ message GetNodeInfoResponse {
 message OnchainReceiveRequest {
 }
 
+// The response `content` for the `OnchainReceive` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`..
 message OnchainReceiveResponse {
 
   // A Bitcoin on-chain address.
@@ -82,6 +86,8 @@ message OnchainSendRequest {
   optional bool send_all = 3;
 }
 
+// The response `content` for the `OnchainSend` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message OnchainSendResponse {
 
   // The transaction ID of the broadcasted transaction.
@@ -107,7 +113,8 @@ message Bolt11ReceiveRequest {
   uint32 expiry_secs = 3;
 }
 
-
+// The response `content` for the `Bolt11Receive` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message Bolt11ReceiveResponse {
 
   // An invoice for a payment within the Lightning Network.
@@ -130,6 +137,8 @@ message Bolt11SendRequest {
 
 }
 
+// The response `content` for the `Bolt11Send` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message Bolt11SendResponse {
 
   // An identifier used to uniquely identify a payment.
@@ -157,6 +166,8 @@ message Bolt12ReceiveRequest {
   optional uint64 quantity = 4;
 }
 
+// The response `content` for the `Bolt12Receive` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message Bolt12ReceiveResponse {
 
   // An offer for a payment within the Lightning Network.
@@ -186,6 +197,8 @@ message Bolt12SendRequest {
   optional string payer_note = 4;
 }
 
+// The response `content` for the `Bolt12Send` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message Bolt12SendResponse {
 
   // An identifier used to uniquely identify a payment.
@@ -216,6 +229,8 @@ message OpenChannelRequest {
   bool announce_channel = 6;
 }
 
+// The response `content` for the `OpenChannel` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message OpenChannelResponse {
 
   // The channel id of the created channel that user can use to refer to channel.
@@ -236,6 +251,8 @@ message UpdateChannelConfigRequest {
   types.ChannelConfig channel_config = 3;
 }
 
+// The response `content` for the `UpdateChannelConfig` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message UpdateChannelConfigResponse {
 }
 
@@ -258,6 +275,8 @@ message CloseChannelRequest {
   optional string force_close_reason = 4;
 }
 
+// The response `content` for the `CloseChannel` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message CloseChannelResponse {
 
 }
@@ -266,6 +285,8 @@ message CloseChannelResponse {
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_channels
 message ListChannelsRequest {}
 
+// The response `content` for the `ListChannels` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message ListChannelsResponse {
 
   // List of channels.
@@ -279,6 +300,8 @@ message GetPaymentDetailsRequest {
   string payment_id = 1;
 }
 
+// The response `content` for the `GetPaymentDetails` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message GetPaymentDetailsResponse {
   // Represents a payment.
   // Will be `None` if payment doesn't exist.
@@ -289,6 +312,8 @@ message GetPaymentDetailsResponse {
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_payments
 message ListPaymentsRequest {}
 
+// The response `content` for the `ListPayments` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message ListPaymentsResponse {
   // List of payments.
   repeated types.Payment payments = 1;
@@ -298,6 +323,8 @@ message ListPaymentsResponse {
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_balances
 message GetBalancesRequest {}
 
+// The response `content` for the `GetBalances` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message GetBalancesResponse {
   // The total balance of our on-chain wallet.
   uint64 total_onchain_balance_sats = 1;

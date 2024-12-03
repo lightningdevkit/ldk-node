@@ -5,6 +5,8 @@
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetNodeInfoRequest {}
+/// The response `content` for the `GetNodeInfo` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetNodeInfoResponse {
@@ -50,6 +52,8 @@ pub struct GetNodeInfoResponse {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OnchainReceiveRequest {}
+/// The response `content` for the `OnchainReceive` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`..
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OnchainReceiveResponse {
@@ -80,6 +84,8 @@ pub struct OnchainSendRequest {
 	#[prost(bool, optional, tag = "3")]
 	pub send_all: ::core::option::Option<bool>,
 }
+/// The response `content` for the `OnchainSend` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OnchainSendResponse {
@@ -107,6 +113,8 @@ pub struct Bolt11ReceiveRequest {
 	#[prost(uint32, tag = "3")]
 	pub expiry_secs: u32,
 }
+/// The response `content` for the `Bolt11Receive` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt11ReceiveResponse {
@@ -130,6 +138,8 @@ pub struct Bolt11SendRequest {
 	#[prost(uint64, optional, tag = "2")]
 	pub amount_msat: ::core::option::Option<u64>,
 }
+/// The response `content` for the `Bolt11Send` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt11SendResponse {
@@ -159,6 +169,8 @@ pub struct Bolt12ReceiveRequest {
 	#[prost(uint64, optional, tag = "4")]
 	pub quantity: ::core::option::Option<u64>,
 }
+/// The response `content` for the `Bolt12Receive` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt12ReceiveResponse {
@@ -190,6 +202,8 @@ pub struct Bolt12SendRequest {
 	#[prost(string, optional, tag = "4")]
 	pub payer_note: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// The response `content` for the `Bolt12Send` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt12SendResponse {
@@ -222,6 +236,8 @@ pub struct OpenChannelRequest {
 	#[prost(bool, tag = "6")]
 	pub announce_channel: bool,
 }
+/// The response `content` for the `OpenChannel` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenChannelResponse {
@@ -244,6 +260,8 @@ pub struct UpdateChannelConfigRequest {
 	#[prost(message, optional, tag = "3")]
 	pub channel_config: ::core::option::Option<super::types::ChannelConfig>,
 }
+/// The response `content` for the `UpdateChannelConfig` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateChannelConfigResponse {}
@@ -267,6 +285,8 @@ pub struct CloseChannelRequest {
 	#[prost(string, optional, tag = "4")]
 	pub force_close_reason: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// The response `content` for the `CloseChannel` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CloseChannelResponse {}
@@ -275,6 +295,8 @@ pub struct CloseChannelResponse {}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChannelsRequest {}
+/// The response `content` for the `ListChannels` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChannelsResponse {
@@ -291,6 +313,8 @@ pub struct GetPaymentDetailsRequest {
 	#[prost(string, tag = "1")]
 	pub payment_id: ::prost::alloc::string::String,
 }
+/// The response `content` for the `GetPaymentDetails` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPaymentDetailsResponse {
@@ -304,6 +328,8 @@ pub struct GetPaymentDetailsResponse {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListPaymentsRequest {}
+/// The response `content` for the `ListPayments` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListPaymentsResponse {
@@ -316,6 +342,8 @@ pub struct ListPaymentsResponse {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetBalancesRequest {}
+/// The response `content` for the `GetBalances` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetBalancesResponse {
