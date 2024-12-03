@@ -374,6 +374,279 @@ pub struct BestBlock {
 	#[prost(uint32, tag = "2")]
 	pub height: u32,
 }
+/// Details about the status of a known Lightning balance.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LightningBalance {
+	#[prost(oneof = "lightning_balance::BalanceType", tags = "1, 2, 3, 4, 5, 6")]
+	pub balance_type: ::core::option::Option<lightning_balance::BalanceType>,
+}
+/// Nested message and enum types in `LightningBalance`.
+pub mod lightning_balance {
+	#[allow(clippy::derive_partial_eq_without_eq)]
+	#[derive(Clone, PartialEq, ::prost::Oneof)]
+	pub enum BalanceType {
+		#[prost(message, tag = "1")]
+		ClaimableOnChannelClose(super::ClaimableOnChannelClose),
+		#[prost(message, tag = "2")]
+		ClaimableAwaitingConfirmations(super::ClaimableAwaitingConfirmations),
+		#[prost(message, tag = "3")]
+		ContentiousClaimable(super::ContentiousClaimable),
+		#[prost(message, tag = "4")]
+		MaybeTimeoutClaimableHtlc(super::MaybeTimeoutClaimableHtlc),
+		#[prost(message, tag = "5")]
+		MaybePreimageClaimableHtlc(super::MaybePreimageClaimableHtlc),
+		#[prost(message, tag = "6")]
+		CounterpartyRevokedOutputClaimable(super::CounterpartyRevokedOutputClaimable),
+	}
+}
+/// The channel is not yet closed (or the commitment or closing transaction has not yet appeared in a block).
+/// The given balance is claimable (less on-chain fees) if the channel is force-closed now.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ClaimableOnChannelClose>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ClaimableOnChannelClose {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, tag = "1")]
+	pub channel_id: ::prost::alloc::string::String,
+	/// The identifier of our channel counterparty.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The amount available to claim, in satoshis, excluding the on-chain fees which will be required to do so.
+	#[prost(uint64, tag = "3")]
+	pub amount_satoshis: u64,
+	/// The transaction fee we pay for the closing commitment transaction.
+	/// This amount is not included in the `amount_satoshis` value.
+	///
+	/// Note that if this channel is inbound (and thus our counterparty pays the commitment transaction fee) this value
+	/// will be zero.
+	#[prost(uint64, tag = "4")]
+	pub transaction_fee_satoshis: u64,
+	/// The amount of millisatoshis which has been burned to fees from HTLCs which are outbound from us and are related to
+	/// a payment which was sent by us. This is the sum of the millisatoshis part of all HTLCs which are otherwise
+	/// represented by `LightningBalance::MaybeTimeoutClaimableHTLC` with their
+	/// `LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment` flag set, as well as any dust HTLCs which would
+	/// otherwise be represented the same.
+	///
+	/// This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+	#[prost(uint64, tag = "5")]
+	pub outbound_payment_htlc_rounded_msat: u64,
+	/// The amount of millisatoshis which has been burned to fees from HTLCs which are outbound from us and are related to
+	/// a forwarded HTLC. This is the sum of the millisatoshis part of all HTLCs which are otherwise represented by
+	/// `LightningBalance::MaybeTimeoutClaimableHTLC` with their `LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment`
+	/// flag not set, as well as any dust HTLCs which would otherwise be represented the same.
+	///
+	/// This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+	#[prost(uint64, tag = "6")]
+	pub outbound_forwarded_htlc_rounded_msat: u64,
+	/// The amount of millisatoshis which has been burned to fees from HTLCs which are inbound to us and for which we know
+	/// the preimage. This is the sum of the millisatoshis part of all HTLCs which would be represented by
+	/// `LightningBalance::ContentiousClaimable` on channel close, but whose current value is included in `amount_satoshis`,
+	/// as well as any dust HTLCs which would otherwise be represented the same.
+	///
+	/// This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+	#[prost(uint64, tag = "7")]
+	pub inbound_claiming_htlc_rounded_msat: u64,
+	/// The amount of millisatoshis which has been burned to fees from HTLCs which are inbound to us and for which we do
+	/// not know the preimage. This is the sum of the millisatoshis part of all HTLCs which would be represented by
+	/// `LightningBalance::MaybePreimageClaimableHTLC` on channel close, as well as any dust HTLCs which would otherwise be
+	/// represented the same.
+	///
+	/// This amount (rounded up to a whole satoshi value) will not be included in the counterparty’s `amount_satoshis`.
+	#[prost(uint64, tag = "8")]
+	pub inbound_htlc_rounded_msat: u64,
+}
+/// The channel has been closed, and the given balance is ours but awaiting confirmations until we consider it spendable.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ClaimableAwaitingConfirmations>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ClaimableAwaitingConfirmations {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, tag = "1")]
+	pub channel_id: ::prost::alloc::string::String,
+	/// The identifier of our channel counterparty.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The amount available to claim, in satoshis, possibly excluding the on-chain fees which were spent in broadcasting
+	/// the transaction.
+	#[prost(uint64, tag = "3")]
+	pub amount_satoshis: u64,
+	/// The height at which we start tracking it as  `SpendableOutput`.
+	#[prost(uint32, tag = "4")]
+	pub confirmation_height: u32,
+}
+/// The channel has been closed, and the given balance should be ours but awaiting spending transaction confirmation.
+/// If the spending transaction does not confirm in time, it is possible our counterparty can take the funds by
+/// broadcasting an HTLC timeout on-chain.
+///
+/// Once the spending transaction confirms, before it has reached enough confirmations to be considered safe from chain
+/// reorganizations, the balance will instead be provided via `LightningBalance::ClaimableAwaitingConfirmations`.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ContentiousClaimable>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ContentiousClaimable {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, tag = "1")]
+	pub channel_id: ::prost::alloc::string::String,
+	/// The identifier of our channel counterparty.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The amount available to claim, in satoshis, excluding the on-chain fees which were spent in broadcasting
+	/// the transaction.
+	#[prost(uint64, tag = "3")]
+	pub amount_satoshis: u64,
+	/// The height at which the counterparty may be able to claim the balance if we have not done so.
+	#[prost(uint32, tag = "4")]
+	pub timeout_height: u32,
+	/// The payment hash that locks this HTLC.
+	#[prost(string, tag = "5")]
+	pub payment_hash: ::prost::alloc::string::String,
+	/// The preimage that can be used to claim this HTLC.
+	#[prost(string, tag = "6")]
+	pub payment_preimage: ::prost::alloc::string::String,
+}
+/// HTLCs which we sent to our counterparty which are claimable after a timeout (less on-chain fees) if the counterparty
+/// does not know the preimage for the HTLCs. These are somewhat likely to be claimed by our counterparty before we do.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.MaybeTimeoutClaimableHTLC>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MaybeTimeoutClaimableHtlc {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, tag = "1")]
+	pub channel_id: ::prost::alloc::string::String,
+	/// The identifier of our channel counterparty.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The amount available to claim, in satoshis, excluding the on-chain fees which were spent in broadcasting
+	/// the transaction.
+	#[prost(uint64, tag = "3")]
+	pub amount_satoshis: u64,
+	/// The height at which we will be able to claim the balance if our counterparty has not done so.
+	#[prost(uint32, tag = "4")]
+	pub claimable_height: u32,
+	/// The payment hash whose preimage our counterparty needs to claim this HTLC.
+	#[prost(string, tag = "5")]
+	pub payment_hash: ::prost::alloc::string::String,
+	/// Indicates whether this HTLC represents a payment which was sent outbound from us.
+	#[prost(bool, tag = "6")]
+	pub outbound_payment: bool,
+}
+/// HTLCs which we received from our counterparty which are claimable with a preimage which we do not currently have.
+/// This will only be claimable if we receive the preimage from the node to which we forwarded this HTLC before the
+/// timeout.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.MaybePreimageClaimableHTLC>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MaybePreimageClaimableHtlc {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, tag = "1")]
+	pub channel_id: ::prost::alloc::string::String,
+	/// The identifier of our channel counterparty.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The amount available to claim, in satoshis, excluding the on-chain fees which were spent in broadcasting
+	/// the transaction.
+	#[prost(uint64, tag = "3")]
+	pub amount_satoshis: u64,
+	/// The height at which our counterparty will be able to claim the balance if we have not yet received the preimage and
+	/// claimed it ourselves.
+	#[prost(uint32, tag = "4")]
+	pub expiry_height: u32,
+	/// The payment hash whose preimage we need to claim this HTLC.
+	#[prost(string, tag = "5")]
+	pub payment_hash: ::prost::alloc::string::String,
+}
+/// The channel has been closed, and our counterparty broadcasted a revoked commitment transaction.
+///
+/// Thus, we’re able to claim all outputs in the commitment transaction, one of which has the following amount.
+///
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.CounterpartyRevokedOutputClaimable>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CounterpartyRevokedOutputClaimable {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, tag = "1")]
+	pub channel_id: ::prost::alloc::string::String,
+	/// The identifier of our channel counterparty.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The amount, in satoshis, of the output which we can claim.
+	#[prost(uint64, tag = "3")]
+	pub amount_satoshis: u64,
+}
+/// Details about the status of a known balance currently being swept to our on-chain wallet.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PendingSweepBalance {
+	#[prost(oneof = "pending_sweep_balance::BalanceType", tags = "1, 2, 3")]
+	pub balance_type: ::core::option::Option<pending_sweep_balance::BalanceType>,
+}
+/// Nested message and enum types in `PendingSweepBalance`.
+pub mod pending_sweep_balance {
+	#[allow(clippy::derive_partial_eq_without_eq)]
+	#[derive(Clone, PartialEq, ::prost::Oneof)]
+	pub enum BalanceType {
+		#[prost(message, tag = "1")]
+		PendingBroadcast(super::PendingBroadcast),
+		#[prost(message, tag = "2")]
+		BroadcastAwaitingConfirmation(super::BroadcastAwaitingConfirmation),
+		#[prost(message, tag = "3")]
+		AwaitingThresholdConfirmations(super::AwaitingThresholdConfirmations),
+	}
+}
+/// The spendable output is about to be swept, but a spending transaction has yet to be generated and broadcast.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.PendingBroadcast>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PendingBroadcast {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, optional, tag = "1")]
+	pub channel_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The amount, in satoshis, of the output being swept.
+	#[prost(uint64, tag = "2")]
+	pub amount_satoshis: u64,
+}
+/// A spending transaction has been generated and broadcast and is awaiting confirmation on-chain.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.BroadcastAwaitingConfirmation>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BroadcastAwaitingConfirmation {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, optional, tag = "1")]
+	pub channel_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The best height when we last broadcast a transaction spending the output being swept.
+	#[prost(uint32, tag = "2")]
+	pub latest_broadcast_height: u32,
+	/// The identifier of the transaction spending the swept output we last broadcast.
+	#[prost(string, tag = "3")]
+	pub latest_spending_txid: ::prost::alloc::string::String,
+	/// The amount, in satoshis, of the output being swept.
+	#[prost(uint64, tag = "4")]
+	pub amount_satoshis: u64,
+}
+/// A spending transaction has been confirmed on-chain and is awaiting threshold confirmations.
+///
+/// It will be considered irrevocably confirmed after reaching `ANTI_REORG_DELAY`.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.AwaitingThresholdConfirmations>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AwaitingThresholdConfirmations {
+	/// The identifier of the channel this balance belongs to.
+	#[prost(string, optional, tag = "1")]
+	pub channel_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The identifier of the confirmed transaction spending the swept output.
+	#[prost(string, tag = "2")]
+	pub latest_spending_txid: ::prost::alloc::string::String,
+	/// The hash of the block in which the spending transaction was confirmed.
+	#[prost(string, tag = "3")]
+	pub confirmation_hash: ::prost::alloc::string::String,
+	/// The height at which the spending transaction was confirmed.
+	#[prost(uint32, tag = "4")]
+	pub confirmation_height: u32,
+	/// The amount, in satoshis, of the output being swept.
+	#[prost(uint64, tag = "5")]
+	pub amount_satoshis: u64,
+}
 /// Represents the direction of a payment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

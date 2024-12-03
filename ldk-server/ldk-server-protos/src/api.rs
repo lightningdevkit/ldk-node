@@ -311,3 +311,50 @@ pub struct ListPaymentsResponse {
 	#[prost(message, repeated, tag = "1")]
 	pub payments: ::prost::alloc::vec::Vec<super::types::Payment>,
 }
+/// Retrieves an overview of all known balances.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_balances>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBalancesRequest {}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBalancesResponse {
+	/// The total balance of our on-chain wallet.
+	#[prost(uint64, tag = "1")]
+	pub total_onchain_balance_sats: u64,
+	/// The currently spendable balance of our on-chain wallet.
+	///
+	/// This includes any sufficiently confirmed funds, minus `total_anchor_channels_reserve_sats`.
+	#[prost(uint64, tag = "2")]
+	pub spendable_onchain_balance_sats: u64,
+	/// The share of our total balance that we retain as an emergency reserve to (hopefully) be
+	/// able to spend the Anchor outputs when one of our channels is closed.
+	#[prost(uint64, tag = "3")]
+	pub total_anchor_channels_reserve_sats: u64,
+	/// The total balance that we would be able to claim across all our Lightning channels.
+	///
+	/// Note this excludes balances that we are unsure if we are able to claim (e.g., as we are
+	/// waiting for a preimage or for a timeout to expire). These balances will however be included
+	/// as `MaybePreimageClaimableHTLC` and `MaybeTimeoutClaimableHTLC` in `lightning_balances`.
+	#[prost(uint64, tag = "4")]
+	pub total_lightning_balance_sats: u64,
+	/// A detailed list of all known Lightning balances that would be claimable on channel closure.
+	///
+	/// Note that less than the listed amounts are spendable over lightning as further reserve
+	/// restrictions apply. Please refer to `Channel::outbound_capacity_msat` and
+	/// Channel::next_outbound_htlc_limit_msat as returned by `ListChannels`
+	/// for a better approximation of the spendable amounts.
+	#[prost(message, repeated, tag = "5")]
+	pub lightning_balances: ::prost::alloc::vec::Vec<super::types::LightningBalance>,
+	/// A detailed list of balances currently being swept from the Lightning to the on-chain
+	/// wallet.
+	///
+	/// These are balances resulting from channel closures that may have been encumbered by a
+	/// delay, but are now being claimed and useable once sufficiently confirmed on-chain.
+	///
+	/// Note that, depending on the sync status of the wallets, swept balances listed here might or
+	/// might not already be accounted for in `total_onchain_balance_sats`.
+	#[prost(message, repeated, tag = "6")]
+	pub pending_balances_from_channel_closures:
+		::prost::alloc::vec::Vec<super::types::PendingSweepBalance>,
+}

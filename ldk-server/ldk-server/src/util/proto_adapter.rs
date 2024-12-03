@@ -2,9 +2,16 @@ use bytes::Bytes;
 use hex::prelude::*;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
 use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::ChannelDetails;
+use ldk_node::{ChannelDetails, LightningBalance, PendingSweepBalance};
+use ldk_server_protos::types::lightning_balance::BalanceType::{
+	ClaimableAwaitingConfirmations, ClaimableOnChannelClose, ContentiousClaimable,
+	CounterpartyRevokedOutputClaimable, MaybePreimageClaimableHtlc, MaybeTimeoutClaimableHtlc,
+};
 use ldk_server_protos::types::payment_kind::Kind::{
 	Bolt11, Bolt11Jit, Bolt12Offer, Bolt12Refund, Onchain, Spontaneous,
+};
+use ldk_server_protos::types::pending_sweep_balance::BalanceType::{
+	AwaitingThresholdConfirmations, BroadcastAwaitingConfirmation, PendingBroadcast,
 };
 use ldk_server_protos::types::{Channel, LspFeeLimits, OutPoint, Payment};
 
@@ -149,6 +156,167 @@ pub(crate) fn payment_kind_to_proto(
 				hash: hash.to_string(),
 				preimage: preimage.map(|p| p.to_string()),
 			})),
+		},
+	}
+}
+
+pub(crate) fn lightning_balance_to_proto(
+	lightning_balance: LightningBalance,
+) -> ldk_server_protos::types::LightningBalance {
+	match lightning_balance {
+		LightningBalance::ClaimableOnChannelClose {
+			channel_id,
+			counterparty_node_id,
+			amount_satoshis,
+			transaction_fee_satoshis,
+			outbound_payment_htlc_rounded_msat,
+			outbound_forwarded_htlc_rounded_msat,
+			inbound_claiming_htlc_rounded_msat,
+			inbound_htlc_rounded_msat,
+		} => ldk_server_protos::types::LightningBalance {
+			balance_type: Some(ClaimableOnChannelClose(
+				ldk_server_protos::types::ClaimableOnChannelClose {
+					channel_id: channel_id.0.to_lower_hex_string(),
+					counterparty_node_id: counterparty_node_id.to_string(),
+					amount_satoshis,
+					transaction_fee_satoshis,
+					outbound_payment_htlc_rounded_msat,
+					outbound_forwarded_htlc_rounded_msat,
+					inbound_claiming_htlc_rounded_msat,
+					inbound_htlc_rounded_msat,
+				},
+			)),
+		},
+		LightningBalance::ClaimableAwaitingConfirmations {
+			channel_id,
+			counterparty_node_id,
+			amount_satoshis,
+			confirmation_height,
+			..
+		} => ldk_server_protos::types::LightningBalance {
+			balance_type: Some(ClaimableAwaitingConfirmations(
+				ldk_server_protos::types::ClaimableAwaitingConfirmations {
+					channel_id: channel_id.0.to_lower_hex_string(),
+					counterparty_node_id: counterparty_node_id.to_string(),
+					amount_satoshis,
+					confirmation_height,
+				},
+			)),
+		},
+		LightningBalance::ContentiousClaimable {
+			channel_id,
+			counterparty_node_id,
+			amount_satoshis,
+			timeout_height,
+			payment_hash,
+			payment_preimage,
+		} => ldk_server_protos::types::LightningBalance {
+			balance_type: Some(ContentiousClaimable(
+				ldk_server_protos::types::ContentiousClaimable {
+					channel_id: channel_id.0.to_lower_hex_string(),
+					counterparty_node_id: counterparty_node_id.to_string(),
+					amount_satoshis,
+					timeout_height,
+					payment_hash: payment_hash.to_string(),
+					payment_preimage: payment_preimage.to_string(),
+				},
+			)),
+		},
+		LightningBalance::MaybeTimeoutClaimableHTLC {
+			channel_id,
+			counterparty_node_id,
+			amount_satoshis,
+			claimable_height,
+			payment_hash,
+			outbound_payment,
+		} => ldk_server_protos::types::LightningBalance {
+			balance_type: Some(MaybeTimeoutClaimableHtlc(
+				ldk_server_protos::types::MaybeTimeoutClaimableHtlc {
+					channel_id: channel_id.0.to_lower_hex_string(),
+					counterparty_node_id: counterparty_node_id.to_string(),
+					amount_satoshis,
+					claimable_height,
+					payment_hash: payment_hash.to_string(),
+					outbound_payment,
+				},
+			)),
+		},
+		LightningBalance::MaybePreimageClaimableHTLC {
+			channel_id,
+			counterparty_node_id,
+			amount_satoshis,
+			expiry_height,
+			payment_hash,
+		} => ldk_server_protos::types::LightningBalance {
+			balance_type: Some(MaybePreimageClaimableHtlc(
+				ldk_server_protos::types::MaybePreimageClaimableHtlc {
+					channel_id: channel_id.0.to_lower_hex_string(),
+					counterparty_node_id: counterparty_node_id.to_string(),
+					amount_satoshis,
+					expiry_height,
+					payment_hash: payment_hash.to_string(),
+				},
+			)),
+		},
+		LightningBalance::CounterpartyRevokedOutputClaimable {
+			channel_id,
+			counterparty_node_id,
+			amount_satoshis,
+		} => ldk_server_protos::types::LightningBalance {
+			balance_type: Some(CounterpartyRevokedOutputClaimable(
+				ldk_server_protos::types::CounterpartyRevokedOutputClaimable {
+					channel_id: channel_id.0.to_lower_hex_string(),
+					counterparty_node_id: counterparty_node_id.to_string(),
+					amount_satoshis,
+				},
+			)),
+		},
+	}
+}
+
+pub(crate) fn pending_sweep_balance_to_proto(
+	pending_sweep_balance: PendingSweepBalance,
+) -> ldk_server_protos::types::PendingSweepBalance {
+	match pending_sweep_balance {
+		PendingSweepBalance::PendingBroadcast { channel_id, amount_satoshis } => {
+			ldk_server_protos::types::PendingSweepBalance {
+				balance_type: Some(PendingBroadcast(ldk_server_protos::types::PendingBroadcast {
+					channel_id: channel_id.map(|c| c.0.to_lower_hex_string()),
+					amount_satoshis,
+				})),
+			}
+		},
+		PendingSweepBalance::BroadcastAwaitingConfirmation {
+			channel_id,
+			latest_broadcast_height,
+			latest_spending_txid,
+			amount_satoshis,
+		} => ldk_server_protos::types::PendingSweepBalance {
+			balance_type: Some(BroadcastAwaitingConfirmation(
+				ldk_server_protos::types::BroadcastAwaitingConfirmation {
+					channel_id: channel_id.map(|c| c.0.to_lower_hex_string()),
+					latest_broadcast_height,
+					latest_spending_txid: latest_spending_txid.to_string(),
+					amount_satoshis,
+				},
+			)),
+		},
+		PendingSweepBalance::AwaitingThresholdConfirmations {
+			channel_id,
+			latest_spending_txid,
+			confirmation_hash,
+			confirmation_height,
+			amount_satoshis,
+		} => ldk_server_protos::types::PendingSweepBalance {
+			balance_type: Some(AwaitingThresholdConfirmations(
+				ldk_server_protos::types::AwaitingThresholdConfirmations {
+					channel_id: channel_id.map(|c| c.0.to_lower_hex_string()),
+					latest_spending_txid: latest_spending_txid.to_string(),
+					confirmation_hash: confirmation_hash.to_string(),
+					confirmation_height,
+					amount_satoshis,
+				},
+			)),
 		},
 	}
 }
