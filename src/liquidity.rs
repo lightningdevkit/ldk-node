@@ -21,9 +21,7 @@ use lightning_liquidity::events::Event;
 use lightning_liquidity::lsps0::ser::RequestId;
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig;
 use lightning_liquidity::lsps1::event::LSPS1ClientEvent;
-use lightning_liquidity::lsps1::msgs::{
-	ChannelInfo, LSPS1Options, OrderId, OrderParameters, PaymentInfo,
-};
+use lightning_liquidity::lsps1::msgs::{ChannelInfo, LSPS1Options, OrderId, OrderParameters};
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::OpeningFeeParams;
@@ -280,7 +278,7 @@ where
 						let response = LSPS1OrderStatus {
 							order_id,
 							order_params: order,
-							payment_options: payment,
+							payment_options: payment.into(),
 							channel_state: channel,
 						};
 
@@ -338,7 +336,7 @@ where
 						let response = LSPS1OrderStatus {
 							order_id,
 							order_params: order,
-							payment_options: payment,
+							payment_options: payment.into(),
 							channel_state: channel,
 						};
 
@@ -887,6 +885,67 @@ pub struct LSPS1OrderStatus {
 	pub payment_options: PaymentInfo,
 	/// Contains information about the channel state.
 	pub channel_state: Option<ChannelInfo>,
+}
+
+#[cfg(not(feature = "uniffi"))]
+type PaymentInfo = lightning_liquidity::lsps1::msgs::PaymentInfo;
+
+/// Details regarding how to pay for an order.
+#[cfg(feature = "uniffi")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaymentInfo {
+	/// A Lightning payment using BOLT 11.
+	pub bolt11: Option<lightning_liquidity::lsps1::msgs::Bolt11PaymentInfo>,
+	/// An onchain payment.
+	pub onchain: Option<OnchainPaymentInfo>,
+}
+
+#[cfg(feature = "uniffi")]
+impl From<lightning_liquidity::lsps1::msgs::PaymentInfo> for PaymentInfo {
+	fn from(value: lightning_liquidity::lsps1::msgs::PaymentInfo) -> Self {
+		PaymentInfo { bolt11: value.bolt11, onchain: value.onchain.map(|o| o.into()) }
+	}
+}
+
+/// An onchain payment.
+#[cfg(feature = "uniffi")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnchainPaymentInfo {
+	/// Indicates the current state of the payment.
+	pub state: lightning_liquidity::lsps1::msgs::PaymentState,
+	/// The datetime when the payment option expires.
+	pub expires_at: chrono::DateTime<chrono::Utc>,
+	/// The total fee the LSP will charge to open this channel in satoshi.
+	pub fee_total_sat: u64,
+	/// The amount the client needs to pay to have the requested channel openend.
+	pub order_total_sat: u64,
+	/// An on-chain address the client can send [`Self::order_total_sat`] to to have the channel
+	/// opened.
+	pub address: bitcoin::Address,
+	/// The minimum number of block confirmations that are required for the on-chain payment to be
+	/// considered confirmed.
+	pub min_onchain_payment_confirmations: Option<u16>,
+	/// The minimum fee rate for the on-chain payment in case the client wants the payment to be
+	/// confirmed without a confirmation.
+	pub min_fee_for_0conf: Arc<bitcoin::FeeRate>,
+	/// The address where the LSP will send the funds if the order fails.
+	pub refund_onchain_address: Option<bitcoin::Address>,
+}
+
+#[cfg(feature = "uniffi")]
+impl From<lightning_liquidity::lsps1::msgs::OnchainPaymentInfo> for OnchainPaymentInfo {
+	fn from(value: lightning_liquidity::lsps1::msgs::OnchainPaymentInfo) -> Self {
+		Self {
+			state: value.state,
+			expires_at: value.expires_at,
+			fee_total_sat: value.fee_total_sat,
+			order_total_sat: value.order_total_sat,
+			address: value.address,
+			min_onchain_payment_confirmations: value.min_onchain_payment_confirmations,
+			min_fee_for_0conf: Arc::new(value.min_fee_for_0conf),
+			refund_onchain_address: value.refund_onchain_address,
+		}
+	}
 }
 
 #[derive(Debug, Clone)]

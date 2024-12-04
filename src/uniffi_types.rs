@@ -14,6 +14,7 @@ pub use crate::config::{
 	default_config, AnchorChannelsConfig, EsploraSyncConfig, MaxDustHTLCExposure,
 };
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
+pub use crate::liquidity::{LSPS1OrderStatus, OnchainPaymentInfo, PaymentInfo};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
@@ -33,11 +34,18 @@ pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
 pub use lightning_invoice::{Bolt11Invoice, Description};
 
+pub use lightning_liquidity::lsps1::msgs::ChannelInfo as ChannelOrderInfo;
+pub use lightning_liquidity::lsps1::msgs::{
+	Bolt11PaymentInfo, OrderId, OrderParameters, PaymentState,
+};
+
 pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Txid};
 
 pub use bip39::Mnemonic;
 
 pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
+
+pub type DateTime = chrono::DateTime<chrono::Utc>;
 
 use crate::UniffiCustomTypeConverter;
 
@@ -393,6 +401,30 @@ impl From<lightning_invoice::Bolt11InvoiceDescription> for Bolt11InvoiceDescript
 				Bolt11InvoiceDescription::Hash { hash: hex_utils::to_string(hash.0.as_ref()) }
 			},
 		}
+	}
+}
+
+impl UniffiCustomTypeConverter for OrderId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(Self(val))
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.0
+	}
+}
+
+impl UniffiCustomTypeConverter for DateTime {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(DateTime::from_str(&val).map_err(|_| Error::InvalidDateTime)?)
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_rfc3339()
 	}
 }
 
