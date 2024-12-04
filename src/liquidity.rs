@@ -5,9 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+//! Objects related to liquidity management.
+
 use crate::chain::ChainSource;
-use crate::logger::{log_debug, log_error, log_info, LdkLogger};
-use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager};
+use crate::connection::ConnectionManager;
+use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
+use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{Config, Error};
 
 use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
@@ -34,7 +37,7 @@ use tokio::sync::oneshot;
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -895,4 +898,119 @@ pub(crate) struct LSPS2FeeResponse {
 pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
 	cltv_expiry_delta: u32,
+}
+
+/// A liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
+///
+/// Should be retrieved by calling [`Node::lsps1_liquidity`].
+///
+/// To open [bLIP-52 / LSPS2] JIT channels, please refer to
+/// [`Bolt11Payment::receive_via_jit_channel`].
+///
+/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
+/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+/// [`Node::lsps1_liquidity`]: crate::Node::lsps1_liquidity
+/// [`Bolt11Payment::receive_via_jit_channel`]: crate::payment::Bolt11Payment::receive_via_jit_channel
+#[derive(Clone)]
+pub struct LSPS1Liquidity {
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	wallet: Arc<Wallet>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	logger: Arc<Logger>,
+}
+
+impl LSPS1Liquidity {
+	pub(crate) fn new(
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, wallet: Arc<Wallet>,
+		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>, logger: Arc<Logger>,
+	) -> Self {
+		Self { runtime, wallet, connection_manager, liquidity_source, logger }
+	}
+
+	/// Connects to the configured LSP and places an order for an inbound channel.
+	///
+	/// The channel will be opened after one of the returned payment options has successfully been
+	/// paid.
+	pub fn request_channel(
+		&self, lsp_balance_sat: u64, client_balance_sat: u64, channel_expiry_blocks: u32,
+		announce_channel: bool,
+	) -> Result<LSPS1OrderStatus, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) = liquidity_source
+			.get_lsps1_service_details()
+			.ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let rt_lock = self.runtime.read().unwrap();
+		let runtime = rt_lock.as_ref().unwrap();
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		tokio::task::block_in_place(move || {
+			runtime.block_on(async move {
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+			})
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
+
+		let refund_address = self.wallet.get_new_address()?;
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response = tokio::task::block_in_place(move || {
+			runtime.block_on(async move {
+				liquidity_source
+					.lsps1_request_channel(
+						lsp_balance_sat,
+						client_balance_sat,
+						channel_expiry_blocks,
+						announce_channel,
+						refund_address,
+					)
+					.await
+			})
+		})?;
+
+		Ok(response)
+	}
+
+	/// Connects to the configured LSP and checks for the status of a previously-placed order.
+	pub fn check_order_status(&self, order_id: OrderId) -> Result<LSPS1OrderStatus, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) = liquidity_source
+			.get_lsps1_service_details()
+			.ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let rt_lock = self.runtime.read().unwrap();
+		let runtime = rt_lock.as_ref().unwrap();
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		tokio::task::block_in_place(move || {
+			runtime.block_on(async move {
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+			})
+		})?;
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response = tokio::task::block_in_place(move || {
+			runtime
+				.block_on(async move { liquidity_source.lsps1_check_order_status(order_id).await })
+		})?;
+
+		Ok(response)
+	}
 }
