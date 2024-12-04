@@ -5,8 +5,6 @@ mod util;
 
 use crate::service::NodeService;
 
-use ldk_node::bitcoin::Network;
-use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event, LogLevel};
 
 use tokio::net::TcpListener;
@@ -15,65 +13,36 @@ use tokio::signal::unix::SignalKind;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 
+use crate::util::config::load_config;
 use ldk_node::config::Config;
-use std::net::SocketAddr;
-use std::str::FromStr;
+use std::path::Path;
 use std::sync::Arc;
 
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
 
-	if args.len() < 8 {
-		eprintln!(
-			"Usage: {} storage_path listening_addr rest_svc_addr network bitcoind_rpc_addr bitcoind_rpc_user bitcoind_rpc_password",
-			args[0]
-		);
+	if args.len() < 2 {
+		eprintln!("Usage: {} config_path", args[0]);
 		std::process::exit(-1);
 	}
 
-	let mut config = Config::default();
-	config.storage_dir_path = args[1].clone();
-	config.log_level = LogLevel::Trace;
+	let mut ldk_node_config = Config::default();
+	let config_file = load_config(Path::new(&args[1])).expect("Invalid configuration file.");
 
-	config.listening_addresses = match SocketAddress::from_str(&args[2]) {
-		Ok(addr) => Some(vec![addr]),
-		Err(_) => {
-			eprintln!("Failed to parse listening_addr: {}", args[2]);
-			std::process::exit(-1);
-		},
-	};
+	ldk_node_config.log_level = LogLevel::Trace;
+	ldk_node_config.storage_dir_path = config_file.storage_dir_path;
+	ldk_node_config.listening_addresses = Some(vec![config_file.listening_addr]);
+	ldk_node_config.network = config_file.network;
 
-	let rest_svc_addr = match SocketAddr::from_str(&args[3]) {
-		Ok(addr) => addr,
-		Err(_) => {
-			eprintln!("Failed to parse rest_svc_addr: {}", args[3]);
-			std::process::exit(-1);
-		},
-	};
+	let mut builder = Builder::from_config(ldk_node_config);
 
-	config.network = match Network::from_str(&args[4]) {
-		Ok(network) => network,
-		Err(_) => {
-			eprintln!("Unsupported network: {}. Use 'bitcoin', 'testnet', 'regtest', 'signet', 'regtest'.", args[4]);
-			std::process::exit(-1);
-		},
-	};
-
-	let mut builder = Builder::from_config(config);
-
-	let bitcoind_rpc_addr = match SocketAddr::from_str(&args[5]) {
-		Ok(addr) => addr,
-		Err(_) => {
-			eprintln!("Failed to parse bitcoind_rpc_addr: {}", args[3]);
-			std::process::exit(-1);
-		},
-	};
+	let bitcoind_rpc_addr = config_file.bitcoind_rpc_addr;
 
 	builder.set_chain_source_bitcoind_rpc(
 		bitcoind_rpc_addr.ip().to_string(),
 		bitcoind_rpc_addr.port(),
-		args[6].clone(),
-		args[7].clone(),
+		config_file.bitcoind_rpc_user,
+		config_file.bitcoind_rpc_password,
 	);
 
 	let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -116,8 +85,9 @@ fn main() {
 			},
 		};
 		let event_node = Arc::clone(&node);
-		let rest_svc_listener =
-			TcpListener::bind(rest_svc_addr).await.expect("Failed to bind listening port");
+		let rest_svc_listener = TcpListener::bind(config_file.rest_service_addr)
+			.await
+			.expect("Failed to bind listening port");
 		loop {
 			tokio::select! {
 				event = event_node.next_event_async() => {
