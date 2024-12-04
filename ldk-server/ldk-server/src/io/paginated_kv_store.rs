@@ -72,7 +72,7 @@ pub trait PaginatedKVStore {
 	/// `primary_namespace`, ordered in descending order of `time`.
 	///
 	/// The `list` method returns the latest records first, based on the `time` associated with each key.
-	/// Pagination is controlled by the `next_page_token`, which is an `Option<String>`
+	/// Pagination is controlled by the `next_page_token`, which is an `Option<(String, i64)>`
 	/// used to determine the starting point for the next page of results. If `next_page_token` is `None`,
 	/// the listing starts from the most recent entry. The `next_page_token` in the returned
 	/// [`ListResponse`] can be used to fetch the next page of results.
@@ -85,7 +85,8 @@ pub trait PaginatedKVStore {
 	///
 	/// [`ListResponse`]: struct.ListResponse.html
 	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str, next_page_token: Option<String>,
+		&self, primary_namespace: &str, secondary_namespace: &str,
+		next_page_token: Option<(String, i64)>,
 	) -> Result<ListResponse, io::Error>;
 }
 
@@ -98,5 +99,5 @@ pub struct ListResponse {
 	pub keys: Vec<String>,
 
 	///  A token that can be used to retrieve the next set of keys.
-	pub next_page_token: Option<String>,
+	pub next_page_token: Option<(String, i64)>,
 }
