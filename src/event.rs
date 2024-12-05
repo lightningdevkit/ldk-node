@@ -332,7 +332,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, amount_sats, required),
 		(2, txid, required),
 		(4, reason, required),
-	};
+	}
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,8 +361,7 @@ pub enum PayjoinPaymentFailureReason {
 impl_writeable_tlv_based_enum!(PayjoinPaymentFailureReason,
 	(0, Timeout) => {},
 	(1, RequestSendingFailed) => {},
-	(2, ResponseProcessingFailed) => {};
->>>>>>> 1136aa4 (Implement `PayjoinPayment` ..)
+	(2, ResponseProcessingFailed) => {}
 );
 
 pub struct EventQueue<L: Deref>

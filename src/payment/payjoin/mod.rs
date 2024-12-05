@@ -83,15 +83,15 @@ impl PayjoinPayment {
 	/// [`Event::PayjoinPaymentSuccessful`]: crate::Event::PayjoinPaymentSuccessful
 	/// [`Event::PayjoinPaymentFailed`]: crate::Event::PayjoinPaymentFailed
 	pub fn send(&self, payjoin_uri: String) -> Result<(), Error> {
+                use payjoin::UriExt;
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
 		let payjoin_handler = self.payjoin_handler.as_ref().ok_or(Error::PayjoinUnavailable)?;
-		let payjoin_uri =
-			payjoin::Uri::try_from(payjoin_uri).map_err(|_| Error::PayjoinUriInvalid).and_then(
-				|uri| uri.require_network(self.config.network).map_err(|_| Error::InvalidNetwork),
-			)?;
+                let uri = payjoin_uri.clone();
+                let payjoin_uri =
+                    payjoin::Uri::try_from(uri).unwrap().assume_checked().check_pj_supported().unwrap();
 		let original_psbt = payjoin_handler.start_request(payjoin_uri.clone())?;
 		let payjoin_handler = Arc::clone(payjoin_handler);
 		let runtime = rt_lock.as_ref().unwrap();

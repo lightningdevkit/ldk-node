@@ -296,7 +296,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(3, quantity, option),
 		(4, secret, option),
 	},
-	(12, Payjoin) => { };
+	(12, Payjoin) => { }
 );
 
 /// Limits applying to how much fee we allow an LSP to deduct from the payment amount.

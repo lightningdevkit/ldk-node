@@ -1234,7 +1234,6 @@ fn build_with_store_internal(
 
 	let payjoin_handler = payjoin_config.map(|pj_config| {
 		Arc::new(PayjoinHandler::new(
-			Arc::clone(&tx_sync),
 			Arc::clone(&event_queue),
 			Arc::clone(&logger),
 			pj_config.payjoin_relay.clone(),
@@ -1242,14 +1241,6 @@ fn build_with_store_internal(
 			Arc::clone(&wallet),
 		))
 	});
-
-	let is_listening = Arc::new(AtomicBool::new(false));
-	let latest_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_onchain_wallet_sync_timestamp = Arc::new(RwLock::new(None));
-	let latest_fee_rate_cache_update_timestamp = Arc::new(RwLock::new(None));
-	let latest_rgs_snapshot_timestamp = Arc::new(RwLock::new(None));
-	let latest_node_announcement_broadcast_timestamp = Arc::new(RwLock::new(None));
-	let latest_channel_monitor_archival_height = Arc::new(RwLock::new(None));
 
 	Ok(Node {
 		runtime,
