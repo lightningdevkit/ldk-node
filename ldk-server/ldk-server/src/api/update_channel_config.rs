@@ -1,21 +1,22 @@
+use crate::service::Context;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
-use ldk_node::{Node, UserChannelId};
+use ldk_node::UserChannelId;
 use ldk_server_protos::api::{UpdateChannelConfigRequest, UpdateChannelConfigResponse};
 use ldk_server_protos::types::channel_config::MaxDustHtlcExposure;
 use std::str::FromStr;
-use std::sync::Arc;
 
 pub(crate) const UPDATE_CHANNEL_CONFIG_PATH: &str = "UpdateChannelConfig";
 
 pub(crate) fn handle_update_channel_config_request(
-	node: Arc<Node>, request: UpdateChannelConfigRequest,
+	context: Context, request: UpdateChannelConfigRequest,
 ) -> Result<UpdateChannelConfigResponse, ldk_node::NodeError> {
 	let user_channel_id: u128 =
 		request.user_channel_id.parse().map_err(|_| ldk_node::NodeError::InvalidChannelId)?;
 
 	//FIXME: Use ldk/ldk-node's partial config update api.
-	let current_config = node
+	let current_config = context
+		.node
 		.list_channels()
 		.into_iter()
 		.find(|c| c.user_channel_id.0 == user_channel_id)
@@ -27,12 +28,15 @@ pub(crate) fn handle_update_channel_config_request(
 
 	let counterparty_node_id = PublicKey::from_str(&request.counterparty_node_id)
 		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;
-	node.update_channel_config(
-		&UserChannelId(user_channel_id),
-		counterparty_node_id,
-		updated_channel_config,
-	)
-	.map_err(ldk_node::NodeError::from)?;
+
+	context
+		.node
+		.update_channel_config(
+			&UserChannelId(user_channel_id),
+			counterparty_node_id,
+			updated_channel_config,
+		)
+		.map_err(ldk_node::NodeError::from)?;
 
 	Ok(UpdateChannelConfigResponse {})
 }

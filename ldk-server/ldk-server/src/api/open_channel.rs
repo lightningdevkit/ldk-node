@@ -1,15 +1,14 @@
+use crate::service::Context;
 use bytes::Bytes;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
-use ldk_node::Node;
 use ldk_server_protos::api::{OpenChannelRequest, OpenChannelResponse};
 use std::str::FromStr;
-use std::sync::Arc;
 
 pub(crate) const OPEN_CHANNEL_PATH: &str = "OpenChannel";
 
 pub(crate) fn handle_open_channel(
-	node: Arc<Node>, request: OpenChannelRequest,
+	context: Context, request: OpenChannelRequest,
 ) -> Result<OpenChannelResponse, ldk_node::NodeError> {
 	let node_id = PublicKey::from_str(&request.node_pubkey)
 		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;
@@ -17,7 +16,7 @@ pub(crate) fn handle_open_channel(
 		.map_err(|_| ldk_node::NodeError::InvalidSocketAddress)?;
 
 	let user_channel_id = if request.announce_channel {
-		node.open_announced_channel(
+		context.node.open_announced_channel(
 			node_id,
 			address,
 			request.channel_amount_sats,
@@ -26,7 +25,7 @@ pub(crate) fn handle_open_channel(
 			None,
 		)?
 	} else {
-		node.open_channel(
+		context.node.open_channel(
 			node_id,
 			address,
 			request.channel_amount_sats,
