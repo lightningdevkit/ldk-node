@@ -16,6 +16,4 @@ ldk-server-protos = { path = "../ldk-server-protos" }
 bytes = "1.4.0"
 hex = { package = "hex-conservative", version = "0.2.1", default-features = false }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
-
-[dev-dependencies]
 rand = "0.8.5"

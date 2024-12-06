@@ -1,8 +1,9 @@
 use bytes::Bytes;
 use hex::prelude::*;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
+use ldk_node::lightning::ln::types::ChannelId;
 use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{ChannelDetails, LightningBalance, PendingSweepBalance};
+use ldk_node::{ChannelDetails, Event, LightningBalance, PendingSweepBalance, UserChannelId};
 use ldk_server_protos::types::lightning_balance::BalanceType::{
 	ClaimableAwaitingConfirmations, ClaimableOnChannelClose, ContentiousClaimable,
 	CounterpartyRevokedOutputClaimable, MaybePreimageClaimableHtlc, MaybeTimeoutClaimableHtlc,
@@ -13,7 +14,7 @@ use ldk_server_protos::types::payment_kind::Kind::{
 use ldk_server_protos::types::pending_sweep_balance::BalanceType::{
 	AwaitingThresholdConfirmations, BroadcastAwaitingConfirmation, PendingBroadcast,
 };
-use ldk_server_protos::types::{Channel, LspFeeLimits, OutPoint, Payment};
+use ldk_server_protos::types::{Channel, ForwardedPayment, LspFeeLimits, OutPoint, Payment};
 
 pub(crate) fn channel_to_proto(channel: ChannelDetails) -> Channel {
 	Channel {
@@ -318,5 +319,23 @@ pub(crate) fn pending_sweep_balance_to_proto(
 				},
 			)),
 		},
+	}
+}
+
+pub(crate) fn forwarded_payment_to_proto(
+	prev_channel_id: ChannelId, next_channel_id: ChannelId,
+	prev_user_channel_id: Option<UserChannelId>, next_user_channel_id: Option<UserChannelId>,
+	total_fee_earned_msat: Option<u64>, skimmed_fee_msat: Option<u64>, claim_from_onchain_tx: bool,
+	outbound_amount_forwarded_msat: Option<u64>,
+) -> ForwardedPayment {
+	ForwardedPayment {
+		prev_channel_id: prev_channel_id.to_string(),
+		next_channel_id: next_channel_id.to_string(),
+		prev_user_channel_id: prev_user_channel_id.expect("").0.to_string(),
+		next_user_channel_id: next_user_channel_id.map(|u| u.0.to_string()),
+		total_fee_earned_msat,
+		skimmed_fee_msat,
+		claim_from_onchain_tx,
+		outbound_amount_forwarded_msat,
 	}
 }
