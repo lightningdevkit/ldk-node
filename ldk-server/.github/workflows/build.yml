@@ -34,7 +34,6 @@ jobs:
       - name: Pin packages to allow for MSRV
         if: matrix.msrv
         run: |
-          cargo update -p hashlink --precise "0.8.2" --verbose # hashlink 0.8.3 requires hashbrown 0.14, requiring 1.64.0
           cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
           cargo update -p home --precise "0.5.5" --verbose # home v0.5.9 requires rustc 1.70 or newer
           cargo update -p tokio --precise "1.38.1" --verbose # tokio v1.39.0 requires rustc 1.70 or newer

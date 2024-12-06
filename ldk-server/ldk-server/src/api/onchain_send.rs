@@ -17,7 +17,8 @@ pub(crate) fn handle_onchain_send_request(
 		(Some(amount_sats), None) => {
 			node.onchain_payment().send_to_address(&address, amount_sats)?
 		},
-		(None, Some(true)) => node.onchain_payment().send_all_to_address(&address)?,
+		// Retain existing api behaviour to not retain reserves on `send_all_to_address`.
+		(None, Some(true)) => node.onchain_payment().send_all_to_address(&address, false)?,
 		_ => return Err(ldk_node::NodeError::InvalidAmount),
 	};
 	let response = OnchainSendResponse { txid: txid.to_string() };
