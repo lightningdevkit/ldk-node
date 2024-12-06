@@ -154,40 +154,40 @@ macro_rules! expect_payment_successful_event {
 
 pub(crate) use expect_payment_successful_event;
 
-macro_rules! expect_payjoin_tx_sent_successfully_event {
-	($node: expr, $is_original_psbt_modified: expr) => {{
-		match $node.wait_next_event() {
-			ref e @ Event::PayjoinPaymentSuccessful { txid, is_original_psbt_modified, .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(is_original_psbt_modified, $is_original_psbt_modified);
-				$node.event_handled();
-				txid
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			},
-		}
-	}};
-}
+// macro_rules! expect_payjoin_tx_sent_successfully_event {
+// 	($node: expr, $is_original_psbt_modified: expr) => {{
+// 		match $node.wait_next_event() {
+// 			ref e @ Event::PayjoinPaymentSuccessful { txid, is_original_psbt_modified, .. } => {
+// 				println!("{} got event {:?}", $node.node_id(), e);
+// 				assert_eq!(is_original_psbt_modified, $is_original_psbt_modified);
+// 				$node.event_handled();
+// 				txid
+// 			},
+// 			ref e => {
+// 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+// 			},
+// 		}
+// 	}};
+// }
 
-pub(crate) use expect_payjoin_tx_sent_successfully_event;
+// pub(crate) use expect_payjoin_tx_sent_successfully_event;
 
-macro_rules! expect_payjoin_await_confirmation {
-	($node: expr) => {{
-		match $node.wait_next_event() {
-			ref e @ Event::PayjoinPaymentAwaitingConfirmation { txid, .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				$node.event_handled();
-				txid
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			},
-		}
-	}};
-}
+// macro_rules! expect_payjoin_await_confirmation {
+// 	($node: expr) => {{
+// 		match $node.wait_next_event() {
+// 			ref e @ Event::PayjoinPaymentAwaitingConfirmation { txid, .. } => {
+// 				println!("{} got event {:?}", $node.node_id(), e);
+// 				$node.event_handled();
+// 				txid
+// 			},
+// 			ref e => {
+// 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+// 			},
+// 		}
+// 	}};
+// }
 
-pub(crate) use expect_payjoin_await_confirmation;
+// pub(crate) use expect_payjoin_await_confirmation;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe =
@@ -352,19 +352,19 @@ pub(crate) fn setup_node(
 	node
 }
 
-pub(crate) fn setup_payjoin_node(electrsd: &ElectrsD, config: Config) -> TestNode {
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	setup_builder!(builder, config);
-	builder.set_esplora_server(esplora_url.clone());
-	let payjoin_relay = "https://pj.bobspacebkk.com".to_string();
-	builder.set_payjoin_config(payjoin_relay).unwrap();
-	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
-	let node = builder.build_with_store(test_sync_store).unwrap();
-	node.start().unwrap();
-	assert!(node.status().is_running);
-	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
-	node
-}
+// pub(crate) fn setup_payjoin_node(electrsd: &ElectrsD, config: Config) -> TestNode {
+// 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+// 	setup_builder!(builder, config);
+// 	builder.set_esplora_server(esplora_url.clone());
+// 	let payjoin_relay = "https://pj.bobspacebkk.com".to_string();
+// 	builder.set_payjoin_config(payjoin_relay).unwrap();
+// 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
+// 	let node = builder.build_with_store(test_sync_store).unwrap();
+// 	node.start().unwrap();
+// 	assert!(node.status().is_running);
+// 	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+// 	node
+// }
 
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
