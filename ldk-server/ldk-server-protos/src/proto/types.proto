@@ -161,6 +161,51 @@ enum PaymentStatus {
   FAILED = 2;
 }
 
+// A forwarded payment through our node.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded
+message ForwardedPayment{
+  // The channel id of the incoming channel between the previous node and us.
+  string prev_channel_id = 1;
+
+  // The channel id of the outgoing channel between the next node and us.
+  string next_channel_id = 2;
+
+  // The `user_channel_id` of the incoming channel between the previous node and us.
+  string prev_user_channel_id = 3;
+
+  // The `user_channel_id` of the outgoing channel between the next node and us.
+  // This will be `None` if the payment was settled via an on-chain transaction.
+  // See the caveat described for the `total_fee_earned_msat` field.
+  optional string next_user_channel_id = 4;
+
+  // The total fee, in milli-satoshis, which was earned as a result of the payment.
+  //
+  // Note that if we force-closed the channel over which we forwarded an HTLC while the HTLC was pending, the amount the
+  // next hop claimed will have been rounded down to the nearest whole satoshi. Thus, the fee calculated here may be
+  // higher than expected as we still claimed the full value in millisatoshis from the source.
+  // In this case, `claim_from_onchain_tx` will be set.
+  //
+  // If the channel which sent us the payment has been force-closed, we will claim the funds via an on-chain transaction.
+  // In that case we do not yet know the on-chain transaction fees which we will spend and will instead set this to `None`.
+  optional uint64 total_fee_earned_msat = 5;
+
+  // The share of the total fee, in milli-satoshis, which was withheld in addition to the forwarding fee.
+  // This will only be set if we forwarded an intercepted HTLC with less than the expected amount. This means our
+  // counterparty accepted to receive less than the invoice amount.
+  //
+  // The caveat described above the `total_fee_earned_msat` field applies here as well.
+  optional uint64 skimmed_fee_msat = 6;
+
+  // If this is true, the forwarded HTLC was claimed by our counterparty via an on-chain transaction.
+  bool claim_from_onchain_tx = 7;
+
+  // The final amount forwarded, in milli-satoshis, after the fee is deducted.
+  //
+  // The caveat described above the `total_fee_earned_msat` field applies here as well.
+  optional uint64 outbound_amount_forwarded_msat = 8;
+
+}
+
 message Channel {
   // The channel ID (prior to funding transaction generation, this is a random 32-byte
   // identifier, afterwards this is the transaction ID of the funding transaction XOR the
@@ -578,4 +623,10 @@ message AwaitingThresholdConfirmations {
 
   // The amount, in satoshis, of the output being swept.
   uint64 amount_satoshis = 5;
+}
+
+// Token used to determine start of next page in paginated APIs.
+message PageToken {
+  string token = 1;
+  int64 index = 2;
 }
