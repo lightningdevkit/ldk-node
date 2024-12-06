@@ -18,6 +18,9 @@ use crate::api::get_payment_details::{
 	handle_get_payment_details_request, GET_PAYMENT_DETAILS_PATH,
 };
 use crate::api::list_channels::{handle_list_channels_request, LIST_CHANNELS_PATH};
+use crate::api::list_forwarded_payments::{
+	handle_list_forwarded_payments_request, LIST_FORWARDED_PAYMENTS_PATH,
+};
 use crate::api::list_payments::{handle_list_payments_request, LIST_PAYMENTS_PATH};
 use crate::api::onchain_receive::{handle_onchain_receive_request, ONCHAIN_RECEIVE_PATH};
 use crate::api::onchain_send::{handle_onchain_send_request, ONCHAIN_SEND_PATH};
@@ -25,6 +28,7 @@ use crate::api::open_channel::{handle_open_channel, OPEN_CHANNEL_PATH};
 use crate::api::update_channel_config::{
 	handle_update_channel_config_request, UPDATE_CHANNEL_CONFIG_PATH,
 };
+use crate::io::paginated_kv_store::PaginatedKVStore;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -32,16 +36,20 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct NodeService {
 	node: Arc<Node>,
+	paginated_kv_store: Arc<dyn PaginatedKVStore + Send + Sync>,
 }
 
 impl NodeService {
-	pub(crate) fn new(node: Arc<Node>) -> Self {
-		Self { node }
+	pub(crate) fn new(
+		node: Arc<Node>, paginated_kv_store: Arc<dyn PaginatedKVStore + Send + Sync>,
+	) -> Self {
+		Self { node, paginated_kv_store }
 	}
 }
 
 pub(crate) struct Context {
 	pub(crate) node: Arc<Node>,
+	pub(crate) paginated_kv_store: Arc<dyn PaginatedKVStore + Send + Sync>,
 }
 
 impl Service<Request<Incoming>> for NodeService {
@@ -50,7 +58,10 @@ impl Service<Request<Incoming>> for NodeService {
 	type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
 	fn call(&self, req: Request<Incoming>) -> Self::Future {
-		let context = Context { node: Arc::clone(&self.node) };
+		let context = Context {
+			node: Arc::clone(&self.node),
+			paginated_kv_store: Arc::clone(&self.paginated_kv_store),
+		};
 		// Exclude '/' from path pattern matching.
 		match &req.uri().path()[1..] {
 			GET_NODE_INFO => Box::pin(handle_request(context, req, handle_get_node_info_request)),
@@ -84,6 +95,9 @@ impl Service<Request<Incoming>> for NodeService {
 			},
 			LIST_PAYMENTS_PATH => {
 				Box::pin(handle_request(context, req, handle_list_payments_request))
+			},
+			LIST_FORWARDED_PAYMENTS_PATH => {
+				Box::pin(handle_request(context, req, handle_list_forwarded_payments_request))
 			},
 			path => {
 				let error = format!("Unknown request: {}", path).into_bytes();

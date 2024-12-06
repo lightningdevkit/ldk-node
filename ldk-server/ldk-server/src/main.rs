@@ -204,7 +204,7 @@ fn main() {
 					match res {
 						Ok((stream, _)) => {
 							let io_stream = TokioIo::new(stream);
-							let node_service = NodeService::new(Arc::clone(&node));
+							let node_service = NodeService::new(Arc::clone(&node), Arc::clone(&paginated_store) as Arc<dyn PaginatedKVStore + Send + Sync>);
 							runtime.spawn(async move {
 								if let Err(err) = http1::Builder::new().serve_connection(io_stream, node_service).await {
 									eprintln!("Failed to serve connection: {}", err);
