@@ -18,16 +18,29 @@ use ldk_node::config::Config;
 use std::path::Path;
 use std::sync::Arc;
 
+const USAGE_GUIDE: &str = "Usage: ldk-server <config_path>";
+
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
 
 	if args.len() < 2 {
-		eprintln!("Usage: {} config_path", args[0]);
+		eprintln!("{USAGE_GUIDE}");
+		std::process::exit(-1);
+	}
+
+	let arg = args[1].as_str();
+	if arg == "-h" || arg == "--help" {
+		println!("{}", USAGE_GUIDE);
+		std::process::exit(0);
+	}
+
+	if fs::File::open(arg).is_err() {
+		eprintln!("Unable to access configuration file.");
 		std::process::exit(-1);
 	}
 
 	let mut ldk_node_config = Config::default();
-	let config_file = load_config(Path::new(&args[1])).expect("Invalid configuration file.");
+	let config_file = load_config(Path::new(arg)).expect("Invalid configuration file.");
 
 	ldk_node_config.log_level = LogLevel::Trace;
 	ldk_node_config.storage_dir_path = config_file.storage_dir_path;
