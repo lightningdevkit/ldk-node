@@ -3,6 +3,7 @@ use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::error::LdkServerError;
 use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
+	GetBalancesRequest, GetNodeInfoRequest, ListChannelsRequest, ListPaymentsRequest,
 	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
 };
 
@@ -18,6 +19,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+	GetNodeInfo,
+	GetBalances,
 	OnchainReceive,
 	OnchainSend {
 		#[arg(short, long)]
@@ -73,6 +76,8 @@ enum Commands {
 		#[arg(long)]
 		announce_channel: bool,
 	},
+	ListChannels,
+	ListPayments,
 }
 
 #[tokio::main]
@@ -81,6 +86,12 @@ async fn main() {
 	let client = LdkServerClient::new(cli.base_url);
 
 	match cli.command {
+		Commands::GetNodeInfo => {
+			handle_response(client.get_node_info(GetNodeInfoRequest {}).await);
+		},
+		Commands::GetBalances => {
+			handle_response(client.get_balances(GetBalancesRequest {}).await);
+		},
 		Commands::OnchainReceive => {
 			handle_response(client.onchain_receive(OnchainReceiveRequest {}).await);
 		},
@@ -137,6 +148,12 @@ async fn main() {
 					})
 					.await,
 			);
+		},
+		Commands::ListChannels => {
+			handle_response(client.list_channels(ListChannelsRequest {}).await);
+		},
+		Commands::ListPayments => {
+			handle_response(client.list_payments(ListPaymentsRequest {}).await);
 		},
 	}
 }
