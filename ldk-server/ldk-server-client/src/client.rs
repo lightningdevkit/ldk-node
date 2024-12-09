@@ -4,15 +4,18 @@ use crate::error::LdkServerError;
 use ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11SendRequest, Bolt11SendResponse,
 	Bolt12ReceiveRequest, Bolt12ReceiveResponse, Bolt12SendRequest, Bolt12SendResponse,
-	CloseChannelRequest, CloseChannelResponse, ListChannelsRequest, ListChannelsResponse,
-	OnchainReceiveRequest, OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse,
-	OpenChannelRequest, OpenChannelResponse,
+	CloseChannelRequest, CloseChannelResponse, GetBalancesRequest, GetBalancesResponse,
+	GetNodeInfoRequest, GetNodeInfoResponse, ListChannelsRequest, ListChannelsResponse,
+	ListPaymentsRequest, ListPaymentsResponse, OnchainReceiveRequest, OnchainReceiveResponse,
+	OnchainSendRequest, OnchainSendResponse, OpenChannelRequest, OpenChannelResponse,
 };
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 
 const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 
+const GET_NODE_INFO_PATH: &str = "GetNodeInfo";
+const GET_BALANCES_PATH: &str = "GetBalances";
 const ONCHAIN_RECEIVE_PATH: &str = "OnchainReceive";
 const ONCHAIN_SEND_PATH: &str = "OnchainSend";
 const BOLT11_RECEIVE_PATH: &str = "Bolt11Receive";
@@ -22,6 +25,7 @@ const BOLT12_SEND_PATH: &str = "Bolt12Send";
 const OPEN_CHANNEL_PATH: &str = "OpenChannel";
 const CLOSE_CHANNEL_PATH: &str = "CloseChannel";
 const LIST_CHANNELS_PATH: &str = "ListChannels";
+const LIST_PAYMENTS_PATH: &str = "ListPayments";
 
 /// Client to access a hosted instance of LDK Server.
 #[derive(Clone)]
@@ -34,6 +38,24 @@ impl LdkServerClient {
 	/// Constructs a [`LdkServerClient`] using `base_url` as the ldk-server endpoint.
 	pub fn new(base_url: String) -> Self {
 		Self { base_url, client: Client::new() }
+	}
+
+	/// Retrieve the latest node info like `node_id`, `current_best_block` etc.
+	/// For API contract/usage, refer to docs for [`GetNodeInfoRequest`] and [`GetNodeInfoResponse`].
+	pub async fn get_node_info(
+		&self, request: GetNodeInfoRequest,
+	) -> Result<GetNodeInfoResponse, LdkServerError> {
+		let url = format!("http://{}/{GET_NODE_INFO_PATH}", self.base_url);
+		self.post_request(&request, &url).await
+	}
+
+	/// Retrieves an overview of all known balances.
+	/// For API contract/usage, refer to docs for [`GetBalancesRequest`] and [`GetBalancesResponse`].
+	pub async fn get_balances(
+		&self, request: GetBalancesRequest,
+	) -> Result<GetBalancesResponse, LdkServerError> {
+		let url = format!("http://{}/{GET_BALANCES_PATH}", self.base_url);
+		self.post_request(&request, &url).await
 	}
 
 	/// Retrieve a new on-chain funding address.
@@ -114,6 +136,15 @@ impl LdkServerClient {
 		&self, request: ListChannelsRequest,
 	) -> Result<ListChannelsResponse, LdkServerError> {
 		let url = format!("http://{}/{LIST_CHANNELS_PATH}", self.base_url);
+		self.post_request(&request, &url).await
+	}
+
+	/// Retrieves list of all payments sent or received by us.
+	/// For API contract/usage, refer to docs for [`ListPaymentsRequest`] and [`ListPaymentsResponse`].
+	pub async fn list_payments(
+		&self, request: ListPaymentsRequest,
+	) -> Result<ListPaymentsResponse, LdkServerError> {
+		let url = format!("http://{}/{LIST_PAYMENTS_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
