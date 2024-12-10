@@ -15,6 +15,7 @@ use hyper_util::rt::TokioIo;
 
 use crate::util::config::load_config;
 use ldk_node::config::Config;
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
