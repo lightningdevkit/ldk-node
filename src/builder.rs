@@ -75,6 +75,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
+const VSS_HARDENED_CHILD_INDEX: u32 = 877;
+const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
+
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
 	Esplora { server_url: String, sync_config: Option<EsploraSyncConfig> },
@@ -481,10 +484,14 @@ impl NodeBuilder {
 
 		let config = Arc::new(self.config.clone());
 
-		let vss_xprv = derive_vss_xprv(config, &seed_bytes, Arc::clone(&logger))?;
+		let vss_xprv =
+			derive_xprv(config, &seed_bytes, VSS_HARDENED_CHILD_INDEX, Arc::clone(&logger))?;
 
 		let lnurl_auth_xprv = vss_xprv
-			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 138 }])
+			.derive_priv(
+				&Secp256k1::new(),
+				&[ChildNumber::Hardened { index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX }],
+			)
 			.map_err(|e| {
 				log_error!(logger, "Failed to derive VSS secret: {}", e);
 				BuildError::KVStoreSetupFailed
@@ -546,7 +553,12 @@ impl NodeBuilder {
 
 		let config = Arc::new(self.config.clone());
 
-		let vss_xprv = derive_vss_xprv(config.clone(), &seed_bytes, Arc::clone(&logger))?;
+		let vss_xprv = derive_xprv(
+			config.clone(),
+			&seed_bytes,
+			VSS_HARDENED_CHILD_INDEX,
+			Arc::clone(&logger),
+		)?;
 
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
@@ -1415,8 +1427,8 @@ fn seed_bytes_from_config(
 	}
 }
 
-fn derive_vss_xprv(
-	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<Logger>,
+fn derive_xprv(
+	config: Arc<Config>, seed_bytes: &[u8; 64], hardened_child_index: u32, logger: Arc<Logger>,
 ) -> Result<Xpriv, BuildError> {
 	use bitcoin::key::Secp256k1;
 
@@ -1425,10 +1437,11 @@ fn derive_vss_xprv(
 		BuildError::InvalidSeedBytes
 	})?;
 
-	xprv.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 877 }]).map_err(|e| {
-		log_error!(logger, "Failed to derive VSS secret: {}", e);
-		BuildError::KVStoreSetupFailed
-	})
+	xprv.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: hardened_child_index }])
+		.map_err(|e| {
+			log_error!(logger, "Failed to derive hardened child secret: {}", e);
+			BuildError::InvalidSeedBytes
+		})
 }
 
 /// Sanitize the user-provided node alias to ensure that it is a valid protocol-specified UTF-8 string.
