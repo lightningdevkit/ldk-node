@@ -1218,6 +1218,7 @@ fn build_with_store_internal(
 	let (liquidity_source, custom_message_handler) =
 		if let Some(lsc) = liquidity_source_config.as_ref() {
 			let mut liquidity_source_builder = LiquiditySourceBuilder::new(
+				Arc::clone(&wallet),
 				Arc::clone(&channel_manager),
 				Arc::clone(&keys_manager),
 				Arc::clone(&chain_source),
