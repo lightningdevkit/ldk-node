@@ -40,9 +40,9 @@ use std::time::Duration;
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
-struct LSPS1Service {
-	node_id: PublicKey,
-	address: SocketAddress,
+struct LSPS1Client {
+	lsp_node_id: PublicKey,
+	lsp_address: SocketAddress,
 	token: Option<String>,
 	client_config: LSPS1ClientConfig,
 	pending_opening_params_requests:
@@ -52,9 +52,9 @@ struct LSPS1Service {
 		Mutex<HashMap<RequestId, oneshot::Sender<LSPS1OrderStatus>>>,
 }
 
-struct LSPS2Service {
-	node_id: PublicKey,
-	address: SocketAddress,
+struct LSPS2Client {
+	lsp_node_id: PublicKey,
+	lsp_address: SocketAddress,
 	token: Option<String>,
 	client_config: LSPS2ClientConfig,
 	pending_fee_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2FeeResponse>>>,
@@ -65,8 +65,8 @@ pub(crate) struct LiquiditySourceBuilder<L: Deref>
 where
 	L::Target: LdkLogger,
 {
-	lsps1_service: Option<LSPS1Service>,
-	lsps2_service: Option<LSPS2Service>,
+	lsps1_client: Option<LSPS1Client>,
+	lsps2_client: Option<LSPS2Client>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	chain_source: Arc<ChainSource>,
@@ -82,11 +82,11 @@ where
 		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
 		chain_source: Arc<ChainSource>, config: Arc<Config>, logger: L,
 	) -> Self {
-		let lsps1_service = None;
-		let lsps2_service = None;
+		let lsps1_client = None;
+		let lsps2_client = None;
 		Self {
-			lsps1_service,
-			lsps2_service,
+			lsps1_client,
+			lsps2_client,
 			channel_manager,
 			keys_manager,
 			chain_source,
@@ -95,17 +95,17 @@ where
 		}
 	}
 
-	pub(crate) fn lsps1_service(
-		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+	pub(crate) fn lsps1_client(
+		&mut self, lsp_node_id: PublicKey, lsp_address: SocketAddress, token: Option<String>,
 	) -> &mut Self {
 		// TODO: allow to set max_channel_fees_msat
 		let client_config = LSPS1ClientConfig { max_channel_fees_msat: None };
 		let pending_opening_params_requests = Mutex::new(HashMap::new());
 		let pending_create_order_requests = Mutex::new(HashMap::new());
 		let pending_check_order_status_requests = Mutex::new(HashMap::new());
-		self.lsps1_service = Some(LSPS1Service {
-			node_id,
-			address,
+		self.lsps1_client = Some(LSPS1Client {
+			lsp_node_id,
+			lsp_address,
 			token,
 			client_config,
 			pending_opening_params_requests,
@@ -115,15 +115,15 @@ where
 		self
 	}
 
-	pub(crate) fn lsps2_service(
-		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+	pub(crate) fn lsps2_client(
+		&mut self, lsp_node_id: PublicKey, lsp_address: SocketAddress, token: Option<String>,
 	) -> &mut Self {
 		let client_config = LSPS2ClientConfig {};
 		let pending_fee_requests = Mutex::new(HashMap::new());
 		let pending_buy_requests = Mutex::new(HashMap::new());
-		self.lsps2_service = Some(LSPS2Service {
-			node_id,
-			address,
+		self.lsps2_client = Some(LSPS2Client {
+			lsp_node_id,
+			lsp_address,
 			token,
 			client_config,
 			pending_fee_requests,
@@ -133,8 +133,8 @@ where
 	}
 
 	pub(crate) fn build(self) -> LiquiditySource<L> {
-		let lsps1_client_config = self.lsps1_service.as_ref().map(|s| s.client_config.clone());
-		let lsps2_client_config = self.lsps2_service.as_ref().map(|s| s.client_config.clone());
+		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.client_config.clone());
+		let lsps2_client_config = self.lsps2_client.as_ref().map(|s| s.client_config.clone());
 		let liquidity_client_config =
 			Some(LiquidityClientConfig { lsps1_client_config, lsps2_client_config });
 
@@ -148,8 +148,8 @@ where
 		));
 
 		LiquiditySource {
-			lsps1_service: self.lsps1_service,
-			lsps2_service: self.lsps2_service,
+			lsps1_client: self.lsps1_client,
+			lsps2_client: self.lsps2_client,
 			channel_manager: self.channel_manager,
 			keys_manager: self.keys_manager,
 			liquidity_manager,
@@ -163,8 +163,8 @@ pub(crate) struct LiquiditySource<L: Deref>
 where
 	L::Target: LdkLogger,
 {
-	lsps1_service: Option<LSPS1Service>,
-	lsps2_service: Option<LSPS2Service>,
+	lsps1_client: Option<LSPS1Client>,
+	lsps2_client: Option<LSPS2Client>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	liquidity_manager: Arc<LiquidityManager>,
@@ -185,12 +185,12 @@ where
 		self.liquidity_manager.as_ref()
 	}
 
-	pub(crate) fn get_lsps1_service_details(&self) -> Option<(PublicKey, SocketAddress)> {
-		self.lsps1_service.as_ref().map(|s| (s.node_id, s.address.clone()))
+	pub(crate) fn get_lsps1_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
+		self.lsps1_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
 	}
 
-	pub(crate) fn get_lsps2_service_details(&self) -> Option<(PublicKey, SocketAddress)> {
-		self.lsps2_service.as_ref().map(|s| (s.node_id, s.address.clone()))
+	pub(crate) fn get_lsps2_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
+		self.lsps2_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
 	}
 
 	pub(crate) async fn handle_next_event(&self) {
@@ -200,8 +200,8 @@ where
 				counterparty_node_id,
 				supported_options,
 			}) => {
-				if let Some(lsps1_service) = self.lsps1_service.as_ref() {
-					if counterparty_node_id != lsps1_service.node_id {
+				if let Some(lsps1_client) = self.lsps1_client.as_ref() {
+					if counterparty_node_id != lsps1_client.lsp_node_id {
 						debug_assert!(
 							false,
 							"Received response from unexpected LSP counterparty. This should never happen."
@@ -213,7 +213,7 @@ where
 						return;
 					}
 
-					if let Some(sender) = lsps1_service
+					if let Some(sender) = lsps1_client
 						.pending_opening_params_requests
 						.lock()
 						.unwrap()
@@ -256,8 +256,8 @@ where
 				payment,
 				channel,
 			}) => {
-				if let Some(lsps1_service) = self.lsps1_service.as_ref() {
-					if counterparty_node_id != lsps1_service.node_id {
+				if let Some(lsps1_client) = self.lsps1_client.as_ref() {
+					if counterparty_node_id != lsps1_client.lsp_node_id {
 						debug_assert!(
 							false,
 							"Received response from unexpected LSP counterparty. This should never happen."
@@ -269,7 +269,7 @@ where
 						return;
 					}
 
-					if let Some(sender) = lsps1_service
+					if let Some(sender) = lsps1_client
 						.pending_create_order_requests
 						.lock()
 						.unwrap()
@@ -314,8 +314,8 @@ where
 				payment,
 				channel,
 			}) => {
-				if let Some(lsps1_service) = self.lsps1_service.as_ref() {
-					if counterparty_node_id != lsps1_service.node_id {
+				if let Some(lsps1_client) = self.lsps1_client.as_ref() {
+					if counterparty_node_id != lsps1_client.lsp_node_id {
 						debug_assert!(
 							false,
 							"Received response from unexpected LSP counterparty. This should never happen."
@@ -327,7 +327,7 @@ where
 						return;
 					}
 
-					if let Some(sender) = lsps1_service
+					if let Some(sender) = lsps1_client
 						.pending_check_order_status_requests
 						.lock()
 						.unwrap()
@@ -369,8 +369,8 @@ where
 				counterparty_node_id,
 				opening_fee_params_menu,
 			}) => {
-				if let Some(lsps2_service) = self.lsps2_service.as_ref() {
-					if counterparty_node_id != lsps2_service.node_id {
+				if let Some(lsps2_client) = self.lsps2_client.as_ref() {
+					if counterparty_node_id != lsps2_client.lsp_node_id {
 						debug_assert!(
 							false,
 							"Received response from unexpected LSP counterparty. This should never happen."
@@ -383,7 +383,7 @@ where
 					}
 
 					if let Some(sender) =
-						lsps2_service.pending_fee_requests.lock().unwrap().remove(&request_id)
+						lsps2_client.pending_fee_requests.lock().unwrap().remove(&request_id)
 					{
 						let response = LSPS2FeeResponse { opening_fee_params_menu };
 
@@ -421,8 +421,8 @@ where
 				cltv_expiry_delta,
 				..
 			}) => {
-				if let Some(lsps2_service) = self.lsps2_service.as_ref() {
-					if counterparty_node_id != lsps2_service.node_id {
+				if let Some(lsps2_client) = self.lsps2_client.as_ref() {
+					if counterparty_node_id != lsps2_client.lsp_node_id {
 						debug_assert!(
 							false,
 							"Received response from unexpected LSP counterparty. This should never happen."
@@ -435,7 +435,7 @@ where
 					}
 
 					if let Some(sender) =
-						lsps2_service.pending_buy_requests.lock().unwrap().remove(&request_id)
+						lsps2_client.pending_buy_requests.lock().unwrap().remove(&request_id)
 					{
 						let response = LSPS2BuyResponse { intercept_scid, cltv_expiry_delta };
 
@@ -475,7 +475,7 @@ where
 	pub(crate) async fn lsps1_request_opening_params(
 		&self,
 	) -> Result<LSPS1OpeningParamsResponse, Error> {
-		let lsps1_service = self.lsps1_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let lsps1_client = self.lsps1_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let client_handler = self.liquidity_manager.lsps1_client_handler().ok_or_else(|| {
 			log_error!(self.logger, "LSPS1 liquidity client was not configured.",);
@@ -485,8 +485,8 @@ where
 		let (request_sender, request_receiver) = oneshot::channel();
 		{
 			let mut pending_opening_params_requests_lock =
-				lsps1_service.pending_opening_params_requests.lock().unwrap();
-			let request_id = client_handler.request_supported_options(lsps1_service.node_id);
+				lsps1_client.pending_opening_params_requests.lock().unwrap();
+			let request_id = client_handler.request_supported_options(lsps1_client.lsp_node_id);
 			pending_opening_params_requests_lock.insert(request_id, request_sender);
 		}
 
@@ -506,7 +506,7 @@ where
 		&self, lsp_balance_sat: u64, client_balance_sat: u64, channel_expiry_blocks: u32,
 		announce_channel: bool, refund_address: bitcoin::Address,
 	) -> Result<LSPS1OrderStatus, Error> {
-		let lsps1_service = self.lsps1_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let lsps1_client = self.lsps1_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 		let client_handler = self.liquidity_manager.lsps1_client_handler().ok_or_else(|| {
 			log_error!(self.logger, "LSPS1 liquidity client was not configured.",);
 			Error::LiquiditySourceUnavailable
@@ -560,7 +560,7 @@ where
 			required_channel_confirmations: lsp_limits.min_required_channel_confirmations,
 			funding_confirms_within_blocks: lsp_limits.min_funding_confirms_within_blocks,
 			channel_expiry_blocks,
-			token: lsps1_service.token.clone(),
+			token: lsps1_client.token.clone(),
 			announce_channel,
 		};
 
@@ -568,9 +568,9 @@ where
 		let request_id;
 		{
 			let mut pending_create_order_requests_lock =
-				lsps1_service.pending_create_order_requests.lock().unwrap();
+				lsps1_client.pending_create_order_requests.lock().unwrap();
 			request_id = client_handler.create_order(
-				&lsps1_service.node_id,
+				&lsps1_client.lsp_node_id,
 				order_params.clone(),
 				Some(refund_address),
 			);
@@ -605,7 +605,7 @@ where
 	pub(crate) async fn lsps1_check_order_status(
 		&self, order_id: OrderId,
 	) -> Result<LSPS1OrderStatus, Error> {
-		let lsps1_service = self.lsps1_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let lsps1_client = self.lsps1_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 		let client_handler = self.liquidity_manager.lsps1_client_handler().ok_or_else(|| {
 			log_error!(self.logger, "LSPS1 liquidity client was not configured.",);
 			Error::LiquiditySourceUnavailable
@@ -614,8 +614,8 @@ where
 		let (request_sender, request_receiver) = oneshot::channel();
 		{
 			let mut pending_check_order_status_requests_lock =
-				lsps1_service.pending_check_order_status_requests.lock().unwrap();
-			let request_id = client_handler.check_order_status(&lsps1_service.node_id, order_id);
+				lsps1_client.pending_check_order_status_requests.lock().unwrap();
+			let request_id = client_handler.check_order_status(&lsps1_client.lsp_node_id, order_id);
 			pending_check_order_status_requests_lock.insert(request_id, request_sender);
 		}
 
@@ -740,7 +740,7 @@ where
 	}
 
 	async fn lsps2_request_opening_fee_params(&self) -> Result<LSPS2FeeResponse, Error> {
-		let lsps2_service = self.lsps2_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let client_handler = self.liquidity_manager.lsps2_client_handler().ok_or_else(|| {
 			log_error!(self.logger, "Liquidity client was not configured.",);
@@ -749,9 +749,9 @@ where
 
 		let (fee_request_sender, fee_request_receiver) = oneshot::channel();
 		{
-			let mut pending_fee_requests_lock = lsps2_service.pending_fee_requests.lock().unwrap();
+			let mut pending_fee_requests_lock = lsps2_client.pending_fee_requests.lock().unwrap();
 			let request_id = client_handler
-				.request_opening_params(lsps2_service.node_id, lsps2_service.token.clone());
+				.request_opening_params(lsps2_client.lsp_node_id, lsps2_client.token.clone());
 			pending_fee_requests_lock.insert(request_id, fee_request_sender);
 		}
 
@@ -773,7 +773,7 @@ where
 	async fn lsps2_send_buy_request(
 		&self, amount_msat: Option<u64>, opening_fee_params: OpeningFeeParams,
 	) -> Result<LSPS2BuyResponse, Error> {
-		let lsps2_service = self.lsps2_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let client_handler = self.liquidity_manager.lsps2_client_handler().ok_or_else(|| {
 			log_error!(self.logger, "Liquidity client was not configured.",);
@@ -782,9 +782,9 @@ where
 
 		let (buy_request_sender, buy_request_receiver) = oneshot::channel();
 		{
-			let mut pending_buy_requests_lock = lsps2_service.pending_buy_requests.lock().unwrap();
+			let mut pending_buy_requests_lock = lsps2_client.pending_buy_requests.lock().unwrap();
 			let request_id = client_handler
-				.select_opening_params(lsps2_service.node_id, amount_msat, opening_fee_params)
+				.select_opening_params(lsps2_client.lsp_node_id, amount_msat, opening_fee_params)
 				.map_err(|e| {
 					log_error!(
 						self.logger,
@@ -817,7 +817,7 @@ where
 		&self, buy_response: LSPS2BuyResponse, amount_msat: Option<u64>,
 		description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let lsps2_service = self.lsps2_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
 		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
@@ -830,7 +830,7 @@ where
 			})?;
 
 		let route_hint = RouteHint(vec![RouteHintHop {
-			src_node_id: lsps2_service.node_id,
+			src_node_id: lsps2_client.lsp_node_id,
 			short_channel_id: buy_response.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
 			cltv_expiry_delta: buy_response.cltv_expiry_delta as u16,
@@ -999,9 +999,8 @@ impl LSPS1Liquidity {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let (lsp_node_id, lsp_address) = liquidity_source
-			.get_lsps1_service_details()
-			.ok_or(Error::LiquiditySourceUnavailable)?;
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps1_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let rt_lock = self.runtime.read().unwrap();
 		let runtime = rt_lock.as_ref().unwrap();
@@ -1045,9 +1044,8 @@ impl LSPS1Liquidity {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let (lsp_node_id, lsp_address) = liquidity_source
-			.get_lsps1_service_details()
-			.ok_or(Error::LiquiditySourceUnavailable)?;
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps1_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let rt_lock = self.runtime.read().unwrap();
 		let runtime = rt_lock.as_ref().unwrap();

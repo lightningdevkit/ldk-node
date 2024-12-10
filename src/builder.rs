@@ -94,18 +94,26 @@ enum GossipSourceConfig {
 	RapidGossipSync(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LiquiditySourceConfig {
-	// LSPS1 service's (node_id, address, token)
-	lsps1_service: Option<(PublicKey, SocketAddress, Option<String>)>,
-	// LSPS2 service's (node_id, address, token)
-	lsps2_service: Option<(PublicKey, SocketAddress, Option<String>)>,
+	// Act as an LSPS1 client connecting to the given service.
+	lsps1_client: Option<LSPS1ClientConfig>,
+	// Act as an LSPS2 client connecting to the given service.
+	lsps2_client: Option<LSPS2ClientConfig>,
 }
 
-impl Default for LiquiditySourceConfig {
-	fn default() -> Self {
-		Self { lsps1_service: None, lsps2_service: None }
-	}
+#[derive(Debug, Clone)]
+struct LSPS1ClientConfig {
+	node_id: PublicKey,
+	address: SocketAddress,
+	token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LSPS2ClientConfig {
+	node_id: PublicKey,
+	address: SocketAddress,
+	token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -319,7 +327,8 @@ impl NodeBuilder {
 
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps1_service = Some((node_id, address, token));
+		let lsps1_client_config = LSPS1ClientConfig { node_id, address, token };
+		liquidity_source_config.lsps1_client = Some(lsps1_client_config);
 		self
 	}
 
@@ -339,7 +348,8 @@ impl NodeBuilder {
 
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps2_service = Some((node_id, address, token));
+		let lsps2_client_config = LSPS2ClientConfig { node_id, address, token };
+		liquidity_source_config.lsps2_client = Some(lsps2_client_config);
 		self
 	}
 
@@ -1039,7 +1049,7 @@ fn build_with_store_internal(
 	};
 
 	let mut user_config = default_user_config(&config);
-	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
+	if liquidity_source_config.and_then(|lsc| lsc.lsps2_client.as_ref()).is_some() {
 		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 		// check that they don't take too much before claiming.
 		user_config.channel_config.accept_underpaying_htlcs = true;
@@ -1180,12 +1190,20 @@ fn build_with_store_internal(
 			Arc::clone(&logger),
 		);
 
-		lsc.lsps1_service.as_ref().map(|(node_id, address, token)| {
-			liquidity_source_builder.lsps1_service(*node_id, address.clone(), token.clone())
+		lsc.lsps1_client.as_ref().map(|config| {
+			liquidity_source_builder.lsps1_client(
+				config.node_id,
+				config.address.clone(),
+				config.token.clone(),
+			)
 		});
 
-		lsc.lsps2_service.as_ref().map(|(node_id, address, token)| {
-			liquidity_source_builder.lsps2_service(*node_id, address.clone(), token.clone())
+		lsc.lsps2_client.as_ref().map(|config| {
+			liquidity_source_builder.lsps2_client(
+				config.node_id,
+				config.address.clone(),
+				config.token.clone(),
+			)
 		});
 
 		Arc::new(liquidity_source_builder.build())
