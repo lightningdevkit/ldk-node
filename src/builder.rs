@@ -1089,6 +1089,12 @@ fn build_with_store_internal(
 			100;
 	}
 
+	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
+		// If we act as an LSPS2 service, we need to to be able to intercept HTLCs and forward the
+		// information to the service handler.
+		user_config.accept_intercept_htlcs = true;
+	}
+
 	let message_router =
 		Arc::new(MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager)));
 

@@ -13,10 +13,14 @@ use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{Config, Error};
 
-use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
+use lightning::events::HTLCDestination;
+use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use lightning::ln::msgs::SocketAddress;
+use lightning::ln::types::ChannelId;
 use lightning::routing::router::{RouteHint, RouteHintHop};
+
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
+
 use lightning_liquidity::events::Event;
 use lightning_liquidity::lsps0::ser::RequestId;
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
@@ -28,6 +32,8 @@ use lightning_liquidity::lsps2::msgs::OpeningFeeParams;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
+
+use lightning_types::payment::PaymentHash;
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
@@ -943,6 +949,70 @@ where
 				log_error!(self.logger, "Failed to build and sign invoice: {}", e);
 				Error::InvoiceCreationFailed
 			})
+	}
+
+	pub(crate) fn handle_channel_ready(
+		&self, user_channel_id: u128, channel_id: &ChannelId, counterparty_node_id: &PublicKey,
+	) {
+		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
+			if let Err(e) = lsps2_service_handler.channel_ready(
+				user_channel_id,
+				channel_id,
+				counterparty_node_id,
+			) {
+				log_error!(
+					self.logger,
+					"LSPS2 service failed to handle ChannelReady event: {:?}",
+					e
+				);
+			}
+		}
+	}
+
+	pub(crate) fn handle_htlc_intercepted(
+		&self, intercept_scid: u64, intercept_id: InterceptId, expected_outbound_amount_msat: u64,
+		payment_hash: PaymentHash,
+	) {
+		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
+			if let Err(e) = lsps2_service_handler.htlc_intercepted(
+				intercept_scid,
+				intercept_id,
+				expected_outbound_amount_msat,
+				payment_hash,
+			) {
+				log_error!(
+					self.logger,
+					"LSPS2 service failed to handle HTLCIntercepted event: {:?}",
+					e
+				);
+			}
+		}
+	}
+
+	pub(crate) fn handle_htlc_handling_failed(&self, failed_next_destination: HTLCDestination) {
+		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
+			if let Err(e) = lsps2_service_handler.htlc_handling_failed(failed_next_destination) {
+				log_error!(
+					self.logger,
+					"LSPS2 service failed to handle HTLCHandlingFailed event: {:?}",
+					e
+				);
+			}
+		}
+	}
+
+	pub(crate) fn handle_payment_forwarded(&self, next_channel_id: Option<ChannelId>) {
+		if let Some(next_channel_id) = next_channel_id {
+			if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
+				if let Err(e) = lsps2_service_handler.payment_forwarded(next_channel_id) {
+					log_error!(
+						self.logger,
+						"LSPS2 service failed to handle PaymentForwarded: {:?}",
+						e
+					);
+				}
+			}
+		}
 	}
 }
 
