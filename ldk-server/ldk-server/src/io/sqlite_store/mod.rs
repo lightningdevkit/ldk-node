@@ -96,7 +96,7 @@ impl SqliteStore {
 		})?;
 
 		let index_creation_time_sql = format!(
-			"CREATE INDEX idx_creation_time ON {} (creation_time);",
+			"CREATE INDEX IF NOT EXISTS idx_creation_time ON {} (creation_time);",
 			paginated_kv_table_name
 		);
 
