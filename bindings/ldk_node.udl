@@ -34,13 +34,16 @@ enum LogLevel {
 	"Error",
 };
 
-dictionary FilesystemLoggerConfig {
-	string log_file_path;
+dictionary LogRecord {
 	LogLevel level;
+	string args;
+	string module_path;
+	u32 line;
 };
 
-dictionary LogFacadeLoggerConfig {
-	LogLevel level;
+[Trait, WithForeign]
+interface LogWriter {
+    void log(LogRecord record);
 };
 
 interface Builder {
@@ -57,8 +60,9 @@ interface Builder {
 	void set_gossip_source_rgs(string rgs_server_url);
 	void set_liquidity_source_lsps2(SocketAddress address, PublicKey node_id, string? token);
 	void set_storage_dir_path(string storage_dir_path);
-	void set_filesystem_logger(FilesystemLoggerConfig fs_config);
-	void set_log_facade_logger(LogFacadeLoggerConfig lf_config);
+	void set_filesystem_logger(string? log_file_path, LogLevel? log_level);
+	void set_log_facade_logger(LogLevel log_level);
+	void set_custom_logger(LogWriter log_writer);
 	void set_network(Network network);
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
@@ -591,18 +595,6 @@ dictionary NodeAnnouncementInfo {
 	u32 last_update;
 	string alias;
 	sequence<SocketAddress> addresses;
-};
-
-dictionary LogRecord {
-	LogLevel level;
-	string args;
-	string module_path;
-	u32 line;
-};
-
-[Trait]
-interface LogWriter {
-    void log(LogRecord record);
 };
 
 [Custom]

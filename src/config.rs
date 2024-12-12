@@ -22,15 +22,21 @@ use bitcoin::Network;
 use std::time::Duration;
 
 // Config defaults
-const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
-const DEFAULT_LOG_FILE_PATH: &'static str = "ldk_node.log";
-const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
+
+/// The default log level.
+pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
+
+/// The default log file path.
+pub const DEFAULT_LOG_FILE_PATH: &'static str = "/tmp/ldk_node/ldk_node.log";
+
+/// The default storage directory.
+pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
@@ -426,32 +432,6 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 				Self::FeeRateMultiplier(multiplier)
 			},
 		}
-	}
-}
-
-/// Configuration options for logging to the filesystem.
-#[derive(Debug, Clone)]
-pub struct FilesystemLoggerConfig {
-	/// The log file path.
-	///
-	/// This specifies the log file path if a destination other than the storage
-	/// directory, i.e. [`Config::storage_dir_path`], is preferred.
-	pub log_file_path: String,
-	/// This specifies the log level.
-	pub level: LogLevel,
-}
-
-/// Configuration options for logging to the `log` facade.
-#[derive(Debug, Clone)]
-pub struct LogFacadeLoggerConfig {
-	/// This specifies the log level.
-	pub level: LogLevel,
-}
-
-impl Default for FilesystemLoggerConfig {
-	fn default() -> Self {
-		let log_file_path = format!("{}/{}", DEFAULT_STORAGE_DIR_PATH, DEFAULT_LOG_FILE_PATH);
-		Self { log_file_path, level: DEFAULT_LOG_LEVEL }
 	}
 }
 

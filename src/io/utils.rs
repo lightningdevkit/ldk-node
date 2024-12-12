@@ -98,6 +98,17 @@ where
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
 		thread_rng().fill_bytes(&mut key);
 
+		if let Some(parent_dir) = Path::new(&keys_seed_path).parent() {
+			fs::create_dir_all(parent_dir).map_err(|e| {
+				log_error!(
+					logger,
+					"Failed to create parent directory for key seed file: {}.",
+					keys_seed_path
+				);
+				e
+			})?;
+		}
+
 		let mut f = fs::File::create(keys_seed_path).map_err(|e| {
 			log_error!(logger, "Failed to create keys seed file: {}", keys_seed_path);
 			e

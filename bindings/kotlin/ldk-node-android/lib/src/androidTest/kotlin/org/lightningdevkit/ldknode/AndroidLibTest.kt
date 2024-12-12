@@ -3,19 +3,16 @@
  */
 package org.lightningdevkit.ldknode
 
-import kotlin.UInt
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.io.path.createTempDirectory
-import org.junit.runner.RunWith
-import org.lightningdevkit.ldknode.*;
-import android.content.Context.MODE_PRIVATE
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlin.io.path.createTempDirectory
+import kotlin.test.Test
+import org.junit.runner.RunWith
+import org.lightningdevkit.ldknode.*
 
 @RunWith(AndroidJUnit4::class)
 class AndroidLibTest {
-    @Test fun node_start_stop() {
+    @Test
+    fun node_start_stop() {
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
         val tmpDir2 = createTempDirectory("ldk_node").toString()

@@ -8,13 +8,12 @@
 #![cfg(any(test, cln_test, vss_test))]
 #![allow(dead_code)]
 
-use chrono::Utc;
 use ldk_node::config::{Config, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
+use ldk_node::logger::LogLevel;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, FilesystemLoggerConfig, LightningBalance,
-	LogFacadeLoggerConfig, LogRecord, LogWriter, Node, NodeError, PendingSweepBalance,
+	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
 };
 
 use lightning::ln::msgs::SocketAddress;
@@ -41,11 +40,9 @@ use electrum_client::ElectrumApi;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 
-use log::{LevelFilter, Log};
-
 use std::env;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 macro_rules! expect_event {
@@ -254,79 +251,6 @@ pub(crate) enum TestChainSource<'a> {
 	BitcoindRpc(&'a BitcoinD),
 }
 
-#[derive(Clone)]
-pub(crate) enum TestLogWriter {
-	File(FilesystemLoggerConfig),
-	LogFacade(LogFacadeLoggerConfig),
-	Custom(Arc<dyn LogWriter + Send + Sync>),
-}
-
-/// Simple in-memory mock `log` logger for tests.
-#[derive(Debug)]
-pub(crate) struct MockLogger {
-	logs: Arc<Mutex<Vec<String>>>,
-}
-
-impl MockLogger {
-	pub fn new() -> Self {
-		Self { logs: Arc::new(Mutex::new(Vec::new())) }
-	}
-
-	pub fn retrieve_logs(&self) -> Vec<String> {
-		self.logs.lock().unwrap().clone()
-	}
-}
-
-/// [`MockLogger`] as `log` logger - destination for [`Writer::LogFacadeWriter`]
-/// to write logs to.
-///
-/// [`Writer::LogFacadeWriter`]: ldk_node::logger::Writer::LogFacadeWriter
-impl Log for MockLogger {
-	fn log(&self, record: &log::Record) {
-		let message = format!(
-			"{} [{}] {}",
-			Utc::now().format("%Y-%m-%d %H:%M:%S"),
-			record.level(),
-			record.args()
-		);
-		self.logs.lock().unwrap().push(message);
-	}
-
-	fn enabled(&self, _metadata: &log::Metadata) -> bool {
-		true
-	}
-
-	fn flush(&self) {}
-}
-
-/// [`MockLogger`] as custom logger - a destination for [`Writer::CustomWriter`]
-/// to write logs to.
-///
-/// [`Writer::CustomWriter`]: ldk_node::logger::Writer::CustomWriter
-impl LogWriter for MockLogger {
-	fn log(&self, record: LogRecord) {
-		let message = format!(
-			"{} [{}] {}",
-			Utc::now().format("%Y-%m-%d %H:%M:%S"),
-			record.level,
-			record.args
-		);
-		self.logs.lock().unwrap().push(message);
-	}
-}
-
-pub(crate) fn init_log_logger(level: LevelFilter) -> Arc<MockLogger> {
-	let logger = Arc::new(MockLogger::new());
-	log::set_boxed_logger(Box::new(logger.clone())).unwrap();
-	log::set_max_level(level);
-	logger
-}
-
-pub(crate) fn init_custom_logger() -> Arc<MockLogger> {
-	let logger = Arc::new(MockLogger::new());
-	logger
-}
-
 macro_rules! setup_builder {
 	($builder: ident, $config: expr) => {
 		#[cfg(feature = "uniffi")]
@@ -340,11 +264,11 @@ pub(crate) use setup_builder;
 
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool, log_writer: TestLogWriter,
+	anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config(anchor_channels);
-	let node_a = setup_node(chain_source, config_a, None, log_writer.clone());
+	let node_a = setup_node(chain_source, config_a, None);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
@@ -359,13 +283,12 @@ pub(crate) fn setup_two_nodes(
 			.trusted_peers_no_reserve
 			.push(node_a.node_id());
 	}
-	let node_b = setup_node(chain_source, config_b, None, log_writer);
+	let node_b = setup_node(chain_source, config_b, None);
 	(node_a, node_b)
 }
 
 pub(crate) fn setup_node(
 	chain_source: &TestChainSource, config: Config, seed_bytes: Option<Vec<u8>>,
-	log_writer: TestLogWriter,
 ) -> TestNode {
 	setup_builder!(builder, config);
 	match chain_source {
@@ -386,17 +309,8 @@ pub(crate) fn setup_node(
 		},
 	}
 
-	match log_writer {
-		TestLogWriter::File(fs_config) => {
-			builder.set_filesystem_logger(fs_config);
-		},
-		TestLogWriter::LogFacade(lf_config) => {
-			builder.set_log_facade_logger(lf_config);
-		},
-		TestLogWriter::Custom(log_writer) => {
-			builder.set_custom_logger(log_writer);
-		},
-	}
+	let log_file_path = format!("{}/{}", config.storage_dir_path, "ldk_node.log");
+	builder.set_filesystem_logger(Some(log_file_path), Some(LogLevel::Gossip));
 
 	if let Some(seed) = seed_bytes {
 		builder.set_entropy_seed_bytes(seed).unwrap();
