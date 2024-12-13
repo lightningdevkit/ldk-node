@@ -319,6 +319,40 @@ message ListPaymentsResponse {
   repeated types.Payment payments = 1;
 }
 
+// Retrieves list of all forwarded payments.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded
+message ListForwardedPaymentsRequest {
+  // `page_token` is a pagination token.
+  //
+  // To query for the first page, `page_token` must not be specified.
+  //
+  // For subsequent pages, use the value that was returned as `next_page_token` in the previous
+  // page's response.
+  optional types.PageToken page_token = 1;
+}
+
+// The response `content` for the `ListForwardedPayments` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ListForwardedPaymentsResponse {
+  // List of forwarded payments.
+  repeated types.ForwardedPayment forwarded_payments = 1;
+
+  // `next_page_token` is a pagination token, used to retrieve the next page of results.
+  // Use this value to query for next-page of paginated operation, by specifying
+  // this value as the `page_token` in the next request.
+  //
+  // If `next_page_token` is `None`, then the "last page" of results has been processed and
+  // there is no more data to be retrieved.
+  //
+  // If `next_page_token` is not `None`, it does not necessarily mean that there is more data in the
+  // result set. The only way to know when you have reached the end of the result set is when
+  // `next_page_token` is `None`.
+  //
+  // **Caution**: Clients must not assume a specific number of records to be present in a page for
+  // paginated response.
+  optional types.PageToken next_page_token = 2;
+}
+
 // Retrieves an overview of all known balances.
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_balances
 message GetBalancesRequest {}

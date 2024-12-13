@@ -165,6 +165,52 @@ pub struct LspFeeLimits {
 	#[prost(uint64, optional, tag = "2")]
 	pub max_proportional_opening_fee_ppm_msat: ::core::option::Option<u64>,
 }
+/// A forwarded payment through our node.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ForwardedPayment {
+	/// The channel id of the incoming channel between the previous node and us.
+	#[prost(string, tag = "1")]
+	pub prev_channel_id: ::prost::alloc::string::String,
+	/// The channel id of the outgoing channel between the next node and us.
+	#[prost(string, tag = "2")]
+	pub next_channel_id: ::prost::alloc::string::String,
+	/// The `user_channel_id` of the incoming channel between the previous node and us.
+	#[prost(string, tag = "3")]
+	pub prev_user_channel_id: ::prost::alloc::string::String,
+	/// The `user_channel_id` of the outgoing channel between the next node and us.
+	/// This will be `None` if the payment was settled via an on-chain transaction.
+	/// See the caveat described for the `total_fee_earned_msat` field.
+	#[prost(string, optional, tag = "4")]
+	pub next_user_channel_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The total fee, in milli-satoshis, which was earned as a result of the payment.
+	///
+	/// Note that if we force-closed the channel over which we forwarded an HTLC while the HTLC was pending, the amount the
+	/// next hop claimed will have been rounded down to the nearest whole satoshi. Thus, the fee calculated here may be
+	/// higher than expected as we still claimed the full value in millisatoshis from the source.
+	/// In this case, `claim_from_onchain_tx` will be set.
+	///
+	/// If the channel which sent us the payment has been force-closed, we will claim the funds via an on-chain transaction.
+	/// In that case we do not yet know the on-chain transaction fees which we will spend and will instead set this to `None`.
+	#[prost(uint64, optional, tag = "5")]
+	pub total_fee_earned_msat: ::core::option::Option<u64>,
+	/// The share of the total fee, in milli-satoshis, which was withheld in addition to the forwarding fee.
+	/// This will only be set if we forwarded an intercepted HTLC with less than the expected amount. This means our
+	/// counterparty accepted to receive less than the invoice amount.
+	///
+	/// The caveat described above the `total_fee_earned_msat` field applies here as well.
+	#[prost(uint64, optional, tag = "6")]
+	pub skimmed_fee_msat: ::core::option::Option<u64>,
+	/// If this is true, the forwarded HTLC was claimed by our counterparty via an on-chain transaction.
+	#[prost(bool, tag = "7")]
+	pub claim_from_onchain_tx: bool,
+	/// The final amount forwarded, in milli-satoshis, after the fee is deducted.
+	///
+	/// The caveat described above the `total_fee_earned_msat` field applies here as well.
+	#[prost(uint64, optional, tag = "8")]
+	pub outbound_amount_forwarded_msat: ::core::option::Option<u64>,
+}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Channel {
@@ -646,6 +692,15 @@ pub struct AwaitingThresholdConfirmations {
 	/// The amount, in satoshis, of the output being swept.
 	#[prost(uint64, tag = "5")]
 	pub amount_satoshis: u64,
+}
+/// Token used to determine start of next page in paginated APIs.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PageToken {
+	#[prost(string, tag = "1")]
+	pub token: ::prost::alloc::string::String,
+	#[prost(int64, tag = "2")]
+	pub index: i64,
 }
 /// Represents the direction of a payment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
