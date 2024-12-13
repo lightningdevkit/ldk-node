@@ -12,6 +12,7 @@ use crate::logger::LdkNodeLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
 use lightning::chain::chainmonitor;
+use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::RoutingMessageHandler;
 use lightning::ln::msgs::SocketAddress;
@@ -347,4 +348,24 @@ pub struct PeerDetails {
 	pub is_persisted: bool,
 	/// Indicates whether we currently have an active connection with the peer.
 	pub is_connected: bool,
+}
+
+/// Custom TLV entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomTlvRecord {
+	/// Type number.
+	pub type_num: u64,
+	/// Serialized value.
+	pub value: Vec<u8>,
+}
+
+impl_writeable_tlv_based!(CustomTlvRecord, {
+	(0, type_num, required),
+	(2, value, required),
+});
+
+impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
+	fn from(tlv: &(u64, Vec<u8>)) -> Self {
+		CustomTlvRecord { type_num: tlv.0, value: tlv.1.clone() }
+	}
 }

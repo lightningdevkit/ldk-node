@@ -15,8 +15,6 @@ use chrono::Utc;
 use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
-#[cfg(not(target_os = "windows"))]
-use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -59,27 +57,15 @@ impl FilesystemLogWriter {
 		let log_file_path = format!("{}/{}", log_dir, log_file_name);
 
 		if let Some(parent_dir) = Path::new(&log_file_path).parent() {
-			fs::create_dir_all(parent_dir).expect("Failed to create log parent directory");
+			fs::create_dir_all(parent_dir)
+				.map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {}", e))?;
 
-			// make sure the file exists, so that the symlink has something to point to.
+			// make sure the file exists.
 			fs::OpenOptions::new()
 				.create(true)
 				.append(true)
-				.open(log_file_path.clone())
+				.open(&log_file_path)
 				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
-
-			#[cfg(not(target_os = "windows"))]
-			{
-				// Create a symlink to the current log file, with prior cleanup
-				let log_file_symlink = parent_dir.join("ldk_node_latest.log");
-				if log_file_symlink.as_path().is_symlink() {
-					fs::remove_file(&log_file_symlink).map_err(|e| {
-						eprintln!("ERROR: Failed to remove log file symlink: {}", e)
-					})?;
-				}
-				symlink(&log_file_name, &log_file_symlink)
-					.map_err(|e| eprintln!("ERROR: Failed to create log file symlink: {}", e))?;
-			}
 		}
 
 		let log_file = Mutex::new(

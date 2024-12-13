@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::types::{DynStore, Sweeper, Wallet};
+use crate::types::{CustomTlvRecord, DynStore, Sweeper, Wallet};
 
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, Graph, PeerInfo,
@@ -32,7 +32,7 @@ use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
-use lightning::ln::PaymentHash;
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::RouteHop;
 use lightning::util::errors::APIError;
@@ -66,6 +66,12 @@ pub enum Event {
 		payment_id: Option<PaymentId>,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
+		/// The preimage to the `payment_hash`.
+		///
+		/// Note that this serves as a payment receipt.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.4.2 or prior.
+		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
 	},
@@ -97,6 +103,52 @@ pub enum Event {
 		payment_hash: PaymentHash,
 		/// The value, in thousandths of a satoshi, that has been received.
 		amount_msat: u64,
+		/// Custom TLV records received on the payment
+		custom_records: Vec<CustomTlvRecord>,
+	},
+	/// A payment has been forwarded.
+	PaymentForwarded {
+		/// The channel id of the incoming channel between the previous node and us.
+		prev_channel_id: ChannelId,
+		/// The channel id of the outgoing channel between the next node and us.
+		next_channel_id: ChannelId,
+		/// The `user_channel_id` of the incoming channel between the previous node and us.
+		///
+		/// Will only be `None` for events serialized with LDK Node v0.3.0 or prior.
+		prev_user_channel_id: Option<UserChannelId>,
+		/// The `user_channel_id` of the outgoing channel between the next node and us.
+		///
+		/// This will be `None` if the payment was settled via an on-chain transaction. See the
+		/// caveat described for the `total_fee_earned_msat` field.
+		next_user_channel_id: Option<UserChannelId>,
+		/// The total fee, in milli-satoshis, which was earned as a result of the payment.
+		///
+		/// Note that if we force-closed the channel over which we forwarded an HTLC while the HTLC
+		/// was pending, the amount the next hop claimed will have been rounded down to the nearest
+		/// whole satoshi. Thus, the fee calculated here may be higher than expected as we still
+		/// claimed the full value in millisatoshis from the source. In this case,
+		/// `claim_from_onchain_tx` will be set.
+		///
+		/// If the channel which sent us the payment has been force-closed, we will claim the funds
+		/// via an on-chain transaction. In that case we do not yet know the on-chain transaction
+		/// fees which we will spend and will instead set this to `None`.
+		total_fee_earned_msat: Option<u64>,
+		/// The share of the total fee, in milli-satoshis, which was withheld in addition to the
+		/// forwarding fee.
+		///
+		/// This will only be `Some` if we forwarded an intercepted HTLC with less than the
+		/// expected amount. This means our counterparty accepted to receive less than the invoice
+		/// amount.
+		///
+		/// The caveat described above the `total_fee_earned_msat` field applies here as well.
+		skimmed_fee_msat: Option<u64>,
+		/// If this is `true`, the forwarded HTLC was claimed by our counterparty via an on-chain
+		/// transaction.
+		claim_from_onchain_tx: bool,
+		/// The final amount forwarded, in milli-satoshis, after the fee is deducted.
+		///
+		/// The caveat described above the `total_fee_earned_msat` field applies here as well.
+		outbound_amount_forwarded_msat: Option<u64>,
 	},
 	/// A payment for a previously-registered payment hash has been received.
 	///
@@ -119,6 +171,8 @@ pub enum Event {
 		/// The block height at which this payment will be failed back and will no longer be
 		/// eligible for claiming.
 		claim_deadline: Option<u32>,
+		/// Custom TLV records attached to the payment
+		custom_records: Vec<CustomTlvRecord>,
 	},
 	/// A channel has been created and is pending confirmation on-chain.
 	ChannelPending {
@@ -189,6 +243,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
 		(3, payment_id, option),
+		(5, payment_preimage, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, option),
@@ -199,6 +254,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, payment_hash, required),
 		(1, payment_id, option),
 		(2, amount_msat, required),
+		(3, custom_records, optional_vec),
 	},
 	(3, ChannelReady) => {
 		(0, channel_id, required),
@@ -223,13 +279,24 @@ impl_writeable_tlv_based_enum!(Event,
 		(2, payment_id, required),
 		(4, claimable_amount_msat, required),
 		(6, claim_deadline, option),
+		(7, custom_records, optional_vec),
 	},
-	(7, ProbeSuccessful) => {
+	(7, PaymentForwarded) => {
+		(0, prev_channel_id, required),
+		(2, next_channel_id, required),
+		(4, prev_user_channel_id, option),
+		(6, next_user_channel_id, option),
+		(8, total_fee_earned_msat, option),
+		(10, skimmed_fee_msat, option),
+		(12, claim_from_onchain_tx, required),
+		(14, outbound_amount_forwarded_msat, option),
+	},
+	(8, ProbeSuccessful) => {
 		(0, payment_id, required),
 		(2, payment_hash, required),
 		(4, hops, required_vec),
 	},
-	(8, ProbeFailed) => {
+	(9, ProbeFailed) => {
 		(0, payment_id, required),
 		(2, payment_hash, required),
 		(4, hops, required_vec),
@@ -518,7 +585,7 @@ where
 				via_channel_id: _,
 				via_user_channel_id: _,
 				claim_deadline,
-				onion_fields: _,
+				onion_fields,
 				counterparty_skimmed_fee_msat,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
@@ -620,11 +687,17 @@ where
 									"We would have registered the preimage if we knew"
 								);
 
+								let custom_records = onion_fields
+									.map(|cf| {
+										cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect()
+									})
+									.unwrap_or_default();
 								let event = Event::PaymentClaimable {
 									payment_id,
 									payment_hash,
 									claimable_amount_msat: amount_msat,
 									claim_deadline,
+									custom_records,
 								};
 								match self.event_queue.add_event(event) {
 									Ok(_) => return Ok(()),
@@ -775,7 +848,7 @@ where
 				receiver_node_id: _,
 				htlcs: _,
 				sender_intended_total_msat: _,
-				onion_fields: _,
+				onion_fields,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				log_info!(
@@ -851,6 +924,9 @@ where
 					payment_id: Some(payment_id),
 					payment_hash,
 					amount_msat,
+					custom_records: onion_fields
+						.map(|cf| cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect())
+						.unwrap_or_default(),
 				};
 				match self.event_queue.add_event(event) {
 					Ok(_) => return Ok(()),
@@ -907,6 +983,7 @@ where
 				let event = Event::PaymentSuccessful {
 					payment_id: Some(payment_id),
 					payment_hash,
+					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
 				};
 
@@ -1116,11 +1193,28 @@ where
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
 				next_channel_id,
+				prev_user_channel_id,
+				next_user_channel_id,
 				total_fee_earned_msat,
+				skimmed_fee_msat,
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
-				..
 			} => {
+				let event = Event::PaymentForwarded {
+					prev_channel_id: prev_channel_id.expect("prev_channel_id expected for events generated by LDK versions greater than 0.0.107."),
+					next_channel_id: next_channel_id.expect("next_channel_id expected for events generated by LDK versions greater than 0.0.107."),
+					prev_user_channel_id: prev_user_channel_id.map(UserChannelId),
+					next_user_channel_id: next_user_channel_id.map(UserChannelId),
+					total_fee_earned_msat,
+					skimmed_fee_msat,
+					claim_from_onchain_tx,
+					outbound_amount_forwarded_msat,
+				};
+				self.event_queue.add_event(event).map_err(|e| {
+					log_error!(self.logger, "Failed to push to event queue: {}", e);
+					ReplayEvent()
+				})?;
+
 				let read_only_network_graph = self.network_graph.read_only();
 				let nodes = read_only_network_graph.nodes();
 				let channels = self.channel_manager.list_channels();

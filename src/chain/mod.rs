@@ -51,7 +51,7 @@ pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/ap
 // The default Esplora client timeout we're using.
 pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
 
-const CHAIN_POLLING_INTERVAL_SECS: u64 = 1;
+const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 
 pub(crate) enum WalletSyncStatus {
 	Completed,
@@ -991,18 +991,23 @@ impl ChainSource {
 									);
 								},
 								Err(e) => match e {
-									esplora_client::Error::Reqwest(err) => {
-										if err.status() == reqwest::StatusCode::from_u16(400).ok() {
-											// Ignore 400, as this just means bitcoind already knows the
+									esplora_client::Error::HttpResponse { status, message } => {
+										if status == 400 {
+											// Log 400 at lesser level, as this often just means bitcoind already knows the
 											// transaction.
 											// FIXME: We can further differentiate here based on the error
 											// message which will be available with rust-esplora-client 0.7 and
 											// later.
+											log_trace!(
+												logger,
+												"Failed to broadcast due to HTTP connection error: {}",
+												message
+											);
 										} else {
 											log_error!(
 												logger,
-												"Failed to broadcast due to HTTP connection error: {}",
-												err
+												"Failed to broadcast due to HTTP connection error: {} - {}",
+												status, message
 											);
 										}
 										log_trace!(

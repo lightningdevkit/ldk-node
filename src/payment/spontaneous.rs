@@ -14,7 +14,7 @@ use crate::payment::store::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
 use crate::payment::SendingParameters;
-use crate::types::{ChannelManager, KeysManager};
+use crate::types::{ChannelManager, CustomTlvRecord, KeysManager};
 
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -59,6 +59,21 @@ impl SpontaneousPayment {
 	pub fn send(
 		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
+		self.send_inner(amount_msat, node_id, sending_parameters, None)
+	}
+
+	/// Send a spontaneous payment including a list of custom TLVs.
+	pub fn send_with_custom_tlvs(
+		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
+		custom_tlvs: Vec<CustomTlvRecord>,
+	) -> Result<PaymentId, Error> {
+		self.send_inner(amount_msat, node_id, sending_parameters, Some(custom_tlvs))
+	}
+
+	fn send_inner(
+		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
+		custom_tlvs: Option<Vec<CustomTlvRecord>>,
+	) -> Result<PaymentId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -97,7 +112,15 @@ impl SpontaneousPayment {
 				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
 		};
 
-		let recipient_fields = RecipientOnionFields::spontaneous_empty();
+		let recipient_fields = match custom_tlvs {
+			Some(tlvs) => RecipientOnionFields::spontaneous_empty()
+				.with_custom_tlvs(tlvs.into_iter().map(|tlv| (tlv.type_num, tlv.value)).collect())
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to send payment with custom TLVs: {:?}", e);
+					Error::InvalidCustomTlvs
+				})?,
+			None => RecipientOnionFields::spontaneous_empty(),
+		};
 
 		match self.channel_manager.send_spontaneous_payment_with_retry(
 			Some(payment_preimage),

@@ -21,6 +21,8 @@ use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::util::persist::KVStore;
 
+use bitcoincore_rpc::RpcApi;
+
 use bitcoin::Amount;
 
 use std::sync::Arc;
@@ -190,6 +192,9 @@ fn multi_hop_sending() {
 	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
 	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
 
+	expect_event!(nodes[1], PaymentForwarded);
+	expect_event!(nodes[2], PaymentForwarded);
+
 	let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);
 	expect_payment_successful_event!(nodes[0], payment_id, Some(fee_paid_msat));
@@ -232,8 +237,8 @@ fn start_stop_reinit() {
 	node.sync_wallets().unwrap();
 	assert_eq!(node.list_balances().spendable_onchain_balance_sats, expected_amount.to_sat());
 
-	let log_file_symlink = format!("{}/logs/ldk_node_latest.log", config.clone().storage_dir_path);
-	assert!(std::path::Path::new(&log_file_symlink).is_symlink());
+	let log_file = format!("{}/ldk_node.log", config.clone().storage_dir_path);
+	assert!(std::path::Path::new(&log_file).exists());
 
 	node.stop().unwrap();
 	assert_eq!(node.stop(), Err(NodeError::NotRunning));
@@ -275,44 +280,183 @@ fn onchain_spend_receive() {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
+	let premine_amount_sat = 1_100_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
-		vec![addr_b.clone()],
-		Amount::from_sat(100000),
+		vec![addr_a.clone(), addr_b.clone()],
+		Amount::from_sat(premine_amount_sat),
 	);
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
-	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, 100000);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let channel_amount_sat = 1_000_000;
+	let reserve_amount_sat = 25_000;
+	open_channel(&node_b, &node_a, channel_amount_sat, true, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let onchain_fee_buffer_sat = 1000;
+	let expected_node_a_balance = premine_amount_sat - reserve_amount_sat;
+	let expected_node_b_balance_lower =
+		premine_amount_sat - channel_amount_sat - reserve_amount_sat - onchain_fee_buffer_sat;
+	let expected_node_b_balance_upper =
+		premine_amount_sat - channel_amount_sat - reserve_amount_sat;
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.onchain_payment().send_to_address(&addr_b, 1000)
+		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1)
 	);
 
-	let txid = node_b.onchain_payment().send_to_address(&addr_a, 1000).unwrap();
+	let amount_to_send_sats = 1000;
+	let txid = node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 1000);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats > 98000);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
+	let expected_node_a_balance = expected_node_a_balance + amount_to_send_sats;
+	let expected_node_b_balance_lower = expected_node_b_balance_lower - amount_to_send_sats;
+	let expected_node_b_balance_upper = expected_node_b_balance_upper - amount_to_send_sats;
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b).unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	assert_eq!(node_a.list_balances().total_onchain_balance_sats, 0);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats > 99000);
-	assert!(node_b.list_balances().spendable_onchain_balance_sats < 100000);
+	let expected_node_b_balance_lower = expected_node_b_balance_lower + expected_node_a_balance;
+	let expected_node_b_balance_upper = expected_node_b_balance_upper + expected_node_a_balance;
+	let expected_node_a_balance = 0;
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert_eq!(node_a.list_balances().total_onchain_balance_sats, reserve_amount_sat);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
+
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false).unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	wait_for_tx(&electrsd.client, txid);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let expected_node_b_balance_lower = expected_node_b_balance_lower + reserve_amount_sat;
+	let expected_node_b_balance_upper = expected_node_b_balance_upper + reserve_amount_sat;
+	let expected_node_a_balance = 0;
+
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert_eq!(node_a.list_balances().total_onchain_balance_sats, expected_node_a_balance);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
+}
+
+#[test]
+fn onchain_wallet_recovery() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let seed_bytes = vec![42u8; 64];
+
+	let original_config = random_config(true);
+	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
+
+	let premine_amount_sat = 100_000;
+
+	let addr_1 = original_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_1],
+		Amount::from_sat(premine_amount_sat),
+	);
+	original_node.sync_wallets().unwrap();
+	assert_eq!(original_node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let addr_2 = original_node.onchain_payment().new_address().unwrap();
+
+	let txid = bitcoind
+		.client
+		.send_to_address(
+			&addr_2,
+			Amount::from_sat(premine_amount_sat),
+			None,
+			None,
+			None,
+			None,
+			None,
+			None,
+		)
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1);
+
+	original_node.sync_wallets().unwrap();
+	assert_eq!(
+		original_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2
+	);
+
+	original_node.stop().unwrap();
+	drop(original_node);
+
+	// Now we start from scratch, only the seed remains the same.
+	let recovered_config = random_config(true);
+	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
+
+	recovered_node.sync_wallets().unwrap();
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2
+	);
+
+	// Check we sync even when skipping some addresses.
+	let _addr_3 = recovered_node.onchain_payment().new_address().unwrap();
+	let _addr_4 = recovered_node.onchain_payment().new_address().unwrap();
+	let _addr_5 = recovered_node.onchain_payment().new_address().unwrap();
+	let addr_6 = recovered_node.onchain_payment().new_address().unwrap();
+
+	let txid = bitcoind
+		.client
+		.send_to_address(
+			&addr_6,
+			Amount::from_sat(premine_amount_sat),
+			None,
+			None,
+			None,
+			None,
+			None,
+			None,
+		)
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1);
+
+	recovered_node.sync_wallets().unwrap();
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 3
+	);
 }
 
 #[test]
@@ -320,7 +464,7 @@ fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, config);
+	let node = setup_node(&chain_source, config, None);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();

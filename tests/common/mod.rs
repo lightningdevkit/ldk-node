@@ -11,7 +11,10 @@
 use ldk_node::config::{Config, EsploraSyncConfig, LoggingConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{Builder, Event, LightningBalance, LogLevel, Node, NodeError, PendingSweepBalance};
+use ldk_node::{
+	Builder, CustomTlvRecord, Event, LightningBalance, LogLevel, Node, NodeError,
+	PendingSweepBalance,
+};
 
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -271,7 +274,7 @@ pub(crate) fn setup_two_nodes(
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config(anchor_channels);
-	let node_a = setup_node(chain_source, config_a);
+	let node_a = setup_node(chain_source, config_a, None);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
@@ -286,11 +289,13 @@ pub(crate) fn setup_two_nodes(
 			.trusted_peers_no_reserve
 			.push(node_a.node_id());
 	}
-	let node_b = setup_node(chain_source, config_b);
+	let node_b = setup_node(chain_source, config_b, None);
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(chain_source: &TestChainSource, config: Config) -> TestNode {
+pub(crate) fn setup_node(
+	chain_source: &TestChainSource, config: Config, seed_bytes: Option<Vec<u8>>,
+) -> TestNode {
 	setup_builder!(builder, config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
@@ -309,6 +314,11 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: Config) -> Test
 			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
 		},
 	}
+
+	if let Some(seed) = seed_bytes {
+		builder.set_entropy_seed_bytes(seed).unwrap();
+	}
+
 	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
@@ -751,14 +761,18 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	// Test spontaneous/keysend payments
 	println!("\nA send_spontaneous_payment");
 	let keysend_amount_msat = 2500_000;
-	let keysend_payment_id =
-		node_a.spontaneous_payment().send(keysend_amount_msat, node_b.node_id(), None).unwrap();
+	let custom_tlvs = vec![CustomTlvRecord { type_num: 13377331, value: vec![1, 2, 3] }];
+	let keysend_payment_id = node_a
+		.spontaneous_payment()
+		.send_with_custom_tlvs(keysend_amount_msat, node_b.node_id(), None, custom_tlvs.clone())
+		.unwrap();
 	expect_event!(node_a, PaymentSuccessful);
-	let received_keysend_amount = match node_b.wait_next_event() {
-		ref e @ Event::PaymentReceived { amount_msat, .. } => {
+	let next_event = node_b.wait_next_event();
+	let (received_keysend_amount, received_custom_records) = match next_event {
+		ref e @ Event::PaymentReceived { amount_msat, ref custom_records, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled();
-			amount_msat
+			(amount_msat, custom_records)
 		},
 		ref e => {
 			panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
@@ -772,6 +786,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.payment(&keysend_payment_id).unwrap().kind,
 		PaymentKind::Spontaneous { .. }
 	));
+	assert_eq!(received_custom_records, &custom_tlvs);
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Inbound);
 	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));

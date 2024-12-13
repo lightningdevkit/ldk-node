@@ -142,7 +142,7 @@ use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
 	KeysManager, OnionMessenger, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, PeerDetails, UserChannelId};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
 pub use logger::LdkNodeLogger;
 use logger::{log_error, log_info, log_trace, Logger};
@@ -643,6 +643,8 @@ impl Node {
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
 		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
+		#[cfg(tokio_unstable)]
+		let metrics_runtime = Arc::clone(&runtime);
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
@@ -705,7 +707,7 @@ impl Node {
 			log_trace!(
 				self.logger,
 				"Active runtime tasks left prior to shutdown: {}",
-				runtime.metrics().active_tasks_count()
+				metrics_runtime.metrics().active_tasks_count()
 			);
 		}
 
@@ -755,6 +757,9 @@ impl Node {
 	/// Will return `Some(..)` if an event is available and `None` otherwise.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	///
+	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
+	/// which can increase the memory footprint of [`Node`].
 	pub fn next_event(&self) -> Option<Event> {
 		self.event_queue.next_event()
 	}
@@ -764,6 +769,9 @@ impl Node {
 	/// Will asynchronously poll the event queue until the next event is ready.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	///
+	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
+	/// which can increase the memory footprint of [`Node`].
 	pub async fn next_event_async(&self) -> Event {
 		self.event_queue.next_event_async().await
 	}
@@ -773,6 +781,9 @@ impl Node {
 	/// Will block the current thread until the next event is available.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
+	///
+	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
+	/// which can increase the memory footprint of [`Node`].
 	pub fn wait_next_event(&self) -> Event {
 		self.event_queue.wait_next_event()
 	}
