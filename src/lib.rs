@@ -1368,6 +1368,8 @@ impl Node {
 	}
 
 	/// Retrieves an overview of all known balances.
+	///
+	/// Note that to retrieve the latest on-chain balance, you need to call [`Node::sync_wallets`] first.
 	pub fn list_balances(&self) -> BalanceDetails {
 		let cur_anchor_reserve_sats =
 			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
