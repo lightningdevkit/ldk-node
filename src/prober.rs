@@ -59,7 +59,10 @@ impl Prober {
 		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
 		self.router
 			.find_route(&self.node_id, &route_params, Some(&first_hops[..]), inflight_htlcs)
-			.map_err(|_| Error::RouteNotFound)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to find route: {e:?}");
+				Error::RouteNotFound
+			})
 	}
 
 	/// Send a probe along the given path returning the payment hash and id of the fake payment.
