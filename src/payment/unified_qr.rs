@@ -256,22 +256,19 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
 			"lightning" => {
 				let bolt11_value =
 					String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
-				if let Ok(invoice) = bolt11_value.parse::<Bolt11Invoice>() {
-					self.bolt11_invoice = Some(invoice);
-					Ok(bip21::de::ParamKind::Known)
-				} else {
-					Ok(bip21::de::ParamKind::Unknown)
-				}
+				let invoice = bolt11_value
+					.parse::<Bolt11Invoice>()
+					.map_err(|_| Error::UriParameterParsingFailed)?;
+				self.bolt11_invoice = Some(invoice);
+				Ok(bip21::de::ParamKind::Known)
 			},
 			"lno" => {
 				let bolt12_value =
 					String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
-				if let Ok(offer) = bolt12_value.parse::<Offer>() {
-					self.bolt12_offer = Some(offer);
-					Ok(bip21::de::ParamKind::Known)
-				} else {
-					Ok(bip21::de::ParamKind::Unknown)
-				}
+				let offer =
+					bolt12_value.parse::<Offer>().map_err(|_| Error::UriParameterParsingFailed)?;
+				self.bolt12_offer = Some(offer);
+				Ok(bip21::de::ParamKind::Known)
 			},
 			_ => Ok(bip21::de::ParamKind::Unknown),
 		}

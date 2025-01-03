@@ -868,11 +868,10 @@ fn unified_qr_send_receive() {
 
 	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
 
-	// Removed one character from the offer to fall back on to invoice.
-	// Still needs work
-	let uri_str_with_invalid_offer = &uri_str[..uri_str.len() - 1];
+	// Cut off the BOLT12 part to fallback to BOLT11.
+	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_with_invalid_offer) {
+		match node_a.unified_qr_payment().send(uri_str_without_offer) {
 			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -893,11 +892,9 @@ fn unified_qr_send_receive() {
 	let onchain_uqr_payment =
 		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
 
-	// Removed a character from the offer, so it would move on to the other parameters.
-	let txid = match node_a
-		.unified_qr_payment()
-		.send(&onchain_uqr_payment.as_str()[..onchain_uqr_payment.len() - 1])
-	{
+	// Cut off any lightning part to fallback to on-chain only.
+	let uri_str_without_lightning = onchain_uqr_payment.split("&lightning=").next().unwrap();
+	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning) {
 		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},
