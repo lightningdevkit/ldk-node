@@ -38,10 +38,7 @@ impl BitcoindRpcClient {
 		let rpc_credentials =
 			BASE64_STANDARD.encode(format!("{}:{}", rpc_user.clone(), rpc_password.clone()));
 
-		let rpc_client = Arc::new(
-			RpcClient::new(&rpc_credentials, http_endpoint)
-				.expect("RpcClient::new is actually infallible"),
-		);
+		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, http_endpoint));
 
 		let latest_mempool_timestamp = AtomicU64::new(0);
 

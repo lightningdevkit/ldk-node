@@ -16,18 +16,18 @@ use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::{BestBlock, Listen};
 
 use lightning::events::bump_transaction::{Utxo, WalletSource};
+use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
-	ChangeDestinationSource, EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner,
-	OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
+	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
+	Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 
 use lightning::util::message_signing;
 use lightning_invoice::RawBolt11Invoice;
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
-use bdk_chain::ChainPosition;
 use bdk_wallet::{Balance, KeychainKind, PersistedWallet, SignOptions, Update};
 
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
@@ -139,11 +139,7 @@ where
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
 
-		tx_builder
-			.add_recipient(output_script, amount)
-			.fee_rate(fee_rate)
-			.nlocktime(locktime)
-			.enable_rbf();
+		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
 
 		let mut psbt = match tx_builder.finish() {
 			Ok(psbt) => {
@@ -255,10 +251,7 @@ where
 				OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
 					let mut tx_builder = locked_wallet.build_tx();
 					let amount = Amount::from_sat(amount_sats);
-					tx_builder
-						.add_recipient(address.script_pubkey(), amount)
-						.fee_rate(fee_rate)
-						.enable_rbf();
+					tx_builder.add_recipient(address.script_pubkey(), amount).fee_rate(fee_rate);
 					tx_builder
 				},
 				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
@@ -277,8 +270,7 @@ where
 								change_address_info.address.script_pubkey(),
 								Amount::from_sat(cur_anchor_reserve_sats),
 							)
-							.fee_rate(fee_rate)
-							.enable_rbf();
+							.fee_rate(fee_rate);
 						match tmp_tx_builder.finish() {
 							Ok(psbt) => psbt.unsigned_tx,
 							Err(err) => {
@@ -316,17 +308,12 @@ where
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
 						.add_recipient(address.script_pubkey(), estimated_spendable_amount)
-						.fee_absolute(estimated_tx_fee)
-						.enable_rbf();
+						.fee_absolute(estimated_tx_fee);
 					tx_builder
 				},
 				OnchainSendAmount::AllDrainingReserve => {
 					let mut tx_builder = locked_wallet.build_tx();
-					tx_builder
-						.drain_wallet()
-						.drain_to(address.script_pubkey())
-						.fee_rate(fee_rate)
-						.enable_rbf();
+					tx_builder.drain_wallet().drain_to(address.script_pubkey()).fee_rate(fee_rate);
 					tx_builder
 				},
 			};
@@ -526,7 +513,7 @@ where
 		let mut utxos = Vec::new();
 		let confirmed_txs: Vec<Txid> = locked_wallet
 			.transactions()
-			.filter(|t| matches!(t.chain_position, ChainPosition::Confirmed(_)))
+			.filter(|t| t.chain_position.is_confirmed())
 			.map(|t| t.tx_node.txid)
 			.collect();
 		let unspent_confirmed_utxos =
@@ -715,8 +702,8 @@ where
 		self.inner.ecdh(recipient, other_key, tweak)
 	}
 
-	fn get_inbound_payment_key_material(&self) -> KeyMaterial {
-		self.inner.get_inbound_payment_key_material()
+	fn get_inbound_payment_key(&self) -> ExpandedKey {
+		self.inner.get_inbound_payment_key()
 	}
 
 	fn sign_invoice(
@@ -733,12 +720,6 @@ where
 		&self, invoice: &lightning::offers::invoice::UnsignedBolt12Invoice,
 	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
 		self.inner.sign_bolt12_invoice(invoice)
-	}
-
-	fn sign_bolt12_invoice_request(
-		&self, invoice_request: &lightning::offers::invoice_request::UnsignedInvoiceRequest,
-	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
-		self.inner.sign_bolt12_invoice_request(invoice_request)
 	}
 }
 

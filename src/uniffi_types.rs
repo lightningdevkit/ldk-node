@@ -16,16 +16,17 @@ pub use crate::config::{
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::payment::store::{LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus};
 pub use crate::payment::{MaxTotalRoutingFeeLimit, QrPaymentResult, SendingParameters};
-pub use crate::types::CustomTlvRecord;
 
 pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
-pub use lightning::ln::types::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
+pub use lightning::ln::types::ChannelId;
 pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::{Offer, OfferId};
 pub use lightning::offers::refund::Refund;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
+
+pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
 pub use lightning_invoice::Bolt11Invoice;
 

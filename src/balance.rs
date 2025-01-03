@@ -10,8 +10,9 @@ use crate::sweep::value_from_descriptor;
 use lightning::chain::channelmonitor::Balance as LdkBalance;
 use lightning::chain::channelmonitor::BalanceSource;
 use lightning::ln::types::ChannelId;
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
+
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Txid};

@@ -907,7 +907,7 @@ fn build_with_store_internal(
 	));
 
 	// Read ChannelMonitor state from store
-	let mut channel_monitors = match read_channel_monitors(
+	let channel_monitors = match read_channel_monitors(
 		Arc::clone(&kv_store),
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
@@ -936,6 +936,9 @@ fn build_with_store_internal(
 			100;
 	}
 
+	let message_router =
+		Arc::new(MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager)));
+
 	// Initialize the ChannelManager
 	let channel_manager = {
 		if let Ok(res) = kv_store.read(
@@ -945,7 +948,7 @@ fn build_with_store_internal(
 		) {
 			let mut reader = Cursor::new(res);
 			let channel_monitor_references =
-				channel_monitors.iter_mut().map(|(_, chanmon)| chanmon).collect();
+				channel_monitors.iter().map(|(_, chanmon)| chanmon).collect();
 			let read_args = ChannelManagerReadArgs::new(
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
@@ -954,6 +957,7 @@ fn build_with_store_internal(
 				Arc::clone(&chain_monitor),
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&router),
+				Arc::clone(&message_router),
 				Arc::clone(&logger),
 				user_config,
 				channel_monitor_references,
@@ -978,6 +982,7 @@ fn build_with_store_internal(
 				Arc::clone(&chain_monitor),
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&router),
+				Arc::clone(&message_router),
 				Arc::clone(&logger),
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
@@ -1000,16 +1005,15 @@ fn build_with_store_internal(
 		})?;
 	}
 
-	let message_router = MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
-
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
 		Arc::clone(&channel_manager),
-		Arc::new(message_router),
+		message_router,
 		Arc::clone(&channel_manager),
+		IgnoringMessageHandler {},
 		IgnoringMessageHandler {},
 		IgnoringMessageHandler {},
 	));
@@ -1055,7 +1059,8 @@ fn build_with_store_internal(
 	let liquidity_source = liquidity_source_config.as_ref().and_then(|lsc| {
 		lsc.lsps2_service.as_ref().map(|(address, node_id, token)| {
 			let lsps2_client_config = Some(LSPS2ClientConfig {});
-			let liquidity_client_config = Some(LiquidityClientConfig { lsps2_client_config });
+			let liquidity_client_config =
+				Some(LiquidityClientConfig { lsps1_client_config: None, lsps2_client_config });
 			let liquidity_manager = Arc::new(LiquidityManager::new(
 				Arc::clone(&keys_manager),
 				Arc::clone(&channel_manager),

@@ -64,6 +64,7 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<KeysManager>,
 	Arc<OnchainFeeEstimator>,
 	Arc<Router>,
+	Arc<MessageRouter>,
 	Arc<FilesystemLogger>,
 >;
 
@@ -112,6 +113,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
+	IgnoringMessageHandler,
 	IgnoringMessageHandler,
 	IgnoringMessageHandler,
 >;
