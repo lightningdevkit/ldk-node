@@ -39,7 +39,8 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{
-	Amount, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, WitnessProgram, WitnessVersion,
+	Amount, FeeRate, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, WitnessProgram,
+	WitnessVersion,
 };
 
 use std::ops::Deref;
@@ -239,9 +240,12 @@ where
 
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
+		fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
+		// Use the set fee_rate or default to fee estimation.
 		let confirmation_target = ConfirmationTarget::OnchainPayment;
-		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
+		let fee_rate =
+			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
 
 		let tx = {
 			let mut locked_wallet = self.inner.lock().unwrap();

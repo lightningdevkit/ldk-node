@@ -161,9 +161,19 @@ interface OnchainPayment {
 	[Throws=NodeError]
 	Address new_address();
 	[Throws=NodeError]
-	Txid send_to_address([ByRef]Address address, u64 amount_sats);
+	Txid send_to_address([ByRef]Address address, u64 amount_sats, FeeRate? fee_rate);
 	[Throws=NodeError]
-	Txid send_all_to_address([ByRef]Address address, boolean retain_reserve);
+	Txid send_all_to_address([ByRef]Address address, boolean retain_reserve, FeeRate? fee_rate);
+};
+
+interface FeeRate {
+	[Name=from_sat_per_kwu]
+	constructor(u64 sat_kwu);
+	[Name=from_sat_per_vb_unchecked]
+	constructor(u64 sat_vb);
+	u64 to_sat_per_kwu();
+	u64 to_sat_per_vb_floor();
+	u64 to_sat_per_vb_ceil();
 };
 
 interface UnifiedQrPayment {

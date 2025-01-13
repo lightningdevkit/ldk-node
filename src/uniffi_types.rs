@@ -30,7 +30,7 @@ pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
 pub use lightning_invoice::Bolt11Invoice;
 
-pub use bitcoin::{Address, BlockHash, Network, OutPoint, Txid};
+pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Txid};
 
 pub use bip39::Mnemonic;
 

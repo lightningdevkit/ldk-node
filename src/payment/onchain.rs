@@ -17,6 +17,24 @@ use bitcoin::{Address, Txid};
 
 use std::sync::{Arc, RwLock};
 
+#[cfg(not(feature = "uniffi"))]
+type FeeRate = bitcoin::FeeRate;
+#[cfg(feature = "uniffi")]
+type FeeRate = Arc<bitcoin::FeeRate>;
+
+macro_rules! maybe_map_fee_rate_opt {
+	($fee_rate_opt: expr) => {{
+		#[cfg(not(feature = "uniffi"))]
+		{
+			$fee_rate_opt
+		}
+		#[cfg(feature = "uniffi")]
+		{
+			$fee_rate_opt.map(|f| *f)
+		}
+	}};
+}
+
 /// A payment handler allowing to send and receive on-chain payments.
 ///
 /// Should be retrieved by calling [`Node::onchain_payment`].
@@ -50,9 +68,12 @@ impl OnchainPayment {
 	/// This will respect any on-chain reserve we need to keep, i.e., won't allow to cut into
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`].
 	///
+	/// If `fee_rate` is set it will be used on the resulting transaction. Otherwise we'll retrieve
+	/// a reasonable estimate from the configured chain source.
+	///
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
 	pub fn send_to_address(
-		&self, address: &bitcoin::Address, amount_sats: u64,
+		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -63,7 +84,8 @@ impl OnchainPayment {
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let send_amount =
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
-		self.wallet.send_to_address(address, send_amount)
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
 	}
 
 	/// Send an on-chain payment to the given address, draining the available funds.
@@ -77,9 +99,12 @@ impl OnchainPayment {
 	/// will try to send all spendable onchain funds, i.e.,
 	/// [`BalanceDetails::spendable_onchain_balance_sats`].
 	///
+	/// If `fee_rate` is set it will be used on the resulting transaction. Otherwise a reasonable
+	/// we'll retrieve an estimate from the configured chain source.
+	///
 	/// [`BalanceDetails::spendable_onchain_balance_sats`]: crate::balance::BalanceDetails::spendable_onchain_balance_sats
 	pub fn send_all_to_address(
-		&self, address: &bitcoin::Address, retain_reserves: bool,
+		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -94,6 +119,7 @@ impl OnchainPayment {
 			OnchainSendAmount::AllDrainingReserve
 		};
 
-		self.wallet.send_to_address(address, send_amount)
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
 	}
 }

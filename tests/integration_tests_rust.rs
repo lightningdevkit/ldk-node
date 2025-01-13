@@ -315,11 +315,12 @@ fn onchain_spend_receive() {
 
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1)
+		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None)
 	);
 
 	let amount_to_send_sats = 1000;
-	let txid = node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats).unwrap();
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
@@ -334,7 +335,7 @@ fn onchain_spend_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true).unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
@@ -350,7 +351,7 @@ fn onchain_spend_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false).unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false, None).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
