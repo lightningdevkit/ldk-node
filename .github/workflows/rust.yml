@@ -18,7 +18,7 @@ jobs:
         toolchain: [
           stable,
           beta,
-          1.63.0, # Our MSRV
+          1.75.0, # Our MSRV
           ]
         include:
           - toolchain: stable
@@ -29,7 +29,7 @@ jobs:
             platform: macos-latest
           - toolchain: stable
             platform: windows-latest
-          - toolchain: 1.63.0
+          - toolchain: 1.75.0
             msrv: true
     runs-on: ${{ matrix.platform }}
     steps:
@@ -45,13 +45,7 @@ jobs:
       - name: Pin packages to allow for MSRV
         if: matrix.msrv
         run: |
-          cargo update -p proptest --precise "1.2.0" --verbose # proptest 1.3.0 requires rustc 1.64.0
-          cargo update -p regex --precise "1.9.6" --verbose # regex 1.10.0 requires rustc 1.65.0
-          cargo update -p home --precise "0.5.5" --verbose # home v0.5.9 requires rustc 1.70 or newer
-          cargo update -p tokio --precise "1.38.1" --verbose # tokio v1.39.0 requires rustc 1.70 or newer
-          cargo update -p tokio-util --precise "0.7.11" --verbose # tokio-util v0.7.12 requires rustc 1.70 or newer
-          cargo update -p idna_adapter --precise "1.1.0" --verbose # url 2.5.3 switched to idna 1.0.3 and ICU4X, which requires rustc 1.67 or newer. Here we opt to keep using unicode-rs by pinning idna_adapter as described here: https://docs.rs/crate/idna_adapter/1.2.0
-          cargo update -p indexmap --precise "2.5.0" --verbose # indexmap 2.6.0 upgraded to hashbrown 0.15, which unfortunately bumped their MSRV to rustc 1.65 with the 0.15.1 release
+          cargo update -p home --precise "0.5.9" --verbose # home v0.5.11 requires rustc 1.81 or newer
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
@@ -84,7 +78,7 @@ jobs:
         if: matrix.build-uniffi
         run: cargo build --features uniffi --verbose --color always
       - name: Build documentation on Rust ${{ matrix.toolchain }}
-        if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.63.0'"
+        if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.75.0'"
         run: |
           cargo doc --release --verbose --color always
           cargo doc --document-private-items --verbose --color always
