@@ -144,7 +144,10 @@ pub(crate) fn apply_post_estimation_adjustments(
 		ConfirmationTarget::Lightning(
 			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
 		) => {
-			let slightly_less_than_background = estimated_rate.to_sat_per_kwu() - 250;
+			let slightly_less_than_background = estimated_rate
+				.to_sat_per_kwu()
+				.saturating_sub(250)
+				.max(FEERATE_FLOOR_SATS_PER_KW as u64);
 			FeeRate::from_sat_per_kwu(slightly_less_than_background)
 		},
 		_ => estimated_rate,
