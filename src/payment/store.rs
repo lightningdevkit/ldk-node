@@ -25,8 +25,8 @@ use lightning::{
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
+use std::collections::hash_map;
 use std::collections::HashMap;
-use std::iter::FromIterator;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -448,6 +448,29 @@ impl PaymentDetailsUpdate {
 	}
 }
 
+impl From<&PaymentDetails> for PaymentDetailsUpdate {
+	fn from(value: &PaymentDetails) -> Self {
+		let (hash, preimage, secret) = match value.kind {
+			PaymentKind::Bolt11 { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
+			PaymentKind::Bolt11Jit { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
+			PaymentKind::Bolt12Offer { hash, preimage, secret, .. } => (hash, preimage, secret),
+			PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => (hash, preimage, secret),
+			PaymentKind::Spontaneous { hash, preimage, .. } => (Some(hash), preimage, None),
+			_ => (None, None, None),
+		};
+
+		Self {
+			id: value.id,
+			hash: Some(hash),
+			preimage: Some(preimage),
+			secret: Some(secret),
+			amount_msat: Some(value.amount_msat),
+			direction: Some(value.direction),
+			status: Some(value.status),
+		}
+	}
+}
+
 pub(crate) struct PaymentStore<L: Deref>
 where
 	L::Target: LdkLogger,
@@ -473,6 +496,28 @@ where
 
 		let updated = locked_payments.insert(payment.id, payment.clone()).is_some();
 		self.persist_info(&payment.id, &payment)?;
+		Ok(updated)
+	}
+
+	pub(crate) fn insert_or_update(&self, payment: &PaymentDetails) -> Result<bool, Error> {
+		let mut locked_payments = self.payments.lock().unwrap();
+
+		let updated;
+		match locked_payments.entry(payment.id) {
+			hash_map::Entry::Occupied(mut e) => {
+				let update = payment.into();
+				updated = e.get_mut().update(&update);
+				if updated {
+					self.persist_info(&payment.id, e.get())?;
+				}
+			},
+			hash_map::Entry::Vacant(e) => {
+				e.insert(payment.clone());
+				self.persist_info(&payment.id, payment)?;
+				updated = true;
+			},
+		}
+
 		Ok(updated)
 	}
 
