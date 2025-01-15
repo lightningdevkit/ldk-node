@@ -59,6 +59,104 @@ impl PaymentDetails {
 			.as_secs();
 		Self { id, kind, amount_msat, direction, status, latest_update_timestamp }
 	}
+
+	pub(crate) fn update(&mut self, update: &PaymentDetailsUpdate) -> bool {
+		debug_assert_eq!(
+			self.id, update.id,
+			"We should only ever override payment data for the same payment id"
+		);
+
+		let mut updated = false;
+
+		macro_rules! update_if_necessary {
+			($val: expr, $update: expr) => {
+				if $val != $update {
+					$val = $update;
+					updated = true;
+				}
+			};
+		}
+
+		if let Some(hash_opt) = update.hash {
+			match self.kind {
+				PaymentKind::Bolt12Offer { ref mut hash, .. } => {
+					debug_assert_eq!(
+						self.direction,
+						PaymentDirection::Outbound,
+						"We should only ever override payment hash for outbound BOLT 12 payments"
+					);
+					update_if_necessary!(*hash, hash_opt);
+				},
+				PaymentKind::Bolt12Refund { ref mut hash, .. } => {
+					debug_assert_eq!(
+						self.direction,
+						PaymentDirection::Outbound,
+						"We should only ever override payment hash for outbound BOLT 12 payments"
+					);
+					update_if_necessary!(*hash, hash_opt);
+				},
+				_ => {
+					// We can omit updating the hash for BOLT11 payments as the payment hash
+					// will always be known from the beginning.
+				},
+			}
+		}
+		if let Some(preimage_opt) = update.preimage {
+			match self.kind {
+				PaymentKind::Bolt11 { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Bolt11Jit { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Bolt12Offer { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Bolt12Refund { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Spontaneous { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(secret_opt) = update.secret {
+			match self.kind {
+				PaymentKind::Bolt11 { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				PaymentKind::Bolt11Jit { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				PaymentKind::Bolt12Offer { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				PaymentKind::Bolt12Refund { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(amount_opt) = update.amount_msat {
+			update_if_necessary!(self.amount_msat, amount_opt);
+		}
+
+		if let Some(status) = update.status {
+			update_if_necessary!(self.status, status);
+		}
+
+		if updated {
+			self.latest_update_timestamp = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs();
+		}
+
+		updated
+	}
 }
 
 impl Writeable for PaymentDetails {
@@ -401,60 +499,10 @@ where
 		let mut locked_payments = self.payments.lock().unwrap();
 
 		if let Some(payment) = locked_payments.get_mut(&update.id) {
-			if let Some(hash_opt) = update.hash {
-				match payment.kind {
-					PaymentKind::Bolt12Offer { ref mut hash, .. } => {
-						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
-							"We should only ever override payment hash for outbound BOLT 12 payments");
-						*hash = hash_opt
-					},
-					PaymentKind::Bolt12Refund { ref mut hash, .. } => {
-						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
-							"We should only ever override payment hash for outbound BOLT 12 payments");
-						*hash = hash_opt
-					},
-					_ => {
-						// We can omit updating the hash for BOLT11 payments as the payment hash
-						// will always be known from the beginning.
-					},
-				}
+			updated = payment.update(update);
+			if updated {
+				self.persist_info(&update.id, payment)?;
 			}
-			if let Some(preimage_opt) = update.preimage {
-				match payment.kind {
-					PaymentKind::Bolt11 { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Bolt11Jit { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Bolt12Offer { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Bolt12Refund { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Spontaneous { ref mut preimage, .. } => *preimage = preimage_opt,
-					_ => {},
-				}
-			}
-
-			if let Some(secret_opt) = update.secret {
-				match payment.kind {
-					PaymentKind::Bolt11 { ref mut secret, .. } => *secret = secret_opt,
-					PaymentKind::Bolt11Jit { ref mut secret, .. } => *secret = secret_opt,
-					PaymentKind::Bolt12Offer { ref mut secret, .. } => *secret = secret_opt,
-					PaymentKind::Bolt12Refund { ref mut secret, .. } => *secret = secret_opt,
-					_ => {},
-				}
-			}
-
-			if let Some(amount_opt) = update.amount_msat {
-				payment.amount_msat = amount_opt;
-			}
-
-			if let Some(status) = update.status {
-				payment.status = status;
-			}
-
-			payment.latest_update_timestamp = SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or(Duration::from_secs(0))
-				.as_secs();
-
-			self.persist_info(&update.id, payment)?;
-			updated = true;
 		}
 		Ok(updated)
 	}
