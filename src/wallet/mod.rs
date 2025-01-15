@@ -10,13 +10,16 @@ use persist::KVStoreWalletPersister;
 use crate::logger::{log_debug, log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
-use crate::payment::store::PaymentStore;
+use crate::payment::store::{ConfirmationStatus, PaymentStore};
+use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
+use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BestBlock, Listen};
 
 use lightning::events::bump_transaction::{Utxo, WalletSource};
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
@@ -45,6 +48,7 @@ use bitcoin::{
 
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
@@ -109,6 +113,11 @@ where
 					Error::PersistenceFailed
 				})?;
 
+				self.update_payment_store(&mut *locked_wallet).map_err(|e| {
+					log_error!(self.logger, "Failed to update payment store: {}", e);
+					Error::PersistenceFailed
+				})?;
+
 				Ok(())
 			},
 			Err(e) => {
@@ -129,6 +138,76 @@ where
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
+
+		Ok(())
+	}
+
+	fn update_payment_store<'a>(
+		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
+	) -> Result<(), Error> {
+		let latest_update_timestamp = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
+
+		for wtx in locked_wallet.transactions() {
+			let id = PaymentId(wtx.tx_node.txid.to_byte_array());
+			let txid = wtx.tx_node.txid;
+			let (payment_status, confirmation_status) = match wtx.chain_position {
+				bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
+					let confirmation_height = anchor.block_id.height;
+					let cur_height = locked_wallet.latest_checkpoint().height();
+					let payment_status = if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1
+					{
+						PaymentStatus::Succeeded
+					} else {
+						PaymentStatus::Pending
+					};
+					let confirmation_status = ConfirmationStatus::Confirmed {
+						block_hash: anchor.block_id.hash,
+						height: confirmation_height,
+						timestamp: anchor.confirmation_time,
+					};
+					(payment_status, confirmation_status)
+				},
+				bdk_chain::ChainPosition::Unconfirmed { .. } => {
+					(PaymentStatus::Pending, ConfirmationStatus::Unconfirmed)
+				},
+			};
+			// TODO: It would be great to introduce additional variants for
+			// `ChannelFunding` and `ChannelClosing`. For the former, we could just
+			// take a reference to `ChannelManager` here and check against
+			// `list_channels`. But for the latter the best approach is much less
+			// clear: for force-closes/HTLC spends we should be good querying
+			// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
+			// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
+			// spent to a wallet address. The only solution I can come up with is to
+			// create and persist a list of 'static pending outputs' that we could use
+			// here to determine the `PaymentKind`, but that's not really satisfactory, so
+			// we're punting on it until we can come up with a better solution.
+			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
+			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
+			let (direction, amount_msat) = if sent > received {
+				let direction = PaymentDirection::Outbound;
+				let amount_msat = Some(sent.to_sat().saturating_sub(received.to_sat()) * 1000);
+				(direction, amount_msat)
+			} else {
+				let direction = PaymentDirection::Inbound;
+				let amount_msat = Some(received.to_sat().saturating_sub(sent.to_sat()) * 1000);
+				(direction, amount_msat)
+			};
+
+			let payment = PaymentDetails {
+				id,
+				kind,
+				amount_msat,
+				direction,
+				status: payment_status,
+				latest_update_timestamp,
+			};
+
+			self.payment_store.insert_or_update(&payment)?;
+		}
 
 		Ok(())
 	}
@@ -477,7 +556,12 @@ where
 		}
 
 		match locked_wallet.apply_block(block, height) {
-			Ok(()) => (),
+			Ok(()) => {
+				if let Err(e) = self.update_payment_store(&mut *locked_wallet) {
+					log_error!(self.logger, "Failed to update payment store: {}", e);
+					return;
+				}
+			},
 			Err(e) => {
 				log_error!(
 					self.logger,
