@@ -292,6 +292,11 @@ impl_writeable_tlv_based_enum!(PaymentStatus,
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaymentKind {
 	/// An on-chain payment.
+	///
+	/// Payments of this kind will be considered pending until the respective transaction has
+	/// reached [`ANTI_REORG_DELAY`] confirmations on-chain.
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
 	Onchain {
 		/// The transaction identifier of this payment.
 		txid: Txid,

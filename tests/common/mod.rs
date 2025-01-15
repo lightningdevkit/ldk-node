@@ -484,6 +484,36 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
+	// Check we saw the node funding transactions.
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		1
+	);
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		0
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		1
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		0
+	);
+
 	// Check we haven't got any events yet
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
@@ -515,6 +545,15 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
+
+	// Check we now see the channel funding transaction as outbound.
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		1
+	);
 
 	let onchain_fee_buffer_sat = 5000;
 	let node_a_anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
@@ -565,22 +604,26 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
 	assert_eq!(node_a.bolt11_payment().send(&invoice, None), Err(NodeError::DuplicatePayment));
 
-	assert_eq!(node_a.list_payments().first().unwrap().id, payment_id);
+	assert!(!node_a.list_payments_with_filter(|p| p.id == payment_id).is_empty());
 
-	let outbound_payments_a =
-		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	let outbound_payments_a = node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(outbound_payments_a.len(), 1);
 
-	let inbound_payments_a =
-		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	let inbound_payments_a = node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(inbound_payments_a.len(), 0);
 
-	let outbound_payments_b =
-		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	let outbound_payments_b = node_b.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(outbound_payments_b.len(), 0);
 
-	let inbound_payments_b =
-		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	let inbound_payments_b = node_b.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(inbound_payments_b.len(), 1);
 
 	expect_event!(node_a, PaymentSuccessful);
@@ -814,8 +857,26 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_b.payment(&keysend_payment_id).unwrap().kind,
 		PaymentKind::Spontaneous { .. }
 	));
-	assert_eq!(node_a.list_payments().len(), 6);
-	assert_eq!(node_b.list_payments().len(), 7);
+	assert_eq!(
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		5
+	);
+	assert_eq!(
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		6
+	);
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
+			.len(),
+		1
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
+			.len(),
+		1
+	);
 
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
@@ -935,6 +996,22 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	assert_eq!(node_a.list_balances().total_anchor_channels_reserve_sats, 0);
 	assert_eq!(node_b.list_balances().total_anchor_channels_reserve_sats, 0);
+
+	// Now we should have seen the channel closing transaction on-chain.
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		2
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		2
+	);
 
 	// Check we handled all events
 	assert_eq!(node_a.next_event(), None);
