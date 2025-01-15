@@ -25,6 +25,8 @@ use lightning::{
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
+use bitcoin::{BlockHash, Txid};
+
 use std::collections::hash_map;
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -156,6 +158,15 @@ impl PaymentDetails {
 			update_if_necessary!(self.status, status);
 		}
 
+		if let Some(confirmation_status) = update.confirmation_status {
+			match self.kind {
+				PaymentKind::Onchain { ref mut status, .. } => {
+					update_if_necessary!(*status, confirmation_status);
+				},
+				_ => {},
+			}
+		}
+
 		if updated {
 			self.latest_update_timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -281,7 +292,12 @@ impl_writeable_tlv_based_enum!(PaymentStatus,
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaymentKind {
 	/// An on-chain payment.
-	Onchain,
+	Onchain {
+		/// The transaction identifier of this payment.
+		txid: Txid,
+		/// The confirmation status of this payment.
+		status: ConfirmationStatus,
+	},
 	/// A [BOLT 11] payment.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
@@ -370,7 +386,10 @@ pub enum PaymentKind {
 }
 
 impl_writeable_tlv_based_enum!(PaymentKind,
-	(0, Onchain) => {},
+	(0, Onchain) => {
+		(0, txid, required),
+		(2, status, required),
+	},
 	(2, Bolt11) => {
 		(0, hash, required),
 		(2, preimage, option),
@@ -403,6 +422,31 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 	}
 );
 
+/// Represents the confirmation status of a transaction.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ConfirmationStatus {
+	/// The transaction is confirmed in the best chain.
+	Confirmed {
+		/// The hash of the block in which the transaction was confirmed.
+		block_hash: BlockHash,
+		/// The height under which the block was confirmed.
+		height: u32,
+		/// The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+		timestamp: u64,
+	},
+	/// The transaction is unconfirmed.
+	Unconfirmed,
+}
+
+impl_writeable_tlv_based_enum!(ConfirmationStatus,
+	(0, Confirmed) => {
+		(0, block_hash, required),
+		(2, height, required),
+		(4, timestamp, required),
+	},
+	(2, Unconfirmed) => {},
+);
+
 /// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
 ///
 /// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
@@ -432,6 +476,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub amount_msat: Option<Option<u64>>,
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
+	pub confirmation_status: Option<ConfirmationStatus>,
 }
 
 impl PaymentDetailsUpdate {
@@ -444,6 +489,7 @@ impl PaymentDetailsUpdate {
 			amount_msat: None,
 			direction: None,
 			status: None,
+			confirmation_status: None,
 		}
 	}
 }
@@ -459,6 +505,11 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			_ => (None, None, None),
 		};
 
+		let confirmation_status = match value.kind {
+			PaymentKind::Onchain { status, .. } => Some(status),
+			_ => None,
+		};
+
 		Self {
 			id: value.id,
 			hash: Some(hash),
@@ -467,6 +518,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			amount_msat: Some(value.amount_msat),
 			direction: Some(value.direction),
 			status: Some(value.status),
+			confirmation_status,
 		}
 	}
 }
