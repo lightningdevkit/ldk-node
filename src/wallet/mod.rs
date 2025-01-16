@@ -449,13 +449,32 @@ where
 	L::Target: Logger,
 {
 	fn filtered_block_connected(
-		&self, _header: &bitcoin::block::Header,
-		_txdata: &lightning::chain::transaction::TransactionData, _height: u32,
+		&self, header: &bitcoin::block::Header,
+		txdata: &lightning::chain::transaction::TransactionData, height: u32,
 	) {
-		debug_assert!(false, "Syncing filtered blocks is currently not supported");
-		// As far as we can tell this would be a no-op anyways as we don't have to tell BDK about
-		// the header chain of intermediate blocks. According to the BDK team, it's sufficient to
-		// only connect full blocks starting from the last point of disagreement.
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let tx_list: Vec<Arc<Transaction>> =
+			txdata.iter().map(|&(_, transaction)| Arc::new(transaction.clone())).collect();
+		let tx_update = bdk_chain::TxUpdate { txs: tx_list, ..Default::default() };
+
+		let block_id = bdk_chain::BlockId { height, hash: header.block_hash() };
+		let mut cp = locked_wallet.latest_checkpoint();
+		cp = cp.insert(block_id);
+
+		let update = Update { tx_update, chain: Some(cp), ..Default::default() };
+
+		match locked_wallet.apply_update(update) {
+			Ok(()) => (),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to apply connected block to on-chain wallet: {}",
+					e
+				);
+				return;
+			},
+		}
 	}
 
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
