@@ -93,7 +93,7 @@ impl Bolt12Payment {
 			max_total_routing_fee_msat,
 		) {
 			Ok(()) => {
-				let payee_pubkey = offer.signing_pubkey();
+				let payee_pubkey = offer.issuer_signing_pubkey();
 				log_info!(
 					self.logger,
 					"Initiated sending {}msat to {:?}",
@@ -197,7 +197,7 @@ impl Bolt12Payment {
 			max_total_routing_fee_msat,
 		) {
 			Ok(()) => {
-				let payee_pubkey = offer.signing_pubkey();
+				let payee_pubkey = offer.issuer_signing_pubkey();
 				log_info!(
 					self.logger,
 					"Initiated sending {}msat to {:?}",

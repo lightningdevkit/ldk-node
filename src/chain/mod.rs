@@ -787,18 +787,12 @@ impl ChainSource {
 				for target in confirmation_targets {
 					let num_blocks = get_num_block_defaults_for_target(target);
 
+					// Convert the retrieved fee rate and fall back to 1 sat/vb if we fail or it
+					// yields less than that. This is mostly necessary to continue on
+					// `signet`/`regtest` where we might not get estimates (or bogus values).
 					let converted_estimate_sat_vb =
-						esplora_client::convert_fee_rate(num_blocks, estimates.clone()).map_err(
-							|e| {
-								log_error!(
-									logger,
-									"Failed to convert fee rate estimates for {:?}: {}",
-									target,
-									e
-								);
-								Error::FeerateEstimationUpdateFailed
-							},
-						)?;
+						esplora_client::convert_fee_rate(num_blocks, estimates.clone())
+							.map_or(1.0, |converted| converted.max(1.0));
 
 					let fee_rate =
 						FeeRate::from_sat_per_kwu((converted_estimate_sat_vb * 250.0) as u64);

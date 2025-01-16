@@ -17,10 +17,12 @@ use ldk_node::{
 };
 
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStore;
 use lightning::util::test_utils::TestStore;
+
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
 use lightning_persister::fs_store::FilesystemStore;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
