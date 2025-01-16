@@ -9,7 +9,7 @@ use persist::KVStoreWalletPersister;
 
 use crate::logger::{log_debug, log_error, log_info, log_trace, FilesystemLogger, Logger};
 
-use crate::event::EventQueue;
+use crate::event::{Event, EventQueue};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::payment::store::{ConfirmationStatus, PaymentStore};
 use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
@@ -207,24 +207,59 @@ where
 			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
 			let (direction, amount_msat) = if sent > received {
 				let direction = PaymentDirection::Outbound;
-				let amount_msat = Some(sent.to_sat().saturating_sub(received.to_sat()) * 1000);
+				let amount_msat = sent.to_sat().saturating_sub(received.to_sat()) * 1000;
 				(direction, amount_msat)
 			} else {
 				let direction = PaymentDirection::Inbound;
-				let amount_msat = Some(received.to_sat().saturating_sub(sent.to_sat()) * 1000);
+				let amount_msat = received.to_sat().saturating_sub(sent.to_sat()) * 1000;
 				(direction, amount_msat)
 			};
 
 			let payment = PaymentDetails {
 				id,
 				kind,
-				amount_msat,
+				amount_msat: Some(amount_msat),
 				direction,
 				status: payment_status,
 				latest_update_timestamp,
 			};
 
-			self.payment_store.insert_or_update(&payment)?;
+			let updated = self.payment_store.insert_or_update(&payment)?;
+
+			// If we just updated the entry and we deem the transaction successful (i.e., has seen
+			// at least ANTI_REORG_DELAY confirmations), issue an event.
+			if updated && payment_status == PaymentStatus::Succeeded {
+				match confirmation_status {
+					ConfirmationStatus::Confirmed { block_hash, height, .. } => {
+						let event;
+						if direction == PaymentDirection::Outbound {
+							event = Event::OnchainPaymentSuccessful {
+								payment_id: id,
+								txid,
+								block_hash,
+								block_height: height,
+								amount_msat,
+							};
+						} else {
+							event = Event::OnchainPaymentReceived {
+								payment_id: id,
+								txid,
+								block_hash,
+								block_height: height,
+								amount_msat,
+							};
+						}
+						self.event_queue.add_event(event).map_err(|e| {
+							log_error!(self.logger, "Failed to push to event queue: {}", e);
+							Error::PersistenceFailed
+						})?;
+					},
+					_ => {
+						// We only issue events for transactions that have seen ANTI_REORG_DELAY
+						// confirmations.
+					},
+				}
+			}
 		}
 
 		Ok(())

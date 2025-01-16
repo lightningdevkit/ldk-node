@@ -42,7 +42,7 @@ use lightning_liquidity::lsps2::utils::compute_opening_fee;
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, BlockHash, OutPoint, Txid};
 
 use rand::{thread_rng, Rng};
 
@@ -221,6 +221,41 @@ pub enum Event {
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
+	/// A sent onchain payment was successful.
+	///
+	/// It's guaranteed to have reached at least [`ANTI_REORG_DELAY`] delay confirmations.
+	///
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	OnchainPaymentSuccessful {
+		/// A local identifier used to track the payment.
+		payment_id: PaymentId,
+		/// The transaction identifier.
+		txid: Txid,
+		/// The value, in thousandths of a satoshi, that has been received.
+		amount_msat: u64,
+		/// The hash of the block in which the transaction was confirmed.
+		block_hash: BlockHash,
+		/// The height under which the block was confirmed.
+		block_height: u32,
+	},
+	/// An onchain payment has been received.
+	///
+	/// It's guaranteed to have reached at least [`ANTI_REORG_DELAY`] delay confirmations.
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	OnchainPaymentReceived {
+		/// A local identifier used to track the payment.
+		payment_id: PaymentId,
+		/// The transaction identifier.
+		txid: Txid,
+		/// The value, in thousandths of a satoshi, that has been received.
+		amount_msat: u64,
+		/// The hash of the block in which the transaction was confirmed.
+		block_hash: BlockHash,
+		/// The height under which the block was confirmed.
+		block_height: u32,
+	},
 }
 
 impl_writeable_tlv_based_enum!(Event,
@@ -277,7 +312,21 @@ impl_writeable_tlv_based_enum!(Event,
 		(10, skimmed_fee_msat, option),
 		(12, claim_from_onchain_tx, required),
 		(14, outbound_amount_forwarded_msat, option),
-	}
+	},
+	(8, OnchainPaymentSuccessful) => {
+		(0, payment_id, required),
+		(2, txid, required),
+		(4, amount_msat, required),
+		(6, block_hash, required),
+		(8, block_height, required),
+	},
+	(9, OnchainPaymentReceived) => {
+		(0, payment_id, required),
+		(2, txid, required),
+		(4, amount_msat, required),
+		(6, block_hash, required),
+		(8, block_height, required),
+	},
 );
 
 pub struct EventQueue<L: Deref>
