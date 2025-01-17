@@ -77,7 +77,10 @@ impl FeeEstimator for OnchainFeeEstimator {
 
 impl LdkFeeEstimator for OnchainFeeEstimator {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: LdkConfirmationTarget) -> u32 {
-		self.estimate_fee_rate(confirmation_target.into()).to_sat_per_kwu() as u32
+		self.estimate_fee_rate(confirmation_target.into())
+			.to_sat_per_kwu()
+			.try_into()
+			.unwrap_or_else(|_| get_fallback_rate_for_ldk_target(confirmation_target))
 	}
 }
 
@@ -102,16 +105,20 @@ pub(crate) fn get_fallback_rate_for_target(target: ConfirmationTarget) -> u32 {
 	match target {
 		ConfirmationTarget::OnchainPayment => 5000,
 		ConfirmationTarget::ChannelFunding => 1000,
-		ConfirmationTarget::Lightning(ldk_target) => match ldk_target {
-			LdkConfirmationTarget::MaximumFeeEstimate => 8000,
-			LdkConfirmationTarget::UrgentOnChainSweep => 5000,
-			LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
-			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
-			LdkConfirmationTarget::AnchorChannelFee => 500,
-			LdkConfirmationTarget::NonAnchorChannelFee => 1000,
-			LdkConfirmationTarget::ChannelCloseMinimum => 500,
-			LdkConfirmationTarget::OutputSpendingFee => 1000,
-		},
+		ConfirmationTarget::Lightning(ldk_target) => get_fallback_rate_for_ldk_target(ldk_target),
+	}
+}
+
+pub(crate) fn get_fallback_rate_for_ldk_target(target: LdkConfirmationTarget) -> u32 {
+	match target {
+		LdkConfirmationTarget::MaximumFeeEstimate => 8000,
+		LdkConfirmationTarget::UrgentOnChainSweep => 5000,
+		LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
+		LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => FEERATE_FLOOR_SATS_PER_KW,
+		LdkConfirmationTarget::AnchorChannelFee => 500,
+		LdkConfirmationTarget::NonAnchorChannelFee => 1000,
+		LdkConfirmationTarget::ChannelCloseMinimum => 500,
+		LdkConfirmationTarget::OutputSpendingFee => 1000,
 	}
 }
 
@@ -137,7 +144,10 @@ pub(crate) fn apply_post_estimation_adjustments(
 		ConfirmationTarget::Lightning(
 			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
 		) => {
-			let slightly_less_than_background = estimated_rate.to_sat_per_kwu() - 250;
+			let slightly_less_than_background = estimated_rate
+				.to_sat_per_kwu()
+				.saturating_sub(250)
+				.max(FEERATE_FLOOR_SATS_PER_KW as u64);
 			FeeRate::from_sat_per_kwu(slightly_less_than_background)
 		},
 		_ => estimated_rate,
