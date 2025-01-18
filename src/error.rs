@@ -116,6 +116,10 @@ pub enum Error {
 	LiquiditySourceUnavailable,
 	/// The given operation failed due to the LSP's required opening fee being too high.
 	LiquidityFeeTooHigh,
+	/// Failed to resolve the HRN to an offer.
+	HrnResolutionFailed,
+	/// The provided HRN is invalid or malformed.
+	InvalidHrn,
 }
 
 impl fmt::Display for Error {

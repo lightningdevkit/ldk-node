@@ -46,6 +46,8 @@ pub struct PaymentDetails {
 	pub status: PaymentStatus,
 	/// The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
 	pub latest_update_timestamp: u64,
+	/// The HRN associated with this payment, if applicable.
+    pub hrn: Option<String>,
 }
 
 impl PaymentDetails {
