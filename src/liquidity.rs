@@ -12,7 +12,7 @@ use crate::{Config, Error};
 use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::router::{RouteHint, RouteHintHop};
-use lightning_invoice::{Bolt11Invoice, InvoiceBuilder, RoutingFees};
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::Event;
 use lightning_liquidity::lsps0::ser::RequestId;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
@@ -196,7 +196,7 @@ where
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(
-		&self, amount_msat: u64, description: &str, expiry_secs: u32,
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<(Bolt11Invoice, u64), Error> {
 		let fee_response = self.lsps2_request_opening_fee_params().await?;
@@ -256,7 +256,7 @@ where
 	}
 
 	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
-		&self, description: &str, expiry_secs: u32,
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<(Bolt11Invoice, u64), Error> {
 		let fee_response = self.lsps2_request_opening_fee_params().await?;
@@ -373,8 +373,8 @@ where
 	}
 
 	fn lsps2_create_jit_invoice(
-		&self, buy_response: LSPS2BuyResponse, amount_msat: Option<u64>, description: &str,
-		expiry_secs: u32,
+		&self, buy_response: LSPS2BuyResponse, amount_msat: Option<u64>,
+		description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		let lsps2_service = self.lsps2_service.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -404,7 +404,7 @@ where
 
 		let currency = self.config.network.into();
 		let mut invoice_builder = InvoiceBuilder::new(currency)
-			.description(description.to_string())
+			.invoice_description(description.clone())
 			.payment_hash(payment_hash)
 			.payment_secret(payment_secret)
 			.current_timestamp()

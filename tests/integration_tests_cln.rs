@@ -13,6 +13,7 @@ use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event};
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
 use clightningrpc::lightningrpc::LightningRPC;
 use clightningrpc::responses::NetworkAddress;
@@ -107,7 +108,10 @@ fn test_cln() {
 
 	// Send a payment to LDK
 	let rand_label: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-	let ldk_invoice = node.bolt11_payment().receive(10_000_000, &rand_label, 3600).unwrap();
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(rand_label).unwrap());
+	let ldk_invoice =
+		node.bolt11_payment().receive(10_000_000, &invoice_description, 3600).unwrap();
 	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
 	common::expect_event!(node, PaymentReceived);
 

@@ -106,6 +106,12 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 };
 
+[Enum]
+interface Bolt11InvoiceDescription {
+  Hash(string hash);
+  Direct(string description);
+};
+
 interface Bolt11Payment {
 	[Throws=NodeError]
 	PaymentId send([ByRef]Bolt11Invoice invoice, SendingParameters? sending_parameters);
@@ -120,17 +126,17 @@ interface Bolt11Payment {
 	[Throws=NodeError]
 	void fail_for_hash(PaymentHash payment_hash);
 	[Throws=NodeError]
-	Bolt11Invoice receive(u64 amount_msat, [ByRef]string description, u32 expiry_secs);
+	Bolt11Invoice receive(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
 	[Throws=NodeError]
-	Bolt11Invoice receive_for_hash(u64 amount_msat, [ByRef]string description, u32 expiry_secs, PaymentHash payment_hash);
+	Bolt11Invoice receive_for_hash(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash);
 	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount([ByRef]string description, u32 expiry_secs);
+	Bolt11Invoice receive_variable_amount([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
 	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_for_hash([ByRef]string description, u32 expiry_secs, PaymentHash payment_hash);
+	Bolt11Invoice receive_variable_amount_for_hash([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash);
 	[Throws=NodeError]
-	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]string description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
+	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
 	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]string description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
+	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
 };
 
 interface Bolt12Payment {

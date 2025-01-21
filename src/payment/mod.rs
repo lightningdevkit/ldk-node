@@ -14,6 +14,7 @@ mod spontaneous;
 pub(crate) mod store;
 mod unified_qr;
 
+pub use bolt11::Bolt11InvoiceDescription;
 pub use bolt11::Bolt11Payment;
 pub use bolt12::Bolt12Payment;
 pub use onchain::OnchainPayment;

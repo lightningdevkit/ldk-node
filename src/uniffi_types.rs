@@ -36,6 +36,8 @@ pub use bip39::Mnemonic;
 
 pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
 
+pub use crate::payment::Bolt11InvoiceDescription;
+
 use crate::UniffiCustomTypeConverter;
 
 use crate::builder::sanitize_alias;
