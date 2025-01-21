@@ -8,6 +8,7 @@
 use crate::chain::ChainSource;
 use crate::config::ChannelConfig;
 use crate::fee_estimator::OnchainFeeEstimator;
+use crate::gossip::RuntimeSpawner;
 use crate::logger::FilesystemLogger;
 use crate::message_handler::NodeCustomMessageHandler;
 
@@ -25,6 +26,9 @@ use lightning::sign::InMemorySigner;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
+
+use lightning_block_sync::gossip::{GossipVerifier, UtxoSource};
+
 use lightning_net_tokio::SocketDescriptor;
 
 use bitcoin::secp256k1::PublicKey;
@@ -91,7 +95,8 @@ pub(crate) type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<FilesystemLogger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
-pub(crate) type UtxoLookup = dyn lightning::routing::utxo::UtxoLookup + Send + Sync;
+pub(crate) type UtxoLookup =
+	GossipVerifier<RuntimeSpawner, Arc<dyn UtxoSource>, Arc<FilesystemLogger>>;
 
 pub(crate) type P2PGossipSync =
 	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<FilesystemLogger>>;
