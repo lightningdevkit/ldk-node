@@ -24,6 +24,7 @@ use lightning::util::persist::KVStore;
 use bitcoincore_rpc::RpcApi;
 
 use bitcoin::Amount;
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
 use std::sync::Arc;
 
@@ -189,7 +190,12 @@ fn multi_hop_sending() {
 		max_channel_saturation_power_of_half: Some(2),
 	};
 
-	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let invoice = nodes[4]
+		.bolt11_payment()
+		.receive(2_500_000, &invoice_description.clone().into(), 9217)
+		.unwrap();
 	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);

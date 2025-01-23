@@ -21,6 +21,7 @@ use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStore;
 use lightning::util::test_utils::TestStore;
 
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use lightning_persister::fs_store::FilesystemStore;
@@ -552,7 +553,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nB receive");
 	let invoice_amount_1_msat = 2500_000;
-	let invoice = node_b.bolt11_payment().receive(invoice_amount_1_msat, &"asdf", 9217).unwrap();
+	let invoice_description: Bolt11InvoiceDescription =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(invoice_amount_1_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
 
 	println!("\nA send");
 	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
@@ -598,7 +604,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 2500_000;
-	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(invoice_amount_2_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
 
 	let underpaid_amount = invoice_amount_2_msat - 1;
 	assert_eq!(
@@ -607,7 +616,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	println!("\nB overpaid receive");
-	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(invoice_amount_2_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
 
 	println!("\nA overpaid send");
@@ -636,8 +648,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Test "zero-amount" invoice payment
 	println!("\nB receive_variable_amount_payment");
-	let variable_amount_invoice =
-		node_b.bolt11_payment().receive_variable_amount(&"asdf", 9217).unwrap();
+	let variable_amount_invoice = node_b
+		.bolt11_payment()
+		.receive_variable_amount(&invoice_description.clone().into(), 9217)
+		.unwrap();
 	let determined_amount_msat = 2345_678;
 	assert_eq!(
 		Err(NodeError::InvalidInvoice),
@@ -676,7 +690,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let manual_payment_hash = PaymentHash(Sha256::hash(&manual_preimage.0).to_byte_array());
 	let manual_invoice = node_b
 		.bolt11_payment()
-		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_payment_hash)
+		.receive_for_hash(
+			invoice_amount_3_msat,
+			&invoice_description.clone().into(),
+			9217,
+			manual_payment_hash,
+		)
 		.unwrap();
 	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).unwrap();
 
@@ -714,7 +733,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		PaymentHash(Sha256::hash(&manual_fail_preimage.0).to_byte_array());
 	let manual_fail_invoice = node_b
 		.bolt11_payment()
-		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_fail_payment_hash)
+		.receive_for_hash(
+			invoice_amount_3_msat,
+			&invoice_description.into(),
+			9217,
+			manual_fail_payment_hash,
+		)
 		.unwrap();
 	let manual_fail_payment_id = node_a.bolt11_payment().send(&manual_fail_invoice, None).unwrap();
 

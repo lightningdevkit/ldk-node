@@ -28,7 +28,7 @@ pub use lightning::util::string::UntrustedString;
 
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
-pub use lightning_invoice::Bolt11Invoice;
+pub use lightning_invoice::{Bolt11Invoice, Description};
 
 pub use bitcoin::{Address, BlockHash, Network, OutPoint, Txid};
 
@@ -343,5 +343,51 @@ impl UniffiCustomTypeConverter for NodeAlias {
 
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.to_string()
+	}
+}
+
+/// Represents the description of an invoice which has to be either a directly included string or
+/// a hash of a description provided out of band.
+pub enum Bolt11InvoiceDescription {
+	/// Contains a full description.
+	Direct {
+		/// Description of what the invoice is for
+		description: String,
+	},
+	/// Contains a hash.
+	Hash {
+		/// Hash of the description of what the invoice is for
+		hash: String,
+	},
+}
+
+impl TryFrom<&Bolt11InvoiceDescription> for lightning_invoice::Bolt11InvoiceDescription {
+	type Error = Error;
+
+	fn try_from(value: &Bolt11InvoiceDescription) -> Result<Self, Self::Error> {
+		match value {
+			Bolt11InvoiceDescription::Direct { description } => {
+				Description::new(description.clone())
+					.map(lightning_invoice::Bolt11InvoiceDescription::Direct)
+					.map_err(|_| Error::InvoiceCreationFailed)
+			},
+			Bolt11InvoiceDescription::Hash { hash } => Sha256::from_str(&hash)
+				.map(lightning_invoice::Sha256)
+				.map(lightning_invoice::Bolt11InvoiceDescription::Hash)
+				.map_err(|_| Error::InvoiceCreationFailed),
+		}
+	}
+}
+
+impl From<lightning_invoice::Bolt11InvoiceDescription> for Bolt11InvoiceDescription {
+	fn from(value: lightning_invoice::Bolt11InvoiceDescription) -> Self {
+		match value {
+			lightning_invoice::Bolt11InvoiceDescription::Direct(description) => {
+				Bolt11InvoiceDescription::Direct { description: description.to_string() }
+			},
+			lightning_invoice::Bolt11InvoiceDescription::Hash(hash) => {
+				Bolt11InvoiceDescription::Hash { hash: hex_utils::to_string(hash.0.as_ref()) }
+			},
+		}
 	}
 }

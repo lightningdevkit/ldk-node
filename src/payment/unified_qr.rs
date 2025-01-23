@@ -18,7 +18,7 @@ use crate::Config;
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
-use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
 use bip21::de::ParamKind;
 use bip21::{DeserializationError, DeserializeParams, Param, SerializeParams};
@@ -99,14 +99,21 @@ impl UnifiedQrPayment {
 			},
 		};
 
-		let bolt11_invoice =
-			match self.bolt11_invoice.receive(amount_msats, description, expiry_sec) {
-				Ok(invoice) => Some(invoice),
-				Err(e) => {
-					log_error!(self.logger, "Failed to create invoice {}", e);
-					return Err(Error::InvoiceCreationFailed);
-				},
-			};
+		let invoice_description = Bolt11InvoiceDescription::Direct(
+			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
+		);
+		let bolt11_invoice = match self.bolt11_invoice.receive_inner(
+			Some(amount_msats),
+			&invoice_description,
+			expiry_sec,
+			None,
+		) {
+			Ok(invoice) => Some(invoice),
+			Err(e) => {
+				log_error!(self.logger, "Failed to create invoice {}", e);
+				return Err(Error::InvoiceCreationFailed);
+			},
+		};
 
 		let extras = Extras { bolt11_invoice, bolt12_offer };
 
