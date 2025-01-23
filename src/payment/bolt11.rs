@@ -12,7 +12,6 @@
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::error::Error;
-use crate::hex_utils;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
 use crate::payment::store::{
@@ -31,13 +30,31 @@ use lightning::routing::router::{PaymentParameters, RouteParameters};
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use lightning_invoice::{Bolt11Invoice, Description};
+use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::Bolt11InvoiceDescription as LdkBolt11InvoiceDescription;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 
-use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+
+#[cfg(not(feature = "uniffi"))]
+type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
+#[cfg(feature = "uniffi")]
+type Bolt11InvoiceDescription = crate::uniffi_types::Bolt11InvoiceDescription;
+
+macro_rules! maybe_convert_description {
+	($description: expr) => {{
+		#[cfg(not(feature = "uniffi"))]
+		{
+			$description
+		}
+		#[cfg(feature = "uniffi")]
+		{
+			&LdkBolt11InvoiceDescription::try_from($description)?
+		}
+	}};
+}
 
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
@@ -405,21 +422,11 @@ impl Bolt11Payment {
 	/// given.
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
-	#[cfg(not(feature = "uniffi"))]
-	pub fn receive(
-		&self, amount_msat: u64, description: &lightning_invoice::Bolt11InvoiceDescription,
-		expiry_secs: u32,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_inner(Some(amount_msat), description, expiry_secs, None)
-	}
-
-	#[cfg(feature = "uniffi")]
 	pub fn receive(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let invoice_description =
-			lightning_invoice::Bolt11InvoiceDescription::try_from(description)?;
-		self.receive_inner(Some(amount_msat), &invoice_description, expiry_secs, None)
+		let description = maybe_convert_description!(description);
+		self.receive_inner(Some(amount_msat), description, expiry_secs, None)
 	}
 
 	/// Returns a payable invoice that can be used to request a payment of the amount
@@ -436,42 +443,23 @@ impl Bolt11Payment {
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
-	#[cfg(not(feature = "uniffi"))]
-	pub fn receive_for_hash(
-		&self, amount_msat: u64, description: &lightning_invoice::Bolt11InvoiceDescription,
-		expiry_secs: u32, payment_hash: PaymentHash,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_inner(Some(amount_msat), description, expiry_secs, Some(payment_hash))
-	}
-
-	#[cfg(feature = "uniffi")]
 	pub fn receive_for_hash(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let invoice_description =
-			lightning_invoice::Bolt11InvoiceDescription::try_from(description)?;
-		self.receive_inner(Some(amount_msat), &invoice_description, expiry_secs, Some(payment_hash))
+		let description = maybe_convert_description!(description);
+		self.receive_inner(Some(amount_msat), description, expiry_secs, Some(payment_hash))
 	}
 
 	/// Returns a payable invoice that can be used to request and receive a payment for which the
 	/// amount is to be determined by the user, also known as a "zero-amount" invoice.
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
-	#[cfg(not(feature = "uniffi"))]
-	pub fn receive_variable_amount(
-		&self, description: &lightning_invoice::Bolt11InvoiceDescription, expiry_secs: u32,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_inner(None, description, expiry_secs, None)
-	}
-
-	#[cfg(feature = "uniffi")]
 	pub fn receive_variable_amount(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let invoice_description =
-			lightning_invoice::Bolt11InvoiceDescription::try_from(description)?;
-		self.receive_inner(None, &invoice_description, expiry_secs, None)
+		let description = maybe_convert_description!(description);
+		self.receive_inner(None, description, expiry_secs, None)
 	}
 
 	/// Returns a payable invoice that can be used to request a payment for the given payment hash
@@ -488,27 +476,16 @@ impl Bolt11Payment {
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
-	#[cfg(not(feature = "uniffi"))]
-	pub fn receive_variable_amount_for_hash(
-		&self, description: &lightning_invoice::Bolt11InvoiceDescription, expiry_secs: u32,
-		payment_hash: PaymentHash,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_inner(None, description, expiry_secs, Some(payment_hash))
-	}
-
-	#[cfg(feature = "uniffi")]
 	pub fn receive_variable_amount_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let invoice_description =
-			lightning_invoice::Bolt11InvoiceDescription::try_from(description)?;
-		self.receive_inner(None, &invoice_description, expiry_secs, Some(payment_hash))
+		let description = maybe_convert_description!(description);
+		self.receive_inner(None, description, expiry_secs, Some(payment_hash))
 	}
 
 	pub(crate) fn receive_inner(
-		&self, amount_msat: Option<u64>,
-		invoice_description: &lightning_invoice::Bolt11InvoiceDescription, expiry_secs: u32,
-		manual_claim_payment_hash: Option<PaymentHash>,
+		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
+		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
 	) -> Result<Bolt11Invoice, Error> {
 		let invoice = {
 			let invoice_params = Bolt11InvoiceParameters {
@@ -573,30 +550,14 @@ impl Bolt11Payment {
 	/// channel to us. We'll use its cheapest offer otherwise.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	#[cfg(not(feature = "uniffi"))]
-	pub fn receive_via_jit_channel(
-		&self, amount_msat: u64, description: &lightning_invoice::Bolt11InvoiceDescription,
-		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
-	) -> Result<Bolt11Invoice, Error> {
-		self.receive_via_jit_channel_inner(
-			Some(amount_msat),
-			description,
-			expiry_secs,
-			max_total_lsp_fee_limit_msat,
-			None,
-		)
-	}
-
-	#[cfg(feature = "uniffi")]
 	pub fn receive_via_jit_channel(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
-		let invoice_description =
-			lightning_invoice::Bolt11InvoiceDescription::try_from(description)?;
+		let description = maybe_convert_description!(description);
 		self.receive_via_jit_channel_inner(
 			Some(amount_msat),
-			&invoice_description,
+			description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
@@ -614,11 +575,11 @@ impl Bolt11Payment {
 	/// We'll use its cheapest offer otherwise.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	#[cfg(not(feature = "uniffi"))]
 	pub fn receive_variable_amount_via_jit_channel(
-		&self, description: &lightning_invoice::Bolt11InvoiceDescription, expiry_secs: u32,
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_convert_description!(description);
 		self.receive_via_jit_channel_inner(
 			None,
 			description,
@@ -628,24 +589,8 @@ impl Bolt11Payment {
 		)
 	}
 
-	#[cfg(feature = "uniffi")]
-	pub fn receive_variable_amount_via_jit_channel(
-		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
-	) -> Result<Bolt11Invoice, Error> {
-		let invoice_description =
-			lightning_invoice::Bolt11InvoiceDescription::try_from(description)?;
-		self.receive_via_jit_channel_inner(
-			None,
-			&invoice_description,
-			expiry_secs,
-			None,
-			max_proportional_lsp_fee_limit_ppm_msat,
-		)
-	}
-
 	fn receive_via_jit_channel_inner(
-		&self, amount_msat: Option<u64>, description: &lightning_invoice::Bolt11InvoiceDescription,
+		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
@@ -815,51 +760,5 @@ impl Bolt11Payment {
 			})?;
 
 		Ok(())
-	}
-}
-
-/// Represents the description of an invoice which has to be either a directly included string or
-/// a hash of a description provided out of band.
-pub enum Bolt11InvoiceDescription {
-	/// Contains a full description.
-	Direct {
-		/// Description of what the invoice is for
-		description: String,
-	},
-	/// Contains a hash.
-	Hash {
-		/// Hash of the description of what the invoice is for
-		hash: String,
-	},
-}
-
-impl TryFrom<&Bolt11InvoiceDescription> for lightning_invoice::Bolt11InvoiceDescription {
-	type Error = Error;
-
-	fn try_from(value: &Bolt11InvoiceDescription) -> Result<Self, Self::Error> {
-		match value {
-			Bolt11InvoiceDescription::Direct { description } => {
-				Description::new(description.clone())
-					.map(lightning_invoice::Bolt11InvoiceDescription::Direct)
-					.map_err(|_| Error::InvoiceCreationFailed)
-			},
-			Bolt11InvoiceDescription::Hash { hash } => Sha256::from_str(&hash)
-				.map(lightning_invoice::Sha256)
-				.map(lightning_invoice::Bolt11InvoiceDescription::Hash)
-				.map_err(|_| Error::InvoiceCreationFailed),
-		}
-	}
-}
-
-impl From<lightning_invoice::Bolt11InvoiceDescription> for Bolt11InvoiceDescription {
-	fn from(value: lightning_invoice::Bolt11InvoiceDescription) -> Self {
-		match value {
-			lightning_invoice::Bolt11InvoiceDescription::Direct(description) => {
-				Bolt11InvoiceDescription::Direct { description: description.to_string() }
-			},
-			lightning_invoice::Bolt11InvoiceDescription::Hash(hash) => {
-				Bolt11InvoiceDescription::Hash { hash: hex_utils::to_string(hash.0.as_ref()) }
-			},
-		}
 	}
 }
