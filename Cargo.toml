@@ -36,7 +36,7 @@ lightning-background-processor = { version = "0.0.125", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.125" }
 lightning-block-sync = { version = "0.0.125", features = ["rpc-client", "tokio"] }
 lightning-transaction-sync = { version = "0.0.125", features = ["esplora-async-https", "time"] }
-lightning-liquidity = { version = "0.1.0-alpha.6", features = ["std"] }
+lightning-liquidity = { version = "=0.1.0-alpha.6", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
