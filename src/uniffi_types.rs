@@ -348,6 +348,7 @@ impl UniffiCustomTypeConverter for NodeAlias {
 
 /// Represents the description of an invoice which has to be either a directly included string or
 /// a hash of a description provided out of band.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bolt11InvoiceDescription {
 	/// Contains a full description.
 	Direct {
@@ -389,5 +390,19 @@ impl From<lightning_invoice::Bolt11InvoiceDescription> for Bolt11InvoiceDescript
 				Bolt11InvoiceDescription::Hash { hash: hex_utils::to_string(hash.0.as_ref()) }
 			},
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	#[test]
+	fn test_invoice_description_conversion() {
+		let hash = "09d08d4865e8af9266f6cc7c0ae23a1d6bf868207cf8f7c5979b9f6ed850dfb0".to_string();
+		let description = Bolt11InvoiceDescription::Hash { hash };
+		let converted_description =
+			lightning_invoice::Bolt11InvoiceDescription::try_from(&description).unwrap();
+		let reconverted_description: Bolt11InvoiceDescription = converted_description.into();
+		assert_eq!(description, reconverted_description);
 	}
 }
