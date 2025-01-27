@@ -54,6 +54,7 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
+use crate::event::EventQueue;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
@@ -91,6 +92,7 @@ pub(crate) struct Wallet {
 	payment_store: Arc<PaymentStore>,
 	runtime: Arc<Runtime>,
 	config: Arc<Config>,
+	event_queue: Arc<EventQueue<Arc<Logger>>>,
 	logger: Arc<Logger>,
 	pending_payment_store: Arc<PendingPaymentStore>,
 }
@@ -101,7 +103,8 @@ impl Wallet {
 		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
 		fee_estimator: Arc<OnchainFeeEstimator>, chain_source: Arc<ChainSource>,
 		payment_store: Arc<PaymentStore>, runtime: Arc<Runtime>, config: Arc<Config>,
-		logger: Arc<Logger>, pending_payment_store: Arc<PendingPaymentStore>,
+		event_queue: Arc<EventQueue<Arc<Logger>>>, logger: Arc<Logger>,
+		pending_payment_store: Arc<PendingPaymentStore>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = tokio::sync::Mutex::new(wallet_persister);
@@ -114,6 +117,7 @@ impl Wallet {
 			payment_store,
 			runtime,
 			config,
+			event_queue,
 			logger,
 			pending_payment_store,
 		}
