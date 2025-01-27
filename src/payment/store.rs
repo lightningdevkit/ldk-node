@@ -25,8 +25,10 @@ use lightning::{
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
+use bitcoin::{BlockHash, Txid};
+
+use std::collections::hash_map;
 use std::collections::HashMap;
-use std::iter::FromIterator;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -58,6 +60,113 @@ impl PaymentDetails {
 			.unwrap_or(Duration::from_secs(0))
 			.as_secs();
 		Self { id, kind, amount_msat, direction, status, latest_update_timestamp }
+	}
+
+	pub(crate) fn update(&mut self, update: &PaymentDetailsUpdate) -> bool {
+		debug_assert_eq!(
+			self.id, update.id,
+			"We should only ever override payment data for the same payment id"
+		);
+
+		let mut updated = false;
+
+		macro_rules! update_if_necessary {
+			($val: expr, $update: expr) => {
+				if $val != $update {
+					$val = $update;
+					updated = true;
+				}
+			};
+		}
+
+		if let Some(hash_opt) = update.hash {
+			match self.kind {
+				PaymentKind::Bolt12Offer { ref mut hash, .. } => {
+					debug_assert_eq!(
+						self.direction,
+						PaymentDirection::Outbound,
+						"We should only ever override payment hash for outbound BOLT 12 payments"
+					);
+					update_if_necessary!(*hash, hash_opt);
+				},
+				PaymentKind::Bolt12Refund { ref mut hash, .. } => {
+					debug_assert_eq!(
+						self.direction,
+						PaymentDirection::Outbound,
+						"We should only ever override payment hash for outbound BOLT 12 payments"
+					);
+					update_if_necessary!(*hash, hash_opt);
+				},
+				_ => {
+					// We can omit updating the hash for BOLT11 payments as the payment hash
+					// will always be known from the beginning.
+				},
+			}
+		}
+		if let Some(preimage_opt) = update.preimage {
+			match self.kind {
+				PaymentKind::Bolt11 { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Bolt11Jit { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Bolt12Offer { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Bolt12Refund { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				PaymentKind::Spontaneous { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, preimage_opt)
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(secret_opt) = update.secret {
+			match self.kind {
+				PaymentKind::Bolt11 { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				PaymentKind::Bolt11Jit { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				PaymentKind::Bolt12Offer { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				PaymentKind::Bolt12Refund { ref mut secret, .. } => {
+					update_if_necessary!(*secret, secret_opt)
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(amount_opt) = update.amount_msat {
+			update_if_necessary!(self.amount_msat, amount_opt);
+		}
+
+		if let Some(status) = update.status {
+			update_if_necessary!(self.status, status);
+		}
+
+		if let Some(confirmation_status) = update.confirmation_status {
+			match self.kind {
+				PaymentKind::Onchain { ref mut status, .. } => {
+					update_if_necessary!(*status, confirmation_status);
+				},
+				_ => {},
+			}
+		}
+
+		if updated {
+			self.latest_update_timestamp = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs();
+		}
+
+		updated
 	}
 }
 
@@ -175,7 +284,17 @@ impl_writeable_tlv_based_enum!(PaymentStatus,
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaymentKind {
 	/// An on-chain payment.
-	Onchain,
+	///
+	/// Payments of this kind will be considered pending until the respective transaction has
+	/// reached [`ANTI_REORG_DELAY`] confirmations on-chain.
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	Onchain {
+		/// The transaction identifier of this payment.
+		txid: Txid,
+		/// The confirmation status of this payment.
+		status: ConfirmationStatus,
+	},
 	/// A [BOLT 11] payment.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
@@ -264,7 +383,10 @@ pub enum PaymentKind {
 }
 
 impl_writeable_tlv_based_enum!(PaymentKind,
-	(0, Onchain) => {},
+	(0, Onchain) => {
+		(0, txid, required),
+		(2, status, required),
+	},
 	(2, Bolt11) => {
 		(0, hash, required),
 		(2, preimage, option),
@@ -297,6 +419,31 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 	}
 );
 
+/// Represents the confirmation status of a transaction.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ConfirmationStatus {
+	/// The transaction is confirmed in the best chain.
+	Confirmed {
+		/// The hash of the block in which the transaction was confirmed.
+		block_hash: BlockHash,
+		/// The height under which the block was confirmed.
+		height: u32,
+		/// The time at which the block was confirmed.
+		timestamp: u64,
+	},
+	/// The transaction is unconfirmed.
+	Unconfirmed,
+}
+
+impl_writeable_tlv_based_enum!(ConfirmationStatus,
+	(0, Confirmed) => {
+		(0, block_hash, required),
+		(2, height, required),
+		(4, timestamp, required),
+	},
+	(2, Unconfirmed) => {},
+);
+
 /// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
 ///
 /// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
@@ -326,6 +473,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub amount_msat: Option<Option<u64>>,
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
+	pub confirmation_status: Option<ConfirmationStatus>,
 }
 
 impl PaymentDetailsUpdate {
@@ -338,6 +486,36 @@ impl PaymentDetailsUpdate {
 			amount_msat: None,
 			direction: None,
 			status: None,
+			confirmation_status: None,
+		}
+	}
+}
+
+impl From<&PaymentDetails> for PaymentDetailsUpdate {
+	fn from(value: &PaymentDetails) -> Self {
+		let (hash, preimage, secret) = match value.kind {
+			PaymentKind::Bolt11 { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
+			PaymentKind::Bolt11Jit { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
+			PaymentKind::Bolt12Offer { hash, preimage, secret, .. } => (hash, preimage, secret),
+			PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => (hash, preimage, secret),
+			PaymentKind::Spontaneous { hash, preimage, .. } => (Some(hash), preimage, None),
+			_ => (None, None, None),
+		};
+
+		let confirmation_status = match value.kind {
+			PaymentKind::Onchain { status, .. } => Some(status),
+			_ => None,
+		};
+
+		Self {
+			id: value.id,
+			hash: Some(hash),
+			preimage: Some(preimage),
+			secret: Some(secret),
+			amount_msat: Some(value.amount_msat),
+			direction: Some(value.direction),
+			status: Some(value.status),
+			confirmation_status,
 		}
 	}
 }
@@ -367,6 +545,28 @@ where
 
 		let updated = locked_payments.insert(payment.id, payment.clone()).is_some();
 		self.persist_info(&payment.id, &payment)?;
+		Ok(updated)
+	}
+
+	pub(crate) fn insert_or_update(&self, payment: &PaymentDetails) -> Result<bool, Error> {
+		let mut locked_payments = self.payments.lock().unwrap();
+
+		let updated;
+		match locked_payments.entry(payment.id) {
+			hash_map::Entry::Occupied(mut e) => {
+				let update = payment.into();
+				updated = e.get_mut().update(&update);
+				if updated {
+					self.persist_info(&payment.id, e.get())?;
+				}
+			},
+			hash_map::Entry::Vacant(e) => {
+				e.insert(payment.clone());
+				self.persist_info(&payment.id, payment)?;
+				updated = true;
+			},
+		}
+
 		Ok(updated)
 	}
 
@@ -401,60 +601,10 @@ where
 		let mut locked_payments = self.payments.lock().unwrap();
 
 		if let Some(payment) = locked_payments.get_mut(&update.id) {
-			if let Some(hash_opt) = update.hash {
-				match payment.kind {
-					PaymentKind::Bolt12Offer { ref mut hash, .. } => {
-						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
-							"We should only ever override payment hash for outbound BOLT 12 payments");
-						*hash = hash_opt
-					},
-					PaymentKind::Bolt12Refund { ref mut hash, .. } => {
-						debug_assert_eq!(payment.direction, PaymentDirection::Outbound,
-							"We should only ever override payment hash for outbound BOLT 12 payments");
-						*hash = hash_opt
-					},
-					_ => {
-						// We can omit updating the hash for BOLT11 payments as the payment hash
-						// will always be known from the beginning.
-					},
-				}
+			updated = payment.update(update);
+			if updated {
+				self.persist_info(&update.id, payment)?;
 			}
-			if let Some(preimage_opt) = update.preimage {
-				match payment.kind {
-					PaymentKind::Bolt11 { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Bolt11Jit { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Bolt12Offer { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Bolt12Refund { ref mut preimage, .. } => *preimage = preimage_opt,
-					PaymentKind::Spontaneous { ref mut preimage, .. } => *preimage = preimage_opt,
-					_ => {},
-				}
-			}
-
-			if let Some(secret_opt) = update.secret {
-				match payment.kind {
-					PaymentKind::Bolt11 { ref mut secret, .. } => *secret = secret_opt,
-					PaymentKind::Bolt11Jit { ref mut secret, .. } => *secret = secret_opt,
-					PaymentKind::Bolt12Offer { ref mut secret, .. } => *secret = secret_opt,
-					PaymentKind::Bolt12Refund { ref mut secret, .. } => *secret = secret_opt,
-					_ => {},
-				}
-			}
-
-			if let Some(amount_opt) = update.amount_msat {
-				payment.amount_msat = amount_opt;
-			}
-
-			if let Some(status) = update.status {
-				payment.status = status;
-			}
-
-			payment.latest_update_timestamp = SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or(Duration::from_secs(0))
-				.as_secs();
-
-			self.persist_info(&update.id, payment)?;
-			updated = true;
 		}
 		Ok(updated)
 	}

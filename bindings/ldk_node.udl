@@ -301,6 +301,8 @@ interface Event {
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
+	OnchainPaymentSuccessful(PaymentId payment_id, Txid txid, u64 amount_msat, BlockHash block_hash, u32 block_height);
+	OnchainPaymentReceived(PaymentId payment_id, Txid txid, u64 amount_msat, BlockHash block_hash, u32 block_height);
 };
 
 enum PaymentFailureReason {
@@ -336,7 +338,7 @@ interface ClosureReason {
 
 [Enum]
 interface PaymentKind {
-	Onchain();
+	Onchain(Txid txid, ConfirmationStatus status);
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
@@ -365,6 +367,12 @@ enum PaymentStatus {
 dictionary LSPFeeLimits {
 	u64? max_total_opening_fee_msat;
 	u64? max_proportional_opening_fee_ppm_msat;
+};
+
+[Enum]
+interface ConfirmationStatus {
+	Confirmed (BlockHash block_hash, u32 height, u64 timestamp);
+	Unconfirmed ();
 };
 
 dictionary PaymentDetails {
