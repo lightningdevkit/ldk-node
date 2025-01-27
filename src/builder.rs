@@ -792,12 +792,25 @@ fn build_with_store_internal(
 		},
 	};
 
+	let event_queue = match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger))
+	{
+		Ok(event_queue) => Arc::new(event_queue),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
+			} else {
+				return Err(BuildError::ReadFailed);
+			}
+		},
+	};
+
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
 		Arc::clone(&payment_store),
+		Arc::clone(&event_queue),
 		Arc::clone(&logger),
 	));
 
@@ -1006,6 +1019,7 @@ fn build_with_store_internal(
 	};
 
 	let channel_manager = Arc::new(channel_manager);
+	wallet.set_channel_manager(Arc::clone(&channel_manager));
 
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
@@ -1186,18 +1200,6 @@ fn build_with_store_internal(
 			return Err(BuildError::ReadFailed);
 		},
 	}
-
-	let event_queue = match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger))
-	{
-		Ok(event_queue) => Arc::new(event_queue),
-		Err(e) => {
-			if e.kind() == std::io::ErrorKind::NotFound {
-				Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
-			} else {
-				return Err(BuildError::ReadFailed);
-			}
-		},
-	};
 
 	let peer_store = match io::utils::read_peer_info(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(peer_store) => Arc::new(peer_store),

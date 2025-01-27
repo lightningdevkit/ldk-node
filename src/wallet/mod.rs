@@ -9,9 +9,11 @@ use persist::KVStoreWalletPersister;
 
 use crate::logger::{log_debug, log_error, log_info, log_trace, FilesystemLogger, Logger};
 
+use crate::event::EventQueue;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::payment::store::{ConfirmationStatus, PaymentStore};
 use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
+use crate::types::ChannelManager;
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -68,9 +70,11 @@ where
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
 	persister: Mutex<KVStoreWalletPersister>,
+	channel_manager: Mutex<Option<Arc<ChannelManager>>>,
 	broadcaster: B,
 	fee_estimator: E,
 	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
+	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
 	logger: L,
 }
 
@@ -83,13 +87,27 @@ where
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
 		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E,
-		payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>, logger: L,
+		payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
+		event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>, logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
-		Self { inner, persister, broadcaster, fee_estimator, payment_store, logger }
+		let channel_manager = Mutex::new(None);
+		Self {
+			inner,
+			persister,
+			channel_manager,
+			broadcaster,
+			fee_estimator,
+			payment_store,
+			event_queue,
+			logger,
+		}
 	}
 
+	pub(crate) fn set_channel_manager(&self, channel_manager: Arc<ChannelManager>) {
+		*self.channel_manager.lock().unwrap() = Some(channel_manager);
+	}
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
 		self.inner.lock().unwrap().start_full_scan().build()
 	}
