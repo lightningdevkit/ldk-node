@@ -163,8 +163,11 @@ impl UnifiedQrPayment {
 			},
 		};
 
-		let txid =
-			self.onchain_payment.send_to_address(&uri_network_checked.address, amount.to_sat())?;
+		let txid = self.onchain_payment.send_to_address(
+			&uri_network_checked.address,
+			amount.to_sat(),
+			None,
+		)?;
 
 		Ok(QrPaymentResult::Onchain { txid })
 	}
