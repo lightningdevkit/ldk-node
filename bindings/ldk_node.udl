@@ -411,6 +411,9 @@ dictionary ChannelDetails {
 	ChannelId channel_id;
 	PublicKey counterparty_node_id;
 	OutPoint? funding_txo;
+	u64? short_channel_id;
+	u64? outbound_scid_alias;
+	u64? inbound_scid_alias;
 	u64 channel_value_sats;
 	u64? unspendable_punishment_reserve;
 	UserChannelId user_channel_id;
