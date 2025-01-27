@@ -7,9 +7,10 @@
 
 use persist::KVStoreWalletPersister;
 
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, Logger, LdkLogger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
+use crate::payment::store::PaymentStore;
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -66,6 +67,7 @@ where
 	persister: Mutex<KVStoreWalletPersister>,
 	broadcaster: B,
 	fee_estimator: E,
+	payment_store: Arc<PaymentStore<Arc<Logger>>>,
 	logger: L,
 }
 
@@ -77,11 +79,12 @@ where
 {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
-		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E, logger: L,
+		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E,
+		payment_store: Arc<PaymentStore<Arc<Logger>>>, logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
-		Self { inner, persister, broadcaster, fee_estimator, logger }
+		Self { inner, persister, broadcaster, fee_estimator, payment_store, logger }
 	}
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {

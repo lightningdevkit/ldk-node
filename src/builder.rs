@@ -855,11 +855,22 @@ fn build_with_store_internal(
 
 	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
 	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
+
+	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(payments) => {
+			Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
+		},
+		Err(_) => {
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
+		Arc::clone(&payment_store),
 		Arc::clone(&logger),
 	));
 
@@ -1248,16 +1259,6 @@ fn build_with_store_internal(
 			return Err(BuildError::ReadFailed);
 		},
 	}
-
-	// Init payment info storage
-	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
-		Ok(payments) => {
-			Arc::new(PaymentStore::new(payments, Arc::clone(&kv_store), Arc::clone(&logger)))
-		},
-		Err(_) => {
-			return Err(BuildError::ReadFailed);
-		},
-	};
 
 	let event_queue = match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger))
 	{
