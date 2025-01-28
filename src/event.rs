@@ -589,6 +589,14 @@ where
 				counterparty_skimmed_fee_msat,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
+				log_info!(
+					self.logger,
+					"Refused inbound payment with ID {}: claiming is disabled.",
+					payment_id
+				);
+				self.channel_manager.fail_htlc_backwards(&payment_hash);
+				return Ok(());
+				// NOTE: Claiming of payments has been disabled.
 				if let Some(info) = self.payment_store.get(&payment_id) {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
