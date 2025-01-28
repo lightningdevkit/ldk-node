@@ -85,6 +85,10 @@ impl PaymentDetails {
 						PaymentDirection::Outbound,
 						"We should only ever override payment hash for outbound BOLT 12 payments"
 					);
+					debug_assert!(
+						hash.is_none() || *hash == hash_opt,
+						"We should never change a payment hash after being initially set"
+					);
 					update_if_necessary!(*hash, hash_opt);
 				},
 				PaymentKind::Bolt12Refund { ref mut hash, .. } => {
@@ -92,6 +96,10 @@ impl PaymentDetails {
 						self.direction,
 						PaymentDirection::Outbound,
 						"We should only ever override payment hash for outbound BOLT 12 payments"
+					);
+					debug_assert!(
+						hash.is_none() || *hash == hash_opt,
+						"We should never change a payment hash after being initially set"
 					);
 					update_if_necessary!(*hash, hash_opt);
 				},
