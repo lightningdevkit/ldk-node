@@ -259,7 +259,6 @@ impl Node {
 							return;
 						}
 						_ = interval.tick() => {
-							let gossip_sync_logger = Arc::clone(&gossip_sync_logger);
 							let now = Instant::now();
 							match gossip_source.update_rgs_snapshot().await {
 								Ok(updated_timestamp) => {
