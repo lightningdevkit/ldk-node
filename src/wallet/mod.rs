@@ -7,7 +7,7 @@
 
 use persist::KVStoreWalletPersister;
 
-use crate::logger::{log_debug, log_error, log_info, log_trace, Logger, LdkLogger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::payment::store::{ConfirmationStatus, PaymentStore};

@@ -144,7 +144,6 @@ use types::{
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
 use logger::{log_error, log_info, log_trace, LdkLogger, Logger};
-pub use logger::{LogLevel, LogRecord, LogWriter};
 
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
