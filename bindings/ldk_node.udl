@@ -81,6 +81,7 @@ interface Builder {
 	void set_chain_source_bitcoind_rest(string rest_host, u16 rest_port, string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
+	void set_pathfinding_scores_source(string url);
 	void set_liquidity_source_lsps1(PublicKey node_id, SocketAddress address, string? token);
 	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);
@@ -330,6 +331,7 @@ dictionary NodeStatus {
 	u64? latest_onchain_wallet_sync_timestamp;
 	u64? latest_fee_rate_cache_update_timestamp;
 	u64? latest_rgs_snapshot_timestamp;
+	u64? latest_pathfinding_scores_sync_timestamp;
 	u64? latest_node_announcement_broadcast_timestamp;
 	u32? latest_channel_monitor_archival_height;
 };
