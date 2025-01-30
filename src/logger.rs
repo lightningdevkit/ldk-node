@@ -143,10 +143,10 @@ impl LogWriter for Writer {
 					($log_level:expr, $($args:tt)*) => {
 						match $log_level {
 							LogLevel::Gossip | LogLevel::Trace => trace!($($args)*),
-            				LogLevel::Debug => debug!($($args)*),
-            				LogLevel::Info => info!($($args)*),
-            				LogLevel::Warn => warn!($($args)*),
-            				LogLevel::Error => error!($($args)*),
+							LogLevel::Debug => debug!($($args)*),
+							LogLevel::Info => info!($($args)*),
+							LogLevel::Warn => warn!($($args)*),
+							LogLevel::Error => error!($($args)*),
 						}
 					};
 				}
