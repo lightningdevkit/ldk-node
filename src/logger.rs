@@ -174,7 +174,7 @@ pub(crate) struct Logger {
 impl Logger {
 	/// Creates a new logger with a filesystem writer. The parameters to this function
 	/// are the path to the log file, and the log level.
-	pub fn new_fs_writer(file_path: &str, level: LogLevel) -> Result<Self, ()> {
+	pub fn new_fs_writer(file_path: String, level: LogLevel) -> Result<Self, ()> {
 		if let Some(parent_dir) = Path::new(&file_path).parent() {
 			fs::create_dir_all(parent_dir)
 				.map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {}", e))?;
@@ -187,7 +187,7 @@ impl Logger {
 				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
 		}
 
-		Ok(Self { writer: Writer::FileWriter { file_path: file_path.to_string(), level } })
+		Ok(Self { writer: Writer::FileWriter { file_path, level } })
 	}
 
 	pub fn new_log_facade(level: LogLevel) -> Self {

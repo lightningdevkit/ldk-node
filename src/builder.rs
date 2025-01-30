@@ -7,8 +7,8 @@
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{
-	default_user_config, Config, EsploraSyncConfig, DEFAULT_LOG_FILE_PATH, DEFAULT_LOG_LEVEL,
-	DEFAULT_STORAGE_DIR_PATH, WALLET_KEYS_SEED_LEN,
+	default_user_config, Config, EsploraSyncConfig, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
@@ -111,18 +111,7 @@ impl Default for LiquiditySourceConfig {
 
 #[derive(Clone)]
 enum LogWriterConfig {
-	File {
-		/// The log file path.
-		///
-		/// This specifies the log file path if a destination other than the storage
-		/// directory, i.e. [`Config::storage_dir_path`], is preferred. If unconfigured,
-		/// defaults to [`DEFAULT_LOG_FILE_PATH`] in default storage directory.
-		log_file_path: Option<String>,
-		/// This specifies the log level.
-		///
-		/// If unconfigured, defaults to `Debug`.
-		log_level: Option<LogLevel>,
-	},
+	File { log_file_path: Option<String>, log_level: Option<LogLevel> },
 	Log(LogLevel),
 	Custom(Arc<dyn LogWriter>),
 }
@@ -139,15 +128,6 @@ impl std::fmt::Debug for LogWriterConfig {
 			LogWriterConfig::Custom(_) => {
 				f.debug_tuple("Custom").field(&"<config internal to custom log writer>").finish()
 			},
-		}
-	}
-}
-
-impl Default for LogWriterConfig {
-	fn default() -> Self {
-		Self::File {
-			log_file_path: Some(DEFAULT_LOG_FILE_PATH.to_string()),
-			log_level: Some(DEFAULT_LOG_LEVEL),
 		}
 	}
 }
@@ -349,9 +329,11 @@ impl NodeBuilder {
 
 	/// Configures the [`Node`] instance to write logs to the filesystem.
 	///
-	/// The `log_file_path` defaults to the [`DEFAULT_LOG_FILE_PATH`] in the default
-	/// storage directory if set to None.
-	/// The `log_level` defaults to [`DEFAULT_LOG_LEVEL`] if set to None.
+	/// The `log_file_path` defaults to [`DEFAULT_LOG_FILENAME`] in the configured
+	/// [`Config::storage_dir_path`] if set to `None`.
+	/// The `log_level` defaults to [`DEFAULT_LOG_LEVEL`] if set to `None`.
+	///
+	/// [`DEFAULT_LOG_FILENAME`]: crate::config::DEFAULT_LOG_FILENAME
 	pub fn set_filesystem_logger(
 		&mut self, log_file_path: Option<String>, log_level: Option<LogLevel>,
 	) -> &mut Self {
@@ -674,9 +656,11 @@ impl ArcedNodeBuilder {
 
 	/// Configures the [`Node`] instance to write logs to the filesystem.
 	///
-	/// The `log_file_path` defaults to the [`DEFAULT_LOG_FILENAME`] in the default
-	/// storage directory if set to None.
-	/// The `log_level` defaults to [`DEFAULT_LOG_LEVEL`] if set to None.
+	/// The `log_file_path` defaults to [`DEFAULT_LOG_FILENAME`] in the configured
+	/// [`Config::storage_dir_path`] if set to `None`.
+	/// The `log_level` defaults to [`DEFAULT_LOG_LEVEL`] if set to `None`.
+	///
+	/// [`DEFAULT_LOG_FILENAME`]: crate::config::DEFAULT_LOG_FILENAME
 	pub fn set_filesystem_logger(
 		&self, log_file_path: Option<String>, log_level: Option<LogLevel>,
 	) {
@@ -1317,33 +1301,30 @@ fn build_with_store_internal(
 }
 
 /// Sets up the node logger.
-///
-/// If `log_writer_conf` is set to None, uses [`LogWriterConfig::default()`].
-/// The `node_conf` is provided to access the configured storage directory.
 fn setup_logger(
-	log_writer_conf: &Option<LogWriterConfig>, node_conf: &Config,
+	log_writer_config: &Option<LogWriterConfig>, config: &Config,
 ) -> Result<Arc<Logger>, BuildError> {
-	let is_default = log_writer_conf.is_none();
-	let default_lw_config = LogWriterConfig::default();
-	let log_writer_config =
-		if let Some(conf) = log_writer_conf { conf } else { &default_lw_config };
-
 	let logger = match log_writer_config {
-		LogWriterConfig::File { log_file_path, log_level } => {
-			let fp = DEFAULT_LOG_FILE_PATH
-				.replace(DEFAULT_STORAGE_DIR_PATH, &node_conf.storage_dir_path);
-			let log_file_path =
-				if is_default { &fp } else { log_file_path.as_ref().map(|p| p).unwrap_or(&fp) };
-
-			let log_level = log_level.unwrap_or(DEFAULT_LOG_LEVEL);
+		Some(LogWriterConfig::File { log_file_path, log_level }) => {
+			let log_file_path = log_file_path
+				.clone()
+				.unwrap_or_else(|| format!("{}/{}", config.storage_dir_path, DEFAULT_LOG_FILENAME));
+			let log_level = log_level.unwrap_or_else(|| DEFAULT_LOG_LEVEL);
 
 			Logger::new_fs_writer(log_file_path, log_level)
 				.map_err(|_| BuildError::LoggerSetupFailed)?
 		},
-		LogWriterConfig::Log(log_level) => Logger::new_log_facade(*log_level),
+		Some(LogWriterConfig::Log(log_level)) => Logger::new_log_facade(*log_level),
 
-		LogWriterConfig::Custom(custom_log_writer) => {
+		Some(LogWriterConfig::Custom(custom_log_writer)) => {
 			Logger::new_custom_writer(Arc::clone(&custom_log_writer))
+		},
+		None => {
+			// Default to use `FileWriter`
+			let log_file_path = format!("{}/{}", config.storage_dir_path, DEFAULT_LOG_FILENAME);
+			let log_level = DEFAULT_LOG_LEVEL;
+			Logger::new_fs_writer(log_file_path, log_level)
+				.map_err(|_| BuildError::LoggerSetupFailed)?
 		},
 	};
 
