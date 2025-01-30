@@ -780,6 +780,7 @@ fn simple_bolt12_send_receive() {
 fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
+
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
@@ -822,6 +823,7 @@ fn generate_bip21_uri() {
 fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
+
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();

@@ -7,7 +7,7 @@
 
 use crate::chain::ChainSource;
 use crate::config::RGS_SYNC_TIMEOUT_SECS;
-use crate::logger::{log_error, log_trace, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_trace, LdkLogger, Logger};
 use crate::types::{GossipSync, Graph, P2PGossipSync, PeerManager, RapidGossipSync, UtxoLookup};
 use crate::Error;
 
@@ -21,18 +21,18 @@ use std::time::Duration;
 pub(crate) enum GossipSource {
 	P2PNetwork {
 		gossip_sync: Arc<P2PGossipSync>,
-		logger: Arc<FilesystemLogger>,
+		logger: Arc<Logger>,
 	},
 	RapidGossipSync {
 		gossip_sync: Arc<RapidGossipSync>,
 		server_url: String,
 		latest_sync_timestamp: AtomicU32,
-		logger: Arc<FilesystemLogger>,
+		logger: Arc<Logger>,
 	},
 }
 
 impl GossipSource {
-	pub fn new_p2p(network_graph: Arc<Graph>, logger: Arc<FilesystemLogger>) -> Self {
+	pub fn new_p2p(network_graph: Arc<Graph>, logger: Arc<Logger>) -> Self {
 		let gossip_sync = Arc::new(P2PGossipSync::new(
 			network_graph,
 			None::<Arc<UtxoLookup>>,
@@ -43,7 +43,7 @@ impl GossipSource {
 
 	pub fn new_rgs(
 		server_url: String, latest_sync_timestamp: u32, network_graph: Arc<Graph>,
-		logger: Arc<FilesystemLogger>,
+		logger: Arc<Logger>,
 	) -> Self {
 		let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
 		let latest_sync_timestamp = AtomicU32::new(latest_sync_timestamp);
@@ -128,12 +128,12 @@ impl GossipSource {
 
 pub(crate) struct RuntimeSpawner {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<Logger>,
 }
 
 impl RuntimeSpawner {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, logger: Arc<FilesystemLogger>,
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, logger: Arc<Logger>,
 	) -> Self {
 		Self { runtime, logger }
 	}

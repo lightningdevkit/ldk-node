@@ -85,7 +85,7 @@ pub mod graph;
 mod hex_utils;
 pub mod io;
 mod liquidity;
-mod logger;
+pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
@@ -143,7 +143,8 @@ use types::{
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
-use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
+use logger::{log_error, log_info, log_trace, LdkLogger, Logger};
+pub use logger::{LogLevel, LogRecord, LogWriter};
 
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
@@ -152,8 +153,6 @@ use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-
-pub use lightning::util::logger::Level as LogLevel;
 
 use lightning_background_processor::process_events_async;
 
@@ -181,23 +180,23 @@ pub struct Node {
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
-	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
+	event_queue: Arc<EventQueue<Arc<Logger>>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
 	onion_messenger: Arc<OnionMessenger>,
-	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	kv_store: Arc<DynStore>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<Logger>,
 	_router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
-	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
-	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
+	peer_store: Arc<PeerStore<Arc<Logger>>>,
+	payment_store: Arc<PaymentStore<Arc<Logger>>>,
 	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 }

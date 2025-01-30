@@ -24,7 +24,7 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_debug, log_error, log_info, Logger};
+use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 
 use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{ClosureReason, PaymentPurpose, ReplayEvent};
@@ -282,7 +282,7 @@ impl_writeable_tlv_based_enum!(Event,
 
 pub struct EventQueue<L: Deref>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	queue: Arc<Mutex<VecDeque<Event>>>,
 	waker: Arc<Mutex<Option<Waker>>>,
@@ -293,7 +293,7 @@ where
 
 impl<L: Deref> EventQueue<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -372,7 +372,7 @@ where
 
 impl<L: Deref> ReadableArgs<(Arc<DynStore>, L)> for EventQueue<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
@@ -436,7 +436,7 @@ impl Future for EventFuture {
 
 pub(crate) struct EventHandler<L: Deref + Clone + Sync + Send + 'static>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
@@ -454,7 +454,7 @@ where
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub fn new(
 		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>,

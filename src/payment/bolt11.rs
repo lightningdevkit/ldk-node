@@ -13,7 +13,7 @@ use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::error::Error;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, FilesystemLogger, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus, PaymentStore,
@@ -65,23 +65,22 @@ macro_rules! maybe_convert_description {
 pub struct Bolt11Payment {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
-	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
-	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
-	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
-	logger: Arc<FilesystemLogger>,
+	logger: Arc<Logger>,
 }
 
 impl Bolt11Payment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>,
-		connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
-		liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
-		payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
-		peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>, config: Arc<Config>,
-		logger: Arc<FilesystemLogger>,
+		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+		payment_store: Arc<PaymentStore<Arc<Logger>>>, peer_store: Arc<PeerStore<Arc<Logger>>>,
+		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
 			runtime,
