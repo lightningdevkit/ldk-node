@@ -110,9 +110,15 @@ impl GossipSource {
 							Error::GossipUpdateFailed
 						})?;
 
-						let new_latest_sync_timestamp = gossip_sync
-							.update_network_graph(&update_data)
-							.map_err(|_| Error::GossipUpdateFailed)?;
+						let new_latest_sync_timestamp =
+							gossip_sync.update_network_graph(&update_data).map_err(|e| {
+								log_trace!(
+									logger,
+									"Failed to update network graph with RGS data: {:?}",
+									e
+								);
+								Error::GossipUpdateFailed
+							})?;
 						latest_sync_timestamp.store(new_latest_sync_timestamp, Ordering::Release);
 						Ok(new_latest_sync_timestamp)
 					},
