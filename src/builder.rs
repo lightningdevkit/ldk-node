@@ -112,7 +112,7 @@ impl Default for LiquiditySourceConfig {
 #[derive(Clone)]
 enum LogWriterConfig {
 	File { log_file_path: Option<String>, max_log_level: Option<LogLevel> },
-	Log(LogLevel),
+	Log { max_log_level: Option<LogLevel> },
 	Custom(Arc<dyn LogWriter>),
 }
 
@@ -124,7 +124,7 @@ impl std::fmt::Debug for LogWriterConfig {
 				.field("max_log_level", max_log_level)
 				.field("log_file_path", log_file_path)
 				.finish(),
-			LogWriterConfig::Log(max_log_level) => {
+			LogWriterConfig::Log { max_log_level } => {
 				f.debug_tuple("Log").field(max_log_level).finish()
 			},
 			LogWriterConfig::Custom(_) => {
@@ -349,8 +349,8 @@ impl NodeBuilder {
 	///
 	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
 	/// [`DEFAULT_LOG_LEVEL`].
-	pub fn set_log_facade_logger(&mut self, max_log_level: LogLevel) -> &mut Self {
-		self.log_writer_config = Some(LogWriterConfig::Log(max_log_level));
+	pub fn set_log_facade_logger(&mut self, max_log_level: Option<LogLevel>) -> &mut Self {
+		self.log_writer_config = Some(LogWriterConfig::Log { max_log_level });
 		self
 	}
 
@@ -680,7 +680,7 @@ impl ArcedNodeBuilder {
 	///
 	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
 	/// [`DEFAULT_LOG_LEVEL`].
-	pub fn set_log_facade_logger(&self, log_level: LogLevel) {
+	pub fn set_log_facade_logger(&self, log_level: Option<LogLevel>) {
 		self.inner.write().unwrap().set_log_facade_logger(log_level);
 	}
 
@@ -1326,7 +1326,10 @@ fn setup_logger(
 			Logger::new_fs_writer(log_file_path, max_log_level)
 				.map_err(|_| BuildError::LoggerSetupFailed)?
 		},
-		Some(LogWriterConfig::Log(log_level)) => Logger::new_log_facade(*log_level),
+		Some(LogWriterConfig::Log { max_log_level }) => {
+			let max_log_level = max_log_level.unwrap_or_else(|| DEFAULT_LOG_LEVEL);
+			Logger::new_log_facade(max_log_level)
+		},
 
 		Some(LogWriterConfig::Custom(custom_log_writer)) => {
 			Logger::new_custom_writer(Arc::clone(&custom_log_writer))

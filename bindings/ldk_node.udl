@@ -61,7 +61,7 @@ interface Builder {
 	void set_liquidity_source_lsps2(SocketAddress address, PublicKey node_id, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(string? log_file_path, LogLevel? max_log_level);
-	void set_log_facade_logger(LogLevel max_log_level);
+	void set_log_facade_logger(LogLevel? max_log_level);
 	void set_custom_logger(LogWriter log_writer);
 	void set_network(Network network);
 	[Throws=BuildError]
