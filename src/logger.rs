@@ -143,26 +143,19 @@ impl LogWriter for Writer {
 					return;
 				}
 				macro_rules! log_with_level {
-					($log_level:expr, $($args:tt)*) => {
+					($log_level:expr, $target: expr, $($args:tt)*) => {
 						match $log_level {
-							LogLevel::Gossip | LogLevel::Trace => trace!($($args)*),
-							LogLevel::Debug => debug!($($args)*),
-							LogLevel::Info => info!($($args)*),
-							LogLevel::Warn => warn!($($args)*),
-							LogLevel::Error => error!($($args)*),
+							LogLevel::Gossip | LogLevel::Trace => trace!(target: $target, $($args)*),
+							LogLevel::Debug => debug!(target: $target, $($args)*),
+							LogLevel::Info => info!(target: $target, $($args)*),
+							LogLevel::Warn => warn!(target: $target, $($args)*),
+							LogLevel::Error => error!(target: $target, $($args)*),
 						}
 					};
 				}
 
-				log_with_level!(
-					max_log_level,
-					"{} {:<5} [{}:{}] {}",
-					Utc::now().format("%Y-%m-%d %H:%M:%S"),
-					record.level,
-					record.module_path,
-					record.line,
-					record.args
-				)
+				let target = format!("[{}:{}]", record.module_path, record.line);
+				log_with_level!(record.level, &target, " {}", record.args)
 			},
 			Writer::CustomWriter(custom_logger) => custom_logger.log(record),
 		}
