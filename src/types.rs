@@ -23,7 +23,7 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{MonitorUpdatingPersister, KVStore};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 
@@ -38,13 +38,22 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) type DynStore = dyn KVStore + Sync + Send;
 
+pub type Persister = MonitorUpdatingPersister<
+	Arc<DynStore>,
+	Arc<Logger>,
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<Broadcaster>,
+	Arc<OnchainFeeEstimator>,
+>;
+
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<ChainSource>,
 	Arc<Broadcaster>,
 	Arc<OnchainFeeEstimator>,
 	Arc<Logger>,
-	Arc<DynStore>,
+	Arc<Persister>,
 >;
 
 pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
