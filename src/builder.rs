@@ -334,8 +334,8 @@ impl NodeBuilder {
 	/// The `log_file_path` defaults to [`DEFAULT_LOG_FILENAME`] in the configured
 	/// [`Config::storage_dir_path`] if set to `None`.
 	///
-	/// If set, The `max_log_level` sets the maximum log level. Otherwise, the latter defaults
-	/// defaults to [`DEFAULT_LOG_LEVEL`].
+	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
+	/// [`DEFAULT_LOG_LEVEL`].
 	///
 	/// [`DEFAULT_LOG_FILENAME`]: crate::config::DEFAULT_LOG_FILENAME
 	pub fn set_filesystem_logger(
@@ -347,8 +347,8 @@ impl NodeBuilder {
 
 	/// Configures the [`Node`] instance to write logs to the [`log`](https://crates.io/crates/log) facade.
 	///
-	/// If set, The `max_log_level` sets the maximum log level. Otherwise, the latter defaults
-	/// defaults to [`DEFAULT_LOG_LEVEL`].
+	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
+	/// [`DEFAULT_LOG_LEVEL`].
 	pub fn set_log_facade_logger(&mut self, max_log_level: LogLevel) -> &mut Self {
 		self.log_writer_config = Some(LogWriterConfig::Log(max_log_level));
 		self
@@ -665,7 +665,9 @@ impl ArcedNodeBuilder {
 	///
 	/// The `log_file_path` defaults to [`DEFAULT_LOG_FILENAME`] in the configured
 	/// [`Config::storage_dir_path`] if set to `None`.
-	/// The `log_level` defaults to [`DEFAULT_LOG_LEVEL`] if set to `None`.
+	///
+	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
+	/// [`DEFAULT_LOG_LEVEL`].
 	///
 	/// [`DEFAULT_LOG_FILENAME`]: crate::config::DEFAULT_LOG_FILENAME
 	pub fn set_filesystem_logger(
@@ -675,6 +677,9 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to write logs to the [`log`](https://crates.io/crates/log) facade.
+	///
+	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
+	/// [`DEFAULT_LOG_LEVEL`].
 	pub fn set_log_facade_logger(&self, log_level: LogLevel) {
 		self.inner.write().unwrap().set_log_facade_logger(log_level);
 	}
