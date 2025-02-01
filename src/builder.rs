@@ -111,7 +111,7 @@ impl Default for LiquiditySourceConfig {
 
 #[derive(Clone)]
 enum LogWriterConfig {
-	File { log_file_path: Option<String>, log_level: Option<LogLevel> },
+	File { log_file_path: Option<String>, max_log_level: Option<LogLevel> },
 	Log(LogLevel),
 	Custom(Arc<dyn LogWriter>),
 }
@@ -119,12 +119,14 @@ enum LogWriterConfig {
 impl std::fmt::Debug for LogWriterConfig {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			LogWriterConfig::File { log_level, log_file_path } => f
+			LogWriterConfig::File { max_log_level, log_file_path } => f
 				.debug_struct("LogWriterConfig")
-				.field("log_level", log_level)
+				.field("max_log_level", max_log_level)
 				.field("log_file_path", log_file_path)
 				.finish(),
-			LogWriterConfig::Log(level) => f.debug_tuple("Log").field(level).finish(),
+			LogWriterConfig::Log(max_log_level) => {
+				f.debug_tuple("Log").field(max_log_level).finish()
+			},
 			LogWriterConfig::Custom(_) => {
 				f.debug_tuple("Custom").field(&"<config internal to custom log writer>").finish()
 			},
@@ -331,19 +333,24 @@ impl NodeBuilder {
 	///
 	/// The `log_file_path` defaults to [`DEFAULT_LOG_FILENAME`] in the configured
 	/// [`Config::storage_dir_path`] if set to `None`.
-	/// The `log_level` defaults to [`DEFAULT_LOG_LEVEL`] if set to `None`.
+	///
+	/// If set, The `max_log_level` sets the maximum log level. Otherwise, the latter defaults
+	/// defaults to [`DEFAULT_LOG_LEVEL`].
 	///
 	/// [`DEFAULT_LOG_FILENAME`]: crate::config::DEFAULT_LOG_FILENAME
 	pub fn set_filesystem_logger(
-		&mut self, log_file_path: Option<String>, log_level: Option<LogLevel>,
+		&mut self, log_file_path: Option<String>, max_log_level: Option<LogLevel>,
 	) -> &mut Self {
-		self.log_writer_config = Some(LogWriterConfig::File { log_file_path, log_level });
+		self.log_writer_config = Some(LogWriterConfig::File { log_file_path, max_log_level });
 		self
 	}
 
 	/// Configures the [`Node`] instance to write logs to the [`log`](https://crates.io/crates/log) facade.
-	pub fn set_log_facade_logger(&mut self, log_level: LogLevel) -> &mut Self {
-		self.log_writer_config = Some(LogWriterConfig::Log(log_level));
+	///
+	/// If set, The `max_log_level` sets the maximum log level. Otherwise, the latter defaults
+	/// defaults to [`DEFAULT_LOG_LEVEL`].
+	pub fn set_log_facade_logger(&mut self, max_log_level: LogLevel) -> &mut Self {
+		self.log_writer_config = Some(LogWriterConfig::Log(max_log_level));
 		self
 	}
 
@@ -1305,13 +1312,13 @@ fn setup_logger(
 	log_writer_config: &Option<LogWriterConfig>, config: &Config,
 ) -> Result<Arc<Logger>, BuildError> {
 	let logger = match log_writer_config {
-		Some(LogWriterConfig::File { log_file_path, log_level }) => {
+		Some(LogWriterConfig::File { log_file_path, max_log_level }) => {
 			let log_file_path = log_file_path
 				.clone()
 				.unwrap_or_else(|| format!("{}/{}", config.storage_dir_path, DEFAULT_LOG_FILENAME));
-			let log_level = log_level.unwrap_or_else(|| DEFAULT_LOG_LEVEL);
+			let max_log_level = max_log_level.unwrap_or_else(|| DEFAULT_LOG_LEVEL);
 
-			Logger::new_fs_writer(log_file_path, log_level)
+			Logger::new_fs_writer(log_file_path, max_log_level)
 				.map_err(|_| BuildError::LoggerSetupFailed)?
 		},
 		Some(LogWriterConfig::Log(log_level)) => Logger::new_log_facade(*log_level),

@@ -106,9 +106,9 @@ pub trait LogWriter: Send + Sync {
 /// Defines a writer for [`Logger`].
 pub(crate) enum Writer {
 	/// Writes logs to the file system.
-	FileWriter { file_path: String, level: LogLevel },
+	FileWriter { file_path: String, max_log_level: LogLevel },
 	/// Forwards logs to the `log` facade.
-	LogFacadeWriter { level: LogLevel },
+	LogFacadeWriter { max_log_level: LogLevel },
 	/// Forwards logs to a custom writer.
 	CustomWriter(Arc<dyn LogWriter>),
 }
@@ -116,8 +116,8 @@ pub(crate) enum Writer {
 impl LogWriter for Writer {
 	fn log(&self, record: LogRecord) {
 		match self {
-			Writer::FileWriter { file_path, level } => {
-				if record.level < *level {
+			Writer::FileWriter { file_path, max_log_level } => {
+				if record.level < *max_log_level {
 					return;
 				}
 
@@ -138,7 +138,10 @@ impl LogWriter for Writer {
 					.write_all(log.as_bytes())
 					.expect("Failed to write to log file")
 			},
-			Writer::LogFacadeWriter { level } => {
+			Writer::LogFacadeWriter { max_log_level } => {
+				if record.level < *max_log_level {
+					return;
+				}
 				macro_rules! log_with_level {
 					($log_level:expr, $($args:tt)*) => {
 						match $log_level {
@@ -152,7 +155,7 @@ impl LogWriter for Writer {
 				}
 
 				log_with_level!(
-					level,
+					max_log_level,
 					"{} {:<5} [{}:{}] {}",
 					Utc::now().format("%Y-%m-%d %H:%M:%S"),
 					record.level,
@@ -174,7 +177,7 @@ pub(crate) struct Logger {
 impl Logger {
 	/// Creates a new logger with a filesystem writer. The parameters to this function
 	/// are the path to the log file, and the log level.
-	pub fn new_fs_writer(file_path: String, level: LogLevel) -> Result<Self, ()> {
+	pub fn new_fs_writer(file_path: String, max_log_level: LogLevel) -> Result<Self, ()> {
 		if let Some(parent_dir) = Path::new(&file_path).parent() {
 			fs::create_dir_all(parent_dir)
 				.map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {}", e))?;
@@ -187,11 +190,11 @@ impl Logger {
 				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
 		}
 
-		Ok(Self { writer: Writer::FileWriter { file_path, level } })
+		Ok(Self { writer: Writer::FileWriter { file_path, max_log_level } })
 	}
 
-	pub fn new_log_facade(level: LogLevel) -> Self {
-		Self { writer: Writer::LogFacadeWriter { level } }
+	pub fn new_log_facade(max_log_level: LogLevel) -> Self {
+		Self { writer: Writer::LogFacadeWriter { max_log_level } }
 	}
 
 	pub fn new_custom_writer(log_writer: Arc<dyn LogWriter>) -> Self {
@@ -202,14 +205,14 @@ impl Logger {
 impl LdkLogger for Logger {
 	fn log(&self, record: LdkRecord) {
 		match &self.writer {
-			Writer::FileWriter { file_path: _, level } => {
-				if record.level < *level {
+			Writer::FileWriter { file_path: _, max_log_level } => {
+				if record.level < *max_log_level {
 					return;
 				}
 				self.writer.log(record.into());
 			},
-			Writer::LogFacadeWriter { level } => {
-				if record.level < *level {
+			Writer::LogFacadeWriter { max_log_level } => {
+				if record.level < *max_log_level {
 					return;
 				}
 				self.writer.log(record.into());
