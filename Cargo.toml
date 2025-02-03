@@ -92,16 +92,16 @@ winapi = { version = "0.3", features = ["winbase"] }
 lightning = { version = "0.1.0", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
 #lightning = { path = "../rust-lightning/lightning", features = ["std", "_test_utils"] }
-electrum-client = { version = "0.21.0", default-features = true }
-bitcoincore-rpc = { version = "0.19.0", default-features = false }
+electrum-client = { version = "0.22.0", default-features = true }
 proptest = "1.0.0"
 regex = "1.5.6"
 
 [target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.29.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_25_0"] }
+electrsd = { version = "0.33.0", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
 
 [target.'cfg(no_download)'.dev-dependencies]
-electrsd = { version = "0.29.0", features = ["legacy"] }
+electrsd = { version = "0.33.0", default-features = false, features = ["legacy"] }
+corepc-node = { version = "0.7.0", default-features = false, features = ["27_2"] }
 
 [target.'cfg(cln_test)'.dev-dependencies]
 clightningrpc = { version = "0.3.0-beta.8", default-features = false }
