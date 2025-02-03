@@ -325,9 +325,9 @@ pub enum PendingSweepBalance {
 	},
 	/// A spending transaction has been confirmed on-chain and is awaiting threshold confirmations.
 	///
-	/// It will be considered irrevocably confirmed after reaching [`ANTI_REORG_DELAY`].
+	/// It will be pruned after reaching [`PRUNE_DELAY_BLOCKS`] confirmations.
 	///
-	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	/// [`PRUNE_DELAY_BLOCKS`]: lightning::util::sweep::PRUNE_DELAY_BLOCKS
 	AwaitingThresholdConfirmations {
 		/// The identifier of the channel this balance belongs to.
 		channel_id: Option<ChannelId>,
