@@ -394,18 +394,10 @@ impl Node {
 								.collect::<Vec<_>>();
 
 							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let res = connect_cm.do_connect_peer(
+								let _ = connect_cm.do_connect_peer(
 									peer_info.node_id,
 									peer_info.address.clone(),
 									).await;
-								match res {
-									Ok(_) => {
-										log_info!(connect_logger, "Successfully reconnected to peer {}", peer_info.node_id);
-									},
-									Err(e) => {
-										log_error!(connect_logger, "Failed to reconnect to peer {}: {}", peer_info.node_id, e);
-									}
-								}
 							}
 						}
 				}
