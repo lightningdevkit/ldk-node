@@ -9,7 +9,7 @@
 
 use crate::types::Graph;
 
-use lightning::routing::gossip::NodeId;
+use lightning::{routing::gossip::NodeId, util::ser::Writeable};
 
 #[cfg(feature = "uniffi")]
 use lightning::ln::msgs::SocketAddress;
@@ -49,6 +49,11 @@ impl NetworkGraph {
 	/// Returns information on a node with the given id.
 	pub fn node(&self, node_id: &NodeId) -> Option<NodeInfo> {
 		self.inner.read_only().nodes().get(node_id).cloned().map(|n| n.into())
+	}
+
+	/// Encode the graph into a byte buffer.
+	pub fn encode(&self) -> Vec<u8> {
+		self.inner.encode()
 	}
 }
 
