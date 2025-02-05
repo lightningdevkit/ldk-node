@@ -143,7 +143,7 @@ use types::{
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
-use logger::{log_error, log_info, log_trace, LdkLogger, Logger};
+use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
@@ -265,7 +265,7 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_gossip_sync.changed() => {
-							log_trace!(
+							log_debug!(
 								gossip_sync_logger,
 								"Stopping background syncing RGS gossip data.",
 							);
@@ -344,7 +344,7 @@ impl Node {
 					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
 					tokio::select! {
 						_ = stop_listen.changed() => {
-							log_trace!(
+							log_debug!(
 								listening_logger,
 								"Stopping listening to inbound connections.",
 							);
@@ -380,7 +380,7 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_connect.changed() => {
-							log_trace!(
+							log_debug!(
 								connect_logger,
 								"Stopping reconnecting known peers.",
 							);
@@ -423,7 +423,7 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_bcast.changed() => {
-							log_trace!(
+							log_debug!(
 								bcast_logger,
 								"Stopping broadcasting node announcements.",
 								);
@@ -496,7 +496,7 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_tx_bcast.changed() => {
-							log_trace!(
+							log_debug!(
 								tx_bcast_logger,
 								"Stopping broadcasting transactions.",
 							);
@@ -550,7 +550,7 @@ impl Node {
 			Box::pin(async move {
 				tokio::select! {
 					_ = stop.changed() => {
-						log_trace!(
+						log_debug!(
 							sleeper_logger,
 							"Stopping processing events.",
 						);
@@ -585,7 +585,7 @@ impl Node {
 				log_error!(background_error_logger, "Failed to process events: {}", e);
 				panic!("Failed to process events");
 			});
-			log_trace!(background_stop_logger, "Events processing stopped.",);
+			log_debug!(background_stop_logger, "Events processing stopped.",);
 
 			match event_handling_stopped_sender.send(()) {
 				Ok(_) => (),
@@ -608,7 +608,7 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_liquidity_handler.changed() => {
-							log_trace!(
+							log_debug!(
 								liquidity_logger,
 								"Stopping processing liquidity events.",
 							);
