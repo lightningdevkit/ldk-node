@@ -44,7 +44,7 @@ fn main() {
 	node.event_handled();
 
 	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
-	node.bolt11_payment().send(&invoice).unwrap();
+	node.bolt11_payment().send(&invoice, None).unwrap();
 
 	node.stop().unwrap();
 }
