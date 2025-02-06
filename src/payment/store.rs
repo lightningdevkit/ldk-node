@@ -314,10 +314,10 @@ pub enum PaymentKind {
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
 	},
-	/// A [BOLT 11] payment intended to open an [LSPS 2] just-in-time channel.
+	/// A [BOLT 11] payment intended to open an [bLIP-52 / LSPS 2] just-in-time channel.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
-	/// [LSPS 2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
 	Bolt11Jit {
 		/// The payment hash, i.e., the hash of the `preimage`.
 		hash: PaymentHash,

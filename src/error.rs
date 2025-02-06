@@ -106,6 +106,10 @@ pub enum Error {
 	InvalidQuantity,
 	/// The given node alias is invalid.
 	InvalidNodeAlias,
+	/// The given date time is invalid.
+	InvalidDateTime,
+	/// The given fee rate is invalid.
+	InvalidFeeRate,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
 	/// The provided offer was denonminated in an unsupported currency.
@@ -172,6 +176,8 @@ impl fmt::Display for Error {
 			Self::InvalidUri => write!(f, "The given URI is invalid."),
 			Self::InvalidQuantity => write!(f, "The given quantity is invalid."),
 			Self::InvalidNodeAlias => write!(f, "The given node alias is invalid."),
+			Self::InvalidDateTime => write!(f, "The given date time is invalid."),
+			Self::InvalidFeeRate => write!(f, "The given fee rate is invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
 			},
