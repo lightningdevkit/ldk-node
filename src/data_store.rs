@@ -143,18 +143,18 @@ where
 		let store_key = object.id().encode_to_hex_str();
 		let data = object.encode();
 		self.kv_store
-			.write(&self.primary_namespace, &self.secondary_namespace, &store_key, &data)
+			.write(&self.primary_namespace, &self.secondary_namespace, &store_key, data)
 			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Write for key {}/{}/{} failed due to: {}",
-					&self.primary_namespace,
-					&self.secondary_namespace,
-					store_key,
-					e
-				);
-				Error::PersistenceFailed
-			})?;
+			log_error!(
+				self.logger,
+				"Write for key {}/{}/{} failed due to: {}",
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				store_key,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
 		Ok(())
 	}
 }

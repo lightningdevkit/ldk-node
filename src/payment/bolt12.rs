@@ -19,7 +19,9 @@ use crate::types::{ChannelManager, PaymentStore};
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
-use lightning::util::string::UntrustedString;
+use lightning::routing::router::RouteParametersConfig;
+
+use lightning_types::string::UntrustedString;
 
 use rand::RngCore;
 
@@ -82,7 +84,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -103,7 +105,7 @@ impl Bolt12Payment {
 			payer_note.clone(),
 			payment_id,
 			retry_strategy,
-			max_total_routing_fee_msat,
+			route_params_config,
 		) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
@@ -185,7 +187,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -210,7 +212,7 @@ impl Bolt12Payment {
 			payer_note.clone(),
 			payment_id,
 			retry_strategy,
-			max_total_routing_fee_msat,
+			route_params_config,
 		) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
@@ -273,17 +275,17 @@ impl Bolt12Payment {
 	pub(crate) fn receive_inner(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<LdkOffer, Error> {
-		let absolute_expiry = expiry_secs.map(|secs| {
-			(SystemTime::now() + Duration::from_secs(secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.unwrap()
-		});
+		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+			Error::OfferCreationFailed
+		})?;
 
-		let offer_builder =
-			self.channel_manager.create_offer_builder(absolute_expiry).map_err(|e| {
-				log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-				Error::OfferCreationFailed
-			})?;
+		if let Some(expiry_secs) = expiry_secs {
+			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.unwrap();
+			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
+		}
 
 		let mut offer =
 			offer_builder.amount_msats(amount_msat).description(description.to_string());
@@ -319,17 +321,18 @@ impl Bolt12Payment {
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
-		let absolute_expiry = expiry_secs.map(|secs| {
-			(SystemTime::now() + Duration::from_secs(secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.unwrap()
-		});
+		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+			Error::OfferCreationFailed
+		})?;
 
-		let offer_builder =
-			self.channel_manager.create_offer_builder(absolute_expiry).map_err(|e| {
-				log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-				Error::OfferCreationFailed
-			})?;
+		if let Some(expiry_secs) = expiry_secs {
+			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.unwrap();
+			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
+		}
+
 		let offer = offer_builder.description(description.to_string()).build().map_err(|e| {
 			log_error!(self.logger, "Failed to create offer: {:?}", e);
 			Error::OfferCreationFailed
@@ -396,7 +399,7 @@ impl Bolt12Payment {
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let mut refund_builder = self
 			.channel_manager
@@ -405,7 +408,7 @@ impl Bolt12Payment {
 				absolute_expiry,
 				payment_id,
 				retry_strategy,
-				max_total_routing_fee_msat,
+				route_params_config,
 			)
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to create refund builder: {:?}", e);

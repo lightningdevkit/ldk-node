@@ -12,7 +12,7 @@ dictionary Config {
 	sequence<PublicKey> trusted_peers_0conf;
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
-	SendingParameters? sending_parameters;
+	RouteParametersConfig? route_parameters;
 };
 
 dictionary AnchorChannelsConfig {
@@ -167,13 +167,13 @@ interface Bolt11InvoiceDescription {
 
 interface Bolt11Payment {
 	[Throws=NodeError]
-	PaymentId send([ByRef]Bolt11Invoice invoice, SendingParameters? sending_parameters);
+	PaymentId send([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, SendingParameters? sending_parameters);
+	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	void send_probes([ByRef]Bolt11Invoice invoice);
+	void send_probes([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
+	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
 	[Throws=NodeError]
@@ -213,13 +213,13 @@ interface Bolt12Payment {
 
 interface SpontaneousPayment {
 	[Throws=NodeError]
-	PaymentId send(u64 amount_msat, PublicKey node_id, SendingParameters? sending_parameters);
+	PaymentId send(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, SendingParameters? sending_parameters, sequence<CustomTlvRecord> custom_tlvs);
+	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters, sequence<CustomTlvRecord> custom_tlvs);
 	[Throws=NodeError]
-	PaymentId send_with_preimage(u64 amount_msat, PublicKey node_id, PaymentPreimage preimage, SendingParameters? sending_parameters);
+	PaymentId send_with_preimage(u64 amount_msat, PublicKey node_id, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	PaymentId send_with_preimage_and_custom_tlvs(u64 amount_msat, PublicKey node_id, sequence<CustomTlvRecord> custom_tlvs, PaymentPreimage preimage, SendingParameters? sending_parameters);
+	PaymentId send_with_preimage_and_custom_tlvs(u64 amount_msat, PublicKey node_id, sequence<CustomTlvRecord> custom_tlvs, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
 };
@@ -254,7 +254,7 @@ interface LSPS1Liquidity {
 	[Throws=NodeError]
 	LSPS1OrderStatus request_channel(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel);
 	[Throws=NodeError]
-	LSPS1OrderStatus check_order_status(OrderId order_id);
+	LSPS1OrderStatus check_order_status(LSPS1OrderId order_id);
 };
 
 [Error]
@@ -392,7 +392,7 @@ enum PaymentFailureReason {
 [Enum]
 interface ClosureReason {
 	CounterpartyForceClosed(UntrustedString peer_msg);
-	HolderForceClosed(boolean? broadcasted_latest_txn);
+	HolderForceClosed(boolean? broadcasted_latest_txn, string message);
 	LegacyCooperativeClosure();
 	CounterpartyInitiatedCooperativeClosure();
 	LocallyInitiatedCooperativeClosure();
@@ -402,8 +402,9 @@ interface ClosureReason {
 	DisconnectedPeer();
 	OutdatedChannelManager();
 	CounterpartyCoopClosedUnfundedChannel();
+	LocallyCoopClosedUnfundedChannel();
 	FundingBatchClosure();
-	HTLCsTimedOut();
+	HTLCsTimedOut( PaymentHash? payment_hash );
 	PeerFeerateTooLow(u32 peer_feerate_sat_per_kw, u32 required_feerate_sat_per_kw);
 };
 
@@ -456,11 +457,11 @@ dictionary PaymentDetails {
 	u64 latest_update_timestamp;
 };
 
-dictionary SendingParameters {
-	MaxTotalRoutingFeeLimit? max_total_routing_fee_msat;
-	u32? max_total_cltv_expiry_delta;
-	u8? max_path_count;
-	u8? max_channel_saturation_power_of_half;
+dictionary RouteParametersConfig {
+	u64? max_total_routing_fee_msat;
+	u32 max_total_cltv_expiry_delta;
+	u8 max_path_count;
+	u8 max_channel_saturation_power_of_half;
 };
 
 dictionary CustomTlvRecord {
@@ -469,13 +470,13 @@ dictionary CustomTlvRecord {
 };
 
 dictionary LSPS1OrderStatus {
-	OrderId order_id;
-	OrderParameters order_params;
-	PaymentInfo payment_options;
-	ChannelOrderInfo? channel_state;
+	LSPS1OrderId order_id;
+	LSPS1OrderParams order_params;
+	LSPS1PaymentInfo payment_options;
+	LSPS1ChannelInfo? channel_state;
 };
 
-dictionary OrderParameters {
+dictionary LSPS1OrderParams {
 	u64 lsp_balance_sat;
 	u64 client_balance_sat;
 	u16 required_channel_confirmations;
@@ -485,22 +486,22 @@ dictionary OrderParameters {
 	boolean announce_channel;
 };
 
-dictionary PaymentInfo {
-	Bolt11PaymentInfo? bolt11;
-	OnchainPaymentInfo? onchain;
+dictionary LSPS1PaymentInfo {
+	LSPS1Bolt11PaymentInfo? bolt11;
+	LSPS1OnchainPaymentInfo? onchain;
 };
 
-dictionary Bolt11PaymentInfo {
-	PaymentState state;
-	DateTime expires_at;
+dictionary LSPS1Bolt11PaymentInfo {
+	LSPS1PaymentState state;
+	LSPSDateTime expires_at;
 	u64 fee_total_sat;
 	u64 order_total_sat;
 	Bolt11Invoice invoice;
 };
 
-dictionary OnchainPaymentInfo {
-	PaymentState state;
-	DateTime expires_at;
+dictionary LSPS1OnchainPaymentInfo {
+	LSPS1PaymentState state;
+	LSPSDateTime expires_at;
 	u64 fee_total_sat;
 	u64 order_total_sat;
 	Address address;
@@ -509,22 +510,16 @@ dictionary OnchainPaymentInfo {
 	Address? refund_onchain_address;
 };
 
-dictionary ChannelOrderInfo {
-	DateTime funded_at;
+dictionary LSPS1ChannelInfo {
+	LSPSDateTime funded_at;
 	OutPoint funding_outpoint;
-	DateTime expires_at;
+	LSPSDateTime expires_at;
 };
 
-enum PaymentState {
+enum LSPS1PaymentState {
 	"ExpectPayment",
 	"Paid",
 	"Refunded",
-};
-
-[Enum]
-interface MaxTotalRoutingFeeLimit {
-	None ();
-	Some ( u64 amount_msat );
 };
 
 [NonExhaustive]
@@ -861,7 +856,7 @@ typedef string UntrustedString;
 typedef string NodeAlias;
 
 [Custom]
-typedef string OrderId;
+typedef string LSPS1OrderId;
 
 [Custom]
-typedef string DateTime;
+typedef string LSPSDateTime;

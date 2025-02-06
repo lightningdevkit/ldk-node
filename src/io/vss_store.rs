@@ -10,7 +10,7 @@ use crate::runtime::Runtime;
 
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
 use lightning::io::{self, Error, ErrorKind};
-use lightning::util::persist::KVStore;
+use lightning::util::persist::KVStoreSync;
 use prost::Message;
 use rand::RngCore;
 #[cfg(test)]
@@ -38,7 +38,7 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
-/// A [`KVStore`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
+/// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
 	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
@@ -127,7 +127,7 @@ impl VssStore {
 	}
 }
 
-impl KVStore for VssStore {
+impl KVStoreSync for VssStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
@@ -160,11 +160,11 @@ impl KVStore for VssStore {
 	}
 
 	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
 		let version = -1;
-		let storable = self.storable_builder.build(buf.to_vec(), version);
+		let storable = self.storable_builder.build(buf, version);
 		let request = PutObjectRequest {
 			store_id: self.store_id.clone(),
 			global_version: None,

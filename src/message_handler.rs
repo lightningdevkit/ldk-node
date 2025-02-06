@@ -10,6 +10,7 @@ use crate::liquidity::LiquiditySource;
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::ln::wire::CustomMessageReader;
 use lightning::util::logger::Logger;
+use lightning::util::ser::LengthLimitedRead;
 
 use lightning_types::features::{InitFeatures, NodeFeatures};
 
@@ -47,7 +48,7 @@ where
 {
 	type CustomMessage = RawLSPSMessage;
 
-	fn read<RD: lightning::io::Read>(
+	fn read<RD: LengthLimitedRead>(
 		&self, message_type: u16, buffer: &mut RD,
 	) -> Result<Option<Self::CustomMessage>, lightning::ln::msgs::DecodeError> {
 		match self {

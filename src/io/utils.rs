@@ -31,8 +31,9 @@ use lightning::util::persist::{
 	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
-use lightning::util::string::PrintableString;
 use lightning::util::sweep::OutputSweeper;
+
+use lightning_types::string::PrintableString;
 
 use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
 use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
@@ -251,7 +252,7 @@ pub(crate) fn read_output_sweeper(
 		kv_store,
 		logger.clone(),
 	);
-	OutputSweeper::read(&mut reader, args).map_err(|e| {
+	OutputSweeper::read_with_kv_store_sync(&mut reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize OutputSweeper: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize OutputSweeper")
 	})
@@ -286,7 +287,7 @@ where
 			NODE_METRICS_PRIMARY_NAMESPACE,
 			NODE_METRICS_SECONDARY_NAMESPACE,
 			NODE_METRICS_KEY,
-			&data,
+			data,
 		)
 		.map_err(|e| {
 			log_error!(
@@ -441,7 +442,7 @@ macro_rules! impl_read_write_change_set_type {
 			L::Target: LdkLogger,
 		{
 			let data = ChangeSetSerWrapper(value).encode();
-			kv_store.write($primary_namespace, $secondary_namespace, $key, &data).map_err(|e| {
+			kv_store.write($primary_namespace, $secondary_namespace, $key, data).map_err(|e| {
 				log_error!(
 					logger,
 					"Writing data to key {}/{}/{} failed due to: {}",
