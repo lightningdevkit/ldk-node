@@ -223,11 +223,11 @@ where
 
 						match sender.send(response) {
 							Ok(()) => (),
-							Err(e) => {
+							Err(_) => {
 								log_error!(
 									self.logger,
-									"Failed to handle response from liquidity service: {:?}",
-									e
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
 								);
 							},
 						}
@@ -284,11 +284,11 @@ where
 
 						match sender.send(response) {
 							Ok(()) => (),
-							Err(e) => {
+							Err(_) => {
 								log_error!(
 									self.logger,
-									"Failed to handle response from liquidity service: {:?}",
-									e
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
 								);
 							},
 						}
@@ -342,11 +342,11 @@ where
 
 						match sender.send(response) {
 							Ok(()) => (),
-							Err(e) => {
+							Err(_) => {
 								log_error!(
 									self.logger,
-									"Failed to handle response from liquidity service: {:?}",
-									e
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
 								);
 							},
 						}
@@ -389,11 +389,11 @@ where
 
 						match sender.send(response) {
 							Ok(()) => (),
-							Err(e) => {
+							Err(_) => {
 								log_error!(
 									self.logger,
-									"Failed to handle response from liquidity service: {:?}",
-									e
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
 								);
 							},
 						}
@@ -441,11 +441,11 @@ where
 
 						match sender.send(response) {
 							Ok(()) => (),
-							Err(e) => {
+							Err(_) => {
 								log_error!(
 									self.logger,
-									"Failed to handle response from liquidity service: {:?}",
-									e
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
 								);
 							},
 						}
