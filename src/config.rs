@@ -52,7 +52,7 @@ pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
 
 // The time in-between peer reconnection attempts.
-pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(60);
 
 // The time in-between RGS sync attempts.
 pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
