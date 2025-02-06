@@ -1509,6 +1509,25 @@ impl Node {
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		self.keys_manager.verify_signature(msg, sig, pkey)
 	}
+
+	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
+	/// a limited view of the network.
+	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
+		self.kv_store
+			.read(
+				lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_KEY,
+			)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to access store while exporting pathfinding scores: {}",
+					e
+				);
+				Error::PersistenceFailed
+			})
+	}
 }
 
 impl Drop for Node {
