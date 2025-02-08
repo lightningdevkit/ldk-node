@@ -108,7 +108,7 @@ pub(crate) enum Writer {
 	/// Writes logs to the file system.
 	FileWriter { file_path: String, max_log_level: LogLevel },
 	/// Forwards logs to the `log` facade.
-	LogFacadeWriter { max_log_level: LogLevel },
+	LogFacadeWriter,
 	/// Forwards logs to a custom writer.
 	CustomWriter(Arc<dyn LogWriter>),
 }
@@ -138,10 +138,7 @@ impl LogWriter for Writer {
 					.write_all(log.as_bytes())
 					.expect("Failed to write to log file")
 			},
-			Writer::LogFacadeWriter { max_log_level } => {
-				if record.level < *max_log_level {
-					return;
-				}
+			Writer::LogFacadeWriter => {
 				macro_rules! log_with_level {
 					($log_level:expr, $target: expr, $($args:tt)*) => {
 						match $log_level {
@@ -186,8 +183,8 @@ impl Logger {
 		Ok(Self { writer: Writer::FileWriter { file_path, max_log_level } })
 	}
 
-	pub fn new_log_facade(max_log_level: LogLevel) -> Self {
-		Self { writer: Writer::LogFacadeWriter { max_log_level } }
+	pub fn new_log_facade() -> Self {
+		Self { writer: Writer::LogFacadeWriter }
 	}
 
 	pub fn new_custom_writer(log_writer: Arc<dyn LogWriter>) -> Self {
@@ -204,10 +201,7 @@ impl LdkLogger for Logger {
 				}
 				self.writer.log(record.into());
 			},
-			Writer::LogFacadeWriter { max_log_level } => {
-				if record.level < *max_log_level {
-					return;
-				}
+			Writer::LogFacadeWriter => {
 				self.writer.log(record.into());
 			},
 			Writer::CustomWriter(_arc) => {

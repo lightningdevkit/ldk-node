@@ -113,7 +113,7 @@ struct LiquiditySourceConfig {
 #[derive(Clone)]
 enum LogWriterConfig {
 	File { log_file_path: Option<String>, max_log_level: Option<LogLevel> },
-	Log { max_log_level: Option<LogLevel> },
+	Log,
 	Custom(Arc<dyn LogWriter>),
 }
 
@@ -125,9 +125,7 @@ impl std::fmt::Debug for LogWriterConfig {
 				.field("max_log_level", max_log_level)
 				.field("log_file_path", log_file_path)
 				.finish(),
-			LogWriterConfig::Log { max_log_level } => {
-				f.debug_tuple("Log").field(max_log_level).finish()
-			},
+			LogWriterConfig::Log => write!(f, "LogWriterConfig::Log"),
 			LogWriterConfig::Custom(_) => {
 				f.debug_tuple("Custom").field(&"<config internal to custom log writer>").finish()
 			},
@@ -385,11 +383,8 @@ impl NodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to write logs to the [`log`](https://crates.io/crates/log) facade.
-	///
-	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
-	/// [`DEFAULT_LOG_LEVEL`].
-	pub fn set_log_facade_logger(&mut self, max_log_level: Option<LogLevel>) -> &mut Self {
-		self.log_writer_config = Some(LogWriterConfig::Log { max_log_level });
+	pub fn set_log_facade_logger(&mut self) -> &mut Self {
+		self.log_writer_config = Some(LogWriterConfig::Log);
 		self
 	}
 
@@ -750,11 +745,8 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to write logs to the [`log`](https://crates.io/crates/log) facade.
-	///
-	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
-	/// [`DEFAULT_LOG_LEVEL`].
-	pub fn set_log_facade_logger(&self, log_level: Option<LogLevel>) {
-		self.inner.write().unwrap().set_log_facade_logger(log_level);
+	pub fn set_log_facade_logger(&self) {
+		self.inner.write().unwrap().set_log_facade_logger();
 	}
 
 	/// Configures the [`Node`] instance to write logs to the provided custom [`LogWriter`].
@@ -1421,10 +1413,7 @@ fn setup_logger(
 			Logger::new_fs_writer(log_file_path, max_log_level)
 				.map_err(|_| BuildError::LoggerSetupFailed)?
 		},
-		Some(LogWriterConfig::Log { max_log_level }) => {
-			let max_log_level = max_log_level.unwrap_or_else(|| DEFAULT_LOG_LEVEL);
-			Logger::new_log_facade(max_log_level)
-		},
+		Some(LogWriterConfig::Log) => Logger::new_log_facade(),
 
 		Some(LogWriterConfig::Custom(custom_log_writer)) => {
 			Logger::new_custom_writer(Arc::clone(&custom_log_writer))
