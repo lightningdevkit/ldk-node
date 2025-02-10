@@ -8,6 +8,7 @@ use crate::{
 	config::{
 		EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL, EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS,
 	},
+	io::utils::write_external_pathfinding_scores_to_cache,
 	logger::LdkLogger,
 	runtime::Runtime,
 	NodeMetrics, Scorer,
@@ -86,15 +87,26 @@ async fn sync_external_scores(
 	let mut reader = Cursor::new(body);
 	match ChannelLiquidities::read(&mut reader) {
 		Ok(liquidities) => {
+			if let Err(e) = write_external_pathfinding_scores_to_cache(
+				Arc::clone(&kv_store),
+				&liquidities,
+				logger,
+			)
+			.await
+			{
+				log_error!(logger, "Failed to persist external scores to cache: {}", e);
+			}
+
 			let duration_since_epoch =
 				SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 			scorer.lock().unwrap().merge(liquidities, duration_since_epoch);
 			let mut locked_node_metrics = node_metrics.write().unwrap();
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
 				Some(duration_since_epoch.as_secs());
-			write_node_metrics(&*locked_node_metrics, kv_store, logger).unwrap_or_else(|e| {
-				log_error!(logger, "Persisting node metrics failed: {}", e);
-			});
+			write_node_metrics(&*locked_node_metrics, Arc::clone(&kv_store), logger)
+				.unwrap_or_else(|e| {
+					log_error!(logger, "Persisting node metrics failed: {}", e);
+				});
 			log_trace!(logger, "External scores merged successfully");
 		},
 		Err(e) => {

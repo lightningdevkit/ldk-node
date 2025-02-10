@@ -24,6 +24,7 @@ use lightning::io::Cursor;
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::log_trace;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
@@ -51,7 +52,9 @@ use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
-use crate::io::utils::{read_node_metrics, write_node_metrics};
+use crate::io::utils::{
+	read_external_pathfinding_scores_from_cache, read_node_metrics, write_node_metrics,
+};
 use crate::io::vss_store::VssStore;
 use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -1409,6 +1412,20 @@ fn build_with_store_internal(
 	};
 
 	let scorer = Arc::new(Mutex::new(CombinedScorer::new(local_scorer)));
+
+	// Restore external pathfinding scores from cache if possible.
+	match read_external_pathfinding_scores_from_cache(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(external_scores) => {
+			scorer.lock().unwrap().merge(external_scores, cur_time);
+			log_trace!(logger, "External scores from cache merged successfully");
+		},
+		Err(e) => {
+			if e.kind() != std::io::ErrorKind::NotFound {
+				log_error!(logger, "Error while reading external scores from cache: {}", e);
+				return Err(BuildError::ReadFailed);
+			}
+		},
+	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
 	let router = Arc::new(DefaultRouter::new(
