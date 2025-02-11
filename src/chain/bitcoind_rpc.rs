@@ -122,21 +122,52 @@ impl BitcoindRpcClient {
 			.map(|resp| resp.0)
 	}
 
-	pub(crate) async fn get_mempool_entry(&self, txid: Txid) -> std::io::Result<MempoolEntry> {
+	pub(crate) async fn get_mempool_entry(
+		&self, txid: Txid,
+	) -> std::io::Result<Option<MempoolEntry>> {
 		let txid_hex = bitcoin::consensus::encode::serialize_hex(&txid);
 		let txid_json = serde_json::json!(txid_hex);
-		self.rpc_client
+		match self
+			.rpc_client
 			.call_method::<GetMempoolEntryResponse>("getmempoolentry", &[txid_json])
 			.await
-			.map(|resp| MempoolEntry { txid, height: resp.height, time: resp.time })
+		{
+			Ok(resp) => Ok(Some(MempoolEntry { txid, height: resp.height, time: resp.time })),
+			Err(e) => match e.into_inner() {
+				Some(inner) => {
+					let rpc_error_res: Result<Box<RpcError>, _> = inner.downcast();
+
+					match rpc_error_res {
+						Ok(rpc_error) => {
+							// Check if it's the 'not found' error code.
+							if rpc_error.code == -5 {
+								Ok(None)
+							} else {
+								Err(std::io::Error::new(std::io::ErrorKind::Other, rpc_error))
+							}
+						},
+						Err(_) => Err(std::io::Error::new(
+							std::io::ErrorKind::Other,
+							"Failed to process getmempoolentry response",
+						)),
+					}
+				},
+				None => Err(std::io::Error::new(
+					std::io::ErrorKind::Other,
+					"Failed to process getmempoolentry response",
+				)),
+			},
+		}
 	}
 
 	pub(crate) async fn get_mempool_entries(&self) -> std::io::Result<Vec<MempoolEntry>> {
 		let mempool_txids = self.get_raw_mempool().await?;
 		let mut mempool_entries = Vec::with_capacity(mempool_txids.len());
 		for txid in mempool_txids {
-			let entry = self.get_mempool_entry(txid).await?;
-			mempool_entries.push(entry);
+			// Push any entries that haven't been dropped since `getrawmempool`
+			if let Some(entry) = self.get_mempool_entry(txid).await? {
+				mempool_entries.push(entry);
+			}
 		}
 		Ok(mempool_entries)
 	}
