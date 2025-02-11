@@ -8,7 +8,7 @@
 use crate::io::utils::check_namespace_key_validity;
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
 use lightning::io::{self, Error, ErrorKind};
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, MigratableKVStore};
 use prost::Message;
 use rand::RngCore;
 #[cfg(test)]
@@ -84,46 +84,39 @@ impl VssStore {
 		}
 	}
 
-	fn extract_key(&self, unified_key: &str) -> io::Result<String> {
+	fn key_to_key_parts<'a>(
+		&self, unified_key: &'a str,
+	) -> io::Result<(&'a str, &'a str, &'a str)> {
 		let mut parts = unified_key.splitn(3, '#');
-		let (_primary_namespace, _secondary_namespace) = (parts.next(), parts.next());
-		match parts.next() {
-			Some(obfuscated_key) => {
-				let actual_key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
-				Ok(actual_key)
+		let (primary_namespace, secondary_namespace) = (parts.next(), parts.next());
+		match (primary_namespace, secondary_namespace, parts.next()) {
+			(Some(primary_namespace), Some(secondary_namespace), Some(obfuscated_key)) => {
+				Ok((primary_namespace, secondary_namespace, obfuscated_key))
 			},
-			None => Err(Error::new(ErrorKind::InvalidData, "Invalid key format")),
+			_ => Err(Error::new(ErrorKind::InvalidData, "Invalid key format")),
 		}
 	}
 
-	async fn list_all_keys(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
+	async fn list_obfuscated_key_versions(&self, key_prefix: String) -> io::Result<Vec<KeyValue>> {
 		let mut page_token = None;
-		let mut keys = vec![];
-		let key_prefix = format!("{}#{}", primary_namespace, secondary_namespace);
+		let mut key_versions = vec![];
 		while page_token != Some("".to_string()) {
 			let request = ListKeyVersionsRequest {
 				store_id: self.store_id.clone(),
-				key_prefix: Some(key_prefix.clone()),
+				key_prefix: Some(key_prefix.to_string()),
 				page_token,
 				page_size: None,
 			};
 
 			let response = self.client.list_key_versions(&request).await.map_err(|e| {
-				let msg = format!(
-					"Failed to list keys in {}/{}: {}",
-					primary_namespace, secondary_namespace, e
-				);
+				let msg = format!("Failed to list keys with prefix {}: {}", key_prefix, e);
 				Error::new(ErrorKind::Other, msg)
 			})?;
 
-			for kv in response.key_versions {
-				keys.push(self.extract_key(&kv.key)?);
-			}
+			key_versions.extend(response.key_versions);
 			page_token = response.next_page_token;
 		}
-		Ok(keys)
+		Ok(key_versions)
 	}
 }
 
@@ -218,8 +211,9 @@ impl KVStore for VssStore {
 	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
 
-		let keys = tokio::task::block_in_place(|| {
-			self.runtime.block_on(self.list_all_keys(primary_namespace, secondary_namespace))
+		let key_prefix = format!("{}#{}", primary_namespace, secondary_namespace);
+		let obfuscated_key_versions = tokio::task::block_in_place(|| {
+			self.runtime.block_on(self.list_obfuscated_key_versions(key_prefix))
 		})
 		.map_err(|e| {
 			let msg = format!(
@@ -229,7 +223,39 @@ impl KVStore for VssStore {
 			Error::new(ErrorKind::Other, msg)
 		})?;
 
-		Ok(keys)
+		let mut deobfuscated_keys = vec![];
+		for kv in obfuscated_key_versions {
+			let obfuscated_key = self.key_to_key_parts(&kv.key)?.2;
+			deobfuscated_keys.push(self.key_obfuscator.deobfuscate(obfuscated_key)?);
+		}
+		Ok(deobfuscated_keys)
+	}
+}
+
+impl MigratableKVStore for VssStore {
+	fn list_all_keys(&self) -> Result<Vec<(String, String, String)>, Error> {
+		// Use empty key_prefix to list all keys.
+		let empty_key_prefix = "".to_string();
+		let obfuscated_key_versions = tokio::task::block_in_place(|| {
+			self.runtime.block_on(self.list_obfuscated_key_versions(empty_key_prefix))
+		})
+		.map_err(|e| {
+			let msg = format!("Failed to list all keys: {}", e);
+			Error::new(ErrorKind::Other, msg)
+		})?;
+
+		let mut deobfuscated_keys = vec![];
+		for kv in obfuscated_key_versions {
+			let (primary_namespace, secondary_namespace, obfuscated_key) =
+				self.key_to_key_parts(&kv.key)?;
+
+			deobfuscated_keys.push((
+				primary_namespace.to_string(),
+				secondary_namespace.to_string(),
+				self.key_obfuscator.deobfuscate(&obfuscated_key)?,
+			));
+		}
+		Ok(deobfuscated_keys)
 	}
 }
 
