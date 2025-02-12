@@ -173,6 +173,12 @@ message ForwardedPayment{
   // The `user_channel_id` of the incoming channel between the previous node and us.
   string prev_user_channel_id = 3;
 
+  // The node id of the previous node.
+  string prev_node_id = 9;
+
+  // The node id of the next node.
+  string next_node_id = 10;
+
   // The `user_channel_id` of the outgoing channel between the next node and us.
   // This will be `None` if the payment was settled via an on-chain transaction.
   // See the caveat described for the `total_fee_earned_msat` field.

@@ -179,6 +179,12 @@ pub struct ForwardedPayment {
 	/// The `user_channel_id` of the incoming channel between the previous node and us.
 	#[prost(string, tag = "3")]
 	pub prev_user_channel_id: ::prost::alloc::string::String,
+	/// The node id of the previous node.
+	#[prost(string, tag = "9")]
+	pub prev_node_id: ::prost::alloc::string::String,
+	/// The node id of the next node.
+	#[prost(string, tag = "10")]
+	pub next_node_id: ::prost::alloc::string::String,
 	/// The `user_channel_id` of the outgoing channel between the next node and us.
 	/// This will be `None` if the payment was settled via an on-chain transaction.
 	/// See the caveat described for the `total_fee_earned_msat` field.
