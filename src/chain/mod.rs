@@ -317,8 +317,14 @@ impl ChainSource {
 					));
 				}
 
+				log_info!(
+					logger,
+					"Starting initial synchronization of chain listeners. This might take a while..",
+				);
+
 				loop {
 					let mut locked_header_cache = header_cache.lock().await;
+					let now = SystemTime::now();
 					match synchronize_listeners(
 						bitcoind_rpc_client.as_ref(),
 						config.network,
@@ -329,6 +335,11 @@ impl ChainSource {
 					{
 						Ok(chain_tip) => {
 							{
+								log_info!(
+									logger,
+									"Finished synchronizing listeners in {}ms",
+									now.elapsed().unwrap().as_millis()
+								);
 								*latest_chain_tip.write().unwrap() = Some(chain_tip);
 								let unix_time_secs_opt = SystemTime::now()
 									.duration_since(UNIX_EPOCH)
@@ -373,6 +384,8 @@ impl ChainSource {
 				fee_rate_update_interval.reset();
 				fee_rate_update_interval
 					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+				log_info!(logger, "Starting continuous polling for chain updates.");
 
 				// Start the polling loop.
 				loop {
@@ -692,13 +705,15 @@ impl ChainSource {
 					&mut *locked_header_cache,
 					&chain_listener,
 				);
-				let mut chain_polling_interval =
-					tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
-				chain_polling_interval
-					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+				let now = SystemTime::now();
 				match spv_client.poll_best_tip().await {
 					Ok((ChainTip::Better(tip), true)) => {
+						log_trace!(
+							logger,
+							"Finished polling best tip in {}ms",
+							now.elapsed().unwrap().as_millis()
+						);
 						*latest_chain_tip.write().unwrap() = Some(tip);
 					},
 					Ok(_) => {},
@@ -711,11 +726,19 @@ impl ChainSource {
 				}
 
 				let cur_height = channel_manager.current_best_block().height;
+
+				let now = SystemTime::now();
 				match bitcoind_rpc_client
 					.get_mempool_transactions_and_timestamp_at_height(cur_height)
 					.await
 				{
 					Ok(unconfirmed_txs) => {
+						log_trace!(
+							logger,
+							"Finished polling mempool of size {} in {}ms",
+							unconfirmed_txs.len(),
+							now.elapsed().unwrap().as_millis()
+						);
 						let _ = onchain_wallet.apply_unconfirmed_txs(unconfirmed_txs);
 					},
 					Err(e) => {
