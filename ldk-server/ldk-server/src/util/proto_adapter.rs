@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use hex::prelude::*;
+use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
 use ldk_node::lightning::ln::types::ChannelId;
 use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
@@ -325,14 +326,20 @@ pub(crate) fn pending_sweep_balance_to_proto(
 pub(crate) fn forwarded_payment_to_proto(
 	prev_channel_id: ChannelId, next_channel_id: ChannelId,
 	prev_user_channel_id: Option<UserChannelId>, next_user_channel_id: Option<UserChannelId>,
+	prev_node_id: Option<PublicKey>, next_node_id: Option<PublicKey>,
 	total_fee_earned_msat: Option<u64>, skimmed_fee_msat: Option<u64>, claim_from_onchain_tx: bool,
 	outbound_amount_forwarded_msat: Option<u64>,
 ) -> ForwardedPayment {
 	ForwardedPayment {
 		prev_channel_id: prev_channel_id.to_string(),
 		next_channel_id: next_channel_id.to_string(),
-		prev_user_channel_id: prev_user_channel_id.expect("").0.to_string(),
+		prev_user_channel_id: prev_user_channel_id
+			.expect("prev_user_channel_id expected for ldk-server >=0.1")
+			.0
+			.to_string(),
 		next_user_channel_id: next_user_channel_id.map(|u| u.0.to_string()),
+		prev_node_id: prev_node_id.expect("prev_node_id expected for ldk-server >=0.1").to_string(),
+		next_node_id: next_node_id.expect("next_node_id expected for ldk-node >=0.1").to_string(),
 		total_fee_earned_msat,
 		skimmed_fee_msat,
 		claim_from_onchain_tx,
