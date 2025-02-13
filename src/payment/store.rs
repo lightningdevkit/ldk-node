@@ -42,6 +42,13 @@ pub struct PaymentDetails {
 	pub kind: PaymentKind,
 	/// The amount transferred.
 	pub amount_msat: Option<u64>,
+	/// The fees that were paid for this payment.
+	///
+	/// For Lightning payments, this will only be updated for outbound payments once they
+	/// succeeded.
+	///
+	/// Will be `None` for Lightning payments made with LDK Node v0.4.x and earlier.
+	pub fee_paid_msat: Option<u64>,
 	/// The direction of the payment.
 	pub direction: PaymentDirection,
 	/// The status of the payment.
@@ -52,14 +59,14 @@ pub struct PaymentDetails {
 
 impl PaymentDetails {
 	pub(crate) fn new(
-		id: PaymentId, kind: PaymentKind, amount_msat: Option<u64>, direction: PaymentDirection,
-		status: PaymentStatus,
+		id: PaymentId, kind: PaymentKind, amount_msat: Option<u64>, fee_paid_msat: Option<u64>,
+		direction: PaymentDirection, status: PaymentStatus,
 	) -> Self {
 		let latest_update_timestamp = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
 			.unwrap_or(Duration::from_secs(0))
 			.as_secs();
-		Self { id, kind, amount_msat, direction, status, latest_update_timestamp }
+		Self { id, kind, amount_msat, fee_paid_msat, direction, status, latest_update_timestamp }
 	}
 
 	pub(crate) fn update(&mut self, update: &PaymentDetailsUpdate) -> bool {
@@ -154,6 +161,10 @@ impl PaymentDetails {
 			update_if_necessary!(self.amount_msat, amount_opt);
 		}
 
+		if let Some(fee_paid_msat_opt) = update.fee_paid_msat {
+			update_if_necessary!(self.fee_paid_msat, fee_paid_msat_opt);
+		}
+
 		if let Some(status) = update.status {
 			update_if_necessary!(self.status, status);
 		}
@@ -192,6 +203,7 @@ impl Writeable for PaymentDetails {
 			(4, None::<Option<PaymentSecret>>, required),
 			(5, self.latest_update_timestamp, required),
 			(6, self.amount_msat, required),
+			(7, self.fee_paid_msat, option),
 			(8, self.direction, required),
 			(10, self.status, required)
 		});
@@ -213,6 +225,7 @@ impl Readable for PaymentDetails {
 			(4, secret, required),
 			(5, latest_update_timestamp, (default_value, unix_time_secs)),
 			(6, amount_msat, required),
+			(7, fee_paid_msat, option),
 			(8, direction, required),
 			(10, status, required)
 		});
@@ -253,7 +266,15 @@ impl Readable for PaymentDetails {
 			}
 		};
 
-		Ok(PaymentDetails { id, kind, amount_msat, direction, status, latest_update_timestamp })
+		Ok(PaymentDetails {
+			id,
+			kind,
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			status,
+			latest_update_timestamp,
+		})
 	}
 }
 
@@ -479,6 +500,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub preimage: Option<Option<PaymentPreimage>>,
 	pub secret: Option<Option<PaymentSecret>>,
 	pub amount_msat: Option<Option<u64>>,
+	pub fee_paid_msat: Option<Option<u64>>,
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
@@ -492,6 +514,7 @@ impl PaymentDetailsUpdate {
 			preimage: None,
 			secret: None,
 			amount_msat: None,
+			fee_paid_msat: None,
 			direction: None,
 			status: None,
 			confirmation_status: None,
@@ -521,6 +544,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			preimage: Some(preimage),
 			secret: Some(secret),
 			amount_msat: Some(value.amount_msat),
+			fee_paid_msat: Some(value.fee_paid_msat),
 			direction: Some(value.direction),
 			status: Some(value.status),
 			confirmation_status,
@@ -708,8 +732,14 @@ mod tests {
 			.is_err());
 
 		let kind = PaymentKind::Bolt11 { hash, preimage: None, secret: None };
-		let payment =
-			PaymentDetails::new(id, kind, None, PaymentDirection::Inbound, PaymentStatus::Pending);
+		let payment = PaymentDetails::new(
+			id,
+			kind,
+			None,
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
 
 		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
 		assert!(payment_store.get(&id).is_some());

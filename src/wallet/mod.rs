@@ -49,7 +49,6 @@ use bitcoin::{
 
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
@@ -146,11 +145,6 @@ where
 	fn update_payment_store<'a>(
 		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
 	) -> Result<(), Error> {
-		let latest_update_timestamp = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or(Duration::from_secs(0))
-			.as_secs();
-
 		for wtx in locked_wallet.transactions() {
 			let id = PaymentId(wtx.tx_node.txid.to_byte_array());
 			let txid = wtx.tx_node.txid;
@@ -205,14 +199,16 @@ where
 				(direction, amount_msat)
 			};
 
-			let payment = PaymentDetails {
+			let fee_paid_msat = Some(fee.to_sat() * 1000);
+
+			let payment = PaymentDetails::new(
 				id,
 				kind,
 				amount_msat,
+				fee_paid_msat,
 				direction,
-				status: payment_status,
-				latest_update_timestamp,
-			};
+				payment_status,
+			);
 
 			self.payment_store.insert_or_update(&payment)?;
 		}

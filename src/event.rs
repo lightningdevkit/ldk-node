@@ -725,6 +725,7 @@ where
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Inbound,
 							PaymentStatus::Pending,
 						);
@@ -765,6 +766,7 @@ where
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Inbound,
 							PaymentStatus::Pending,
 						);
@@ -931,6 +933,7 @@ where
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
+					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
