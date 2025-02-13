@@ -281,48 +281,49 @@ impl ChainSource {
 					}
 				}
 
-				let channel_manager_best_block_hash =
-					channel_manager.current_best_block().block_hash;
-				let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
-				let onchain_wallet_best_block_hash = onchain_wallet.current_best_block().block_hash;
-
-				let mut chain_listeners = vec![
-					(
-						onchain_wallet_best_block_hash,
-						&**onchain_wallet as &(dyn Listen + Send + Sync),
-					),
-					(
-						channel_manager_best_block_hash,
-						&*channel_manager as &(dyn Listen + Send + Sync),
-					),
-					(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
-				];
-
-				// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
-				// before giving them to `ChainMonitor` it the first place. However, this isn't
-				// trivial as we load them on initialization (in the `Builder`) and only gain
-				// network access during `start`. For now, we just make sure we get the worst known
-				// block hash and sychronize them via `ChainMonitor`.
-				if let Some(worst_channel_monitor_block_hash) = chain_monitor
-					.list_monitors()
-					.iter()
-					.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
-					.map(|m| m.current_best_block())
-					.min_by_key(|b| b.height)
-					.map(|b| b.block_hash)
-				{
-					chain_listeners.push((
-						worst_channel_monitor_block_hash,
-						&*chain_monitor as &(dyn Listen + Send + Sync),
-					));
-				}
-
 				log_info!(
 					logger,
 					"Starting initial synchronization of chain listeners. This might take a while..",
 				);
 
 				loop {
+					let channel_manager_best_block_hash =
+						channel_manager.current_best_block().block_hash;
+					let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
+					let onchain_wallet_best_block_hash =
+						onchain_wallet.current_best_block().block_hash;
+
+					let mut chain_listeners = vec![
+						(
+							onchain_wallet_best_block_hash,
+							&**onchain_wallet as &(dyn Listen + Send + Sync),
+						),
+						(
+							channel_manager_best_block_hash,
+							&*channel_manager as &(dyn Listen + Send + Sync),
+						),
+						(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
+					];
+
+					// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
+					// before giving them to `ChainMonitor` it the first place. However, this isn't
+					// trivial as we load them on initialization (in the `Builder`) and only gain
+					// network access during `start`. For now, we just make sure we get the worst known
+					// block hash and sychronize them via `ChainMonitor`.
+					if let Some(worst_channel_monitor_block_hash) = chain_monitor
+						.list_monitors()
+						.iter()
+						.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
+						.map(|m| m.current_best_block())
+						.min_by_key(|b| b.height)
+						.map(|b| b.block_hash)
+					{
+						chain_listeners.push((
+							worst_channel_monitor_block_hash,
+							&*chain_monitor as &(dyn Listen + Send + Sync),
+						));
+					}
+
 					let mut locked_header_cache = header_cache.lock().await;
 					let now = SystemTime::now();
 					match synchronize_listeners(
