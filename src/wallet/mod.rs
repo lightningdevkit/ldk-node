@@ -187,14 +187,21 @@ where
 			// here to determine the `PaymentKind`, but that's not really satisfactory, so
 			// we're punting on it until we can come up with a better solution.
 			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
+			let fee = locked_wallet.calculate_fee(&wtx.tx_node.tx).unwrap_or(Amount::ZERO);
 			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
 			let (direction, amount_msat) = if sent > received {
 				let direction = PaymentDirection::Outbound;
-				let amount_msat = Some(sent.to_sat().saturating_sub(received.to_sat()) * 1000);
+				let amount_msat = Some(
+					sent.to_sat().saturating_sub(fee.to_sat()).saturating_sub(received.to_sat())
+						* 1000,
+				);
 				(direction, amount_msat)
 			} else {
 				let direction = PaymentDirection::Inbound;
-				let amount_msat = Some(received.to_sat().saturating_sub(sent.to_sat()) * 1000);
+				let amount_msat = Some(
+					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee.to_sat()))
+						* 1000,
+				);
 				(direction, amount_msat)
 			};
 
