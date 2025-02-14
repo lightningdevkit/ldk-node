@@ -19,10 +19,10 @@ use lightning::routing::router::{RouteHint, RouteHintHop};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::Event;
 use lightning_liquidity::lsps0::ser::RequestId;
-use lightning_liquidity::lsps1::client::LSPS1ClientConfig;
+use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
 use lightning_liquidity::lsps1::event::LSPS1ClientEvent;
 use lightning_liquidity::lsps1::msgs::{ChannelInfo, LSPS1Options, OrderId, OrderParameters};
-use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
+use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
@@ -44,7 +44,7 @@ struct LSPS1Client {
 	lsp_node_id: PublicKey,
 	lsp_address: SocketAddress,
 	token: Option<String>,
-	client_config: LSPS1ClientConfig,
+	ldk_client_config: LdkLSPS1ClientConfig,
 	pending_opening_params_requests:
 		Mutex<HashMap<RequestId, oneshot::Sender<LSPS1OpeningParamsResponse>>>,
 	pending_create_order_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS1OrderStatus>>>,
@@ -56,7 +56,7 @@ struct LSPS2Client {
 	lsp_node_id: PublicKey,
 	lsp_address: SocketAddress,
 	token: Option<String>,
-	client_config: LSPS2ClientConfig,
+	ldk_client_config: LdkLSPS2ClientConfig,
 	pending_fee_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2FeeResponse>>>,
 	pending_buy_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2BuyResponse>>>,
 }
@@ -99,7 +99,7 @@ where
 		&mut self, lsp_node_id: PublicKey, lsp_address: SocketAddress, token: Option<String>,
 	) -> &mut Self {
 		// TODO: allow to set max_channel_fees_msat
-		let client_config = LSPS1ClientConfig { max_channel_fees_msat: None };
+		let ldk_client_config = LdkLSPS1ClientConfig { max_channel_fees_msat: None };
 		let pending_opening_params_requests = Mutex::new(HashMap::new());
 		let pending_create_order_requests = Mutex::new(HashMap::new());
 		let pending_check_order_status_requests = Mutex::new(HashMap::new());
@@ -107,7 +107,7 @@ where
 			lsp_node_id,
 			lsp_address,
 			token,
-			client_config,
+			ldk_client_config,
 			pending_opening_params_requests,
 			pending_create_order_requests,
 			pending_check_order_status_requests,
@@ -118,14 +118,14 @@ where
 	pub(crate) fn lsps2_client(
 		&mut self, lsp_node_id: PublicKey, lsp_address: SocketAddress, token: Option<String>,
 	) -> &mut Self {
-		let client_config = LSPS2ClientConfig {};
+		let ldk_client_config = LdkLSPS2ClientConfig {};
 		let pending_fee_requests = Mutex::new(HashMap::new());
 		let pending_buy_requests = Mutex::new(HashMap::new());
 		self.lsps2_client = Some(LSPS2Client {
 			lsp_node_id,
 			lsp_address,
 			token,
-			client_config,
+			ldk_client_config,
 			pending_fee_requests,
 			pending_buy_requests,
 		});
@@ -133,8 +133,8 @@ where
 	}
 
 	pub(crate) fn build(self) -> LiquiditySource<L> {
-		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.client_config.clone());
-		let lsps2_client_config = self.lsps2_client.as_ref().map(|s| s.client_config.clone());
+		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.ldk_client_config.clone());
+		let lsps2_client_config = self.lsps2_client.as_ref().map(|s| s.ldk_client_config.clone());
 		let liquidity_client_config =
 			Some(LiquidityClientConfig { lsps1_client_config, lsps2_client_config });
 
