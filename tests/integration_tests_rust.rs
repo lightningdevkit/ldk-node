@@ -8,13 +8,14 @@
 mod common;
 
 use common::{
-	do_channel_full_cycle, expect_channel_ready_event, expect_event, expect_payment_received_event,
-	expect_payment_successful_event, generate_blocks_and_wait, open_channel,
-	premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event, expect_event,
+	expect_payment_received_event, expect_payment_successful_event, generate_blocks_and_wait,
+	open_channel, premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd,
+	setup_builder, setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
 };
 
 use ldk_node::config::EsploraSyncConfig;
+use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDirection, PaymentKind, PaymentStatus, QrPaymentResult,
 	SendingParameters,
@@ -1037,4 +1038,109 @@ fn unified_qr_send_receive() {
 
 	assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
+}
+
+#[test]
+fn lsps2_client_service_integration() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.onchain_wallet_sync_interval_secs = 100000;
+	sync_config.lightning_wallet_sync_interval_secs = 100000;
+
+	// Setup three nodes: service, client, and payer
+	let channel_opening_fee_ppm = 10_000;
+	let channel_over_provisioning_ppm = 100_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+	};
+
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	let service_node = service_builder.build().unwrap();
+	service_node.start().unwrap();
+
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
+	let client_node = client_builder.build().unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config(true);
+	setup_builder!(payer_builder, payer_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build().unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 10_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr, client_addr, payer_addr],
+		Amount::from_sat(premine_amount_sat),
+	);
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	// Open a channel payer -> service that will allow paying the JIT invoice
+	println!("Opening channel payer_node -> service_node!");
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_amount_msat = 100_000_000;
+
+	println!("Generating JIT invoice!");
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.unwrap();
+
+	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
+	println!("Paying JIT invoice!");
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
+	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_received_event!(client_node, expected_received_amount_msat);
+
+	let expected_channel_overprovisioning_msat =
+		(expected_received_amount_msat * channel_over_provisioning_ppm as u64) / 1_000_000;
+	let expected_channel_size_sat =
+		(expected_received_amount_msat + expected_channel_overprovisioning_msat) / 1000;
+	let channel_value_sats = client_node.list_channels().first().unwrap().channel_value_sats;
+	assert_eq!(channel_value_sats, expected_channel_size_sat);
 }
