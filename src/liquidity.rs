@@ -52,6 +52,13 @@ struct LSPS1Client {
 		Mutex<HashMap<RequestId, oneshot::Sender<LSPS1OrderStatus>>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LSPS1ClientConfig {
+	pub node_id: PublicKey,
+	pub address: SocketAddress,
+	pub token: Option<String>,
+}
+
 struct LSPS2Client {
 	lsp_node_id: PublicKey,
 	lsp_address: SocketAddress,
@@ -59,6 +66,13 @@ struct LSPS2Client {
 	ldk_client_config: LdkLSPS2ClientConfig,
 	pending_fee_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2FeeResponse>>>,
 	pending_buy_requests: Mutex<HashMap<RequestId, oneshot::Sender<LSPS2BuyResponse>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LSPS2ClientConfig {
+	pub node_id: PublicKey,
+	pub address: SocketAddress,
+	pub token: Option<String>,
 }
 
 pub(crate) struct LiquiditySourceBuilder<L: Deref>

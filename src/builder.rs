@@ -18,7 +18,7 @@ use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
-use crate::liquidity::LiquiditySourceBuilder;
+use crate::liquidity::{LSPS1ClientConfig, LSPS2ClientConfig, LiquiditySourceBuilder};
 use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
@@ -103,20 +103,6 @@ struct LiquiditySourceConfig {
 	lsps1_client: Option<LSPS1ClientConfig>,
 	// Act as an LSPS2 client connecting to the given service.
 	lsps2_client: Option<LSPS2ClientConfig>,
-}
-
-#[derive(Debug, Clone)]
-struct LSPS1ClientConfig {
-	node_id: PublicKey,
-	address: SocketAddress,
-	token: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct LSPS2ClientConfig {
-	node_id: PublicKey,
-	address: SocketAddress,
-	token: Option<String>,
 }
 
 #[derive(Clone)]
