@@ -107,7 +107,7 @@ message Bolt11ReceiveRequest {
 
   // An optional description to attach along with the invoice.
   // Will be set in the description field of the encoded payment request.
-  string description = 2;
+  types.Bolt11InvoiceDescription description = 2;
 
   // Invoice expiry time in seconds.
   uint32 expiry_secs = 3;

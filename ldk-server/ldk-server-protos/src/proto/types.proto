@@ -636,3 +636,10 @@ message PageToken {
   string token = 1;
   int64 index = 2;
 }
+
+message Bolt11InvoiceDescription {
+  oneof kind {
+    string direct = 1;
+    string hash = 2;
+  }
+}

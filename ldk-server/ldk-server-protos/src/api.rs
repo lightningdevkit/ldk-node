@@ -107,8 +107,8 @@ pub struct Bolt11ReceiveRequest {
 	pub amount_msat: ::core::option::Option<u64>,
 	/// An optional description to attach along with the invoice.
 	/// Will be set in the description field of the encoded payment request.
-	#[prost(string, tag = "2")]
-	pub description: ::prost::alloc::string::String,
+	#[prost(message, optional, tag = "2")]
+	pub description: ::core::option::Option<super::types::Bolt11InvoiceDescription>,
 	/// Invoice expiry time in seconds.
 	#[prost(uint32, tag = "3")]
 	pub expiry_secs: u32,

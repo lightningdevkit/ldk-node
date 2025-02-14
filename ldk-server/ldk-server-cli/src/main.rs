@@ -6,6 +6,9 @@ use ldk_server_client::ldk_server_protos::api::{
 	GetBalancesRequest, GetNodeInfoRequest, ListChannelsRequest, ListPaymentsRequest,
 	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
 };
+use ldk_server_client::ldk_server_protos::types::{
+	bolt11_invoice_description, Bolt11InvoiceDescription,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -32,7 +35,9 @@ enum Commands {
 	},
 	Bolt11Receive {
 		#[arg(short, long)]
-		description: String,
+		description: Option<String>,
+		#[arg(short, long)]
+		description_hash: Option<String>,
 		#[arg(short, long)]
 		expiry_secs: u32,
 		#[arg(long)]
@@ -87,31 +92,47 @@ async fn main() {
 
 	match cli.command {
 		Commands::GetNodeInfo => {
-			handle_response(client.get_node_info(GetNodeInfoRequest {}).await);
+			handle_response_result(client.get_node_info(GetNodeInfoRequest {}).await);
 		},
 		Commands::GetBalances => {
-			handle_response(client.get_balances(GetBalancesRequest {}).await);
+			handle_response_result(client.get_balances(GetBalancesRequest {}).await);
 		},
 		Commands::OnchainReceive => {
-			handle_response(client.onchain_receive(OnchainReceiveRequest {}).await);
+			handle_response_result(client.onchain_receive(OnchainReceiveRequest {}).await);
 		},
 		Commands::OnchainSend { address, amount_sats, send_all } => {
-			handle_response(
+			handle_response_result(
 				client.onchain_send(OnchainSendRequest { address, amount_sats, send_all }).await,
 			);
 		},
-		Commands::Bolt11Receive { description, expiry_secs, amount_msat } => {
-			handle_response(
-				client
-					.bolt11_receive(Bolt11ReceiveRequest { description, expiry_secs, amount_msat })
-					.await,
-			);
+		Commands::Bolt11Receive { description, description_hash, expiry_secs, amount_msat } => {
+			let invoice_description = match (description, description_hash) {
+				(Some(desc), None) => Some(Bolt11InvoiceDescription {
+					kind: Some(bolt11_invoice_description::Kind::Direct(desc)),
+				}),
+				(None, Some(hash)) => Some(Bolt11InvoiceDescription {
+					kind: Some(bolt11_invoice_description::Kind::Hash(hash)),
+				}),
+				(Some(_), Some(_)) => {
+					handle_error(LdkServerError::InternalError(
+						"Only one of description or description_hash can be set.".to_string(),
+					));
+				},
+				(None, None) => None,
+			};
+
+			let request =
+				Bolt11ReceiveRequest { description: invoice_description, expiry_secs, amount_msat };
+
+			handle_response_result(client.bolt11_receive(request).await);
 		},
 		Commands::Bolt11Send { invoice, amount_msat } => {
-			handle_response(client.bolt11_send(Bolt11SendRequest { invoice, amount_msat }).await);
+			handle_response_result(
+				client.bolt11_send(Bolt11SendRequest { invoice, amount_msat }).await,
+			);
 		},
 		Commands::Bolt12Receive { description, amount_msat, expiry_secs, quantity } => {
-			handle_response(
+			handle_response_result(
 				client
 					.bolt12_receive(Bolt12ReceiveRequest {
 						description,
@@ -123,7 +144,7 @@ async fn main() {
 			);
 		},
 		Commands::Bolt12Send { offer, amount_msat, quantity, payer_note } => {
-			handle_response(
+			handle_response_result(
 				client
 					.bolt12_send(Bolt12SendRequest { offer, amount_msat, quantity, payer_note })
 					.await,
@@ -136,7 +157,7 @@ async fn main() {
 			push_to_counterparty_msat,
 			announce_channel,
 		} => {
-			handle_response(
+			handle_response_result(
 				client
 					.open_channel(OpenChannelRequest {
 						node_pubkey,
@@ -150,22 +171,26 @@ async fn main() {
 			);
 		},
 		Commands::ListChannels => {
-			handle_response(client.list_channels(ListChannelsRequest {}).await);
+			handle_response_result(client.list_channels(ListChannelsRequest {}).await);
 		},
 		Commands::ListPayments => {
-			handle_response(client.list_payments(ListPaymentsRequest {}).await);
+			handle_response_result(client.list_payments(ListPaymentsRequest {}).await);
 		},
 	}
 }
 
-fn handle_response<Rs: ::prost::Message>(response: Result<Rs, LdkServerError>) {
+fn handle_response_result<Rs: ::prost::Message>(response: Result<Rs, LdkServerError>) {
 	match response {
 		Ok(response) => {
 			println!("{:?}", response);
 		},
 		Err(e) => {
-			eprintln!("Error executing command: {:?}", e);
-			std::process::exit(1); // Exit with status code 1 on error.
+			handle_error(e);
 		},
 	};
+}
+
+fn handle_error(e: LdkServerError) -> ! {
+	eprintln!("Error executing command: {:?}", e);
+	std::process::exit(1); // Exit with status code 1 on error.
 }

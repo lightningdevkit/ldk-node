@@ -1,10 +1,12 @@
 use bytes::Bytes;
 use hex::prelude::*;
+use ldk_node::bitcoin::hashes::sha256;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
 use ldk_node::lightning::ln::types::ChannelId;
+use ldk_node::lightning_invoice::{Bolt11InvoiceDescription, Description, Sha256};
 use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{ChannelDetails, Event, LightningBalance, PendingSweepBalance, UserChannelId};
+use ldk_node::{ChannelDetails, LightningBalance, NodeError, PendingSweepBalance, UserChannelId};
 use ldk_server_protos::types::lightning_balance::BalanceType::{
 	ClaimableAwaitingConfirmations, ClaimableOnChannelClose, ContentiousClaimable,
 	CounterpartyRevokedOutputClaimable, MaybePreimageClaimableHtlc, MaybeTimeoutClaimableHtlc,
@@ -15,7 +17,9 @@ use ldk_server_protos::types::payment_kind::Kind::{
 use ldk_server_protos::types::pending_sweep_balance::BalanceType::{
 	AwaitingThresholdConfirmations, BroadcastAwaitingConfirmation, PendingBroadcast,
 };
-use ldk_server_protos::types::{Channel, ForwardedPayment, LspFeeLimits, OutPoint, Payment};
+use ldk_server_protos::types::{
+	bolt11_invoice_description, Channel, ForwardedPayment, LspFeeLimits, OutPoint, Payment,
+};
 
 pub(crate) fn channel_to_proto(channel: ChannelDetails) -> Channel {
 	Channel {
@@ -345,4 +349,19 @@ pub(crate) fn forwarded_payment_to_proto(
 		claim_from_onchain_tx,
 		outbound_amount_forwarded_msat,
 	}
+}
+
+pub(crate) fn proto_to_bolt11_description(
+	description: Option<ldk_server_protos::types::Bolt11InvoiceDescription>,
+) -> Result<Bolt11InvoiceDescription, NodeError> {
+	Ok(match description.and_then(|d| d.kind) {
+		Some(bolt11_invoice_description::Kind::Direct(s)) => {
+			Bolt11InvoiceDescription::Direct(Description::new(s).unwrap())
+		},
+		Some(bolt11_invoice_description::Kind::Hash(h)) => {
+			let hash_bytes = <[u8; 32]>::from_hex(&h).map_err(|_| NodeError::InvalidInvoice)?;
+			Bolt11InvoiceDescription::Hash(Sha256(*sha256::Hash::from_bytes_ref(&hash_bytes)))
+		},
+		None => Bolt11InvoiceDescription::Direct(Description::new("".to_string()).unwrap()),
+	})
 }

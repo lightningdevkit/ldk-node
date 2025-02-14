@@ -708,6 +708,23 @@ pub struct PageToken {
 	#[prost(int64, tag = "2")]
 	pub index: i64,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Bolt11InvoiceDescription {
+	#[prost(oneof = "bolt11_invoice_description::Kind", tags = "1, 2")]
+	pub kind: ::core::option::Option<bolt11_invoice_description::Kind>,
+}
+/// Nested message and enum types in `Bolt11InvoiceDescription`.
+pub mod bolt11_invoice_description {
+	#[allow(clippy::derive_partial_eq_without_eq)]
+	#[derive(Clone, PartialEq, ::prost::Oneof)]
+	pub enum Kind {
+		#[prost(string, tag = "1")]
+		Direct(::prost::alloc::string::String),
+		#[prost(string, tag = "2")]
+		Hash(::prost::alloc::string::String),
+	}
+}
 /// Represents the direction of a payment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
