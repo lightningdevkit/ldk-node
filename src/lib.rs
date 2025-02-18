@@ -84,7 +84,7 @@ mod gossip;
 pub mod graph;
 mod hex_utils;
 pub mod io;
-mod liquidity;
+pub mod liquidity;
 pub mod logger;
 mod message_handler;
 pub mod payment;
@@ -100,6 +100,7 @@ pub use bip39;
 pub use bitcoin;
 pub use lightning;
 pub use lightning_invoice;
+pub use lightning_liquidity;
 pub use lightning_types;
 pub use vss_client;
 
@@ -130,7 +131,7 @@ use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
-use liquidity::LiquiditySource;
+use liquidity::{LSPS1Liquidity, LiquiditySource};
 use payment::store::PaymentStore;
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
@@ -143,7 +144,7 @@ use types::{
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
-use logger::{log_error, log_info, log_trace, LdkLogger, Logger};
+use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
@@ -265,7 +266,7 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_gossip_sync.changed() => {
-							log_trace!(
+							log_debug!(
 								gossip_sync_logger,
 								"Stopping background syncing RGS gossip data.",
 							);
@@ -344,7 +345,7 @@ impl Node {
 					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
 					tokio::select! {
 						_ = stop_listen.changed() => {
-							log_trace!(
+							log_debug!(
 								listening_logger,
 								"Stopping listening to inbound connections.",
 							);
@@ -380,7 +381,7 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_connect.changed() => {
-							log_trace!(
+							log_debug!(
 								connect_logger,
 								"Stopping reconnecting known peers.",
 							);
@@ -394,18 +395,10 @@ impl Node {
 								.collect::<Vec<_>>();
 
 							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let res = connect_cm.do_connect_peer(
+								let _ = connect_cm.do_connect_peer(
 									peer_info.node_id,
 									peer_info.address.clone(),
 									).await;
-								match res {
-									Ok(_) => {
-										log_info!(connect_logger, "Successfully reconnected to peer {}", peer_info.node_id);
-									},
-									Err(e) => {
-										log_error!(connect_logger, "Failed to reconnect to peer {}: {}", peer_info.node_id, e);
-									}
-								}
 							}
 						}
 				}
@@ -431,7 +424,7 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_bcast.changed() => {
-							log_trace!(
+							log_debug!(
 								bcast_logger,
 								"Stopping broadcasting node announcements.",
 								);
@@ -504,7 +497,7 @@ impl Node {
 			loop {
 				tokio::select! {
 						_ = stop_tx_bcast.changed() => {
-							log_trace!(
+							log_debug!(
 								tx_bcast_logger,
 								"Stopping broadcasting transactions.",
 							);
@@ -558,7 +551,7 @@ impl Node {
 			Box::pin(async move {
 				tokio::select! {
 					_ = stop.changed() => {
-						log_trace!(
+						log_debug!(
 							sleeper_logger,
 							"Stopping processing events.",
 						);
@@ -593,7 +586,7 @@ impl Node {
 				log_error!(background_error_logger, "Failed to process events: {}", e);
 				panic!("Failed to process events");
 			});
-			log_trace!(background_stop_logger, "Events processing stopped.",);
+			log_debug!(background_stop_logger, "Events processing stopped.",);
 
 			match event_handling_stopped_sender.send(()) {
 				Ok(_) => (),
@@ -616,7 +609,7 @@ impl Node {
 				loop {
 					tokio::select! {
 						_ = stop_liquidity_handler.changed() => {
-							log_trace!(
+							log_debug!(
 								liquidity_logger,
 								"Stopping processing liquidity events.",
 							);
@@ -953,6 +946,34 @@ impl Node {
 			self.bolt11_payment(),
 			self.bolt12_payment(),
 			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
+	///
+	/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
+	#[cfg(not(feature = "uniffi"))]
+	pub fn lsps1_liquidity(&self) -> LSPS1Liquidity {
+		LSPS1Liquidity::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
+			Arc::clone(&self.logger),
+		)
+	}
+
+	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
+	///
+	/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
+	#[cfg(feature = "uniffi")]
+	pub fn lsps1_liquidity(&self) -> Arc<LSPS1Liquidity> {
+		Arc::new(LSPS1Liquidity::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -1508,6 +1529,25 @@ impl Node {
 	/// secret key corresponding to the given public key.
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		self.keys_manager.verify_signature(msg, sig, pkey)
+	}
+
+	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
+	/// a limited view of the network.
+	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
+		self.kv_store
+			.read(
+				lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_KEY,
+			)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to access store while exporting pathfinding scores: {}",
+					e
+				);
+				Error::PersistenceFailed
+			})
 	}
 }
 

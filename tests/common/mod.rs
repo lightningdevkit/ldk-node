@@ -935,7 +935,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.sync_wallets().unwrap();
 
 		assert!(node_b.list_balances().lightning_balances.is_empty());
-		assert!(node_b.list_balances().pending_balances_from_channel_closures.is_empty());
+		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
 
 		// Check node_a properly sees all balances and sweeps them.
 		assert_eq!(node_a.list_balances().lightning_balances.len(), 1);

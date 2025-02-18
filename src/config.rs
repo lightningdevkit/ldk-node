@@ -52,7 +52,7 @@ pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
 
 // The time in-between peer reconnection attempts.
-pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(60);
 
 // The time in-between RGS sync attempts.
 pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -210,13 +210,11 @@ pub struct AnchorChannelsConfig {
 	/// on-chain.
 	///
 	/// Channels with these peers won't count towards the retained on-chain reserve and we won't
-	/// take any action to get the required transactions confirmed ourselves.
+	/// take any action to get the required channel closing transactions confirmed ourselves.
 	///
 	/// **Note:** Trusting the channel counterparty to take the necessary actions to get the
-	/// required Anchor spending and HTLC transactions confirmed on-chain is potentially insecure
-	/// as the channel may not be closed if they refuse to do so, potentially leaving the user
-	/// funds stuck *or* even allow the counterparty to steal any in-flight funds after the
-	/// corresponding HTLCs time out.
+	/// required Anchor spending transactions confirmed on-chain is potentially insecure
+	/// as the channel may not be closed if they refuse to do so.
 	pub trusted_peers_no_reserve: Vec<PublicKey>,
 	/// The amount of satoshis per anchors-negotiated channel with an untrusted peer that we keep
 	/// as an emergency reserve in our on-chain wallet.
@@ -228,9 +226,9 @@ pub struct AnchorChannelsConfig {
 	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`], we will always try to spend the Anchor
 	/// outputs with *any* on-chain funds available, i.e., the total reserve value as well as any
 	/// spendable funds available in the on-chain wallet. Therefore, this per-channel multiplier is
-	/// really a emergencey reserve that we maintain at all time to reduce reduce the risk of
+	/// really a emergency reserve that we maintain at all time to reduce reduce the risk of
 	/// insufficient funds at time of a channel closure. To this end, we will refuse to open
-	/// outbound or accept inbound channels if we don't have sufficient on-chain funds availble to
+	/// outbound or accept inbound channels if we don't have sufficient on-chain funds available to
 	/// cover the additional reserve requirement.
 	///
 	/// **Note:** Depending on the fee market at the time of closure, this reserve amount might or

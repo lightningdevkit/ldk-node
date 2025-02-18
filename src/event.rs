@@ -8,10 +8,11 @@
 use crate::types::{CustomTlvRecord, DynStore, Sweeper, Wallet};
 
 use crate::{
-	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, Graph, PeerInfo,
-	PeerStore, UserChannelId,
+	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
+	UserChannelId,
 };
 
+use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
 use crate::fee_estimator::ConfirmationTarget;
 
@@ -1041,15 +1042,29 @@ where
 				funding_satoshis,
 				channel_type,
 				channel_negotiation_type: _,
-				is_announced: _,
+				is_announced,
 				params: _,
 			} => {
+				if is_announced && !may_announce_channel(&*self.config) {
+					log_error!(
+						self.logger,
+						"Rejecting inbound announced channel from peer {} as not all required details are set. Please ensure node alias and listening addresses have been configured.",
+						counterparty_node_id,
+					);
+
+					self.channel_manager
+						.force_close_without_broadcasting_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+							"Channel request rejected".to_string(),
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to reject channel: {:?}", e)
+						});
+					return Ok(());
+				}
+
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
-
-				// TODO: We should use `is_announced` flag above and reject announced channels if
-				// we're not a forwading node, once we add a 'forwarding mode' based on listening
-				// address / node alias being set.
-
 				if anchor_channel {
 					if let Some(anchor_channels_config) =
 						self.config.anchor_channels_config.as_ref()
@@ -1373,30 +1388,29 @@ where
 				}
 			},
 			LdkEvent::BumpTransaction(bte) => {
-				let (channel_id, counterparty_node_id) = match bte {
+				match bte {
 					BumpTransactionEvent::ChannelClose {
 						ref channel_id,
 						ref counterparty_node_id,
 						..
-					} => (channel_id, counterparty_node_id),
-					BumpTransactionEvent::HTLCResolution {
-						ref channel_id,
-						ref counterparty_node_id,
-						..
-					} => (channel_id, counterparty_node_id),
-				};
-
-				if let Some(anchor_channels_config) = self.config.anchor_channels_config.as_ref() {
-					if anchor_channels_config
-						.trusted_peers_no_reserve
-						.contains(counterparty_node_id)
-					{
-						log_debug!(self.logger,
-							"Ignoring BumpTransactionEvent for channel {} due to trusted counterparty {}",
-							channel_id, counterparty_node_id
-						);
-						return Ok(());
-					}
+					} => {
+						// Skip bumping channel closes if our counterparty is trusted.
+						if let Some(anchor_channels_config) =
+							self.config.anchor_channels_config.as_ref()
+						{
+							if anchor_channels_config
+								.trusted_peers_no_reserve
+								.contains(counterparty_node_id)
+							{
+								log_debug!(self.logger,
+									"Ignoring BumpTransactionEvent::ChannelClose for channel {} due to trusted counterparty {}",
+									channel_id, counterparty_node_id
+								);
+								return Ok(());
+							}
+						}
+					},
+					BumpTransactionEvent::HTLCResolution { .. } => {},
 				}
 
 				self.bump_tx_event_handler.handle_event(&bte);
