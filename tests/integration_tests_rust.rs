@@ -202,7 +202,11 @@ fn multi_hop_sending() {
 	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
-	expect_event!(nodes[2], PaymentForwarded);
+
+	// We expect that the payment goes through N2 or N3, so we check both for the PaymentForwarded event.
+	let node_2_fwd_event = matches!(nodes[2].next_event(), Some(Event::PaymentForwarded { .. }));
+	let node_3_fwd_event = matches!(nodes[3].next_event(), Some(Event::PaymentForwarded { .. }));
+	assert!(node_2_fwd_event || node_3_fwd_event);
 
 	let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);
