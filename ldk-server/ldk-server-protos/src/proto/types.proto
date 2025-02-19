@@ -35,7 +35,35 @@ message PaymentKind {
 }
 
 // Represents an on-chain payment.
-message Onchain {}
+message Onchain {
+  // The transaction identifier of this payment.
+  string txid = 1;
+
+  // The confirmation status of this payment.
+  ConfirmationStatus status = 2;
+}
+
+message ConfirmationStatus {
+  oneof status {
+    Confirmed confirmed     = 1;
+    Unconfirmed unconfirmed = 2;
+  }
+}
+
+// The on-chain transaction is confirmed in the best chain.
+message Confirmed {
+  // The hex representation of hash of the block in which the transaction was confirmed.
+  string  block_hash = 1;
+
+  // The height under which the block was confirmed.
+  uint32 height = 2;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+  uint64 timestamp = 3;
+}
+
+// The on-chain transaction is unconfirmed.
+message Unconfirmed {}
 
 // Represents a BOLT 11 payment.
 message Bolt11 {
