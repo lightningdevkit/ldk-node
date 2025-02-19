@@ -973,7 +973,7 @@ fn build_with_store_internal(
 	let persister = Arc::new(Persister::new(
 		Arc::clone(&kv_store),
 		Arc::clone(&logger),
-		10, // (?)
+		100,
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&tx_broadcaster),
