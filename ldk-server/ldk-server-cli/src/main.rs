@@ -32,6 +32,8 @@ enum Commands {
 		amount_sats: Option<u64>,
 		#[arg(long)]
 		send_all: Option<bool>,
+		#[arg(long)]
+		fee_rate_sat_per_vb: Option<u64>,
 	},
 	Bolt11Receive {
 		#[arg(short, long)]
@@ -100,9 +102,16 @@ async fn main() {
 		Commands::OnchainReceive => {
 			handle_response_result(client.onchain_receive(OnchainReceiveRequest {}).await);
 		},
-		Commands::OnchainSend { address, amount_sats, send_all } => {
+		Commands::OnchainSend { address, amount_sats, send_all, fee_rate_sat_per_vb } => {
 			handle_response_result(
-				client.onchain_send(OnchainSendRequest { address, amount_sats, send_all }).await,
+				client
+					.onchain_send(OnchainSendRequest {
+						address,
+						amount_sats,
+						send_all,
+						fee_rate_sat_per_vb,
+					})
+					.await,
 			);
 		},
 		Commands::Bolt11Receive { description, description_hash, expiry_secs, amount_msat } => {

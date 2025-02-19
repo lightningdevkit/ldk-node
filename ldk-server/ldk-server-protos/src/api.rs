@@ -83,6 +83,10 @@ pub struct OnchainSendRequest {
 	/// See more: <https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.send_all_to_address>
 	#[prost(bool, optional, tag = "3")]
 	pub send_all: ::core::option::Option<bool>,
+	/// If `fee_rate_sat_per_vb` is set it will be used on the resulting transaction. Otherwise we'll retrieve
+	/// a reasonable estimate from BitcoinD.
+	#[prost(uint64, optional, tag = "4")]
+	pub fee_rate_sat_per_vb: ::core::option::Option<u64>,
 }
 /// The response `content` for the `OnchainSend` API, when HttpStatusCode is OK (200).
 /// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
