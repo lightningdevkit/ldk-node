@@ -140,7 +140,7 @@ fn main() {
 							);
 							event_node.event_handled();
 						},
-						Event::PaymentReceived { payment_id, payment_hash, amount_msat } => {
+						Event::PaymentReceived { payment_id, payment_hash, amount_msat, .. } => {
 							println!(
 								"PAYMENT_RECEIVED: with id {:?}, hash {}, amount_msat {}",
 								payment_id, payment_hash, amount_msat
