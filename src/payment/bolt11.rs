@@ -160,6 +160,7 @@ impl Bolt11Payment {
 					payment_id,
 					kind,
 					invoice.amount_milli_satoshis(),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -182,6 +183,7 @@ impl Bolt11Payment {
 							payment_id,
 							kind,
 							invoice.amount_milli_satoshis(),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -293,6 +295,7 @@ impl Bolt11Payment {
 					payment_id,
 					kind,
 					Some(amount_msat),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -315,6 +318,7 @@ impl Bolt11Payment {
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -531,6 +535,7 @@ impl Bolt11Payment {
 			id,
 			kind,
 			amount_msat,
+			None,
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
@@ -666,6 +671,7 @@ impl Bolt11Payment {
 			id,
 			kind,
 			amount_msat,
+			None,
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);

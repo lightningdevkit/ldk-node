@@ -412,6 +412,7 @@ dictionary PaymentDetails {
 	PaymentId id;
 	PaymentKind kind;
 	u64? amount_msat;
+	u64? fee_paid_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
 	u64 latest_update_timestamp;

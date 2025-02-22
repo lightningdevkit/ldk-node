@@ -113,6 +113,7 @@ impl Bolt12Payment {
 					payment_id,
 					kind,
 					Some(offer_amount_msat),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -137,6 +138,7 @@ impl Bolt12Payment {
 							payment_id,
 							kind,
 							Some(offer_amount_msat),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -217,6 +219,7 @@ impl Bolt12Payment {
 					payment_id,
 					kind,
 					Some(amount_msat),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -241,6 +244,7 @@ impl Bolt12Payment {
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -338,6 +342,7 @@ impl Bolt12Payment {
 			payment_id,
 			kind,
 			Some(refund.amount_msats()),
+			None,
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
@@ -402,6 +407,7 @@ impl Bolt12Payment {
 			payment_id,
 			kind,
 			Some(amount_msat),
+			None,
 			PaymentDirection::Outbound,
 			PaymentStatus::Pending,
 		);

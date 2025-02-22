@@ -103,6 +103,10 @@ macro_rules! expect_payment_received_event {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
+				let payment = $node.payment(&payment_id.unwrap()).unwrap();
+				if !matches!(payment.kind, PaymentKind::Onchain { .. }) {
+					assert_eq!(payment.fee_paid_msat, None);
+				}
 				$node.event_handled();
 				payment_id
 			},
@@ -148,6 +152,8 @@ macro_rules! expect_payment_successful_event {
 				if let Some(fee_msat) = $fee_paid_msat {
 					assert_eq!(fee_paid_msat, fee_msat);
 				}
+				let payment = $node.payment(&$payment_id.unwrap()).unwrap();
+				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
 				$node.event_handled();
 			},

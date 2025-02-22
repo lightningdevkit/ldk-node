@@ -26,6 +26,7 @@ use lightning::util::persist::KVStore;
 
 use bitcoincore_rpc::RpcApi;
 
+use bitcoin::hashes::Hash;
 use bitcoin::Amount;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
@@ -285,7 +286,7 @@ fn start_stop_reinit() {
 }
 
 #[test]
-fn onchain_spend_receive() {
+fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
@@ -356,12 +357,37 @@ fn onchain_spend_receive() {
 		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None)
 	);
 
-	let amount_to_send_sats = 1000;
+	let amount_to_send_sats = 54321;
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
 
+	let payment_id = PaymentId(txid.to_byte_array());
+	let payment_a = node_a.payment(&payment_id).unwrap();
+	assert_eq!(payment_a.status, PaymentStatus::Pending);
+	match payment_a.kind {
+		PaymentKind::Onchain { status, .. } => {
+			assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+	assert!(payment_a.fee_paid_msat > Some(0));
+	let payment_b = node_b.payment(&payment_id).unwrap();
+	assert_eq!(payment_b.status, PaymentStatus::Pending);
+	match payment_a.kind {
+		PaymentKind::Onchain { status, .. } => {
+			assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+	assert!(payment_b.fee_paid_msat > Some(0));
+	assert_eq!(payment_a.amount_msat, Some(amount_to_send_sats * 1000));
+	assert_eq!(payment_a.amount_msat, payment_b.amount_msat);
+	assert_eq!(payment_a.fee_paid_msat, payment_b.fee_paid_msat);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -378,6 +404,24 @@ fn onchain_spend_receive() {
 	let node_b_payments =
 		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_b_payments.len(), 3);
+
+	let payment_a = node_a.payment(&payment_id).unwrap();
+	match payment_a.kind {
+		PaymentKind::Onchain { txid: _txid, status } => {
+			assert_eq!(_txid, txid);
+			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	let payment_b = node_a.payment(&payment_id).unwrap();
+	match payment_b.kind {
+		PaymentKind::Onchain { txid: _txid, status } => {
+			assert_eq!(_txid, txid);
+			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
