@@ -1,9 +1,15 @@
 use bytes::Bytes;
 use hex::prelude::*;
+use ldk_node::bitcoin::hashes::sha256;
+use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
 use ldk_node::lightning::ln::types::ChannelId;
-use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{ChannelDetails, Event, LightningBalance, PendingSweepBalance, UserChannelId};
+use ldk_node::lightning_invoice::{Bolt11InvoiceDescription, Description, Sha256};
+use ldk_node::payment::{
+	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
+};
+use ldk_node::{ChannelDetails, LightningBalance, NodeError, PendingSweepBalance, UserChannelId};
+use ldk_server_protos::types::confirmation_status::Status::{Confirmed, Unconfirmed};
 use ldk_server_protos::types::lightning_balance::BalanceType::{
 	ClaimableAwaitingConfirmations, ClaimableOnChannelClose, ContentiousClaimable,
 	CounterpartyRevokedOutputClaimable, MaybePreimageClaimableHtlc, MaybeTimeoutClaimableHtlc,
@@ -14,7 +20,9 @@ use ldk_server_protos::types::payment_kind::Kind::{
 use ldk_server_protos::types::pending_sweep_balance::BalanceType::{
 	AwaitingThresholdConfirmations, BroadcastAwaitingConfirmation, PendingBroadcast,
 };
-use ldk_server_protos::types::{Channel, ForwardedPayment, LspFeeLimits, OutPoint, Payment};
+use ldk_server_protos::types::{
+	bolt11_invoice_description, Channel, ForwardedPayment, LspFeeLimits, OutPoint, Payment,
+};
 
 pub(crate) fn channel_to_proto(channel: ChannelDetails) -> Channel {
 	Channel {
@@ -105,8 +113,11 @@ pub(crate) fn payment_kind_to_proto(
 	payment_kind: PaymentKind,
 ) -> ldk_server_protos::types::PaymentKind {
 	match payment_kind {
-		PaymentKind::Onchain => ldk_server_protos::types::PaymentKind {
-			kind: Some(Onchain(ldk_server_protos::types::Onchain {})),
+		PaymentKind::Onchain { txid, status } => ldk_server_protos::types::PaymentKind {
+			kind: Some(Onchain(ldk_server_protos::types::Onchain {
+				txid: txid.to_string(),
+				status: Some(confirmation_status_to_proto(status)),
+			})),
 		},
 		PaymentKind::Bolt11 { hash, preimage, secret } => ldk_server_protos::types::PaymentKind {
 			kind: Some(Bolt11(ldk_server_protos::types::Bolt11 {
@@ -157,6 +168,25 @@ pub(crate) fn payment_kind_to_proto(
 				hash: hash.to_string(),
 				preimage: preimage.map(|p| p.to_string()),
 			})),
+		},
+	}
+}
+
+pub(crate) fn confirmation_status_to_proto(
+	confirmation_status: ConfirmationStatus,
+) -> ldk_server_protos::types::ConfirmationStatus {
+	match confirmation_status {
+		ConfirmationStatus::Confirmed { block_hash, height, timestamp } => {
+			ldk_server_protos::types::ConfirmationStatus {
+				status: Some(Confirmed(ldk_server_protos::types::Confirmed {
+					block_hash: block_hash.to_string(),
+					height,
+					timestamp,
+				})),
+			}
+		},
+		ConfirmationStatus::Unconfirmed => ldk_server_protos::types::ConfirmationStatus {
+			status: Some(Unconfirmed(ldk_server_protos::types::Unconfirmed {})),
 		},
 	}
 }
@@ -325,17 +355,38 @@ pub(crate) fn pending_sweep_balance_to_proto(
 pub(crate) fn forwarded_payment_to_proto(
 	prev_channel_id: ChannelId, next_channel_id: ChannelId,
 	prev_user_channel_id: Option<UserChannelId>, next_user_channel_id: Option<UserChannelId>,
+	prev_node_id: Option<PublicKey>, next_node_id: Option<PublicKey>,
 	total_fee_earned_msat: Option<u64>, skimmed_fee_msat: Option<u64>, claim_from_onchain_tx: bool,
 	outbound_amount_forwarded_msat: Option<u64>,
 ) -> ForwardedPayment {
 	ForwardedPayment {
 		prev_channel_id: prev_channel_id.to_string(),
 		next_channel_id: next_channel_id.to_string(),
-		prev_user_channel_id: prev_user_channel_id.expect("").0.to_string(),
+		prev_user_channel_id: prev_user_channel_id
+			.expect("prev_user_channel_id expected for ldk-server >=0.1")
+			.0
+			.to_string(),
 		next_user_channel_id: next_user_channel_id.map(|u| u.0.to_string()),
+		prev_node_id: prev_node_id.expect("prev_node_id expected for ldk-server >=0.1").to_string(),
+		next_node_id: next_node_id.expect("next_node_id expected for ldk-node >=0.1").to_string(),
 		total_fee_earned_msat,
 		skimmed_fee_msat,
 		claim_from_onchain_tx,
 		outbound_amount_forwarded_msat,
 	}
+}
+
+pub(crate) fn proto_to_bolt11_description(
+	description: Option<ldk_server_protos::types::Bolt11InvoiceDescription>,
+) -> Result<Bolt11InvoiceDescription, NodeError> {
+	Ok(match description.and_then(|d| d.kind) {
+		Some(bolt11_invoice_description::Kind::Direct(s)) => {
+			Bolt11InvoiceDescription::Direct(Description::new(s).unwrap())
+		},
+		Some(bolt11_invoice_description::Kind::Hash(h)) => {
+			let hash_bytes = <[u8; 32]>::from_hex(&h).map_err(|_| NodeError::InvalidInvoice)?;
+			Bolt11InvoiceDescription::Hash(Sha256(*sha256::Hash::from_bytes_ref(&hash_bytes)))
+		},
+		None => Bolt11InvoiceDescription::Direct(Description::new("".to_string()).unwrap()),
+	})
 }

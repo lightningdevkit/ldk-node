@@ -5,7 +5,7 @@ mod util;
 
 use crate::service::NodeService;
 
-use ldk_node::{Builder, Event, LogLevel};
+use ldk_node::{Builder, Event};
 
 use tokio::net::TcpListener;
 use tokio::signal::unix::SignalKind;
@@ -23,6 +23,7 @@ use crate::util::config::load_config;
 use crate::util::proto_adapter::forwarded_payment_to_proto;
 use hex::DisplayHex;
 use ldk_node::config::Config;
+use ldk_node::logger::LogLevel;
 use prost::Message;
 use rand::Rng;
 use std::fs;
@@ -54,12 +55,12 @@ fn main() {
 	let mut ldk_node_config = Config::default();
 	let config_file = load_config(Path::new(arg)).expect("Invalid configuration file.");
 
-	ldk_node_config.log_level = LogLevel::Trace;
 	ldk_node_config.storage_dir_path = config_file.storage_dir_path.clone();
 	ldk_node_config.listening_addresses = Some(vec![config_file.listening_addr]);
 	ldk_node_config.network = config_file.network;
 
 	let mut builder = Builder::from_config(ldk_node_config);
+	builder.set_log_facade_logger(Some(LogLevel::Trace));
 
 	let bitcoind_rpc_addr = config_file.bitcoind_rpc_addr;
 
@@ -140,7 +141,7 @@ fn main() {
 							);
 							event_node.event_handled();
 						},
-						Event::PaymentReceived { payment_id, payment_hash, amount_msat } => {
+						Event::PaymentReceived { payment_id, payment_hash, amount_msat, .. } => {
 							println!(
 								"PAYMENT_RECEIVED: with id {:?}, hash {}, amount_msat {}",
 								payment_id, payment_hash, amount_msat
@@ -152,6 +153,8 @@ fn main() {
 							next_channel_id,
 							prev_user_channel_id,
 							next_user_channel_id,
+							prev_node_id,
+							next_node_id,
 							total_fee_earned_msat,
 							skimmed_fee_msat,
 							claim_from_onchain_tx,
@@ -167,6 +170,8 @@ fn main() {
 								next_channel_id,
 								prev_user_channel_id,
 								next_user_channel_id,
+								prev_node_id,
+								next_node_id,
 								total_fee_earned_msat,
 								skimmed_fee_msat,
 								claim_from_onchain_tx,

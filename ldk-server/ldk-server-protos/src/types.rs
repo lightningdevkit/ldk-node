@@ -50,7 +50,49 @@ pub mod payment_kind {
 /// Represents an on-chain payment.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Onchain {}
+pub struct Onchain {
+	/// The transaction identifier of this payment.
+	#[prost(string, tag = "1")]
+	pub txid: ::prost::alloc::string::String,
+	/// The confirmation status of this payment.
+	#[prost(message, optional, tag = "2")]
+	pub status: ::core::option::Option<ConfirmationStatus>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfirmationStatus {
+	#[prost(oneof = "confirmation_status::Status", tags = "1, 2")]
+	pub status: ::core::option::Option<confirmation_status::Status>,
+}
+/// Nested message and enum types in `ConfirmationStatus`.
+pub mod confirmation_status {
+	#[allow(clippy::derive_partial_eq_without_eq)]
+	#[derive(Clone, PartialEq, ::prost::Oneof)]
+	pub enum Status {
+		#[prost(message, tag = "1")]
+		Confirmed(super::Confirmed),
+		#[prost(message, tag = "2")]
+		Unconfirmed(super::Unconfirmed),
+	}
+}
+/// The on-chain transaction is confirmed in the best chain.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Confirmed {
+	/// The hex representation of hash of the block in which the transaction was confirmed.
+	#[prost(string, tag = "1")]
+	pub block_hash: ::prost::alloc::string::String,
+	/// The height under which the block was confirmed.
+	#[prost(uint32, tag = "2")]
+	pub height: u32,
+	/// The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+	#[prost(uint64, tag = "3")]
+	pub timestamp: u64,
+}
+/// The on-chain transaction is unconfirmed.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Unconfirmed {}
 /// Represents a BOLT 11 payment.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -179,6 +221,12 @@ pub struct ForwardedPayment {
 	/// The `user_channel_id` of the incoming channel between the previous node and us.
 	#[prost(string, tag = "3")]
 	pub prev_user_channel_id: ::prost::alloc::string::String,
+	/// The node id of the previous node.
+	#[prost(string, tag = "9")]
+	pub prev_node_id: ::prost::alloc::string::String,
+	/// The node id of the next node.
+	#[prost(string, tag = "10")]
+	pub next_node_id: ::prost::alloc::string::String,
 	/// The `user_channel_id` of the outgoing channel between the next node and us.
 	/// This will be `None` if the payment was settled via an on-chain transaction.
 	/// See the caveat described for the `total_fee_earned_msat` field.
@@ -701,6 +749,23 @@ pub struct PageToken {
 	pub token: ::prost::alloc::string::String,
 	#[prost(int64, tag = "2")]
 	pub index: i64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Bolt11InvoiceDescription {
+	#[prost(oneof = "bolt11_invoice_description::Kind", tags = "1, 2")]
+	pub kind: ::core::option::Option<bolt11_invoice_description::Kind>,
+}
+/// Nested message and enum types in `Bolt11InvoiceDescription`.
+pub mod bolt11_invoice_description {
+	#[allow(clippy::derive_partial_eq_without_eq)]
+	#[derive(Clone, PartialEq, ::prost::Oneof)]
+	pub enum Kind {
+		#[prost(string, tag = "1")]
+		Direct(::prost::alloc::string::String),
+		#[prost(string, tag = "2")]
+		Hash(::prost::alloc::string::String),
+	}
 }
 /// Represents the direction of a payment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]

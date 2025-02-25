@@ -35,7 +35,35 @@ message PaymentKind {
 }
 
 // Represents an on-chain payment.
-message Onchain {}
+message Onchain {
+  // The transaction identifier of this payment.
+  string txid = 1;
+
+  // The confirmation status of this payment.
+  ConfirmationStatus status = 2;
+}
+
+message ConfirmationStatus {
+  oneof status {
+    Confirmed confirmed     = 1;
+    Unconfirmed unconfirmed = 2;
+  }
+}
+
+// The on-chain transaction is confirmed in the best chain.
+message Confirmed {
+  // The hex representation of hash of the block in which the transaction was confirmed.
+  string  block_hash = 1;
+
+  // The height under which the block was confirmed.
+  uint32 height = 2;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+  uint64 timestamp = 3;
+}
+
+// The on-chain transaction is unconfirmed.
+message Unconfirmed {}
 
 // Represents a BOLT 11 payment.
 message Bolt11 {
@@ -172,6 +200,12 @@ message ForwardedPayment{
 
   // The `user_channel_id` of the incoming channel between the previous node and us.
   string prev_user_channel_id = 3;
+
+  // The node id of the previous node.
+  string prev_node_id = 9;
+
+  // The node id of the next node.
+  string next_node_id = 10;
 
   // The `user_channel_id` of the outgoing channel between the next node and us.
   // This will be `None` if the payment was settled via an on-chain transaction.
@@ -629,4 +663,11 @@ message AwaitingThresholdConfirmations {
 message PageToken {
   string token = 1;
   int64 index = 2;
+}
+
+message Bolt11InvoiceDescription {
+  oneof kind {
+    string direct = 1;
+    string hash = 2;
+  }
 }

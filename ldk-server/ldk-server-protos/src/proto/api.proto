@@ -84,6 +84,10 @@ message OnchainSendRequest {
   // the counterparty to spend the Anchor output after channel closure.
   // See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.send_all_to_address
   optional bool send_all = 3;
+
+  // If `fee_rate_sat_per_vb` is set it will be used on the resulting transaction. Otherwise we'll retrieve
+  // a reasonable estimate from BitcoinD.
+  optional uint64 fee_rate_sat_per_vb = 4;
 }
 
 // The response `content` for the `OnchainSend` API, when HttpStatusCode is OK (200).
@@ -107,7 +111,7 @@ message Bolt11ReceiveRequest {
 
   // An optional description to attach along with the invoice.
   // Will be set in the description field of the encoded payment request.
-  string description = 2;
+  types.Bolt11InvoiceDescription description = 2;
 
   // Invoice expiry time in seconds.
   uint32 expiry_secs = 3;
