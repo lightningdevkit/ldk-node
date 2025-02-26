@@ -12,6 +12,7 @@ use crate::api::bolt11_send::{handle_bolt11_send_request, BOLT11_SEND_PATH};
 use crate::api::bolt12_receive::{handle_bolt12_receive_request, BOLT12_RECEIVE_PATH};
 use crate::api::bolt12_send::{handle_bolt12_send_request, BOLT12_SEND_PATH};
 use crate::api::close_channel::{handle_close_channel_request, CLOSE_CHANNEL_PATH};
+use crate::api::error::LdkServerError;
 use crate::api::get_balances::{handle_get_balances_request, GET_BALANCES};
 use crate::api::get_node_info::{handle_get_node_info_request, GET_NODE_INFO};
 use crate::api::get_payment_details::{
@@ -116,7 +117,7 @@ impl Service<Request<Incoming>> for NodeService {
 async fn handle_request<
 	T: Message + Default,
 	R: Message,
-	F: Fn(Context, T) -> Result<R, ldk_node::NodeError>,
+	F: Fn(Context, T) -> Result<R, LdkServerError>,
 >(
 	context: Context, request: Request<Incoming>, handler: F,
 ) -> Result<<NodeService as Service<Request<Incoming>>>::Response, hyper::Error> {
