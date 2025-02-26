@@ -1,3 +1,4 @@
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LdkServerError {
 	// The error message containing a generic description of the error condition in English.
 	// It is intended for a human audience only and should not be parsed to extract any information
@@ -10,6 +11,7 @@ pub(crate) struct LdkServerError {
 	pub(crate) error_code: LdkServerErrorCode,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LdkServerErrorCode {
 	/// Please refer to [`protos::error::ErrorCode::InvalidRequestError`].
 	InvalidRequestError,
