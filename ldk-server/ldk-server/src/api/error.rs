@@ -13,6 +13,12 @@ pub(crate) struct LdkServerError {
 	pub(crate) error_code: LdkServerErrorCode,
 }
 
+impl LdkServerError {
+	pub(crate) fn new(error_code: LdkServerErrorCode, message: impl Into<String>) -> Self {
+		Self { error_code, message: message.into() }
+	}
+}
+
 impl std::error::Error for LdkServerError {}
 
 impl fmt::Display for LdkServerError {
