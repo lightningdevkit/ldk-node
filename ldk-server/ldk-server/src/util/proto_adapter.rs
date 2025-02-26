@@ -1,3 +1,5 @@
+use crate::api::error::LdkServerError;
+use crate::api::error::LdkServerErrorCode::InvalidRequestError;
 use bytes::Bytes;
 use hex::prelude::*;
 use ldk_node::bitcoin::hashes::sha256;
@@ -8,7 +10,7 @@ use ldk_node::lightning_invoice::{Bolt11InvoiceDescription, Description, Sha256}
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 };
-use ldk_node::{ChannelDetails, LightningBalance, NodeError, PendingSweepBalance, UserChannelId};
+use ldk_node::{ChannelDetails, LightningBalance, PendingSweepBalance, UserChannelId};
 use ldk_server_protos::types::confirmation_status::Status::{Confirmed, Unconfirmed};
 use ldk_server_protos::types::lightning_balance::BalanceType::{
 	ClaimableAwaitingConfirmations, ClaimableOnChannelClose, ContentiousClaimable,
@@ -378,15 +380,32 @@ pub(crate) fn forwarded_payment_to_proto(
 
 pub(crate) fn proto_to_bolt11_description(
 	description: Option<ldk_server_protos::types::Bolt11InvoiceDescription>,
-) -> Result<Bolt11InvoiceDescription, NodeError> {
+) -> Result<Bolt11InvoiceDescription, LdkServerError> {
 	Ok(match description.and_then(|d| d.kind) {
 		Some(bolt11_invoice_description::Kind::Direct(s)) => {
-			Bolt11InvoiceDescription::Direct(Description::new(s).unwrap())
+			Bolt11InvoiceDescription::Direct(Description::new(s).map_err(|e| {
+				LdkServerError::new(
+					InvalidRequestError,
+					format!("Invalid invoice description: {}", e),
+				)
+			})?)
 		},
 		Some(bolt11_invoice_description::Kind::Hash(h)) => {
-			let hash_bytes = <[u8; 32]>::from_hex(&h).map_err(|_| NodeError::InvalidInvoice)?;
+			let hash_bytes = <[u8; 32]>::from_hex(&h).map_err(|_| {
+				LdkServerError::new(
+					InvalidRequestError,
+					"Invalid invoice description_hash, must be 32-byte hex string".to_string(),
+				)
+			})?;
 			Bolt11InvoiceDescription::Hash(Sha256(*sha256::Hash::from_bytes_ref(&hash_bytes)))
 		},
-		None => Bolt11InvoiceDescription::Direct(Description::new("".to_string()).unwrap()),
+		None => {
+			Bolt11InvoiceDescription::Direct(Description::new("".to_string()).map_err(|e| {
+				LdkServerError::new(
+					InvalidRequestError,
+					format!("Invalid invoice description: {}", e),
+				)
+			})?)
+		},
 	})
 }
