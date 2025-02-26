@@ -30,7 +30,8 @@ pub(crate) fn handle_list_forwarded_payments_request(
 			)
 		})?;
 
-	let mut forwarded_payments: Vec<ForwardedPayment> = vec![];
+	let mut forwarded_payments: Vec<ForwardedPayment> =
+		Vec::with_capacity(list_response.keys.len());
 	for key in list_response.keys {
 		let forwarded_payment_bytes = context
 			.paginated_kv_store
