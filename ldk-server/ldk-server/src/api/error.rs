@@ -1,3 +1,4 @@
+use ldk_node::NodeError;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,5 +51,69 @@ impl fmt::Display for LdkServerErrorCode {
 			LdkServerErrorCode::LightningError => write!(f, "LightningError"),
 			LdkServerErrorCode::InternalServerError => write!(f, "InternalServerError"),
 		}
+	}
+}
+
+impl From<NodeError> for LdkServerError {
+	fn from(error: NodeError) -> Self {
+		let (message, error_code) = match error {
+			NodeError::InvalidAddress
+			| NodeError::InvalidSocketAddress
+			| NodeError::InvalidPublicKey
+			| NodeError::InvalidSecretKey
+			| NodeError::InvalidOfferId
+			| NodeError::InvalidNodeId
+			| NodeError::InvalidPaymentId
+			| NodeError::InvalidPaymentHash
+			| NodeError::InvalidPaymentPreimage
+			| NodeError::InvalidPaymentSecret
+			| NodeError::InvalidAmount
+			| NodeError::InvalidInvoice
+			| NodeError::InvalidOffer
+			| NodeError::InvalidRefund
+			| NodeError::InvalidChannelId
+			| NodeError::InvalidNetwork
+			| NodeError::InvalidUri
+			| NodeError::InvalidQuantity
+			| NodeError::InvalidNodeAlias
+			| NodeError::InvalidDateTime
+			| NodeError::InvalidFeeRate
+			| NodeError::UriParameterParsingFailed => {
+				(error.to_string(), LdkServerErrorCode::InvalidRequestError)
+			},
+
+			NodeError::ConnectionFailed
+			| NodeError::InvoiceCreationFailed
+			| NodeError::InvoiceRequestCreationFailed
+			| NodeError::OfferCreationFailed
+			| NodeError::RefundCreationFailed
+			| NodeError::PaymentSendingFailed
+			| NodeError::InvalidCustomTlvs
+			| NodeError::ProbeSendingFailed
+			| NodeError::ChannelCreationFailed
+			| NodeError::ChannelClosingFailed
+			| NodeError::ChannelConfigUpdateFailed
+			| NodeError::DuplicatePayment
+			| NodeError::InsufficientFunds
+			| NodeError::UnsupportedCurrency
+			| NodeError::LiquidityFeeTooHigh => (error.to_string(), LdkServerErrorCode::LightningError),
+
+			NodeError::AlreadyRunning
+			| NodeError::NotRunning
+			| NodeError::PersistenceFailed
+			| NodeError::FeerateEstimationUpdateFailed
+			| NodeError::FeerateEstimationUpdateTimeout
+			| NodeError::WalletOperationFailed
+			| NodeError::WalletOperationTimeout
+			| NodeError::GossipUpdateFailed
+			| NodeError::GossipUpdateTimeout
+			| NodeError::LiquiditySourceUnavailable
+			| NodeError::LiquidityRequestFailed
+			| NodeError::OnchainTxCreationFailed
+			| NodeError::OnchainTxSigningFailed
+			| NodeError::TxSyncFailed
+			| NodeError::TxSyncTimeout => (error.to_string(), LdkServerErrorCode::InternalServerError),
+		};
+		LdkServerError::new(error_code, message)
 	}
 }
