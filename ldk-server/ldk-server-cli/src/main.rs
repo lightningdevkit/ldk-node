@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
 use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::error::LdkServerError;
+use ldk_server_client::error::LdkServerErrorCode::{
+	AuthError, InternalError, InternalServerError, InvalidRequestError, LightningError,
+};
 use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
 	GetBalancesRequest, GetNodeInfoRequest, ListChannelsRequest, ListPaymentsRequest,
@@ -123,7 +126,8 @@ async fn main() {
 					kind: Some(bolt11_invoice_description::Kind::Hash(hash)),
 				}),
 				(Some(_), Some(_)) => {
-					handle_error(LdkServerError::InternalError(
+					handle_error(LdkServerError::new(
+						InternalError,
 						"Only one of description or description_hash can be set.".to_string(),
 					));
 				},
@@ -191,15 +195,22 @@ async fn main() {
 fn handle_response_result<Rs: ::prost::Message>(response: Result<Rs, LdkServerError>) {
 	match response {
 		Ok(response) => {
-			println!("{:?}", response);
+			println!("Success: {:?}", response);
 		},
 		Err(e) => {
 			handle_error(e);
 		},
-	};
+	}
 }
 
 fn handle_error(e: LdkServerError) -> ! {
-	eprintln!("Error executing command: {:?}", e);
+	let error_type = match e.error_code {
+		InvalidRequestError => "Invalid Request",
+		AuthError => "Authentication Error",
+		LightningError => "Lightning Error",
+		InternalServerError => "Internal Server Error",
+		InternalError => "Internal Error",
+	};
+	eprintln!("Error ({}): {}", error_type, e.message);
 	std::process::exit(1); // Exit with status code 1 on error.
 }
