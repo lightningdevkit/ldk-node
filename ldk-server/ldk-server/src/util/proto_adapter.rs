@@ -1,7 +1,10 @@
 use crate::api::error::LdkServerError;
-use crate::api::error::LdkServerErrorCode::InvalidRequestError;
+use crate::api::error::LdkServerErrorCode::{
+	AuthError, InternalServerError, InvalidRequestError, LightningError,
+};
 use bytes::Bytes;
 use hex::prelude::*;
+use hyper::StatusCode;
 use ldk_node::bitcoin::hashes::sha256;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
@@ -11,6 +14,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use ldk_node::{ChannelDetails, LightningBalance, PendingSweepBalance, UserChannelId};
+use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use ldk_server_protos::types::confirmation_status::Status::{Confirmed, Unconfirmed};
 use ldk_server_protos::types::lightning_balance::BalanceType::{
 	ClaimableAwaitingConfirmations, ClaimableOnChannelClose, ContentiousClaimable,
@@ -408,4 +412,24 @@ pub(crate) fn proto_to_bolt11_description(
 			})?)
 		},
 	})
+}
+
+pub(crate) fn to_error_response(ldk_error: LdkServerError) -> (ErrorResponse, StatusCode) {
+	let error_code = match ldk_error.error_code {
+		InvalidRequestError => ErrorCode::InvalidRequestError,
+		AuthError => ErrorCode::AuthError,
+		LightningError => ErrorCode::LightningError,
+		InternalServerError => ErrorCode::InternalServerError,
+	} as i32;
+
+	let status = match ldk_error.error_code {
+		InvalidRequestError => StatusCode::BAD_REQUEST,
+		AuthError => StatusCode::UNAUTHORIZED,
+		LightningError => StatusCode::INTERNAL_SERVER_ERROR,
+		InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
+	};
+
+	let error_response = ErrorResponse { message: ldk_error.message, error_code };
+
+	(error_response, status)
 }
