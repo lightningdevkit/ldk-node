@@ -1,6 +1,9 @@
 use prost::Message;
 
 use crate::error::LdkServerError;
+use crate::error::LdkServerErrorCode::{
+	AuthError, InternalError, InternalServerError, InvalidRequestError, LightningError,
+};
 use ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11SendRequest, Bolt11SendResponse,
 	Bolt12ReceiveRequest, Bolt12ReceiveResponse, Bolt12SendRequest, Bolt12SendResponse,
@@ -9,6 +12,7 @@ use ldk_server_protos::api::{
 	ListPaymentsRequest, ListPaymentsResponse, OnchainReceiveRequest, OnchainReceiveResponse,
 	OnchainSendRequest, OnchainSendResponse, OpenChannelRequest, OpenChannelResponse,
 };
+use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 
@@ -152,27 +156,46 @@ impl LdkServerClient {
 		&self, request: &Rq, url: &str,
 	) -> Result<Rs, LdkServerError> {
 		let request_body = request.encode_to_vec();
-		let response_raw = match self
+		let response_raw = self
 			.client
 			.post(url)
 			.header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
 			.body(request_body)
 			.send()
 			.await
-		{
-			Ok(response) => response,
-			Err(e) => {
-				return Err(LdkServerError::InternalError(e.to_string()));
-			},
-		};
+			.map_err(|e| {
+				LdkServerError::new(InternalError, format!("HTTP request failed: {}", e))
+			})?;
+
 		let status = response_raw.status();
-		let payload = response_raw.bytes().await?;
+		let payload = response_raw.bytes().await.map_err(|e| {
+			LdkServerError::new(InternalError, format!("Failed to read response body: {}", e))
+		})?;
 
 		if status.is_success() {
-			Ok(Rs::decode(&payload[..])?)
+			Ok(Rs::decode(&payload[..]).map_err(|e| {
+				LdkServerError::new(
+					InternalError,
+					format!("Failed to decode success response: {}", e),
+				)
+			})?)
 		} else {
-			//TODO: Error handling and error response parsing.
-			Err(LdkServerError::InternalError("Unknown Error".to_string()))
+			let error_response = ErrorResponse::decode(&payload[..]).map_err(|e| {
+				LdkServerError::new(
+					InternalError,
+					format!("Failed to decode error response (status {}): {}", status, e),
+				)
+			})?;
+
+			let error_code = match ErrorCode::from_i32(error_response.error_code) {
+				Some(ErrorCode::InvalidRequestError) => InvalidRequestError,
+				Some(ErrorCode::AuthError) => AuthError,
+				Some(ErrorCode::LightningError) => LightningError,
+				Some(ErrorCode::InternalServerError) => InternalServerError,
+				Some(ErrorCode::UnknownError) | None => InternalError,
+			};
+
+			Err(LdkServerError::new(error_code, error_response.message))
 		}
 	}
 }
