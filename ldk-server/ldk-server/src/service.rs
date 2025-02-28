@@ -12,6 +12,8 @@ use crate::api::bolt11_send::{handle_bolt11_send_request, BOLT11_SEND_PATH};
 use crate::api::bolt12_receive::{handle_bolt12_receive_request, BOLT12_RECEIVE_PATH};
 use crate::api::bolt12_send::{handle_bolt12_send_request, BOLT12_SEND_PATH};
 use crate::api::close_channel::{handle_close_channel_request, CLOSE_CHANNEL_PATH};
+use crate::api::error::LdkServerError;
+use crate::api::error::LdkServerErrorCode::InvalidRequestError;
 use crate::api::get_balances::{handle_get_balances_request, GET_BALANCES};
 use crate::api::get_node_info::{handle_get_node_info_request, GET_NODE_INFO};
 use crate::api::get_payment_details::{
@@ -29,6 +31,7 @@ use crate::api::update_channel_config::{
 	handle_update_channel_config_request, UPDATE_CHANNEL_CONFIG_PATH,
 };
 use crate::io::paginated_kv_store::PaginatedKVStore;
+use crate::util::proto_adapter::to_error_response;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -116,7 +119,7 @@ impl Service<Request<Incoming>> for NodeService {
 async fn handle_request<
 	T: Message + Default,
 	R: Message,
-	F: Fn(Context, T) -> Result<R, ldk_node::NodeError>,
+	F: Fn(Context, T) -> Result<R, LdkServerError>,
 >(
 	context: Context, request: Request<Incoming>, handler: F,
 ) -> Result<<NodeService as Service<Request<Incoming>>>::Response, hyper::Error> {
@@ -128,16 +131,23 @@ async fn handle_request<
 				.body(Full::new(Bytes::from(response.encode_to_vec())))
 				// unwrap safety: body only errors when previous chained calls failed.
 				.unwrap()),
-			Err(e) => Ok(Response::builder()
-				.status(StatusCode::INTERNAL_SERVER_ERROR)
-				.body(Full::new(Bytes::from(e.to_string().into_bytes())))
-				// unwrap safety: body only errors when previous chained calls failed.
-				.unwrap()),
+			Err(e) => {
+				let (error_response, status_code) = to_error_response(e);
+				Ok(Response::builder()
+					.status(status_code)
+					.body(Full::new(Bytes::from(error_response.encode_to_vec())))
+					// unwrap safety: body only errors when previous chained calls failed.
+					.unwrap())
+			},
 		},
-		Err(_) => Ok(Response::builder()
-			.status(StatusCode::BAD_REQUEST)
-			.body(Full::new(Bytes::from(b"Error parsing request".to_vec())))
-			// unwrap safety: body only errors when previous chained calls failed.
-			.unwrap()),
+		Err(_) => {
+			let (error_response, status_code) =
+				to_error_response(LdkServerError::new(InvalidRequestError, "Malformed request."));
+			Ok(Response::builder()
+				.status(status_code)
+				.body(Full::new(Bytes::from(error_response.encode_to_vec())))
+				// unwrap safety: body only errors when previous chained calls failed.
+				.unwrap())
+		},
 	}
 }

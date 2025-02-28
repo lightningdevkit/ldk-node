@@ -1,3 +1,4 @@
+use crate::api::error::LdkServerError;
 use crate::service::Context;
 use bytes::Bytes;
 use ldk_node::lightning::offers::offer::Offer;
@@ -8,7 +9,7 @@ pub(crate) const BOLT12_SEND_PATH: &str = "Bolt12Send";
 
 pub(crate) fn handle_bolt12_send_request(
 	context: Context, request: Bolt12SendRequest,
-) -> Result<Bolt12SendResponse, ldk_node::NodeError> {
+) -> Result<Bolt12SendResponse, LdkServerError> {
 	let offer =
 		Offer::from_str(&request.offer.as_str()).map_err(|_| ldk_node::NodeError::InvalidOffer)?;
 

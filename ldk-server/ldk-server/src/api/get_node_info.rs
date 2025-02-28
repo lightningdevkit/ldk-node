@@ -1,3 +1,4 @@
+use crate::api::error::LdkServerError;
 use crate::service::Context;
 use ldk_server_protos::api::{GetNodeInfoRequest, GetNodeInfoResponse};
 use ldk_server_protos::types::BestBlock;
@@ -6,7 +7,7 @@ pub(crate) const GET_NODE_INFO: &str = "GetNodeInfo";
 
 pub(crate) fn handle_get_node_info_request(
 	context: Context, _request: GetNodeInfoRequest,
-) -> Result<GetNodeInfoResponse, ldk_node::NodeError> {
+) -> Result<GetNodeInfoResponse, LdkServerError> {
 	let node_status = context.node.status();
 
 	let best_block = BestBlock {

@@ -1,3 +1,5 @@
+use crate::api::error::LdkServerError;
+use crate::api::error::LdkServerErrorCode::{InvalidRequestError, LightningError};
 use crate::service::Context;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::{ChannelConfig, MaxDustHTLCExposure};
@@ -10,9 +12,10 @@ pub(crate) const UPDATE_CHANNEL_CONFIG_PATH: &str = "UpdateChannelConfig";
 
 pub(crate) fn handle_update_channel_config_request(
 	context: Context, request: UpdateChannelConfigRequest,
-) -> Result<UpdateChannelConfigResponse, ldk_node::NodeError> {
-	let user_channel_id: u128 =
-		request.user_channel_id.parse().map_err(|_| ldk_node::NodeError::InvalidChannelId)?;
+) -> Result<UpdateChannelConfigResponse, LdkServerError> {
+	let user_channel_id: u128 = request.user_channel_id.parse().map_err(|_| {
+		LdkServerError::new(InvalidRequestError, "Failed to parse user_channel_id: invalid format.")
+	})?;
 
 	//FIXME: Use ldk/ldk-node's partial config update api.
 	let current_config = context
@@ -20,14 +23,24 @@ pub(crate) fn handle_update_channel_config_request(
 		.list_channels()
 		.into_iter()
 		.find(|c| c.user_channel_id.0 == user_channel_id)
-		.ok_or_else(|| ldk_node::NodeError::InvalidChannelId)?
+		.ok_or_else(|| {
+			LdkServerError::new(InvalidRequestError, "Channel not found for given user_channel_id.")
+		})?
 		.config;
 
-	let updated_channel_config =
-		build_updated_channel_config(current_config, request.channel_config.unwrap());
+	let updated_channel_config = build_updated_channel_config(
+		current_config,
+		request.channel_config.ok_or_else(|| {
+			LdkServerError::new(InvalidRequestError, "Channel config must be provided.")
+		})?,
+	)?;
 
-	let counterparty_node_id = PublicKey::from_str(&request.counterparty_node_id)
-		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;
+	let counterparty_node_id = PublicKey::from_str(&request.counterparty_node_id).map_err(|e| {
+		LdkServerError::new(
+			InvalidRequestError,
+			format!("Invalid counterparty node id, error {}", e),
+		)
+	})?;
 
 	context
 		.node
@@ -36,14 +49,16 @@ pub(crate) fn handle_update_channel_config_request(
 			counterparty_node_id,
 			updated_channel_config,
 		)
-		.map_err(ldk_node::NodeError::from)?;
+		.map_err(|e| {
+			LdkServerError::new(LightningError, format!("Failed to update channel config: {}", e))
+		})?;
 
 	Ok(UpdateChannelConfigResponse {})
 }
 
 fn build_updated_channel_config(
 	current_config: ChannelConfig, proto_channel_config: ldk_server_protos::types::ChannelConfig,
-) -> ChannelConfig {
+) -> Result<ChannelConfig, LdkServerError> {
 	let max_dust_htlc_exposure = proto_channel_config
 		.max_dust_htlc_exposure
 		.map(|max_dust_htlc_exposure| match max_dust_htlc_exposure {
@@ -56,12 +71,18 @@ fn build_updated_channel_config(
 		})
 		.unwrap_or(current_config.max_dust_htlc_exposure);
 
-	let cltv_expiry_delta = proto_channel_config
-		.cltv_expiry_delta
-		.map(|c| u16::try_from(c).unwrap())
-		.unwrap_or(current_config.cltv_expiry_delta);
+	let cltv_expiry_delta = match proto_channel_config.cltv_expiry_delta {
+		Some(c) => Some(u16::try_from(c).map_err(|_| {
+			LdkServerError::new(
+				InvalidRequestError,
+				format!("Invalid cltv_expiry_delta, must be between 0 and {}", u16::MAX),
+			)
+		})?),
+		None => None,
+	}
+	.unwrap_or_else(|| current_config.cltv_expiry_delta);
 
-	ChannelConfig {
+	Ok(ChannelConfig {
 		forwarding_fee_proportional_millionths: proto_channel_config
 			.forwarding_fee_proportional_millionths
 			.unwrap_or(current_config.forwarding_fee_proportional_millionths),
@@ -76,5 +97,5 @@ fn build_updated_channel_config(
 		accept_underpaying_htlcs: proto_channel_config
 			.accept_underpaying_htlcs
 			.unwrap_or(current_config.accept_underpaying_htlcs),
-	}
+	})
 }

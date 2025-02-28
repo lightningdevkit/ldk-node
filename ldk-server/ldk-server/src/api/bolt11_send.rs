@@ -1,3 +1,4 @@
+use crate::api::error::LdkServerError;
 use crate::service::Context;
 use bytes::Bytes;
 use ldk_node::lightning_invoice::Bolt11Invoice;
@@ -8,7 +9,7 @@ pub(crate) const BOLT11_SEND_PATH: &str = "Bolt11Send";
 
 pub(crate) fn handle_bolt11_send_request(
 	context: Context, request: Bolt11SendRequest,
-) -> Result<Bolt11SendResponse, ldk_node::NodeError> {
+) -> Result<Bolt11SendResponse, LdkServerError> {
 	let invoice = Bolt11Invoice::from_str(&request.invoice.as_str())
 		.map_err(|_| ldk_node::NodeError::InvalidInvoice)?;
 

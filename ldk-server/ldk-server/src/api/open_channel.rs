@@ -1,3 +1,4 @@
+use crate::api::error::LdkServerError;
 use crate::service::Context;
 use bytes::Bytes;
 use ldk_node::bitcoin::secp256k1::PublicKey;
@@ -9,7 +10,7 @@ pub(crate) const OPEN_CHANNEL_PATH: &str = "OpenChannel";
 
 pub(crate) fn handle_open_channel(
 	context: Context, request: OpenChannelRequest,
-) -> Result<OpenChannelResponse, ldk_node::NodeError> {
+) -> Result<OpenChannelResponse, LdkServerError> {
 	let node_id = PublicKey::from_str(&request.node_pubkey)
 		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;
 	let address = SocketAddress::from_str(&request.address)

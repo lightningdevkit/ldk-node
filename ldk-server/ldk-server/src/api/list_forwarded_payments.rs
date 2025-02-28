@@ -1,3 +1,5 @@
+use crate::api::error::LdkServerError;
+use crate::api::error::LdkServerErrorCode::InternalServerError;
 use crate::io::{
 	FORWARDED_PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
 	FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -12,7 +14,7 @@ pub(crate) const LIST_FORWARDED_PAYMENTS_PATH: &str = "ListForwardedPayments";
 
 pub(crate) fn handle_list_forwarded_payments_request(
 	context: Context, request: ListForwardedPaymentsRequest,
-) -> Result<ListForwardedPaymentsResponse, ldk_node::NodeError> {
+) -> Result<ListForwardedPaymentsResponse, LdkServerError> {
 	let page_token = request.page_token.map(|p| (p.token, p.index));
 	let list_response = context
 		.paginated_kv_store
@@ -21,9 +23,15 @@ pub(crate) fn handle_list_forwarded_payments_request(
 			FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 			page_token,
 		)
-		.map_err(|_| ldk_node::NodeError::ConnectionFailed)?;
+		.map_err(|e| {
+			LdkServerError::new(
+				InternalServerError,
+				format!("Failed to list forwarded payments: {}", e),
+			)
+		})?;
 
-	let mut forwarded_payments: Vec<ForwardedPayment> = vec![];
+	let mut forwarded_payments: Vec<ForwardedPayment> =
+		Vec::with_capacity(list_response.keys.len());
 	for key in list_response.keys {
 		let forwarded_payment_bytes = context
 			.paginated_kv_store
@@ -32,9 +40,19 @@ pub(crate) fn handle_list_forwarded_payments_request(
 				FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 				&key,
 			)
-			.map_err(|_| ldk_node::NodeError::ConnectionFailed)?;
+			.map_err(|e| {
+				LdkServerError::new(
+					InternalServerError,
+					format!("Failed to read forwarded payment data: {}", e),
+				)
+			})?;
 		let forwarded_payment = ForwardedPayment::decode(Bytes::from(forwarded_payment_bytes))
-			.map_err(|_| ldk_node::NodeError::ConnectionFailed)?;
+			.map_err(|e| {
+				LdkServerError::new(
+					InternalServerError,
+					format!("Failed to decode forwarded payment: {}", e),
+				)
+			})?;
 		forwarded_payments.push(forwarded_payment);
 	}
 	let response = ListForwardedPaymentsResponse {
