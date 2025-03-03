@@ -46,6 +46,7 @@ jobs:
         if: matrix.msrv
         run: |
           cargo update -p home --precise "0.5.9" --verbose # home v0.5.11 requires rustc 1.81 or newer
+          cargo update -p idna_adapter --precise "1.1.0" --verbose # idna_adapter 1.2 switched to ICU4X, requiring 1.81 and newer
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
