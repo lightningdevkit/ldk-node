@@ -25,6 +25,18 @@ dictionary EsploraSyncConfig {
 	u64 fee_rate_cache_update_interval_secs;
 };
 
+dictionary LSPS2ServiceConfig {
+	string? require_token;
+	boolean advertise_service;
+	u32 channel_opening_fee_ppm;
+	u32 channel_over_provisioning_ppm;
+	u64 min_channel_opening_fee_msat;
+	u32 min_channel_lifetime;
+	u32 max_client_to_self_delay;
+	u64 min_payment_size_msat;
+	u64 max_payment_size_msat;
+};
+
 enum LogLevel {
 	"Gossip",
 	"Trace",

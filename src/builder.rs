@@ -18,7 +18,9 @@ use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{read_node_metrics, write_node_metrics};
 use crate::io::vss_store::VssStore;
-use crate::liquidity::LiquiditySourceBuilder;
+use crate::liquidity::{
+	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
+};
 use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::store::PaymentStore;
@@ -75,6 +77,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
+const VSS_HARDENED_CHILD_INDEX: u32 = 877;
+const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
+const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
+
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
 	Esplora { server_url: String, sync_config: Option<EsploraSyncConfig> },
@@ -94,18 +100,14 @@ enum GossipSourceConfig {
 	RapidGossipSync(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LiquiditySourceConfig {
-	// LSPS1 service's (node_id, address, token)
-	lsps1_service: Option<(PublicKey, SocketAddress, Option<String>)>,
-	// LSPS2 service's (node_id, address, token)
-	lsps2_service: Option<(PublicKey, SocketAddress, Option<String>)>,
-}
-
-impl Default for LiquiditySourceConfig {
-	fn default() -> Self {
-		Self { lsps1_service: None, lsps2_service: None }
-	}
+	// Act as an LSPS1 client connecting to the given service.
+	lsps1_client: Option<LSPS1ClientConfig>,
+	// Act as an LSPS2 client connecting to the given service.
+	lsps2_client: Option<LSPS2ClientConfig>,
+	// Act as an LSPS2 service.
+	lsps2_service: Option<LSPS2ServiceConfig>,
 }
 
 #[derive(Clone)]
@@ -319,7 +321,8 @@ impl NodeBuilder {
 
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps1_service = Some((node_id, address, token));
+		let lsps1_client_config = LSPS1ClientConfig { node_id, address, token };
+		liquidity_source_config.lsps1_client = Some(lsps1_client_config);
 		self
 	}
 
@@ -339,7 +342,23 @@ impl NodeBuilder {
 
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps2_service = Some((node_id, address, token));
+		let lsps2_client_config = LSPS2ClientConfig { node_id, address, token };
+		liquidity_source_config.lsps2_client = Some(lsps2_client_config);
+		self
+	}
+
+	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
+	/// channels to clients.
+	///
+	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
+	///
+	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	pub fn set_liquidity_provider_lsps2(
+		&mut self, service_config: LSPS2ServiceConfig,
+	) -> &mut Self {
+		let liquidity_source_config =
+			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
+		liquidity_source_config.lsps2_service = Some(service_config);
 		self
 	}
 
@@ -471,10 +490,14 @@ impl NodeBuilder {
 
 		let config = Arc::new(self.config.clone());
 
-		let vss_xprv = derive_vss_xprv(config, &seed_bytes, Arc::clone(&logger))?;
+		let vss_xprv =
+			derive_xprv(config, &seed_bytes, VSS_HARDENED_CHILD_INDEX, Arc::clone(&logger))?;
 
 		let lnurl_auth_xprv = vss_xprv
-			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 138 }])
+			.derive_priv(
+				&Secp256k1::new(),
+				&[ChildNumber::Hardened { index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX }],
+			)
 			.map_err(|e| {
 				log_error!(logger, "Failed to derive VSS secret: {}", e);
 				BuildError::KVStoreSetupFailed
@@ -536,7 +559,12 @@ impl NodeBuilder {
 
 		let config = Arc::new(self.config.clone());
 
-		let vss_xprv = derive_vss_xprv(config.clone(), &seed_bytes, Arc::clone(&logger))?;
+		let vss_xprv = derive_xprv(
+			config.clone(),
+			&seed_bytes,
+			VSS_HARDENED_CHILD_INDEX,
+			Arc::clone(&logger),
+		)?;
 
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
@@ -689,6 +717,16 @@ impl ArcedNodeBuilder {
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 	) {
 		self.inner.write().unwrap().set_liquidity_source_lsps2(node_id, address, token);
+	}
+
+	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
+	/// channels to clients.
+	///
+	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
+	///
+	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	pub fn set_liquidity_provider_lsps2(&self, service_config: LSPS2ServiceConfig) {
+		self.inner.write().unwrap().set_liquidity_provider_lsps2(service_config);
 	}
 
 	/// Sets the used storage directory path.
@@ -1039,7 +1077,7 @@ fn build_with_store_internal(
 	};
 
 	let mut user_config = default_user_config(&config);
-	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
+	if liquidity_source_config.and_then(|lsc| lsc.lsps2_client.as_ref()).is_some() {
 		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 		// check that they don't take too much before claiming.
 		user_config.channel_config.accept_underpaying_htlcs = true;
@@ -1049,6 +1087,12 @@ fn build_with_store_internal(
 		// now we just bump the default for all channels.
 		user_config.channel_handshake_config.max_inbound_htlc_value_in_flight_percent_of_channel =
 			100;
+	}
+
+	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
+		// If we act as an LSPS2 service, we need to to be able to intercept HTLCs and forward the
+		// information to the service handler.
+		user_config.accept_intercept_htlcs = true;
 	}
 
 	let message_router =
@@ -1171,31 +1215,53 @@ fn build_with_store_internal(
 		},
 	};
 
-	let liquidity_source = liquidity_source_config.as_ref().map(|lsc| {
-		let mut liquidity_source_builder = LiquiditySourceBuilder::new(
-			Arc::clone(&channel_manager),
-			Arc::clone(&keys_manager),
-			Arc::clone(&chain_source),
-			Arc::clone(&config),
-			Arc::clone(&logger),
-		);
+	let (liquidity_source, custom_message_handler) =
+		if let Some(lsc) = liquidity_source_config.as_ref() {
+			let mut liquidity_source_builder = LiquiditySourceBuilder::new(
+				Arc::clone(&wallet),
+				Arc::clone(&channel_manager),
+				Arc::clone(&keys_manager),
+				Arc::clone(&chain_source),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+			);
 
-		lsc.lsps1_service.as_ref().map(|(node_id, address, token)| {
-			liquidity_source_builder.lsps1_service(*node_id, address.clone(), token.clone())
-		});
+			lsc.lsps1_client.as_ref().map(|config| {
+				liquidity_source_builder.lsps1_client(
+					config.node_id,
+					config.address.clone(),
+					config.token.clone(),
+				)
+			});
 
-		lsc.lsps2_service.as_ref().map(|(node_id, address, token)| {
-			liquidity_source_builder.lsps2_service(*node_id, address.clone(), token.clone())
-		});
+			lsc.lsps2_client.as_ref().map(|config| {
+				liquidity_source_builder.lsps2_client(
+					config.node_id,
+					config.address.clone(),
+					config.token.clone(),
+				)
+			});
 
-		Arc::new(liquidity_source_builder.build())
-	});
+			let promise_secret = {
+				let lsps_xpriv = derive_xprv(
+					Arc::clone(&config),
+					&seed_bytes,
+					LSPS_HARDENED_CHILD_INDEX,
+					Arc::clone(&logger),
+				)?;
+				lsps_xpriv.private_key.secret_bytes()
+			};
+			lsc.lsps2_service.as_ref().map(|config| {
+				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
+			});
 
-	let custom_message_handler = if let Some(liquidity_source) = liquidity_source.as_ref() {
-		Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)))
-	} else {
-		Arc::new(NodeCustomMessageHandler::new_ignoring())
-	};
+			let liquidity_source = Arc::new(liquidity_source_builder.build());
+			let custom_message_handler =
+				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
+			(Some(liquidity_source), custom_message_handler)
+		} else {
+			(None, Arc::new(NodeCustomMessageHandler::new_ignoring()))
+		};
 
 	let msg_handler = match gossip_source.as_gossip_sync() {
 		GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
@@ -1397,8 +1463,8 @@ fn seed_bytes_from_config(
 	}
 }
 
-fn derive_vss_xprv(
-	config: Arc<Config>, seed_bytes: &[u8; 64], logger: Arc<Logger>,
+fn derive_xprv(
+	config: Arc<Config>, seed_bytes: &[u8; 64], hardened_child_index: u32, logger: Arc<Logger>,
 ) -> Result<Xpriv, BuildError> {
 	use bitcoin::key::Secp256k1;
 
@@ -1407,10 +1473,11 @@ fn derive_vss_xprv(
 		BuildError::InvalidSeedBytes
 	})?;
 
-	xprv.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 877 }]).map_err(|e| {
-		log_error!(logger, "Failed to derive VSS secret: {}", e);
-		BuildError::KVStoreSetupFailed
-	})
+	xprv.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: hardened_child_index }])
+		.map_err(|e| {
+			log_error!(logger, "Failed to derive hardened child secret: {}", e);
+			BuildError::InvalidSeedBytes
+		})
 }
 
 /// Sanitize the user-provided node alias to ensure that it is a valid protocol-specified UTF-8 string.
