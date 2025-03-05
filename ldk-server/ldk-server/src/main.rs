@@ -5,7 +5,7 @@ mod util;
 
 use crate::service::NodeService;
 
-use ldk_node::{Builder, Event};
+use ldk_node::{Builder, Event, Node};
 
 use tokio::net::TcpListener;
 use tokio::signal::unix::SignalKind;
@@ -24,7 +24,7 @@ use crate::util::config::load_config;
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use hex::DisplayHex;
 use ldk_node::config::Config;
-use ldk_node::lightning::util::persist::KVStore;
+use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::logger::LogLevel;
 use prost::Message;
 use rand::Rng;
@@ -34,38 +34,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const USAGE_GUIDE: &str = "Usage: ldk-server <config_path>";
-
-macro_rules! upsert_payment_details {
-	($event_node:expr, $paginated_store:expr, $payment_id:expr) => {{
-		if let Some(payment_details) = $event_node.payment($payment_id) {
-			let payment = payment_to_proto(payment_details);
-			let time = SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.expect("Time must be > 1970")
-				.as_secs() as i64;
-
-			match $paginated_store.write(
-				PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
-				&$payment_id.0.to_lower_hex_string(),
-				time,
-				&payment.encode_to_vec(),
-			) {
-				Ok(_) => {
-					$event_node.event_handled();
-				},
-				Err(e) => {
-					eprintln!("Failed to write payment to persistence: {}", e);
-				},
-			}
-		} else {
-			eprintln!(
-				"Unable to find payment with paymentId: {}",
-				$payment_id.0.to_lower_hex_string()
-			);
-		}
-	}};
-}
 
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
@@ -181,18 +149,18 @@ fn main() {
 								payment_id, payment_hash, amount_msat
 							);
 							let payment_id = payment_id.expect("PaymentId expected for ldk-server >=0.1");
-							upsert_payment_details!(event_node, &paginated_store, &payment_id);
+							upsert_payment_details(&event_node, Arc::clone(&paginated_store) as Arc<dyn PaginatedKVStore>, &payment_id);
 						},
 						Event::PaymentSuccessful {payment_id, ..} => {
 							let payment_id = payment_id.expect("PaymentId expected for ldk-server >=0.1");
-							upsert_payment_details!(event_node, &paginated_store, &payment_id);
+							upsert_payment_details(&event_node, Arc::clone(&paginated_store) as Arc<dyn PaginatedKVStore>, &payment_id);
 						},
 						Event::PaymentFailed {payment_id, ..} => {
 							let payment_id = payment_id.expect("PaymentId expected for ldk-server >=0.1");
-							upsert_payment_details!(event_node, &paginated_store, &payment_id);
+							upsert_payment_details(&event_node, Arc::clone(&paginated_store) as Arc<dyn PaginatedKVStore>, &payment_id);
 						},
 						Event::PaymentClaimable {payment_id, ..} => {
-							upsert_payment_details!(event_node, &paginated_store, &payment_id);
+							upsert_payment_details(&event_node, Arc::clone(&paginated_store) as Arc<dyn PaginatedKVStore>, &payment_id);
 						},
 						Event::PaymentForwarded {
 							prev_channel_id,
@@ -279,4 +247,32 @@ fn main() {
 
 	node.stop().expect("Shutdown should always succeed.");
 	println!("Shutdown complete..");
+}
+
+fn upsert_payment_details(
+	event_node: &Node, paginated_store: Arc<dyn PaginatedKVStore>, payment_id: &PaymentId,
+) {
+	if let Some(payment_details) = event_node.payment(payment_id) {
+		let payment = payment_to_proto(payment_details);
+		let time =
+			SystemTime::now().duration_since(UNIX_EPOCH).expect("Time must be > 1970").as_secs()
+				as i64;
+
+		match paginated_store.write(
+			PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
+			PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			&payment_id.0.to_lower_hex_string(),
+			time,
+			&payment.encode_to_vec(),
+		) {
+			Ok(_) => {
+				event_node.event_handled();
+			},
+			Err(e) => {
+				eprintln!("Failed to write payment to persistence: {}", e);
+			},
+		}
+	} else {
+		eprintln!("Unable to find payment with paymentId: {}", payment_id.0.to_lower_hex_string());
+	}
 }
