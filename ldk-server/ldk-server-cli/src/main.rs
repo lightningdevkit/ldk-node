@@ -10,8 +10,9 @@ use ldk_server_client::ldk_server_protos::api::{
 	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_protos::types::{
-	bolt11_invoice_description, Bolt11InvoiceDescription,
+	bolt11_invoice_description, Bolt11InvoiceDescription, PageToken, Payment,
 };
+use std::fmt::Debug;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -87,7 +88,13 @@ enum Commands {
 		announce_channel: bool,
 	},
 	ListChannels,
-	ListPayments,
+	ListPayments {
+		#[arg(short, long)]
+		#[arg(
+			help = "Minimum number of payments to return. If not provided, only the first page of the paginated list is returned."
+		)]
+		number_of_payments: Option<u64>,
+	},
 }
 
 #[tokio::main]
@@ -186,13 +193,33 @@ async fn main() {
 		Commands::ListChannels => {
 			handle_response_result(client.list_channels(ListChannelsRequest {}).await);
 		},
-		Commands::ListPayments => {
-			handle_response_result(client.list_payments(ListPaymentsRequest {}).await);
+		Commands::ListPayments { number_of_payments } => {
+			handle_response_result(list_n_payments(client, number_of_payments).await);
 		},
 	}
 }
 
-fn handle_response_result<Rs: ::prost::Message>(response: Result<Rs, LdkServerError>) {
+async fn list_n_payments(
+	client: LdkServerClient, number_of_payments: Option<u64>,
+) -> Result<Vec<Payment>, LdkServerError> {
+	let mut payments = Vec::new();
+	let mut page_token: Option<PageToken> = None;
+	// If no count is specified, just list the first page.
+	let target_count = number_of_payments.unwrap_or(0);
+
+	loop {
+		let response = client.list_payments(ListPaymentsRequest { page_token }).await?;
+
+		payments.extend(response.payments);
+		if payments.len() >= target_count as usize || response.next_page_token.is_none() {
+			break;
+		}
+		page_token = response.next_page_token;
+	}
+	Ok(payments)
+}
+
+fn handle_response_result<Rs: Debug>(response: Result<Rs, LdkServerError>) {
 	match response {
 		Ok(response) => {
 			println!("Success: {:?}", response);
