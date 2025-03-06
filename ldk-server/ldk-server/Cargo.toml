@@ -13,7 +13,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["server-gr
 tokio = { version = "1.38.0", default-features = false, features = ["time", "signal", "rt-multi-thread"] }
 prost = { version = "0.11.6", default-features = false, features = ["std"] }
 ldk-server-protos = { path = "../ldk-server-protos" }
-bytes = "1.4.0"
+bytes = { version = "1.4.0", default-features = false }
 hex = { package = "hex-conservative", version = "0.2.1", default-features = false }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
-rand = "0.8.5"
+rand = { version = "0.8.5", default-features = false }
