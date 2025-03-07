@@ -364,13 +364,34 @@ pub struct EsploraSyncConfig {
 	/// Background sync configuration.
 	///
 	/// If set to `None`, background syncing will be disabled. Users will need to manually
-	/// sync via `Node::sync_wallets` for the wallets and fee rate updates.
+	/// sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
 	///
 	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
 	pub background_sync_config: Option<BackgroundSyncConfig>,
 }
 
 impl Default for EsploraSyncConfig {
+	fn default() -> Self {
+		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }
+	}
+}
+
+/// Configuration for syncing with an Electrum backend.
+///
+/// Background syncing is enabled by default, using the default values specified in
+/// [`BackgroundSyncConfig`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ElectrumSyncConfig {
+	/// Background sync configuration.
+	///
+	/// If set to `None`, background syncing will be disabled. Users will need to manually
+	/// sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+	///
+	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
+	pub background_sync_config: Option<BackgroundSyncConfig>,
+}
+
+impl Default for ElectrumSyncConfig {
 	fn default() -> Self {
 		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }
 	}

@@ -6,12 +6,14 @@
 // accordance with one or both of these licenses.
 
 mod bitcoind_rpc;
+mod electrum;
 
 use crate::chain::bitcoind_rpc::{
 	BitcoindRpcClient, BoundedHeaderCache, ChainListener, FeeRateEstimationMode,
 };
+use crate::chain::electrum::ElectrumRuntimeClient;
 use crate::config::{
-	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
+	Config, ElectrumSyncConfig, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, TX_BROADCAST_TIMEOUT_SECS,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
@@ -107,6 +109,45 @@ impl WalletSyncStatus {
 	}
 }
 
+pub(crate) enum ElectrumRuntimeStatus {
+	Started(Arc<ElectrumRuntimeClient>),
+	Stopped,
+}
+
+impl ElectrumRuntimeStatus {
+	pub(crate) fn new() -> Self {
+		Self::Stopped
+	}
+
+	pub(crate) fn start(
+		&mut self, server_url: String, runtime: Arc<tokio::runtime::Runtime>, logger: Arc<Logger>,
+	) -> Result<(), Error> {
+		match self {
+			Self::Stopped => {
+				let client =
+					Arc::new(ElectrumRuntimeClient::new(server_url.clone(), runtime, logger)?);
+
+				*self = Self::Started(client);
+			},
+			Self::Started(_) => {
+				debug_assert!(false, "We shouldn't call start if we're already started")
+			},
+		}
+		Ok(())
+	}
+
+	pub(crate) fn stop(&mut self) {
+		*self = Self::new()
+	}
+
+	pub(crate) fn client(&self) -> Option<&Arc<ElectrumRuntimeClient>> {
+		match self {
+			Self::Started(client) => Some(&client),
+			Self::Stopped { .. } => None,
+		}
+	}
+}
+
 pub(crate) enum ChainSource {
 	Esplora {
 		sync_config: EsploraSyncConfig,
@@ -114,6 +155,20 @@ pub(crate) enum ChainSource {
 		onchain_wallet: Arc<Wallet>,
 		onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 		tx_sync: Arc<EsploraSyncClient<Arc<Logger>>>,
+		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
+		fee_estimator: Arc<OnchainFeeEstimator>,
+		tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>,
+		config: Arc<Config>,
+		logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
+	},
+	Electrum {
+		server_url: String,
+		sync_config: ElectrumSyncConfig,
+		electrum_runtime_status: RwLock<ElectrumRuntimeStatus>,
+		onchain_wallet: Arc<Wallet>,
+		onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 		fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>,
@@ -167,6 +222,31 @@ impl ChainSource {
 		}
 	}
 
+	pub(crate) fn new_electrum(
+		server_url: String, sync_config: ElectrumSyncConfig, onchain_wallet: Arc<Wallet>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
+	) -> Self {
+		let electrum_runtime_status = RwLock::new(ElectrumRuntimeStatus::new());
+		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		Self::Electrum {
+			server_url,
+			sync_config,
+			electrum_runtime_status,
+			onchain_wallet,
+			onchain_wallet_sync_status,
+			lightning_wallet_sync_status,
+			fee_estimator,
+			tx_broadcaster,
+			kv_store,
+			config,
+			logger,
+			node_metrics,
+		}
+	}
+
 	pub(crate) fn new_bitcoind_rpc(
 		host: String, port: u16, rpc_user: String, rpc_password: String,
 		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
@@ -190,6 +270,33 @@ impl ChainSource {
 			config,
 			logger,
 			node_metrics,
+		}
+	}
+
+	pub(crate) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
+		match self {
+			Self::Electrum { server_url, electrum_runtime_status, logger, .. } => {
+				electrum_runtime_status.write().unwrap().start(
+					server_url.clone(),
+					runtime,
+					Arc::clone(&logger),
+				)?;
+			},
+			_ => {
+				// Nothing to do for other chain sources.
+			},
+		}
+		Ok(())
+	}
+
+	pub(crate) fn stop(&self) {
+		match self {
+			Self::Electrum { electrum_runtime_status, .. } => {
+				electrum_runtime_status.write().unwrap().stop();
+			},
+			_ => {
+				// Nothing to do for other chain sources.
+			},
 		}
 	}
 
@@ -271,6 +378,7 @@ impl ChainSource {
 					return;
 				}
 			},
+			Self::Electrum { .. } => todo!(),
 			Self::BitcoindRpc {
 				bitcoind_rpc_client,
 				header_cache,
@@ -538,6 +646,7 @@ impl ChainSource {
 
 				res
 			},
+			Self::Electrum { .. } => todo!(),
 			Self::BitcoindRpc { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go by via
 				// `ChainPoller`. So nothing to do here.
@@ -637,6 +746,7 @@ impl ChainSource {
 
 				res
 			},
+			Self::Electrum { .. } => todo!(),
 			Self::BitcoindRpc { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go by via
 				// `ChainPoller`. So nothing to do here.
@@ -652,6 +762,11 @@ impl ChainSource {
 		match self {
 			Self::Esplora { .. } => {
 				// In Esplora mode we sync lightning and onchain wallets via
+				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
+				unreachable!("Listeners will be synced via transction-based syncing")
+			},
+			Self::Electrum { .. } => {
+				// In Electrum mode we sync lightning and onchain wallets via
 				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
 				unreachable!("Listeners will be synced via transction-based syncing")
 			},
@@ -875,6 +990,7 @@ impl ChainSource {
 
 				Ok(())
 			},
+			Self::Electrum { .. } => todo!(),
 			Self::BitcoindRpc {
 				bitcoind_rpc_client,
 				fee_estimator,
@@ -1085,6 +1201,7 @@ impl ChainSource {
 					}
 				}
 			},
+			Self::Electrum { .. } => todo!(),
 			Self::BitcoindRpc { bitcoind_rpc_client, tx_broadcaster, logger, .. } => {
 				// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
 				// features, we should eventually switch to use `submitpackage` via the
@@ -1147,12 +1264,14 @@ impl Filter for ChainSource {
 	fn register_tx(&self, txid: &bitcoin::Txid, script_pubkey: &bitcoin::Script) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_tx(txid, script_pubkey),
+			Self::Electrum { .. } => todo!(),
 			Self::BitcoindRpc { .. } => (),
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_output(output),
+			Self::Electrum { .. } => todo!(),
 			Self::BitcoindRpc { .. } => (),
 		}
 	}
