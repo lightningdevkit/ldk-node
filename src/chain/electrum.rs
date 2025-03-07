@@ -5,20 +5,24 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use crate::config::TX_BROADCAST_TIMEOUT_SECS;
 use crate::error::Error;
-use crate::logger::{log_error, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_error, log_trace, LdkLogger, Logger};
 
 use lightning::chain::{Filter, WatchedOutput};
+use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
 
 use bdk_electrum::BdkElectrumClient;
 
 use electrum_client::Client as ElectrumClient;
 use electrum_client::ConfigBuilder as ElectrumConfigBuilder;
+use electrum_client::ElectrumApi;
 
-use bitcoin::{Script, Txid};
+use bitcoin::{Script, Transaction, Txid};
 
 use std::sync::Arc;
+use std::time::Duration;
 
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
 const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 20;
@@ -59,6 +63,48 @@ impl ElectrumRuntimeClient {
 			})?,
 		);
 		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, logger })
+	}
+
+	pub(crate) async fn broadcast(&self, tx: Transaction) {
+		let electrum_client = Arc::clone(&self.electrum_client);
+
+		let txid = tx.compute_txid();
+		let tx_bytes = tx.encode();
+
+		let spawn_fut =
+			self.runtime.spawn_blocking(move || electrum_client.transaction_broadcast(&tx));
+
+		let timeout_fut =
+			tokio::time::timeout(Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS), spawn_fut);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(_) => {
+					log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
+					log_trace!(
+						self.logger,
+						"Failed broadcast transaction bytes: {}",
+						log_bytes!(tx_bytes)
+					);
+				},
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to broadcast transaction due to timeout {}: {}",
+					txid,
+					e
+				);
+				log_trace!(
+					self.logger,
+					"Failed broadcast transaction bytes: {}",
+					log_bytes!(tx_bytes)
+				);
+			},
+		}
 	}
 }
 

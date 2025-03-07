@@ -154,9 +154,9 @@ impl ElectrumRuntimeStatus {
 		*self = Self::new()
 	}
 
-	pub(crate) fn client(&self) -> Option<&ElectrumRuntimeClient> {
+	pub(crate) fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
 		match self {
-			Self::Started(client) => Some(&*client),
+			Self::Started(client) => Some(Arc::clone(&client)),
 			Self::Stopped { .. } => None,
 		}
 	}
@@ -1266,7 +1266,26 @@ impl ChainSource {
 					}
 				}
 			},
-			Self::Electrum { .. } => todo!(),
+			Self::Electrum { electrum_runtime_status, tx_broadcaster, .. } => {
+				let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+					electrum_runtime_status.read().unwrap().client().as_ref()
+				{
+					Arc::clone(client)
+				} else {
+					debug_assert!(
+						false,
+						"We should have started the chain source before broadcasting"
+					);
+					return;
+				};
+
+				let mut receiver = tx_broadcaster.get_broadcast_queue().await;
+				while let Some(next_package) = receiver.recv().await {
+					for tx in next_package {
+						electrum_client.broadcast(tx).await;
+					}
+				}
+			},
 			Self::BitcoindRpc { bitcoind_rpc_client, tx_broadcaster, logger, .. } => {
 				// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
 				// features, we should eventually switch to use `submitpackage` via the
