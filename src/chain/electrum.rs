@@ -8,12 +8,15 @@
 use crate::error::Error;
 use crate::logger::{log_error, LdkLogger, Logger};
 
+use lightning::chain::{Filter, WatchedOutput};
 use lightning_transaction_sync::ElectrumSyncClient;
 
 use bdk_electrum::BdkElectrumClient;
 
 use electrum_client::Client as ElectrumClient;
 use electrum_client::ConfigBuilder as ElectrumConfigBuilder;
+
+use bitcoin::{Script, Txid};
 
 use std::sync::Arc;
 
@@ -56,5 +59,14 @@ impl ElectrumRuntimeClient {
 			})?,
 		);
 		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, logger })
+	}
+}
+
+impl Filter for ElectrumRuntimeClient {
+	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
+		self.tx_sync.register_tx(txid, script_pubkey)
+	}
+	fn register_output(&self, output: WatchedOutput) {
+		self.tx_sync.register_output(output)
 	}
 }

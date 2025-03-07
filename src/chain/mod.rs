@@ -28,7 +28,7 @@ use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper,
 use crate::{Error, NodeMetrics};
 
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::{Confirm, Filter, Listen};
+use lightning::chain::{Confirm, Filter, Listen, WatchedOutput};
 use lightning::util::ser::Writeable;
 
 use lightning_transaction_sync::EsploraSyncClient;
@@ -42,7 +42,7 @@ use bdk_esplora::EsploraAsyncExt;
 
 use esplora_client::AsyncClient as EsploraAsyncClient;
 
-use bitcoin::{FeeRate, Network};
+use bitcoin::{FeeRate, Network, Script, ScriptBuf, Txid};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -111,21 +111,35 @@ impl WalletSyncStatus {
 
 pub(crate) enum ElectrumRuntimeStatus {
 	Started(Arc<ElectrumRuntimeClient>),
-	Stopped,
+	Stopped {
+		pending_registered_txs: Vec<(Txid, ScriptBuf)>,
+		pending_registered_outputs: Vec<WatchedOutput>,
+	},
 }
 
 impl ElectrumRuntimeStatus {
 	pub(crate) fn new() -> Self {
-		Self::Stopped
+		let pending_registered_txs = Vec::new();
+		let pending_registered_outputs = Vec::new();
+		Self::Stopped { pending_registered_txs, pending_registered_outputs }
 	}
 
 	pub(crate) fn start(
 		&mut self, server_url: String, runtime: Arc<tokio::runtime::Runtime>, logger: Arc<Logger>,
 	) -> Result<(), Error> {
 		match self {
-			Self::Stopped => {
+			Self::Stopped { pending_registered_txs, pending_registered_outputs } => {
 				let client =
 					Arc::new(ElectrumRuntimeClient::new(server_url.clone(), runtime, logger)?);
+
+				// Apply any pending `Filter` entries
+				for (txid, script_pubkey) in pending_registered_txs.drain(..) {
+					client.register_tx(&txid, &script_pubkey);
+				}
+
+				for output in pending_registered_outputs.drain(..) {
+					client.register_output(output)
+				}
 
 				*self = Self::Started(client);
 			},
@@ -140,10 +154,28 @@ impl ElectrumRuntimeStatus {
 		*self = Self::new()
 	}
 
-	pub(crate) fn client(&self) -> Option<&Arc<ElectrumRuntimeClient>> {
+	pub(crate) fn client(&self) -> Option<&ElectrumRuntimeClient> {
 		match self {
-			Self::Started(client) => Some(&client),
+			Self::Started(client) => Some(&*client),
 			Self::Stopped { .. } => None,
+		}
+	}
+
+	fn register_tx(&mut self, txid: &Txid, script_pubkey: &Script) {
+		match self {
+			Self::Started(client) => client.register_tx(txid, script_pubkey),
+			Self::Stopped { pending_registered_txs, .. } => {
+				pending_registered_txs.push((*txid, script_pubkey.to_owned()))
+			},
+		}
+	}
+
+	fn register_output(&mut self, output: lightning::chain::WatchedOutput) {
+		match self {
+			Self::Started(client) => client.register_output(output),
+			Self::Stopped { pending_registered_outputs, .. } => {
+				pending_registered_outputs.push(output)
+			},
 		}
 	}
 }
@@ -278,7 +310,7 @@ impl ChainSource {
 			Self::Electrum { server_url, electrum_runtime_status, logger, .. } => {
 				electrum_runtime_status.write().unwrap().start(
 					server_url.clone(),
-					runtime,
+					Arc::clone(&runtime),
 					Arc::clone(&logger),
 				)?;
 			},
@@ -1261,17 +1293,21 @@ impl ChainSource {
 }
 
 impl Filter for ChainSource {
-	fn register_tx(&self, txid: &bitcoin::Txid, script_pubkey: &bitcoin::Script) {
+	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_tx(txid, script_pubkey),
-			Self::Electrum { .. } => todo!(),
+			Self::Electrum { electrum_runtime_status, .. } => {
+				electrum_runtime_status.write().unwrap().register_tx(txid, script_pubkey)
+			},
 			Self::BitcoindRpc { .. } => (),
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_output(output),
-			Self::Electrum { .. } => todo!(),
+			Self::Electrum { electrum_runtime_status, .. } => {
+				electrum_runtime_status.write().unwrap().register_output(output)
+			},
 			Self::BitcoindRpc { .. } => (),
 		}
 	}
