@@ -331,7 +331,16 @@ pub struct GetPaymentDetailsResponse {
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_payments>
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListPaymentsRequest {}
+pub struct ListPaymentsRequest {
+	/// `page_token` is a pagination token.
+	///
+	/// To query for the first page, `page_token` must not be specified.
+	///
+	/// For subsequent pages, use the value that was returned as `next_page_token` in the previous
+	/// page's response.
+	#[prost(message, optional, tag = "1")]
+	pub page_token: ::core::option::Option<super::types::PageToken>,
+}
 /// The response `content` for the `ListPayments` API, when HttpStatusCode is OK (200).
 /// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -340,6 +349,21 @@ pub struct ListPaymentsResponse {
 	/// List of payments.
 	#[prost(message, repeated, tag = "1")]
 	pub payments: ::prost::alloc::vec::Vec<super::types::Payment>,
+	/// `next_page_token` is a pagination token, used to retrieve the next page of results.
+	/// Use this value to query for next-page of paginated operation, by specifying
+	/// this value as the `page_token` in the next request.
+	///
+	/// If `next_page_token` is `None`, then the "last page" of results has been processed and
+	/// there is no more data to be retrieved.
+	///
+	/// If `next_page_token` is not `None`, it does not necessarily mean that there is more data in the
+	/// result set. The only way to know when you have reached the end of the result set is when
+	/// `next_page_token` is `None`.
+	///
+	/// **Caution**: Clients must not assume a specific number of records to be present in a page for
+	/// paginated response.
+	#[prost(message, optional, tag = "2")]
+	pub next_page_token: ::core::option::Option<super::types::PageToken>,
 }
 /// Retrieves list of all forwarded payments.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded>
