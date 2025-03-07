@@ -13,10 +13,10 @@ use crate::chain::bitcoind_rpc::{
 };
 use crate::chain::electrum::ElectrumRuntimeClient;
 use crate::config::{
-	Config, ElectrumSyncConfig, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
-	BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
-	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, TX_BROADCAST_TIMEOUT_SECS,
-	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	BackgroundSyncConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY,
+	BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL,
+	TX_BROADCAST_TIMEOUT_SECS, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
@@ -346,71 +346,45 @@ impl ChainSource {
 	) {
 		match self {
 			Self::Esplora { sync_config, logger, .. } => {
-				// Setup syncing intervals if enabled
-				if let Some(background_sync_config) = sync_config.background_sync_config {
-					let onchain_wallet_sync_interval_secs = background_sync_config
-						.onchain_wallet_sync_interval_secs
-						.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-					let mut onchain_wallet_sync_interval = tokio::time::interval(
-						Duration::from_secs(onchain_wallet_sync_interval_secs),
-					);
-					onchain_wallet_sync_interval
-						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-					let fee_rate_cache_update_interval_secs = background_sync_config
-						.fee_rate_cache_update_interval_secs
-						.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-					let mut fee_rate_update_interval = tokio::time::interval(Duration::from_secs(
-						fee_rate_cache_update_interval_secs,
-					));
-					// When starting up, we just blocked on updating, so skip the first tick.
-					fee_rate_update_interval.reset();
-					fee_rate_update_interval
-						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-					let lightning_wallet_sync_interval_secs = background_sync_config
-						.lightning_wallet_sync_interval_secs
-						.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
-					let mut lightning_wallet_sync_interval = tokio::time::interval(
-						Duration::from_secs(lightning_wallet_sync_interval_secs),
-					);
-					lightning_wallet_sync_interval
-						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-					// Start the syncing loop.
-					loop {
-						tokio::select! {
-							_ = stop_sync_receiver.changed() => {
-								log_trace!(
-									logger,
-									"Stopping background syncing on-chain wallet.",
-								);
-								return;
-							}
-							_ = onchain_wallet_sync_interval.tick() => {
-								let _ = self.sync_onchain_wallet().await;
-							}
-							_ = fee_rate_update_interval.tick() => {
-								let _ = self.update_fee_rate_estimates().await;
-							}
-							_ = lightning_wallet_sync_interval.tick() => {
-								let _ = self.sync_lightning_wallet(
-									Arc::clone(&channel_manager),
-									Arc::clone(&chain_monitor),
-									Arc::clone(&output_sweeper),
-								).await;
-							}
-						}
-					}
+				if let Some(background_sync_config) = sync_config.background_sync_config.as_ref() {
+					self.start_tx_based_sync_loop(
+						stop_sync_receiver,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+						background_sync_config,
+						Arc::clone(&logger),
+					)
+					.await
 				} else {
 					// Background syncing is disabled
 					log_info!(
-						logger, "Background syncing disabled. Manual syncing required for onchain wallet, lightning wallet, and fee rate updates.",
+						logger,
+						"Background syncing is disabled. Manual syncing required for onchain wallet, lightning wallet, and fee rate updates.",
 					);
 					return;
 				}
 			},
-			Self::Electrum { .. } => todo!(),
+			Self::Electrum { sync_config, logger, .. } => {
+				if let Some(background_sync_config) = sync_config.background_sync_config.as_ref() {
+					self.start_tx_based_sync_loop(
+						stop_sync_receiver,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+						background_sync_config,
+						Arc::clone(&logger),
+					)
+					.await
+				} else {
+					// Background syncing is disabled
+					log_info!(
+						logger,
+						"Background syncing is disabled. Manual syncing required for onchain wallet, lightning wallet, and fee rate updates.",
+					);
+					return;
+				}
+			},
 			Self::BitcoindRpc {
 				bitcoind_rpc_client,
 				header_cache,
@@ -558,6 +532,65 @@ impl ChainSource {
 					}
 				}
 			},
+		}
+	}
+
+	async fn start_tx_based_sync_loop(
+		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>, background_sync_config: &BackgroundSyncConfig,
+		logger: Arc<Logger>,
+	) {
+		// Setup syncing intervals
+		let onchain_wallet_sync_interval_secs = background_sync_config
+			.onchain_wallet_sync_interval_secs
+			.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+		let mut onchain_wallet_sync_interval =
+			tokio::time::interval(Duration::from_secs(onchain_wallet_sync_interval_secs));
+		onchain_wallet_sync_interval
+			.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+		let fee_rate_cache_update_interval_secs = background_sync_config
+			.fee_rate_cache_update_interval_secs
+			.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+		let mut fee_rate_update_interval =
+			tokio::time::interval(Duration::from_secs(fee_rate_cache_update_interval_secs));
+		// When starting up, we just blocked on updating, so skip the first tick.
+		fee_rate_update_interval.reset();
+		fee_rate_update_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+		let lightning_wallet_sync_interval_secs = background_sync_config
+			.lightning_wallet_sync_interval_secs
+			.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+		let mut lightning_wallet_sync_interval =
+			tokio::time::interval(Duration::from_secs(lightning_wallet_sync_interval_secs));
+		lightning_wallet_sync_interval
+			.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+		// Start the syncing loop.
+		loop {
+			tokio::select! {
+				_ = stop_sync_receiver.changed() => {
+					log_trace!(
+						logger,
+						"Stopping background syncing on-chain wallet.",
+						);
+					return;
+				}
+				_ = onchain_wallet_sync_interval.tick() => {
+					let _ = self.sync_onchain_wallet().await;
+				}
+				_ = fee_rate_update_interval.tick() => {
+					let _ = self.update_fee_rate_estimates().await;
+				}
+				_ = lightning_wallet_sync_interval.tick() => {
+					let _ = self.sync_lightning_wallet(
+						Arc::clone(&channel_manager),
+						Arc::clone(&chain_monitor),
+						Arc::clone(&output_sweeper),
+						).await;
+				}
+			}
 		}
 	}
 
