@@ -278,7 +278,7 @@ impl Node {
 						_ = interval.tick() => {
 							let gossip_sync_logger = Arc::clone(&gossip_sync_logger);
 							let now = Instant::now();
-							match gossip_source.update_rgs_snapshot().await {
+							match gossip_source.update_rgs_snapshot(false).await {
 								Ok(updated_timestamp) => {
 									log_trace!(
 										gossip_sync_logger,
@@ -1255,6 +1255,14 @@ impl Node {
 				},
 			)
 		})
+	}
+
+	/// Manually sync the RGS snapshot.
+	///
+	/// If `do_full_sync` is true, the RGS snapshot will be updated from scratch. Otherwise, the
+	/// snapshot will be updated from the last known sync point.
+	pub async fn sync_rgs(&self, do_full_sync: bool) -> Result<u32, Error> {
+		self.gossip_source.update_rgs_snapshot(do_full_sync).await
 	}
 
 	/// Close a previously opened channel.
