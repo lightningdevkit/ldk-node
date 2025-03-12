@@ -1093,6 +1093,7 @@ dependencies = [
 name = "ldk-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "hex-conservative 0.2.1",
  "http-body-util",
