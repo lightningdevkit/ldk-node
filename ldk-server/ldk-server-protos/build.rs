@@ -15,7 +15,12 @@ fn generate_protos() {
 	prost_build::Config::new()
 		.bytes(&["."])
 		.compile_protos(
-			&["src/proto/api.proto", "src/proto/types.proto", "src/proto/error.proto"],
+			&[
+				"src/proto/api.proto",
+				"src/proto/types.proto",
+				"src/proto/events.proto",
+				"src/proto/error.proto",
+			],
 			&["src/proto/"],
 		)
 		.expect("protobuf compilation failed");
@@ -24,6 +29,8 @@ fn generate_protos() {
 	fs::copy(from_path, "src/api.rs").unwrap();
 	let from_path = Path::new(&env::var("OUT_DIR").unwrap()).join("types.rs");
 	fs::copy(from_path, "src/types.rs").unwrap();
+	let from_path = Path::new(&env::var("OUT_DIR").unwrap()).join("events.rs");
+	fs::copy(from_path, "src/events.rs").unwrap();
 	let from_path = Path::new(&env::var("OUT_DIR").unwrap()).join("error.rs");
 	fs::copy(from_path, "src/error.rs").unwrap();
 }
