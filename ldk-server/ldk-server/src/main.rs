@@ -13,9 +13,9 @@ use tokio::signal::unix::SignalKind;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 
-use crate::io::paginated_kv_store::PaginatedKVStore;
-use crate::io::sqlite_store::SqliteStore;
-use crate::io::{
+use crate::io::persist::paginated_kv_store::PaginatedKVStore;
+use crate::io::persist::sqlite_store::SqliteStore;
+use crate::io::persist::{
 	FORWARDED_PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
 	FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE, PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
 	PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,

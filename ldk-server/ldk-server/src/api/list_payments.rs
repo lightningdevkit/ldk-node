@@ -1,6 +1,8 @@
 use crate::api::error::LdkServerError;
 use crate::api::error::LdkServerErrorCode::InternalServerError;
-use crate::io::{PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE};
+use crate::io::persist::{
+	PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use crate::service::Context;
 use bytes::Bytes;
 use ldk_server_protos::api::{ListPaymentsRequest, ListPaymentsResponse};
