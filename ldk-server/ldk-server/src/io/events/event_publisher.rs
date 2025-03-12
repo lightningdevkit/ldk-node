@@ -40,3 +40,16 @@ pub trait EventPublisher {
 	/// [`LdkServerErrorCode::InternalServerError`]: crate::api::error::LdkServerErrorCode
 	async fn publish(&self, event: EventEnvelope) -> Result<(), LdkServerError>;
 }
+
+pub(crate) struct NoopEventPublisher;
+
+#[async_trait]
+impl EventPublisher for NoopEventPublisher {
+	/// Publishes an event to a no-op sink, effectively discarding it.
+	///
+	/// This implementation does nothing and always returns `Ok(())`, serving as a
+	/// default when no messaging system is configured.
+	async fn publish(&self, _event: EventEnvelope) -> Result<(), LdkServerError> {
+		Ok(())
+	}
+}
