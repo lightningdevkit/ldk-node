@@ -13,6 +13,7 @@ use tokio::signal::unix::SignalKind;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 
+use crate::io::events::event_publisher::{EventPublisher, NoopEventPublisher};
 use crate::io::persist::paginated_kv_store::PaginatedKVStore;
 use crate::io::persist::sqlite_store::SqliteStore;
 use crate::io::persist::{
@@ -26,6 +27,8 @@ use hex::DisplayHex;
 use ldk_node::config::Config;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::logger::LogLevel;
+use ldk_server_protos::events;
+use ldk_server_protos::events::{event_envelope, EventEnvelope};
 use prost::Message;
 use rand::Rng;
 use std::fs;
@@ -97,6 +100,8 @@ fn main() {
 				std::process::exit(-1);
 			},
 		});
+
+	let event_publisher: Arc<dyn EventPublisher> = Arc::new(NoopEventPublisher);
 
 	println!("Starting up...");
 	match node.start_with_runtime(Arc::clone(&runtime)) {
@@ -199,6 +204,18 @@ fn main() {
 							rand::thread_rng().fill(&mut forwarded_payment_id);
 
 							let forwarded_payment_creation_time = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time must be > 1970").as_secs() as i64;
+
+							match event_publisher.publish(EventEnvelope {
+									event: Some(event_envelope::Event::PaymentForwarded(events::PaymentForwarded {
+											forwarded_payment: Some(forwarded_payment.clone()),
+									})),
+							}).await {
+								Ok(_) => {},
+								Err(e) => {
+									println!("Failed to publish 'PaymentForwarded' event: {}", e);
+									continue;
+								}
+							};
 
 							match paginated_store.write(FORWARDED_PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 								&forwarded_payment_id.to_lower_hex_string(),
