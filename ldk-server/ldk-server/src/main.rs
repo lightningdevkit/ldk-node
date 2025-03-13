@@ -15,6 +15,8 @@ use hyper_util::rt::TokioIo;
 
 use crate::io::events::event_publisher::{EventPublisher, NoopEventPublisher};
 use crate::io::events::get_event_name;
+#[cfg(feature = "events-rabbitmq")]
+use crate::io::events::rabbitmq::{RabbitMqConfig, RabbitMqEventPublisher};
 use crate::io::persist::paginated_kv_store::PaginatedKVStore;
 use crate::io::persist::sqlite_store::SqliteStore;
 use crate::io::persist::{
@@ -105,6 +107,15 @@ fn main() {
 		});
 
 	let event_publisher: Arc<dyn EventPublisher> = Arc::new(NoopEventPublisher);
+
+	#[cfg(feature = "events-rabbitmq")]
+	let event_publisher: Arc<dyn EventPublisher> = {
+		let rabbitmq_config = RabbitMqConfig {
+			connection_string: config_file.rabbitmq_connection_string,
+			exchange_name: config_file.rabbitmq_exchange_name,
+		};
+		Arc::new(RabbitMqEventPublisher::new(rabbitmq_config))
+	};
 
 	println!("Starting up...");
 	match node.start_with_runtime(Arc::clone(&runtime)) {
