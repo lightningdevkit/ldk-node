@@ -18,3 +18,10 @@ hex = { package = "hex-conservative", version = "0.2.1", default-features = fals
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 rand = { version = "0.8.5", default-features = false }
 async-trait = { version = "0.1.85", default-features = false }
+
+# Required for RabittMQ based EventPublisher. Only enabled for `events-rabbitmq` feature.
+lapin = { version = "2.4.0", features = ["rustls"], default-features = false, optional = true }
+
+[features]
+default = []
+events-rabbitmq = ["dep:lapin"]
