@@ -45,7 +45,7 @@ fn test_cln() {
 
 	// Setup LDK Node
 	let config = common::random_config(true);
-	let mut builder = Builder::from_config(config);
+	let mut builder = Builder::from_config(config.node_config);
 	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
 
 	let node = builder.build().unwrap();

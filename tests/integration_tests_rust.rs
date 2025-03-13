@@ -10,6 +10,7 @@ mod common;
 use common::{
 	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_received_event, expect_payment_successful_event, generate_blocks_and_wait,
+	logging::{init_log_logger, validate_log_entry, TestLogWriter},
 	open_channel, premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd,
 	setup_builder, setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
 };
@@ -30,6 +31,7 @@ use bitcoincore_rpc::RpcApi;
 use bitcoin::hashes::Hash;
 use bitcoin::Amount;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use log::LevelFilter;
 
 use std::sync::Arc;
 
@@ -128,7 +130,7 @@ fn multi_hop_sending() {
 		let mut sync_config = EsploraSyncConfig::default();
 		sync_config.onchain_wallet_sync_interval_secs = 100000;
 		sync_config.lightning_wallet_sync_interval_secs = 100000;
-		setup_builder!(builder, config);
+		setup_builder!(builder, config.node_config);
 		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		let node = builder.build().unwrap();
 		node.start().unwrap();
@@ -223,12 +225,12 @@ fn start_stop_reinit() {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	let test_sync_store: Arc<dyn KVStore + Sync + Send> =
-		Arc::new(TestSyncStore::new(config.storage_dir_path.clone().into()));
+		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
 
 	let mut sync_config = EsploraSyncConfig::default();
 	sync_config.onchain_wallet_sync_interval_secs = 100000;
 	sync_config.lightning_wallet_sync_interval_secs = 100000;
-	setup_builder!(builder, config);
+	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
@@ -252,7 +254,7 @@ fn start_stop_reinit() {
 	node.sync_wallets().unwrap();
 	assert_eq!(node.list_balances().spendable_onchain_balance_sats, expected_amount.to_sat());
 
-	let log_file = format!("{}/ldk_node.log", config.clone().storage_dir_path);
+	let log_file = format!("{}/ldk_node.log", config.node_config.clone().storage_dir_path);
 	assert!(std::path::Path::new(&log_file).exists());
 
 	node.stop().unwrap();
@@ -265,7 +267,7 @@ fn start_stop_reinit() {
 	assert_eq!(node.stop(), Err(NodeError::NotRunning));
 	drop(node);
 
-	setup_builder!(builder, config);
+	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let reinitialized_node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
@@ -1066,7 +1068,7 @@ fn lsps2_client_service_integration() {
 	};
 
 	let service_config = random_config(true);
-	setup_builder!(service_builder, service_config);
+	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
 	let service_node = service_builder.build().unwrap();
@@ -1076,14 +1078,14 @@ fn lsps2_client_service_integration() {
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
 
 	let client_config = random_config(true);
-	setup_builder!(client_builder, client_config);
+	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
 	let client_node = client_builder.build().unwrap();
 	client_node.start().unwrap();
 
 	let payer_config = random_config(true);
-	setup_builder!(payer_builder, payer_config);
+	setup_builder!(payer_builder, payer_config.node_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	let payer_node = payer_builder.build().unwrap();
 	payer_node.start().unwrap();
@@ -1143,4 +1145,22 @@ fn lsps2_client_service_integration() {
 		(expected_received_amount_msat + expected_channel_overprovisioning_msat) / 1000;
 	let channel_value_sats = client_node.list_channels().first().unwrap().channel_value_sats;
 	assert_eq!(channel_value_sats, expected_channel_size_sat);
+}
+
+#[test]
+fn facade_logging() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let logger = init_log_logger(LevelFilter::Trace);
+	let mut config = random_config(false);
+	config.log_writer = TestLogWriter::LogFacade;
+
+	println!("== Facade logging starts ==");
+	let _node = setup_node(&chain_source, config, None);
+
+	assert!(!logger.retrieve_logs().is_empty());
+	for (_, entry) in logger.retrieve_logs().iter().enumerate() {
+		validate_log_entry(entry);
+	}
 }
