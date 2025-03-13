@@ -8,10 +8,7 @@
 //! Holds a prober object that can be used to send probes to a destination node
 //! outside of regular payment flows.
 
-use std::{
-	sync::{Arc, Mutex},
-	time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::{Arc, Mutex};
 
 use crate::{
 	error::Error,
@@ -27,7 +24,7 @@ use lightning::{
 		router::{Path, PaymentParameters, Route, RouteParameters, Router as _},
 		scoring::{
 			ProbabilisticScorer, ProbabilisticScoringDecayParameters,
-			ProbabilisticScoringFeeParameters, ScoreUpdate as _,
+			ProbabilisticScoringFeeParameters,
 		},
 	},
 	util::{
@@ -65,10 +62,9 @@ impl Prober {
 
 	/// Find a route from the node to a given destination on the network.
 	pub fn find_route(
-		&self, destination: PublicKey, amount_msat: u64, attempts: u8, cltv_expiry_delta: u32,
+		&self, destination: PublicKey, amount_msat: u64, cltv_expiry_delta: u32,
 	) -> Result<Route, Error> {
-		let payment_params = PaymentParameters::from_node_id(destination, cltv_expiry_delta)
-			.with_max_path_count(attempts);
+		let payment_params = PaymentParameters::from_node_id(destination, cltv_expiry_delta);
 		let route_params =
 			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
 		let usable_channels = self.channel_manager.list_usable_channels();
@@ -88,18 +84,6 @@ impl Prober {
 			log_error!(self.logger, "Failed to send probe: {e:?}");
 			Error::ProbeSendingFailed
 		})
-	}
-
-	/// Updates the scorer based on the probe result.
-	pub fn update_scorer(&self, path: &Path, failed_scid: Option<u64>) {
-		let duration_since_epoch =
-			SystemTime::now().duration_since(UNIX_EPOCH).expect("Time is before UNIX epoch");
-		let mut scorer = self.scorer.lock().expect("Lock poisoned");
-		if let Some(scid) = failed_scid {
-			scorer.probe_failed(path, scid, duration_since_epoch);
-		} else {
-			scorer.probe_successful(path, duration_since_epoch);
-		}
 	}
 
 	/// Updates the scoring decay parameters while retaining channel liquidity information..
