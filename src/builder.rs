@@ -148,6 +148,8 @@ pub enum BuildError {
 	InvalidChannelMonitor,
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
+	/// The given announcement addresses are invalid, e.g. too many were passed.
+	InvalidAnnouncementAddresses,
 	/// The provided alias is invalid.
 	InvalidNodeAlias,
 	/// We failed to read data from the [`KVStore`].
@@ -184,6 +186,9 @@ impl fmt::Display for BuildError {
 				write!(f, "Failed to watch a deserialized ChannelMonitor")
 			},
 			Self::InvalidListeningAddresses => write!(f, "Given listening addresses are invalid."),
+			Self::InvalidAnnouncementAddresses => {
+				write!(f, "Given announcement addresses are invalid.")
+			},
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
@@ -410,6 +415,22 @@ impl NodeBuilder {
 		}
 
 		self.config.listening_addresses = Some(listening_addresses);
+		Ok(self)
+	}
+
+	/// Sets the IP address and TCP port which [`Node`] will announce to the gossip network that it accepts connections on.
+	///
+	/// **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+	///
+	/// [`listening_addresses`]: Self::set_listening_addresses
+	pub fn set_announcement_addresses(
+		&mut self, announcement_addresses: Vec<SocketAddress>,
+	) -> Result<&mut Self, BuildError> {
+		if announcement_addresses.len() > 100 {
+			return Err(BuildError::InvalidAnnouncementAddresses);
+		}
+
+		self.config.announcement_addresses = Some(announcement_addresses);
 		Ok(self)
 	}
 
@@ -774,6 +795,17 @@ impl ArcedNodeBuilder {
 		&self, listening_addresses: Vec<SocketAddress>,
 	) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
+	}
+
+	/// Sets the IP address and TCP port which [`Node`] will announce to the gossip network that it accepts connections on.
+	///
+	/// **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+	///
+	/// [`listening_addresses`]: Self::set_listening_addresses
+	pub fn set_announcement_addresses(
+		&self, announcement_addresses: Vec<SocketAddress>,
+	) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_announcement_addresses(announcement_addresses).map(|_| ())
 	}
 
 	/// Sets the node alias that will be used when broadcasting announcements to the gossip

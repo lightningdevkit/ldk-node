@@ -117,6 +117,12 @@ pub struct Config {
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
+	/// The addresses which the node will announce to the gossip network that it accepts connections on.
+	///
+	/// **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+	///
+	/// [`listening_addresses`]: Config::listening_addresses
+	pub announcement_addresses: Option<Vec<SocketAddress>>,
 	/// The node alias that will be used when broadcasting announcements to the gossip network.
 	///
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
@@ -168,6 +174,7 @@ impl Default for Config {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
+			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
@@ -478,6 +485,12 @@ mod tests {
 			NodeAlias(bytes)
 		};
 		node_config.node_alias = Some(alias_frm_str("LDK_Node"));
+		assert!(!may_announce_channel(&node_config));
+
+		// Set announcement addresses with listening addresses unset
+		let announcement_address = SocketAddress::from_str("123.45.67.89:9735")
+			.expect("Socket address conversion failed.");
+		node_config.announcement_addresses = Some(vec![announcement_address]);
 		assert!(!may_announce_channel(&node_config));
 
 		// Set node alias with an empty list of listening addresses

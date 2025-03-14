@@ -457,8 +457,10 @@ impl Node {
 								continue;
 							}
 
-							let addresses = if let Some(addresses) = bcast_config.listening_addresses.clone() {
-								addresses
+							let addresses = if let Some(announcement_addresses) = bcast_config.announcement_addresses.clone() {
+								announcement_addresses
+							} else if let Some(listening_addresses) = bcast_config.listening_addresses.clone() {
+								listening_addresses
 							} else {
 								debug_assert!(false, "We checked whether the node may announce, so listening addresses should always be set");
 								continue;
@@ -800,6 +802,14 @@ impl Node {
 	/// Returns our own listening addresses.
 	pub fn listening_addresses(&self) -> Option<Vec<SocketAddress>> {
 		self.config.listening_addresses.clone()
+	}
+
+	/// Returns the addresses that the node will announce to the network.
+	pub fn announcement_addresses(&self) -> Option<Vec<SocketAddress>> {
+		self.config
+			.announcement_addresses
+			.clone()
+			.or_else(|| self.config.listening_addresses.clone())
 	}
 
 	/// Returns our node alias.
