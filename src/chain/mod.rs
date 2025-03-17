@@ -817,7 +817,77 @@ impl ChainSource {
 
 				res
 			},
-			Self::Electrum { .. } => todo!(),
+			Self::Electrum {
+				electrum_runtime_status,
+				lightning_wallet_sync_status,
+				kv_store,
+				logger,
+				node_metrics,
+				..
+			} => {
+				let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+					electrum_runtime_status.read().unwrap().client().as_ref()
+				{
+					Arc::clone(client)
+				} else {
+					debug_assert!(
+							false,
+							"We should have started the chain source before syncing the lightning wallet"
+						);
+					return Err(Error::TxSyncFailed);
+				};
+
+				let sync_cman = Arc::clone(&channel_manager);
+				let sync_cmon = Arc::clone(&chain_monitor);
+				let sync_sweeper = Arc::clone(&output_sweeper);
+				let confirmables = vec![
+					sync_cman as Arc<dyn Confirm + Sync + Send>,
+					sync_cmon as Arc<dyn Confirm + Sync + Send>,
+					sync_sweeper as Arc<dyn Confirm + Sync + Send>,
+				];
+
+				let receiver_res = {
+					let mut status_lock = lightning_wallet_sync_status.lock().unwrap();
+					status_lock.register_or_subscribe_pending_sync()
+				};
+				if let Some(mut sync_receiver) = receiver_res {
+					log_info!(logger, "Sync in progress, skipping.");
+					return sync_receiver.recv().await.map_err(|e| {
+						debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+						log_error!(logger, "Failed to receive wallet sync result: {:?}", e);
+						Error::TxSyncFailed
+					})?;
+				}
+
+				let res = electrum_client.sync_confirmables(confirmables).await;
+
+				if let Ok(_) = res {
+					let unix_time_secs_opt =
+						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+					{
+						let mut locked_node_metrics = node_metrics.write().unwrap();
+						locked_node_metrics.latest_lightning_wallet_sync_timestamp =
+							unix_time_secs_opt;
+						write_node_metrics(
+							&*locked_node_metrics,
+							Arc::clone(&kv_store),
+							Arc::clone(&logger),
+						)?;
+					}
+
+					periodically_archive_fully_resolved_monitors(
+						Arc::clone(&channel_manager),
+						Arc::clone(&chain_monitor),
+						Arc::clone(&kv_store),
+						Arc::clone(&logger),
+						Arc::clone(&node_metrics),
+					)?;
+				}
+
+				lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+				res
+			},
 			Self::BitcoindRpc { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go by via
 				// `ChainPoller`. So nothing to do here.

@@ -5,15 +5,18 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::config::{Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS};
+use crate::config::{
+	Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	TX_BROADCAST_TIMEOUT_SECS,
+};
 use crate::error::Error;
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	ConfirmationTarget,
 };
-use crate::logger::{log_bytes, log_error, log_trace, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
 
-use lightning::chain::{Filter, WatchedOutput};
+use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
 
@@ -27,7 +30,7 @@ use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
 const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 20;
@@ -70,6 +73,40 @@ impl ElectrumRuntimeClient {
 			})?,
 		);
 		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, config, logger })
+	}
+
+	pub(crate) async fn sync_confirmables(
+		&self, confirmables: Vec<Arc<dyn Confirm + Sync + Send>>,
+	) -> Result<(), Error> {
+		let now = Instant::now();
+
+		let tx_sync = Arc::clone(&self.tx_sync);
+		let spawn_fut = self.runtime.spawn_blocking(move || tx_sync.sync(confirmables));
+		let timeout_fut =
+			tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), spawn_fut);
+
+		let res = timeout_fut
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Sync of Lightning wallet timed out: {}", e);
+				Error::TxSyncTimeout
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Sync of Lightning wallet failed: {}", e);
+				Error::TxSyncFailed
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Sync of Lightning wallet failed: {}", e);
+				Error::TxSyncFailed
+			})?;
+
+		log_info!(
+			self.logger,
+			"Sync of Lightning wallet finished in {}ms.",
+			now.elapsed().as_millis()
+		);
+
+		Ok(res)
 	}
 
 	pub(crate) async fn broadcast(&self, tx: Transaction) {
