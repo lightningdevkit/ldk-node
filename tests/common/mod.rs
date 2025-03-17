@@ -464,7 +464,7 @@ pub fn open_channel(
 		node_a
 			.open_announced_channel(
 				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				Some(node_b.listening_addresses().unwrap().first().unwrap().clone()),
 				funding_amount_sat,
 				None,
 				None,
@@ -474,7 +474,7 @@ pub fn open_channel(
 		node_a
 			.open_channel(
 				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				Some(node_b.listening_addresses().unwrap().first().unwrap().clone()),
 				funding_amount_sat,
 				None,
 				None,
@@ -549,7 +549,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a
 		.open_announced_channel(
 			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			Some(node_b.listening_addresses().unwrap().first().unwrap().clone()),
 			funding_amount_sat,
 			Some(push_msat),
 			None,

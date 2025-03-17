@@ -110,12 +110,103 @@ fn channel_open_fails_when_funds_insufficient() {
 		Err(NodeError::InsufficientFunds),
 		node_a.open_channel(
 			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			Some(node_b.listening_addresses().unwrap().first().unwrap().clone()),
 			120000,
 			None,
 			None,
 		)
 	);
+}
+
+#[test]
+fn channel_open_with_no_address() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 1_100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Test 1: Opening channel without address and no existing connection should fail
+	assert_eq!(
+		Err(NodeError::ConnectionFailed),
+		node_a.open_channel(
+			node_b.node_id(),
+			None,
+			100_000,
+			None,
+			None,
+		)
+	);
+
+	// Test 2: Connect first, then open channel without address should succeed
+	node_a.connect(
+		node_b.node_id(),
+		node_b.listening_addresses().unwrap().first().unwrap().clone(),
+		true,
+	).unwrap();
+
+	// Now opening without address should work since we're connected
+	node_a.open_channel(
+		node_b.node_id(),
+		None,
+		100_000,
+		None,
+		None,
+	).unwrap();
+
+	// Verify channel was created successfully
+	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
+	wait_for_tx(&electrsd.client, funding_txo.txid);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	// Test 3: Opening announced channel without address and no connection should fail
+	node_a.disconnect(node_b.node_id()).unwrap();
+	assert_eq!(
+		Err(NodeError::ConnectionFailed),
+		node_a.open_announced_channel(
+			node_b.node_id(),
+			None,
+			100_000,
+			None,
+			None,
+		)
+	);
+
+	// Test 4: Connect first, then open announced channel without address should succeed
+	node_a.connect(
+		node_b.node_id(),
+		node_b.listening_addresses().unwrap().first().unwrap().clone(),
+		true,
+	).unwrap();
+
+	// Now opening announced channel without address should work
+	node_a.open_announced_channel(
+		node_b.node_id(),
+		None,
+		100_000,
+		None,
+		None,
+	).unwrap();
+
+	// Verify announced channel was created successfully
+	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
+	wait_for_tx(&electrsd.client, funding_txo.txid);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
 }
 
 #[test]
