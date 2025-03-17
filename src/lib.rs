@@ -1043,7 +1043,7 @@ impl Node {
 	}
 
 	fn open_channel_inner(
-		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: Option<SocketAddress>, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool,
 	) -> Result<UserChannelId, Error> {
@@ -1053,7 +1053,13 @@ impl Node {
 		}
 		let runtime = rt_lock.as_ref().unwrap();
 
-		let peer_info = PeerInfo { node_id, address };
+		// Get the address from the provided parameter or try to find an existing connection
+		let peer_address = match address {
+			Some(addr) => addr,
+			None => self.get_peer_address_if_connected(&node_id).ok_or(Error::ConnectionFailed)?,
+		};
+
+		let peer_info = PeerInfo { node_id, address: peer_address };
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
@@ -1185,7 +1191,7 @@ impl Node {
 	) -> Result<UserChannelId, Error> {
 		self.open_channel_inner(
 			node_id,
-			address,
+			Some(address),
 			channel_amount_sats,
 			push_to_counterparty_msat,
 			channel_config,
@@ -1221,7 +1227,7 @@ impl Node {
 		if may_announce_channel(&self.config) {
 			self.open_channel_inner(
 				node_id,
-				address,
+				Some(address),
 				channel_amount_sats,
 				push_to_counterparty_msat,
 				channel_config,
