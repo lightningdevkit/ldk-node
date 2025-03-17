@@ -168,6 +168,8 @@ pub enum BuildError {
 	WalletSetupFailed,
 	/// We failed to setup the logger.
 	LoggerSetupFailed,
+	/// The given network does not match the node's previously configured network.
+	NetworkMismatch,
 }
 
 impl fmt::Display for BuildError {
@@ -189,6 +191,9 @@ impl fmt::Display for BuildError {
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
 			Self::InvalidNodeAlias => write!(f, "Given node alias is invalid."),
+			Self::NetworkMismatch => {
+				write!(f, "Given network does not match the node's previously configured network.")
+			},
 		}
 	}
 }
@@ -904,9 +909,25 @@ fn build_with_store_internal(
 		.extract_keys()
 		.check_network(config.network)
 		.load_wallet(&mut wallet_persister)
-		.map_err(|e| {
-			log_error!(logger, "Failed to set up wallet: {}", e);
-			BuildError::WalletSetupFailed
+		.map_err(|e| match e {
+			bdk_wallet::LoadWithPersistError::InvalidChangeSet(
+				bdk_wallet::LoadError::Mismatch(bdk_wallet::LoadMismatch::Network {
+					loaded,
+					expected,
+				}),
+			) => {
+				log_error!(
+					logger,
+					"Failed to setup wallet: Networks do not match. Expected {} but got {}",
+					expected,
+					loaded
+				);
+				BuildError::NetworkMismatch
+			},
+			_ => {
+				log_error!(logger, "Failed to set up wallet: {}", e);
+				BuildError::WalletSetupFailed
+			},
 		})?;
 	let bdk_wallet = match wallet_opt {
 		Some(wallet) => wallet,
