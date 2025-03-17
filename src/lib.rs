@@ -1186,12 +1186,12 @@ impl Node {
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
-		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: Option<SocketAddress>, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		self.open_channel_inner(
 			node_id,
-			Some(address),
+			address,
 			channel_amount_sats,
 			push_to_counterparty_msat,
 			channel_config,
@@ -1221,13 +1221,13 @@ impl Node {
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
-		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: Option<SocketAddress>, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		if may_announce_channel(&self.config) {
 			self.open_channel_inner(
 				node_id,
-				Some(address),
+				address,
 				channel_amount_sats,
 				push_to_counterparty_msat,
 				channel_config,
