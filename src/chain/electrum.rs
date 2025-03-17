@@ -5,8 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::config::TX_BROADCAST_TIMEOUT_SECS;
+use crate::config::{Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS};
 use crate::error::Error;
+use crate::fee_estimator::{
+	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
+	ConfirmationTarget,
+};
 use crate::logger::{log_bytes, log_error, log_trace, LdkLogger, Logger};
 
 use lightning::chain::{Filter, WatchedOutput};
@@ -17,10 +21,11 @@ use bdk_electrum::BdkElectrumClient;
 
 use electrum_client::Client as ElectrumClient;
 use electrum_client::ConfigBuilder as ElectrumConfigBuilder;
-use electrum_client::ElectrumApi;
+use electrum_client::{Batch, ElectrumApi};
 
-use bitcoin::{Script, Transaction, Txid};
+use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,12 +37,14 @@ pub(crate) struct ElectrumRuntimeClient {
 	bdk_electrum_client: Arc<BdkElectrumClient<ElectrumClient>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
 	runtime: Arc<tokio::runtime::Runtime>,
+	config: Arc<Config>,
 	logger: Arc<Logger>,
 }
 
 impl ElectrumRuntimeClient {
 	pub(crate) fn new(
-		server_url: String, runtime: Arc<tokio::runtime::Runtime>, logger: Arc<Logger>,
+		server_url: String, runtime: Arc<tokio::runtime::Runtime>, config: Arc<Config>,
+		logger: Arc<Logger>,
 	) -> Result<Self, Error> {
 		let electrum_config = ElectrumConfigBuilder::new()
 			.retry(ELECTRUM_CLIENT_NUM_RETRIES)
@@ -62,7 +69,7 @@ impl ElectrumRuntimeClient {
 				Error::ConnectionFailed
 			})?,
 		);
-		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, logger })
+		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, config, logger })
 	}
 
 	pub(crate) async fn broadcast(&self, tx: Transaction) {
@@ -105,6 +112,89 @@ impl ElectrumRuntimeClient {
 				);
 			},
 		}
+	}
+
+	pub(crate) async fn get_fee_rate_cache_update(
+		&self,
+	) -> Result<HashMap<ConfirmationTarget, FeeRate>, Error> {
+		let electrum_client = Arc::clone(&self.electrum_client);
+
+		let mut batch = Batch::default();
+		let confirmation_targets = get_all_conf_targets();
+		for target in confirmation_targets {
+			let num_blocks = get_num_block_defaults_for_target(target);
+			batch.estimate_fee(num_blocks);
+		}
+
+		let spawn_fut = self.runtime.spawn_blocking(move || electrum_client.batch_call(&batch));
+
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+			spawn_fut,
+		);
+
+		let raw_estimates_btc_kvb = timeout_fut
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
+				Error::FeerateEstimationUpdateTimeout
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
+				Error::FeerateEstimationUpdateFailed
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
+				Error::FeerateEstimationUpdateFailed
+			})?;
+
+		if raw_estimates_btc_kvb.len() != confirmation_targets.len()
+			&& self.config.network == Network::Bitcoin
+		{
+			// Ensure we fail if we didn't receive all estimates.
+			debug_assert!(false,
+				"Electrum server didn't return all expected results. This is disallowed on Mainnet."
+			);
+			log_error!(self.logger,
+				"Failed to retrieve fee rate estimates: Electrum server didn't return all expected results. This is disallowed on Mainnet."
+			);
+			return Err(Error::FeerateEstimationUpdateFailed);
+		}
+
+		let mut new_fee_rate_cache = HashMap::with_capacity(10);
+		for (target, raw_fee_rate_btc_per_kvb) in
+			confirmation_targets.into_iter().zip(raw_estimates_btc_kvb.into_iter())
+		{
+			// Parse the retrieved serde_json::Value and fall back to 1 sat/vb (10^3 / 10^8 = 10^-5
+			// = 0.00001 btc/kvb) if we fail or it yields less than that. This is mostly necessary
+			// to continue on `signet`/`regtest` where we might not get estimates (or bogus
+			// values).
+			let fee_rate_btc_per_kvb = raw_fee_rate_btc_per_kvb
+				.as_f64()
+				.map_or(0.00001, |converted| converted.max(0.00001));
+
+			// Electrum, just like Bitcoin Core, gives us a feerate in BTC/KvB.
+			// Thus, we multiply by 25_000_000 (10^8 / 4) to get satoshis/kwu.
+			let fee_rate = {
+				let fee_rate_sat_per_kwu = (fee_rate_btc_per_kvb * 25_000_000.0).round() as u64;
+				FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
+			};
+
+			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+			// require some post-estimation adjustments to the fee rates, which we do here.
+			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+
+			new_fee_rate_cache.insert(target, adjusted_fee_rate);
+
+			log_trace!(
+				self.logger,
+				"Fee rate estimation updated for {:?}: {} sats/kwu",
+				target,
+				adjusted_fee_rate.to_sat_per_kwu(),
+			);
+		}
+
+		Ok(new_fee_rate_cache)
 	}
 }
 

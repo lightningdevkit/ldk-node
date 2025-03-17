@@ -125,12 +125,17 @@ impl ElectrumRuntimeStatus {
 	}
 
 	pub(crate) fn start(
-		&mut self, server_url: String, runtime: Arc<tokio::runtime::Runtime>, logger: Arc<Logger>,
+		&mut self, server_url: String, runtime: Arc<tokio::runtime::Runtime>, config: Arc<Config>,
+		logger: Arc<Logger>,
 	) -> Result<(), Error> {
 		match self {
 			Self::Stopped { pending_registered_txs, pending_registered_outputs } => {
-				let client =
-					Arc::new(ElectrumRuntimeClient::new(server_url.clone(), runtime, logger)?);
+				let client = Arc::new(ElectrumRuntimeClient::new(
+					server_url.clone(),
+					runtime,
+					config,
+					logger,
+				)?);
 
 				// Apply any pending `Filter` entries
 				for (txid, script_pubkey) in pending_registered_txs.drain(..) {
@@ -307,10 +312,11 @@ impl ChainSource {
 
 	pub(crate) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
 		match self {
-			Self::Electrum { server_url, electrum_runtime_status, logger, .. } => {
+			Self::Electrum { server_url, electrum_runtime_status, config, logger, .. } => {
 				electrum_runtime_status.write().unwrap().start(
 					server_url.clone(),
 					Arc::clone(&runtime),
+					Arc::clone(&config),
 					Arc::clone(&logger),
 				)?;
 			},
@@ -1055,7 +1061,51 @@ impl ChainSource {
 
 				Ok(())
 			},
-			Self::Electrum { .. } => todo!(),
+			Self::Electrum {
+				electrum_runtime_status,
+				fee_estimator,
+				kv_store,
+				logger,
+				node_metrics,
+				..
+			} => {
+				let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+					electrum_runtime_status.read().unwrap().client().as_ref()
+				{
+					Arc::clone(client)
+				} else {
+					debug_assert!(
+						false,
+						"We should have started the chain source before updating fees"
+					);
+					return Err(Error::FeerateEstimationUpdateFailed);
+				};
+
+				let now = Instant::now();
+
+				let new_fee_rate_cache = electrum_client.get_fee_rate_cache_update().await?;
+				fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
+
+				log_info!(
+					logger,
+					"Fee rate cache update finished in {}ms.",
+					now.elapsed().as_millis()
+				);
+
+				let unix_time_secs_opt =
+					SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+				{
+					let mut locked_node_metrics = node_metrics.write().unwrap();
+					locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
+					write_node_metrics(
+						&*locked_node_metrics,
+						Arc::clone(&kv_store),
+						Arc::clone(&logger),
+					)?;
+				}
+
+				Ok(())
+			},
 			Self::BitcoindRpc {
 				bitcoind_rpc_client,
 				fee_estimator,
