@@ -12,7 +12,7 @@ pub(crate) mod logging;
 
 use logging::TestLogWriter;
 
-use ldk_node::config::{Config, EsploraSyncConfig};
+use ldk_node::config::{Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
@@ -255,6 +255,7 @@ type TestNode = Node;
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
 	Esplora(&'a ElectrsD),
+	Electrum(&'a ElectrsD),
 	BitcoindRpc(&'a BitcoinD),
 }
 
@@ -310,6 +311,11 @@ pub(crate) fn setup_node(
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 			let sync_config = EsploraSyncConfig { background_sync_config: None };
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+		},
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let sync_config = ElectrumSyncConfig { background_sync_config: None };
+			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
 		},
 		TestChainSource::BitcoindRpc(bitcoind) => {
 			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
