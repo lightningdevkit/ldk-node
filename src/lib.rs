@@ -1144,6 +1144,23 @@ impl Node {
 			},
 		}
 	}
+	
+	/// Returns the address of a peer if we're already connected to them.
+	fn get_peer_address_if_connected(&self, node_id: &PublicKey) -> Option<SocketAddress> {
+		// First check if we have an active connection with an address
+		if let Some(peer) = self.peer_manager.peer_by_node_id(node_id) {
+			if let Some(addr) = peer.socket_address {
+				return Some(addr);
+			}
+		}
+
+		// If not, check if we have a stored address for this peer
+		if let Some(peer_info) = self.peer_store.get_peer(node_id) {
+			return Some(peer_info.address);
+		}
+
+		None
+	}
 
 	/// Connect to a node and open a new unannounced channel.
 	///
@@ -1215,6 +1232,7 @@ impl Node {
 			return Err(Error::ChannelCreationFailed);
 		}
 	}
+	
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
 	/// cache.
