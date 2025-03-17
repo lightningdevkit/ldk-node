@@ -141,30 +141,20 @@ fn channel_open_with_no_address() {
 	// Test 1: Opening channel without address and no existing connection should fail
 	assert_eq!(
 		Err(NodeError::ConnectionFailed),
-		node_a.open_channel(
-			node_b.node_id(),
-			None,
-			100_000,
-			None,
-			None,
-		)
+		node_a.open_channel(node_b.node_id(), None, 100_000, None, None,)
 	);
 
 	// Test 2: Connect first, then open channel without address should succeed
-	node_a.connect(
-		node_b.node_id(),
-		node_b.listening_addresses().unwrap().first().unwrap().clone(),
-		true,
-	).unwrap();
+	node_a
+		.connect(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			true,
+		)
+		.unwrap();
 
 	// Now opening without address should work since we're connected
-	node_a.open_channel(
-		node_b.node_id(),
-		None,
-		100_000,
-		None,
-		None,
-	).unwrap();
+	node_a.open_channel(node_b.node_id(), None, 100_000, None, None).unwrap();
 
 	// Verify channel was created successfully
 	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
@@ -175,30 +165,20 @@ fn channel_open_with_no_address() {
 	node_a.disconnect(node_b.node_id()).unwrap();
 	assert_eq!(
 		Err(NodeError::ConnectionFailed),
-		node_a.open_announced_channel(
-			node_b.node_id(),
-			None,
-			100_000,
-			None,
-			None,
-		)
+		node_a.open_announced_channel(node_b.node_id(), None, 100_000, None, None,)
 	);
 
 	// Test 4: Connect first, then open announced channel without address should succeed
-	node_a.connect(
-		node_b.node_id(),
-		node_b.listening_addresses().unwrap().first().unwrap().clone(),
-		true,
-	).unwrap();
+	node_a
+		.connect(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			true,
+		)
+		.unwrap();
 
 	// Now opening announced channel without address should work
-	node_a.open_announced_channel(
-		node_b.node_id(),
-		None,
-		100_000,
-		None,
-		None,
-	).unwrap();
+	node_a.open_announced_channel(node_b.node_id(), None, 100_000, None, None).unwrap();
 
 	// Verify announced channel was created successfully
 	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
