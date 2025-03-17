@@ -6,8 +6,8 @@
 // accordance with one or both of these licenses.
 
 use crate::config::{
-	Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
-	TX_BROADCAST_TIMEOUT_SECS,
+	Config, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::error::Error;
 use crate::fee_estimator::{
@@ -19,6 +19,12 @@ use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
+
+use bdk_chain::bdk_core::spk_client::FullScanRequest as BdkFullScanRequest;
+use bdk_chain::bdk_core::spk_client::FullScanResponse as BdkFullScanResponse;
+use bdk_chain::bdk_core::spk_client::SyncRequest as BdkSyncRequest;
+use bdk_chain::bdk_core::spk_client::SyncResponse as BdkSyncResponse;
+use bdk_wallet::KeychainKind as BdkKeyChainKind;
 
 use bdk_electrum::BdkElectrumClient;
 
@@ -32,6 +38,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
 const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 20;
 
@@ -107,6 +114,69 @@ impl ElectrumRuntimeClient {
 		);
 
 		Ok(res)
+	}
+
+	pub(crate) async fn get_full_scan_wallet_update(
+		&self, request: BdkFullScanRequest<BdkKeyChainKind>,
+		cached_txs: impl IntoIterator<Item = impl Into<Arc<Transaction>>>,
+	) -> Result<BdkFullScanResponse<BdkKeyChainKind>, Error> {
+		let bdk_electrum_client = Arc::clone(&self.bdk_electrum_client);
+		bdk_electrum_client.populate_tx_cache(cached_txs);
+
+		let spawn_fut = self.runtime.spawn_blocking(move || {
+			bdk_electrum_client.full_scan(
+				request,
+				BDK_CLIENT_STOP_GAP,
+				BDK_ELECTRUM_CLIENT_BATCH_SIZE,
+				true,
+			)
+		});
+		let wallet_sync_timeout_fut =
+			tokio::time::timeout(Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS), spawn_fut);
+
+		wallet_sync_timeout_fut
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Sync of on-chain wallet timed out: {}", e);
+				Error::WalletOperationTimeout
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Sync of on-chain wallet failed: {}", e);
+				Error::WalletOperationFailed
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Sync of on-chain wallet failed: {}", e);
+				Error::WalletOperationFailed
+			})
+	}
+
+	pub(crate) async fn get_incremental_sync_wallet_update(
+		&self, request: BdkSyncRequest<(BdkKeyChainKind, u32)>,
+		cached_txs: impl IntoIterator<Item = impl Into<Arc<Transaction>>>,
+	) -> Result<BdkSyncResponse, Error> {
+		let bdk_electrum_client = Arc::clone(&self.bdk_electrum_client);
+		bdk_electrum_client.populate_tx_cache(cached_txs);
+
+		let spawn_fut = self.runtime.spawn_blocking(move || {
+			bdk_electrum_client.sync(request, BDK_ELECTRUM_CLIENT_BATCH_SIZE, true)
+		});
+		let wallet_sync_timeout_fut =
+			tokio::time::timeout(Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS), spawn_fut);
+
+		wallet_sync_timeout_fut
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Incremental sync of on-chain wallet timed out: {}", e);
+				Error::WalletOperationTimeout
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Incremental sync of on-chain wallet failed: {}", e);
+				Error::WalletOperationFailed
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Incremental sync of on-chain wallet failed: {}", e);
+				Error::WalletOperationFailed
+			})
 	}
 
 	pub(crate) async fn broadcast(&self, tx: Transaction) {

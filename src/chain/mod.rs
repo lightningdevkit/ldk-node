@@ -39,6 +39,7 @@ use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 use lightning_block_sync::SpvClient;
 
 use bdk_esplora::EsploraAsyncExt;
+use bdk_wallet::Update as BdkUpdate;
 
 use esplora_client::AsyncClient as EsploraAsyncClient;
 
@@ -717,7 +718,98 @@ impl ChainSource {
 
 				res
 			},
-			Self::Electrum { .. } => todo!(),
+			Self::Electrum {
+				electrum_runtime_status,
+				onchain_wallet,
+				onchain_wallet_sync_status,
+				kv_store,
+				logger,
+				node_metrics,
+				..
+			} => {
+				let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+					electrum_runtime_status.read().unwrap().client().as_ref()
+				{
+					Arc::clone(client)
+				} else {
+					debug_assert!(
+						false,
+						"We should have started the chain source before syncing the onchain wallet"
+					);
+					return Err(Error::FeerateEstimationUpdateFailed);
+				};
+				let receiver_res = {
+					let mut status_lock = onchain_wallet_sync_status.lock().unwrap();
+					status_lock.register_or_subscribe_pending_sync()
+				};
+				if let Some(mut sync_receiver) = receiver_res {
+					log_info!(logger, "Sync in progress, skipping.");
+					return sync_receiver.recv().await.map_err(|e| {
+						debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+						log_error!(logger, "Failed to receive wallet sync result: {:?}", e);
+						Error::WalletOperationFailed
+					})?;
+				}
+
+				// If this is our first sync, do a full scan with the configured gap limit.
+				// Otherwise just do an incremental sync.
+				let incremental_sync =
+					node_metrics.read().unwrap().latest_onchain_wallet_sync_timestamp.is_some();
+
+				let apply_wallet_update =
+					|update_res: Result<BdkUpdate, Error>, now: Instant| match update_res {
+						Ok(update) => match onchain_wallet.apply_update(update) {
+							Ok(()) => {
+								log_info!(
+									logger,
+									"{} of on-chain wallet finished in {}ms.",
+									if incremental_sync { "Incremental sync" } else { "Sync" },
+									now.elapsed().as_millis()
+								);
+								let unix_time_secs_opt = SystemTime::now()
+									.duration_since(UNIX_EPOCH)
+									.ok()
+									.map(|d| d.as_secs());
+								{
+									let mut locked_node_metrics = node_metrics.write().unwrap();
+									locked_node_metrics.latest_onchain_wallet_sync_timestamp =
+										unix_time_secs_opt;
+									write_node_metrics(
+										&*locked_node_metrics,
+										Arc::clone(&kv_store),
+										Arc::clone(&logger),
+									)?;
+								}
+								Ok(())
+							},
+							Err(e) => Err(e),
+						},
+						Err(e) => Err(e),
+					};
+
+				let cached_txs = onchain_wallet.get_cached_txs();
+
+				let res = if incremental_sync {
+					let incremental_sync_request = onchain_wallet.get_incremental_sync_request();
+					let incremental_sync_fut = electrum_client
+						.get_incremental_sync_wallet_update(incremental_sync_request, cached_txs);
+
+					let now = Instant::now();
+					let update_res = incremental_sync_fut.await.map(|u| u.into());
+					apply_wallet_update(update_res, now)
+				} else {
+					let full_scan_request = onchain_wallet.get_full_scan_request();
+					let full_scan_fut =
+						electrum_client.get_full_scan_wallet_update(full_scan_request, cached_txs);
+					let now = Instant::now();
+					let update_res = full_scan_fut.await.map(|u| u.into());
+					apply_wallet_update(update_res, now)
+				};
+
+				onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+				res
+			},
 			Self::BitcoindRpc { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go by via
 				// `ChainPoller`. So nothing to do here.

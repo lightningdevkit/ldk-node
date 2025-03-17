@@ -98,6 +98,10 @@ where
 		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
 	}
 
+	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
+		self.inner.lock().unwrap().tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
+	}
+
 	pub(crate) fn current_best_block(&self) -> BestBlock {
 		let checkpoint = self.inner.lock().unwrap().latest_checkpoint();
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
