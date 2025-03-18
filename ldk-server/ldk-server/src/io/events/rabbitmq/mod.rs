@@ -142,3 +142,91 @@ impl EventPublisher for RabbitMqEventPublisher {
 		}
 	}
 }
+
+#[cfg(test)]
+#[cfg(feature = "integration-tests-events-rabbitmq")]
+mod integration_tests_events_rabbitmq {
+	use super::*;
+	use lapin::{
+		options::{BasicAckOptions, BasicConsumeOptions, QueueBindOptions, QueueDeclareOptions},
+		types::FieldTable,
+		Channel, Connection,
+	};
+	use ldk_server_protos::events::event_envelope::Event;
+	use ldk_server_protos::events::PaymentForwarded;
+	use std::io;
+	use std::time::Duration;
+	use tokio;
+
+	use futures_util::stream::StreamExt;
+	#[tokio::test]
+	async fn test_publish_and_consume_event() {
+		let config = RabbitMqConfig {
+			connection_string: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+			exchange_name: "test_exchange".to_string(),
+		};
+
+		let publisher = RabbitMqEventPublisher::new(config.clone());
+
+		let conn = Connection::connect(&config.connection_string, ConnectionProperties::default())
+			.await
+			.expect("Failed make rabbitmq connection");
+		let channel = conn.create_channel().await.expect("Failed to create rabbitmq channel");
+
+		let queue_name = "test_queue";
+		setup_queue(&queue_name, &channel, &config).await;
+
+		let event =
+			EventEnvelope { event: Some(Event::PaymentForwarded(PaymentForwarded::default())) };
+		publisher.publish(event.clone()).await.expect("Failed to publish event");
+
+		consume_event(&queue_name, &channel, &event).await.expect("Failed to consume event");
+	}
+
+	async fn setup_queue(queue_name: &str, channel: &Channel, config: &RabbitMqConfig) {
+		channel
+			.queue_declare(queue_name, QueueDeclareOptions::default(), FieldTable::default())
+			.await
+			.unwrap();
+		channel
+			.exchange_declare(
+				&config.exchange_name,
+				ExchangeKind::Fanout,
+				ExchangeDeclareOptions { durable: true, ..Default::default() },
+				FieldTable::default(),
+			)
+			.await
+			.unwrap();
+
+		channel
+			.queue_bind(
+				queue_name,
+				&config.exchange_name,
+				"",
+				QueueBindOptions::default(),
+				FieldTable::default(),
+			)
+			.await
+			.unwrap();
+	}
+
+	async fn consume_event(
+		queue_name: &str, channel: &Channel, expected_event: &EventEnvelope,
+	) -> io::Result<()> {
+		let mut consumer = channel
+			.basic_consume(
+				queue_name,
+				"test_consumer",
+				BasicConsumeOptions::default(),
+				FieldTable::default(),
+			)
+			.await
+			.unwrap();
+		let delivery =
+			tokio::time::timeout(Duration::from_secs(10), consumer.next()).await?.unwrap().unwrap();
+		let received_event = EventEnvelope::decode(&*delivery.data)?;
+		assert_eq!(received_event, *expected_event, "Event mismatch");
+		channel.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).await.unwrap();
+		Ok(())
+	}
+}

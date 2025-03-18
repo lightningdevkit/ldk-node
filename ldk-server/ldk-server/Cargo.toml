@@ -25,3 +25,9 @@ lapin = { version = "2.4.0", features = ["rustls"], default-features = false, op
 [features]
 default = []
 events-rabbitmq = ["dep:lapin"]
+
+# Feature-flags related to integration tests.
+integration-tests-events-rabbitmq = ["events-rabbitmq"]
+
+[dev-dependencies]
+futures-util = "0.3.31"
