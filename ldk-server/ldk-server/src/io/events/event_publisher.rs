@@ -18,7 +18,7 @@ use ldk_server_protos::events::EventEnvelope;
 /// The underlying messaging system is expected to support durably buffered events,
 /// enabling easy decoupling between the LDK Server and event consumers.
 #[async_trait]
-pub trait EventPublisher {
+pub trait EventPublisher: Send + Sync {
 	/// Publishes an event to the underlying messaging system.
 	///
 	/// # Arguments
