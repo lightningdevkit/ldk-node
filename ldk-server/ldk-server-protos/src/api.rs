@@ -147,9 +147,9 @@ pub struct Bolt11SendRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt11SendResponse {
-	/// An identifier used to uniquely identify a payment.
-	#[prost(bytes = "bytes", tag = "1")]
-	pub payment_id: ::prost::bytes::Bytes,
+	/// An identifier used to uniquely identify a payment in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
 }
 /// Returns a BOLT12 offer for the given amount, if specified.
 ///
@@ -211,9 +211,9 @@ pub struct Bolt12SendRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt12SendResponse {
-	/// An identifier used to uniquely identify a payment.
-	#[prost(bytes = "bytes", tag = "1")]
-	pub payment_id: ::prost::bytes::Bytes,
+	/// An identifier used to uniquely identify a payment in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
 }
 /// Creates a new outbound channel to the given remote node.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.connect_open_channel>
@@ -245,16 +245,16 @@ pub struct OpenChannelRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenChannelResponse {
-	/// The channel id of the created channel that user can use to refer to channel.
-	#[prost(bytes = "bytes", tag = "1")]
-	pub user_channel_id: ::prost::bytes::Bytes,
+	/// The local channel id of the created channel that user can use to refer to channel.
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
 }
 /// Update the config for a previously opened channel.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.update_channel_config>
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateChannelConfigRequest {
-	/// The hex-encoded local `user_channel_id` of this channel.
+	/// The local `user_channel_id` of this channel.
 	#[prost(string, tag = "1")]
 	pub user_channel_id: ::prost::alloc::string::String,
 	/// The hex-encoded public key of the counterparty node to update channel config with.
@@ -276,9 +276,9 @@ pub struct UpdateChannelConfigResponse {}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CloseChannelRequest {
-	/// The channel id of the created channel that user can use to refer to channel.
-	#[prost(bytes = "bytes", tag = "1")]
-	pub user_channel_id: ::prost::bytes::Bytes,
+	/// The local `user_channel_id` of this channel.
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
 	/// The hex-encoded public key of the node to close a channel with.
 	#[prost(string, tag = "2")]
 	pub counterparty_node_id: ::prost::alloc::string::String,

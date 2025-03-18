@@ -11,10 +11,10 @@ pub(crate) const CLOSE_CHANNEL_PATH: &str = "CloseChannel";
 pub(crate) fn handle_close_channel_request(
 	context: Context, request: CloseChannelRequest,
 ) -> Result<CloseChannelResponse, LdkServerError> {
-	//TODO: Should this be string?
-	let mut user_channel_id_bytes = [0u8; 16];
-	user_channel_id_bytes.copy_from_slice(&request.user_channel_id);
-	let user_channel_id = UserChannelId(u128::from_be_bytes(user_channel_id_bytes));
+	let user_channel_id =
+		UserChannelId((&request.user_channel_id).parse::<u128>().map_err(|_| {
+			LdkServerError::new(InvalidRequestError, "Invalid UserChannelId.".to_string())
+		})?);
 	let counterparty_node_id = PublicKey::from_str(&request.counterparty_node_id).map_err(|e| {
 		LdkServerError::new(
 			InvalidRequestError,

@@ -1,6 +1,5 @@
 use crate::api::error::LdkServerError;
 use crate::service::Context;
-use bytes::Bytes;
 use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_server_protos::api::{Bolt11SendRequest, Bolt11SendResponse};
 use std::str::FromStr;
@@ -20,6 +19,6 @@ pub(crate) fn handle_bolt11_send_request(
 		},
 	}?;
 
-	let response = Bolt11SendResponse { payment_id: Bytes::from(payment_id.0.to_vec()) };
+	let response = Bolt11SendResponse { payment_id: payment_id.to_string() };
 	Ok(response)
 }

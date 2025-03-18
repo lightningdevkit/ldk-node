@@ -13,9 +13,10 @@ pub(crate) const UPDATE_CHANNEL_CONFIG_PATH: &str = "UpdateChannelConfig";
 pub(crate) fn handle_update_channel_config_request(
 	context: Context, request: UpdateChannelConfigRequest,
 ) -> Result<UpdateChannelConfigResponse, LdkServerError> {
-	let user_channel_id: u128 = request.user_channel_id.parse().map_err(|_| {
-		LdkServerError::new(InvalidRequestError, "Failed to parse user_channel_id: invalid format.")
-	})?;
+	let user_channel_id: u128 = request
+		.user_channel_id
+		.parse::<u128>()
+		.map_err(|_| LdkServerError::new(InvalidRequestError, "Invalid UserChannelId."))?;
 
 	//FIXME: Use ldk/ldk-node's partial config update api.
 	let current_config = context

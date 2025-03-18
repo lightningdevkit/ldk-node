@@ -1,6 +1,5 @@
 use crate::api::error::LdkServerError;
 use crate::service::Context;
-use bytes::Bytes;
 use ldk_node::lightning::offers::offer::Offer;
 use ldk_server_protos::api::{Bolt12SendRequest, Bolt12SendResponse};
 use std::str::FromStr;
@@ -23,6 +22,6 @@ pub(crate) fn handle_bolt12_send_request(
 		),
 	}?;
 
-	let response = Bolt12SendResponse { payment_id: Bytes::from(payment_id.0.to_vec()) };
+	let response = Bolt12SendResponse { payment_id: payment_id.to_string() };
 	Ok(response)
 }
