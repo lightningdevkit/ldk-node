@@ -39,6 +39,9 @@ jobs:
       - name: Generate Kotlin JVM
         run: ./scripts/uniffi_bindgen_generate_kotlin.sh
 
+      - name: Install `bindgen-cli`
+        run: cargo install --force bindgen-cli
+
       - name: Generate Kotlin Android
         run: ./scripts/uniffi_bindgen_generate_kotlin_android.sh
 
