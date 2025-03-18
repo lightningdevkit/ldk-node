@@ -92,7 +92,7 @@ fn main() {
 		},
 	};
 
-	let paginated_store =
+	let paginated_store: Arc<dyn PaginatedKVStore> =
 		Arc::new(match SqliteStore::new(PathBuf::from(config_file.storage_dir_path), None, None) {
 			Ok(store) => store,
 			Err(e) => {
@@ -240,7 +240,7 @@ fn main() {
 					match res {
 						Ok((stream, _)) => {
 							let io_stream = TokioIo::new(stream);
-							let node_service = NodeService::new(Arc::clone(&node), Arc::clone(&paginated_store) as Arc<dyn PaginatedKVStore + Send + Sync>);
+							let node_service = NodeService::new(Arc::clone(&node), Arc::clone(&paginated_store));
 							runtime.spawn(async move {
 								if let Err(err) = http1::Builder::new().serve_connection(io_stream, node_service).await {
 									eprintln!("Failed to serve connection: {}", err);

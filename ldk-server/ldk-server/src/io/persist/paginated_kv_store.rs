@@ -26,7 +26,7 @@ use std::io;
 /// [`KVStore`]: ldk_node::lightning::util::persist::KVStore
 /// [`KVSTORE_NAMESPACE_KEY_ALPHABET`]: ldk_node::lightning::util::persist::KVSTORE_NAMESPACE_KEY_ALPHABET
 /// [`KVSTORE_NAMESPACE_KEY_MAX_LEN`]: ldk_node::lightning::util::persist::KVSTORE_NAMESPACE_KEY_MAX_LEN
-pub trait PaginatedKVStore {
+pub trait PaginatedKVStore: Send + Sync {
 	/// Returns the data stored for the given `primary_namespace`, `secondary_namespace`, and `key`.
 	///
 	/// Returns an [`ErrorKind::NotFound`] if the given `key` could not be found in the given
