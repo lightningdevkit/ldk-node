@@ -145,8 +145,8 @@ message Bolt11SendRequest {
 // When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message Bolt11SendResponse {
 
-  // An identifier used to uniquely identify a payment.
-  bytes payment_id = 1;
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string payment_id = 1;
 }
 
 // Returns a BOLT12 offer for the given amount, if specified.
@@ -205,8 +205,8 @@ message Bolt12SendRequest {
 // When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message Bolt12SendResponse {
 
-  // An identifier used to uniquely identify a payment.
-  bytes payment_id = 1;
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string payment_id = 1;
 }
 
 // Creates a new outbound channel to the given remote node.
