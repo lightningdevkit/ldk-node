@@ -1,4 +1,4 @@
-use crate::io::paginated_kv_store::{ListResponse, PaginatedKVStore};
+use crate::io::persist::paginated_kv_store::{ListResponse, PaginatedKVStore};
 use crate::io::utils::check_namespace_key_validity;
 use ldk_node::lightning::types::string::PrintableString;
 use rusqlite::{named_params, Connection};

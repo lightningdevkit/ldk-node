@@ -1,0 +1,15 @@
+syntax = "proto3";
+import "types.proto";
+package events;
+
+// EventEnvelope wraps different event types in a single message to be used by EventPublisher.
+message EventEnvelope {
+  oneof event {
+    PaymentForwarded payment_forwarded = 2;
+  }
+}
+
+// PaymentForwarded indicates a payment was forwarded through the node.
+message PaymentForwarded {
+  types.ForwardedPayment forwarded_payment = 1;
+}

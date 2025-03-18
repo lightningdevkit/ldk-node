@@ -1,6 +1,6 @@
 use crate::api::error::LdkServerError;
 use crate::api::error::LdkServerErrorCode::InternalServerError;
-use crate::io::{
+use crate::io::persist::{
 	FORWARDED_PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
 	FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 };
