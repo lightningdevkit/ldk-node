@@ -78,8 +78,8 @@ pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort a RGS sync operation.
 pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
 
-// The length in bytes of our wallets' keys seed.
-pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
+/// The length in bytes of our wallets' keys seed.
+pub const WALLET_KEYS_SEED_LEN: usize = 64;
 
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.

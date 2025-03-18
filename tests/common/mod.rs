@@ -338,7 +338,16 @@ pub(crate) fn setup_node(
 	}
 
 	if let Some(seed) = seed_bytes {
-		builder.set_entropy_seed_bytes(seed).unwrap();
+		#[cfg(feature = "uniffi")]
+		{
+			builder.set_entropy_seed_bytes(seed).unwrap();
+		}
+		#[cfg(not(feature = "uniffi"))]
+		{
+			let mut bytes = [0u8; 64];
+			bytes.copy_from_slice(&seed);
+			builder.set_entropy_seed_bytes(bytes);
+		}
 	}
 
 	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
