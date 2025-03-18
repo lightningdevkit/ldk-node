@@ -1,6 +1,5 @@
 use crate::api::error::LdkServerError;
 use crate::service::Context;
-use bytes::Bytes;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_server_protos::api::{OpenChannelRequest, OpenChannelResponse};
@@ -35,8 +34,6 @@ pub(crate) fn handle_open_channel(
 		)?
 	};
 
-	let response = OpenChannelResponse {
-		user_channel_id: Bytes::from(user_channel_id.0.to_be_bytes().to_vec()),
-	};
+	let response = OpenChannelResponse { user_channel_id: user_channel_id.0.to_string() };
 	Ok(response)
 }

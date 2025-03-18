@@ -237,15 +237,15 @@ message OpenChannelRequest {
 // When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message OpenChannelResponse {
 
-  // The channel id of the created channel that user can use to refer to channel.
-  bytes user_channel_id = 1;
+  // The local channel id of the created channel that user can use to refer to channel.
+  string user_channel_id = 1;
 }
 
 // Update the config for a previously opened channel.
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.update_channel_config
 message UpdateChannelConfigRequest {
 
-  // The hex-encoded local `user_channel_id` of this channel.
+  // The local `user_channel_id` of this channel.
   string user_channel_id = 1;
 
   // The hex-encoded public key of the counterparty node to update channel config with.
@@ -266,8 +266,8 @@ message UpdateChannelConfigResponse {
 // - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.force_close_channel
 message CloseChannelRequest {
 
-  // The channel id of the created channel that user can use to refer to channel.
-  bytes user_channel_id = 1;
+  // The local `user_channel_id` of this channel.
+  string user_channel_id = 1;
 
   // The hex-encoded public key of the node to close a channel with.
   string counterparty_node_id = 2;
