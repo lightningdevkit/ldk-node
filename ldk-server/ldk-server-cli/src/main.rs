@@ -42,7 +42,7 @@ enum Commands {
 	Bolt11Receive {
 		#[arg(short, long)]
 		description: Option<String>,
-		#[arg(short, long)]
+		#[arg(long)]
 		description_hash: Option<String>,
 		#[arg(short, long)]
 		expiry_secs: u32,
