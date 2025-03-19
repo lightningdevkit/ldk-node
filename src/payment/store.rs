@@ -41,6 +41,8 @@ pub struct PaymentDetails {
 	/// The kind of the payment.
 	pub kind: PaymentKind,
 	/// The amount transferred.
+	///
+	/// Will be `None` for variable-amount payments until we receive them.
 	pub amount_msat: Option<u64>,
 	/// The fees that were paid for this payment.
 	///
