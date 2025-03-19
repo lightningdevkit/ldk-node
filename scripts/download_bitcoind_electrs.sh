@@ -1,3 +1,6 @@
+#!/bin/bash
+set -eox pipefail
+
 # Our Esplora-based tests require `electrs` and `bitcoind`
 # binaries. Here, we download the binaries, validate them, and export their
 # location via `ELECTRS_EXE`/`BITCOIND_EXE` which will be used by the
@@ -7,19 +10,20 @@ HOST_PLATFORM="$(rustc --version --verbose | grep "host:" | awk '{ print $2 }')"
 ELECTRS_DL_ENDPOINT="https://github.com/RCasatta/electrsd/releases/download/electrs_releases"
 ELECTRS_VERSION="esplora_a33e97e1a1fc63fa9c20a116bb92579bbf43b254"
 BITCOIND_DL_ENDPOINT="https://bitcoincore.org/bin/"
-BITCOIND_VERSION="25.1"
+BITCOIND_VERSION="27.2"
 if [[ "$HOST_PLATFORM" == *linux* ]]; then
 	ELECTRS_DL_FILE_NAME=electrs_linux_"$ELECTRS_VERSION".zip
 	ELECTRS_DL_HASH="865e26a96e8df77df01d96f2f569dcf9622fc87a8d99a9b8fe30861a4db9ddf1"
 	BITCOIND_DL_FILE_NAME=bitcoin-"$BITCOIND_VERSION"-x86_64-linux-gnu.tar.gz
-	BITCOIND_DL_HASH="a978c407b497a727f0444156e397b50491ce862d1f906fef9b521415b3611c8b"
+	BITCOIND_DL_HASH="acc223af46c178064c132b235392476f66d486453ddbd6bca6f1f8411547da78"
 elif [[ "$HOST_PLATFORM" == *darwin* ]]; then
 	ELECTRS_DL_FILE_NAME=electrs_macos_"$ELECTRS_VERSION".zip
 	ELECTRS_DL_HASH="2d5ff149e8a2482d3658e9b386830dfc40c8fbd7c175ca7cbac58240a9505bcd"
 	BITCOIND_DL_FILE_NAME=bitcoin-"$BITCOIND_VERSION"-x86_64-apple-darwin.tar.gz
-	BITCOIND_DL_HASH="1acfde0ec3128381b83e3e5f54d1c7907871d324549129592144dd12a821eff1"
+	BITCOIND_DL_HASH="6ebc56ca1397615d5a6df2b5cf6727b768e3dcac320c2d5c2f321dcaabc7efa2"
 else
-	echo "\n\nUnsupported platform: $HOST_PLATFORM Exiting.."
+	printf "\n\n"
+	echo "Unsupported platform: $HOST_PLATFORM Exiting.."
 	exit 1
 fi
 
