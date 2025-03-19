@@ -104,6 +104,7 @@ interface Node {
 	Event wait_next_event();
 	[Async]
 	Event next_event_async();
+	[Throws=NodeError]
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
