@@ -165,6 +165,18 @@ impl PaymentDetails {
 			update_if_necessary!(self.fee_paid_msat, fee_paid_msat_opt);
 		}
 
+		if let Some(skimmed_fee_msat) = update.counterparty_skimmed_fee_msat {
+			match self.kind {
+				PaymentKind::Bolt11Jit { ref mut counterparty_skimmed_fee_msat, .. } => {
+					update_if_necessary!(*counterparty_skimmed_fee_msat, skimmed_fee_msat);
+				},
+				_ => debug_assert!(
+					false,
+					"We should only ever override counterparty_skimmed_fee_msat for JIT payments"
+				),
+			}
+		}
+
 		if let Some(status) = update.status {
 			update_if_necessary!(self.status, status);
 		}
@@ -257,7 +269,14 @@ impl Readable for PaymentDetails {
 
 			if secret.is_some() {
 				if let Some(lsp_fee_limits) = lsp_fee_limits {
-					PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits }
+					let counterparty_skimmed_fee_msat = None;
+					PaymentKind::Bolt11Jit {
+						hash,
+						preimage,
+						secret,
+						counterparty_skimmed_fee_msat,
+						lsp_fee_limits,
+					}
 				} else {
 					PaymentKind::Bolt11 { hash, preimage, secret }
 				}
@@ -346,6 +365,12 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
+		/// The value, in thousands of a satoshi, that was deducted from this payment as an extra
+		/// fee taken by our channel counterparty.
+		///
+		/// Will only be `Some` once we received the payment. Will always be `None` for LDK Node
+		/// v0.4 and prior.
+		counterparty_skimmed_fee_msat: Option<u64>,
 		/// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
 		///
 		/// Allowing them to deduct this fee from the first inbound payment will pay for the LSP's
@@ -423,6 +448,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 	},
 	(4, Bolt11Jit) => {
 		(0, hash, required),
+		(1, counterparty_skimmed_fee_msat, option),
 		(2, preimage, option),
 		(4, secret, option),
 		(6, lsp_fee_limits, required),
@@ -501,6 +527,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub secret: Option<Option<PaymentSecret>>,
 	pub amount_msat: Option<Option<u64>>,
 	pub fee_paid_msat: Option<Option<u64>>,
+	pub counterparty_skimmed_fee_msat: Option<Option<u64>>,
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
@@ -515,6 +542,7 @@ impl PaymentDetailsUpdate {
 			secret: None,
 			amount_msat: None,
 			fee_paid_msat: None,
+			counterparty_skimmed_fee_msat: None,
 			direction: None,
 			status: None,
 			confirmation_status: None,
@@ -538,6 +566,13 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			_ => None,
 		};
 
+		let counterparty_skimmed_fee_msat = match value.kind {
+			PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
+				Some(counterparty_skimmed_fee_msat)
+			},
+			_ => None,
+		};
+
 		Self {
 			id: value.id,
 			hash: Some(hash),
@@ -545,6 +580,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			secret: Some(secret),
 			amount_msat: Some(value.amount_msat),
 			fee_paid_msat: Some(value.fee_paid_msat),
+			counterparty_skimmed_fee_msat,
 			direction: Some(value.direction),
 			status: Some(value.status),
 			confirmation_status,
@@ -841,10 +877,17 @@ mod tests {
 			);
 
 			match bolt11_jit_decoded.kind {
-				PaymentKind::Bolt11Jit { hash: h, preimage: p, secret: s, lsp_fee_limits: l } => {
+				PaymentKind::Bolt11Jit {
+					hash: h,
+					preimage: p,
+					secret: s,
+					counterparty_skimmed_fee_msat: c,
+					lsp_fee_limits: l,
+				} => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
+					assert_eq!(None, c);
 					assert_eq!(lsp_fee_limits, Some(l));
 				},
 				_ => {

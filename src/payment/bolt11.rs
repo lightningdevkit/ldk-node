@@ -664,6 +664,7 @@ impl Bolt11Payment {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
+			counterparty_skimmed_fee_msat: None,
 			lsp_fee_limits,
 		};
 		let payment = PaymentDetails::new(
