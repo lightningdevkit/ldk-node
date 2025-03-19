@@ -245,15 +245,11 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
-	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: Vec<u8>) -> Result<&mut Self, BuildError> {
-		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
-			return Err(BuildError::InvalidSeedBytes);
-		}
-		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
-		bytes.copy_from_slice(&seed_bytes);
-		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(bytes));
-		Ok(self)
+	/// Configures the [`Node`] instance to source its wallet entropy from the given
+	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
+	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: [u8; WALLET_KEYS_SEED_LEN]) -> &mut Self {
+		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(seed_bytes));
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
@@ -637,11 +633,20 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_entropy_seed_path(seed_path);
 	}
 
-	/// Configures the [`Node`] instance to source its wallet entropy from the given 64 seed bytes.
+	/// Configures the [`Node`] instance to source its wallet entropy from the given
+	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
 	///
-	/// **Note:** Panics if the length of the given `seed_bytes` differs from 64.
+	/// **Note:** Will return an error if the length of the given `seed_bytes` differs from
+	/// [`WALLET_KEYS_SEED_LEN`].
 	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) -> Result<(), BuildError> {
-		self.inner.write().unwrap().set_entropy_seed_bytes(seed_bytes).map(|_| ())
+		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
+			return Err(BuildError::InvalidSeedBytes);
+		}
+		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
+		bytes.copy_from_slice(&seed_bytes);
+
+		self.inner.write().unwrap().set_entropy_seed_bytes(bytes);
+		Ok(())
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
