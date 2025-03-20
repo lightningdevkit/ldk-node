@@ -65,7 +65,7 @@ fn main() {
 	ldk_node_config.network = config_file.network;
 
 	let mut builder = Builder::from_config(ldk_node_config);
-	builder.set_log_facade_logger(Some(LogLevel::Trace));
+	builder.set_log_facade_logger();
 
 	let bitcoind_rpc_addr = config_file.bitcoind_rpc_addr;
 
