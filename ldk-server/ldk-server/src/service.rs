@@ -39,20 +39,18 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct NodeService {
 	node: Arc<Node>,
-	paginated_kv_store: Arc<dyn PaginatedKVStore + Send + Sync>,
+	paginated_kv_store: Arc<dyn PaginatedKVStore>,
 }
 
 impl NodeService {
-	pub(crate) fn new(
-		node: Arc<Node>, paginated_kv_store: Arc<dyn PaginatedKVStore + Send + Sync>,
-	) -> Self {
+	pub(crate) fn new(node: Arc<Node>, paginated_kv_store: Arc<dyn PaginatedKVStore>) -> Self {
 		Self { node, paginated_kv_store }
 	}
 }
 
 pub(crate) struct Context {
 	pub(crate) node: Arc<Node>,
-	pub(crate) paginated_kv_store: Arc<dyn PaginatedKVStore + Send + Sync>,
+	pub(crate) paginated_kv_store: Arc<dyn PaginatedKVStore>,
 }
 
 impl Service<Request<Incoming>> for NodeService {
