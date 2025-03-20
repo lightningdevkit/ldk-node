@@ -1,5 +1,8 @@
 pub(crate) mod event_publisher;
 
+#[cfg(feature = "events-rabbitmq")]
+pub(crate) mod rabbitmq;
+
 use ldk_server_protos::events::event_envelope;
 
 /// Event variant to event name mapping.

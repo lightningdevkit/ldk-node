@@ -16,6 +16,8 @@ pub struct Config {
 	pub bitcoind_rpc_addr: SocketAddr,
 	pub bitcoind_rpc_user: String,
 	pub bitcoind_rpc_password: String,
+	pub rabbitmq_connection_string: String,
+	pub rabbitmq_exchange_name: String,
 }
 
 impl TryFrom<JsonConfig> for Config {
@@ -45,6 +47,16 @@ impl TryFrom<JsonConfig> for Config {
 				)
 			})?;
 
+		#[cfg(feature = "events-rabbitmq")]
+		if json_config.rabbitmq_connection_string.as_deref().map_or(true, |s| s.is_empty())
+			|| json_config.rabbitmq_exchange_name.as_deref().map_or(true, |s| s.is_empty())
+		{
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"Both `rabbitmq_connection_string` and `rabbitmq_exchange_name` must be configured if enabling `events-rabbitmq` feature.".to_string(),
+			));
+		}
+
 		Ok(Config {
 			listening_addr,
 			network: json_config.network,
@@ -53,6 +65,8 @@ impl TryFrom<JsonConfig> for Config {
 			bitcoind_rpc_addr,
 			bitcoind_rpc_user: json_config.bitcoind_rpc_user,
 			bitcoind_rpc_password: json_config.bitcoind_rpc_password,
+			rabbitmq_connection_string: json_config.rabbitmq_connection_string.unwrap_or_default(),
+			rabbitmq_exchange_name: json_config.rabbitmq_exchange_name.unwrap_or_default(),
 		})
 	}
 }
@@ -67,6 +81,8 @@ pub struct JsonConfig {
 	bitcoind_rpc_address: String,
 	bitcoind_rpc_user: String,
 	bitcoind_rpc_password: String,
+	rabbitmq_connection_string: Option<String>,
+	rabbitmq_exchange_name: Option<String>,
 }
 
 /// Loads the configuration from a JSON file at the given path.
@@ -114,6 +130,8 @@ mod tests {
 			"bitcoind_rpc_address":"127.0.0.1:8332", // comment-1
 			"bitcoind_rpc_user": "bitcoind-testuser",
 			"bitcoind_rpc_password": "bitcoind-testpassword",
+			"rabbitmq_connection_string": "rabbitmq_connection_string",
+			"rabbitmq_exchange_name": "rabbitmq_exchange_name",
 			"unknown_key": "random-value"
 			// comment-2
 			}"#;
@@ -130,6 +148,8 @@ mod tests {
 				bitcoind_rpc_addr: SocketAddr::from_str("127.0.0.1:8332").unwrap(),
 				bitcoind_rpc_user: "bitcoind-testuser".to_string(),
 				bitcoind_rpc_password: "bitcoind-testpassword".to_string(),
+				rabbitmq_connection_string: "rabbitmq_connection_string".to_string(),
+				rabbitmq_exchange_name: "rabbitmq_exchange_name".to_string(),
 			}
 		)
 	}
