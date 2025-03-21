@@ -1090,6 +1090,14 @@ fn build_with_store_internal(
 		// If we act as an LSPS2 service, we need to to be able to intercept HTLCs and forward the
 		// information to the service handler.
 		user_config.accept_intercept_htlcs = true;
+
+		// If we act as an LSPS2 service, we allow forwarding to unnannounced channels.
+		user_config.accept_forwards_to_priv_channels = true;
+
+		// If we act as an LSPS2 service, set the HTLC-value-in-flight to 100% of the channel value
+		// to ensure we can forward the initial payment.
+		user_config.channel_handshake_config.max_inbound_htlc_value_in_flight_percent_of_channel =
+			100;
 	}
 
 	let message_router =
