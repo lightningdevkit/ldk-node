@@ -96,22 +96,37 @@ pub(crate) fn channel_config_to_proto(
 }
 
 pub(crate) fn payment_to_proto(payment: PaymentDetails) -> Payment {
-	Payment {
-		id: payment.id.0.to_lower_hex_string(),
-		kind: Some(payment_kind_to_proto(payment.kind)),
-		amount_msat: payment.amount_msat,
-		direction: match payment.direction {
-			PaymentDirection::Inbound => ldk_server_protos::types::PaymentDirection::Inbound.into(),
-			PaymentDirection::Outbound => {
-				ldk_server_protos::types::PaymentDirection::Outbound.into()
+	match payment {
+		PaymentDetails {
+			id,
+			kind,
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			status,
+			latest_update_timestamp,
+		} => Payment {
+			id: id.to_string(),
+			kind: Some(payment_kind_to_proto(kind)),
+			amount_msat,
+			fee_paid_msat,
+			direction: match direction {
+				PaymentDirection::Inbound => {
+					ldk_server_protos::types::PaymentDirection::Inbound.into()
+				},
+				PaymentDirection::Outbound => {
+					ldk_server_protos::types::PaymentDirection::Outbound.into()
+				},
 			},
+			status: match status {
+				PaymentStatus::Pending => ldk_server_protos::types::PaymentStatus::Pending.into(),
+				PaymentStatus::Succeeded => {
+					ldk_server_protos::types::PaymentStatus::Succeeded.into()
+				},
+				PaymentStatus::Failed => ldk_server_protos::types::PaymentStatus::Failed.into(),
+			},
+			latest_update_timestamp,
 		},
-		status: match payment.status {
-			PaymentStatus::Pending => ldk_server_protos::types::PaymentStatus::Pending.into(),
-			PaymentStatus::Succeeded => ldk_server_protos::types::PaymentStatus::Succeeded.into(),
-			PaymentStatus::Failed => ldk_server_protos::types::PaymentStatus::Failed.into(),
-		},
-		latest_update_timestamp: payment.latest_update_timestamp,
 	}
 }
 

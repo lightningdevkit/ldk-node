@@ -13,6 +13,12 @@ message Payment {
   // The amount transferred.
   optional uint64 amount_msat = 3;
 
+  // The fees that were paid for this payment.
+  //
+  // For Lightning payments, this will only be updated for outbound payments once they
+  // succeeded.
+  optional uint64 fee_paid_msat = 7;
+
   // The direction of the payment.
   PaymentDirection direction = 4;
 

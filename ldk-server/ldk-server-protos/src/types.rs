@@ -12,6 +12,12 @@ pub struct Payment {
 	/// The amount transferred.
 	#[prost(uint64, optional, tag = "3")]
 	pub amount_msat: ::core::option::Option<u64>,
+	/// The fees that were paid for this payment.
+	///
+	/// For Lightning payments, this will only be updated for outbound payments once they
+	/// succeeded.
+	#[prost(uint64, optional, tag = "7")]
+	pub fee_paid_msat: ::core::option::Option<u64>,
 	/// The direction of the payment.
 	#[prost(enumeration = "PaymentDirection", tag = "4")]
 	pub direction: i32,
