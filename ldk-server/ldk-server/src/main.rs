@@ -29,7 +29,8 @@ use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use hex::DisplayHex;
 use ldk_node::config::Config;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
-use ldk_node::logger::LogLevel;
+#[cfg(feature = "experimental-lsps2-support")]
+use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_server_protos::events;
 use ldk_server_protos::events::{event_envelope, EventEnvelope};
 use ldk_server_protos::types::Payment;
@@ -79,6 +80,12 @@ fn main() {
 		bitcoind_rpc_addr.port(),
 		config_file.bitcoind_rpc_user,
 		config_file.bitcoind_rpc_password,
+	);
+
+	// LSPS2 support is highly experimental and for testing purposes only.
+	#[cfg(feature = "experimental-lsps2-support")]
+	builder.set_liquidity_provider_lsps2(
+		config_file.lsps2_service_config.expect("Missing liquidity.lsps2_server config"),
 	);
 
 	let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {

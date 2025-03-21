@@ -17,4 +17,36 @@ rpc_password = "polarpass"                    # RPC password
 # RabbitMQ settings (only required if using events-rabbitmq feature)
 [rabbitmq]
 connection_string = ""                        # RabbitMQ connection string
-exchange_name = ""                            # RabbitMQ exchange name
+exchange_name = ""
+
+# Experimental LSPS2 Service Support
+# CAUTION: LSPS2 support is highly experimental and for testing purposes only.
+[liquidity.lsps2_service]
+# Indicates whether the LSPS service will be announced via the gossip network.
+advertise_service = false
+
+# The fee we withhold for the channel open from the initial payment.
+channel_opening_fee_ppm = 1000            # 0.1% fee
+
+# The proportional overprovisioning for the channel.
+channel_over_provisioning_ppm = 500000    # 50% extra capacity
+
+# The minimum fee required for opening a channel.
+min_channel_opening_fee_msat = 10000000   # 10,000 satoshis
+
+# The minimum number of blocks after confirmation we promise to keep the channel open.
+min_channel_lifetime = 4320               # ~30 days
+
+# The maximum number of blocks that the client is allowed to set its `to_self_delay` parameter.
+max_client_to_self_delay = 1440           # ~10 days
+
+# The minimum payment size that we will accept when opening a channel.
+min_payment_size_msat = 10000000          # 10,000 satoshis
+
+# The maximum payment size that we will accept when opening a channel.
+max_payment_size_msat = 25000000000       # 0.25 BTC
+
+# Optional token for clients (uncomment and set if required)
+## A token we may require to be sent by the clients.
+## If set, only requests matching this token will be accepted. (uncomment and set if required)
+# require_token = ""
