@@ -1,0 +1,20 @@
+# Lightning node settings
+[node]
+network = "regtest"                           # Bitcoin network to use
+listening_address = "localhost:3001"          # Lightning node listening address
+rest_service_address = "127.0.0.1:3002"       # LDK Server REST address
+
+# Storage settings
+[storage.disk]
+dir_path = "/tmp/ldk-server/"                 # Path for LDK and BDK data persistence
+
+# Bitcoin Core settings
+[bitcoind]
+rpc_address = "127.0.0.1:18444"               # RPC endpoint
+rpc_user = "polaruser"                        # RPC username
+rpc_password = "polarpass"                    # RPC password
+
+# RabbitMQ settings (only required if using events-rabbitmq feature)
+[rabbitmq]
+connection_string = ""                        # RabbitMQ connection string
+exchange_name = ""                            # RabbitMQ exchange name

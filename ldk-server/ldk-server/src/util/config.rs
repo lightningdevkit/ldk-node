@@ -20,72 +20,101 @@ pub struct Config {
 	pub rabbitmq_exchange_name: String,
 }
 
-impl TryFrom<JsonConfig> for Config {
+impl TryFrom<TomlConfig> for Config {
 	type Error = io::Error;
 
-	fn try_from(json_config: JsonConfig) -> io::Result<Self> {
+	fn try_from(toml_config: TomlConfig) -> io::Result<Self> {
 		let listening_addr =
-			SocketAddress::from_str(&json_config.listening_address).map_err(|e| {
+			SocketAddress::from_str(&toml_config.node.listening_address).map_err(|e| {
 				io::Error::new(
 					io::ErrorKind::InvalidInput,
 					format!("Invalid listening address configured: {}", e),
 				)
 			})?;
-		let rest_service_addr =
-			SocketAddr::from_str(&json_config.rest_service_address).map_err(|e| {
+		let rest_service_addr = SocketAddr::from_str(&toml_config.node.rest_service_address)
+			.map_err(|e| {
 				io::Error::new(
 					io::ErrorKind::InvalidInput,
 					format!("Invalid rest service address configured: {}", e),
 				)
 			})?;
-
 		let bitcoind_rpc_addr =
-			SocketAddr::from_str(&json_config.bitcoind_rpc_address).map_err(|e| {
+			SocketAddr::from_str(&toml_config.bitcoind.rpc_address).map_err(|e| {
 				io::Error::new(
 					io::ErrorKind::InvalidInput,
 					format!("Invalid bitcoind RPC address configured: {}", e),
 				)
 			})?;
 
-		#[cfg(feature = "events-rabbitmq")]
-		if json_config.rabbitmq_connection_string.as_deref().map_or(true, |s| s.is_empty())
-			|| json_config.rabbitmq_exchange_name.as_deref().map_or(true, |s| s.is_empty())
-		{
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				"Both `rabbitmq_connection_string` and `rabbitmq_exchange_name` must be configured if enabling `events-rabbitmq` feature.".to_string(),
-			));
-		}
+		let (rabbitmq_connection_string, rabbitmq_exchange_name) = {
+			let rabbitmq = toml_config.rabbitmq.unwrap_or(RabbitmqConfig {
+				connection_string: String::new(),
+				exchange_name: String::new(),
+			});
+			#[cfg(feature = "events-rabbitmq")]
+			if rabbitmq.connection_string.is_empty() || rabbitmq.exchange_name.is_empty() {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"Both `rabbitmq.connection_string` and `rabbitmq.exchange_name` must be configured if enabling `events-rabbitmq` feature.".to_string(),
+				));
+			}
+			(rabbitmq.connection_string, rabbitmq.exchange_name)
+		};
 
 		Ok(Config {
 			listening_addr,
-			network: json_config.network,
+			network: toml_config.node.network,
 			rest_service_addr,
-			storage_dir_path: json_config.storage_dir_path,
+			storage_dir_path: toml_config.storage.disk.dir_path,
 			bitcoind_rpc_addr,
-			bitcoind_rpc_user: json_config.bitcoind_rpc_user,
-			bitcoind_rpc_password: json_config.bitcoind_rpc_password,
-			rabbitmq_connection_string: json_config.rabbitmq_connection_string.unwrap_or_default(),
-			rabbitmq_exchange_name: json_config.rabbitmq_exchange_name.unwrap_or_default(),
+			bitcoind_rpc_user: toml_config.bitcoind.rpc_user,
+			bitcoind_rpc_password: toml_config.bitcoind.rpc_password,
+			rabbitmq_connection_string,
+			rabbitmq_exchange_name,
 		})
 	}
 }
 
-/// Configuration loaded from a JSON file.
+/// Configuration loaded from a TOML file.
 #[derive(Deserialize, Serialize)]
-pub struct JsonConfig {
-	listening_address: String,
-	network: Network,
-	rest_service_address: String,
-	storage_dir_path: String,
-	bitcoind_rpc_address: String,
-	bitcoind_rpc_user: String,
-	bitcoind_rpc_password: String,
-	rabbitmq_connection_string: Option<String>,
-	rabbitmq_exchange_name: Option<String>,
+pub struct TomlConfig {
+	node: NodeConfig,
+	storage: StorageConfig,
+	bitcoind: BitcoindConfig,
+	rabbitmq: Option<RabbitmqConfig>,
 }
 
-/// Loads the configuration from a JSON file at the given path.
+#[derive(Deserialize, Serialize)]
+struct NodeConfig {
+	network: Network,
+	listening_address: String,
+	rest_service_address: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StorageConfig {
+	disk: DiskConfig,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DiskConfig {
+	dir_path: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct BitcoindConfig {
+	rpc_address: String,
+	rpc_user: String,
+	rpc_password: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RabbitmqConfig {
+	connection_string: String,
+	exchange_name: String,
+}
+
+/// Loads the configuration from a TOML file at the given path.
 pub fn load_config<P: AsRef<Path>>(config_path: P) -> io::Result<Config> {
 	let file_contents = fs::read_to_string(config_path.as_ref()).map_err(|e| {
 		io::Error::new(
@@ -94,21 +123,13 @@ pub fn load_config<P: AsRef<Path>>(config_path: P) -> io::Result<Config> {
 		)
 	})?;
 
-	let json_string = remove_json_comments(file_contents.as_str());
-	let json_config: JsonConfig = serde_json::from_str(&json_string).map_err(|e| {
+	let toml_config: TomlConfig = toml::from_str(&file_contents).map_err(|e| {
 		io::Error::new(
 			io::ErrorKind::InvalidData,
-			format!("Config file contains invalid JSON format: {}", e),
+			format!("Config file contains invalid TOML format: {}", e),
 		)
 	})?;
-	Ok(Config::try_from(json_config)?)
-}
-
-fn remove_json_comments(s: &str) -> String {
-	s.lines()
-		.map(|line| if let Some(pos) = line.find("//") { &line[..pos] } else { line })
-		.collect::<Vec<&str>>()
-		.join("\n")
+	Ok(Config::try_from(toml_config)?)
 }
 
 #[cfg(test)]
@@ -118,25 +139,30 @@ mod tests {
 	use std::str::FromStr;
 
 	#[test]
-	fn test_read_json_config_from_file() {
+	fn test_read_toml_config_from_file() {
 		let storage_path = std::env::temp_dir();
-		let config_file_name = "config.json";
+		let config_file_name = "config.toml";
 
-		let json_config = r#"{
-			"listening_address": "localhost:3001",
-			"network": "regtest",
-			"rest_service_address": "127.0.0.1:3002",
-			"storage_dir_path": "/tmp",
-			"bitcoind_rpc_address":"127.0.0.1:8332", // comment-1
-			"bitcoind_rpc_user": "bitcoind-testuser",
-			"bitcoind_rpc_password": "bitcoind-testpassword",
-			"rabbitmq_connection_string": "rabbitmq_connection_string",
-			"rabbitmq_exchange_name": "rabbitmq_exchange_name",
-			"unknown_key": "random-value"
-			// comment-2
-			}"#;
+		let toml_config = r#"
+			[node]
+			network = "regtest"
+			listening_address = "localhost:3001"
+			rest_service_address = "127.0.0.1:3002"
+			
+			[storage.disk]
+			dir_path = "/tmp"
+			
+			[bitcoind]
+			rpc_address = "127.0.0.1:8332"    # RPC endpoint
+			rpc_user = "bitcoind-testuser"
+			rpc_password = "bitcoind-testpassword"
+			
+			[rabbitmq]
+			connection_string = "rabbitmq_connection_string"
+			exchange_name = "rabbitmq_exchange_name"
+			"#;
 
-		fs::write(storage_path.join(config_file_name), json_config).unwrap();
+		fs::write(storage_path.join(config_file_name), toml_config).unwrap();
 
 		assert_eq!(
 			load_config(storage_path.join(config_file_name)).unwrap(),

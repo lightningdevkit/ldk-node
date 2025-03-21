@@ -36,7 +36,7 @@ We welcome your feedback and contributions to help shape the future of LDK Serve
 
 
 ### Configuration
-Refer `./ldk-server/ldk-server.config` to see available configuration options.
+Refer `./ldk-server/ldk-server-config.toml` to see available configuration options.
 
 ### Building
 ```
