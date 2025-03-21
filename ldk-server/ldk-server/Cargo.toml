@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", rev = "f0338d19256615088fabab2b6927d478ae3ec1a1" }
 serde = { version = "1.0.203", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0.118", default-features = false }
 hyper = { version = "1", default-features = false, features = ["server", "http1"] }
 http-body-util = { version = "0.1", default-features = false }
 hyper-util = { version = "0.1", default-features = false, features = ["server-graceful"] }
@@ -18,6 +17,7 @@ hex = { package = "hex-conservative", version = "0.2.1", default-features = fals
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 rand = { version = "0.8.5", default-features = false }
 async-trait = { version = "0.1.85", default-features = false }
+toml = { version = "0.8.9", default-features = false, features = ["parse"] }
 
 # Required for RabittMQ based EventPublisher. Only enabled for `events-rabbitmq` feature.
 lapin = { version = "2.4.0", features = ["rustls"], default-features = false, optional = true }
