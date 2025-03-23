@@ -53,7 +53,7 @@ macro_rules! expect_event {
 		match $node.wait_next_event() {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
@@ -70,7 +70,7 @@ macro_rules! expect_channel_pending_event {
 			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				funding_txo
 			},
 			ref e => {
@@ -88,7 +88,7 @@ macro_rules! expect_channel_ready_event {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				user_channel_id
 			},
 			ref e => {
@@ -110,7 +110,7 @@ macro_rules! expect_payment_received_event {
 				if !matches!(payment.kind, PaymentKind::Onchain { .. }) {
 					assert_eq!(payment.fee_paid_msat, None);
 				}
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				payment_id
 			},
 			ref e => {
@@ -135,7 +135,7 @@ macro_rules! expect_payment_claimable_event {
 				assert_eq!(payment_hash, $payment_hash);
 				assert_eq!(payment_id, $payment_id);
 				assert_eq!(claimable_amount_msat, $claimable_amount_msat);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				claimable_amount_msat
 			},
 			ref e => {
@@ -158,7 +158,7 @@ macro_rules! expect_payment_successful_event {
 				let payment = $node.payment(&$payment_id.unwrap()).unwrap();
 				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
@@ -707,7 +707,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -745,7 +745,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -868,7 +868,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let (received_keysend_amount, received_custom_records) = match next_event {
 		ref e @ Event::PaymentReceived { amount_msat, ref custom_records, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			(amount_msat, custom_records)
 		},
 		ref e => {

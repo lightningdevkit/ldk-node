@@ -781,15 +781,15 @@ impl Node {
 	/// Confirm the last retrieved event handled.
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
-	pub fn event_handled(&self) {
-		self.event_queue.event_handled().unwrap_or_else(|e| {
+	pub fn event_handled(&self) -> Result<(), Error> {
+		self.event_queue.event_handled().map_err(|e| {
 			log_error!(
 				self.logger,
 				"Couldn't mark event handled due to persistence failure: {}",
 				e
 			);
-			panic!("Couldn't mark event handled due to persistence failure");
-		});
+			e
+		})
 	}
 
 	/// Returns our own node id
