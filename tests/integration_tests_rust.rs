@@ -127,9 +127,7 @@ fn multi_hop_sending() {
 	let mut nodes = Vec::new();
 	for _ in 0..5 {
 		let config = random_config(true);
-		let mut sync_config = EsploraSyncConfig::default();
-		sync_config.onchain_wallet_sync_interval_secs = 100000;
-		sync_config.lightning_wallet_sync_interval_secs = 100000;
+		let sync_config = EsploraSyncConfig { background_sync_config: None };
 		setup_builder!(builder, config.node_config);
 		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		let node = builder.build().unwrap();
@@ -227,9 +225,7 @@ fn start_stop_reinit() {
 	let test_sync_store: Arc<dyn KVStore + Sync + Send> =
 		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
 
-	let mut sync_config = EsploraSyncConfig::default();
-	sync_config.onchain_wallet_sync_interval_secs = 100000;
-	sync_config.lightning_wallet_sync_interval_secs = 100000;
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
@@ -1048,9 +1044,7 @@ fn lsps2_client_service_integration() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let mut sync_config = EsploraSyncConfig::default();
-	sync_config.onchain_wallet_sync_interval_secs = 100000;
-	sync_config.lightning_wallet_sync_interval_secs = 100000;
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
 
 	// Setup three nodes: service, client, and payer
 	let channel_opening_fee_ppm = 10_000;
