@@ -106,6 +106,10 @@ electrsd = { version = "0.29.0", features = ["legacy"] }
 [target.'cfg(cln_test)'.dev-dependencies]
 clightningrpc = { version = "0.3.0-beta.8", default-features = false }
 
+[target.'cfg(lnd_test)'.dev-dependencies]
+lnd_grpc_rust = { version = "2.10.0", default-features = false }
+tokio = { version = "1.37", features = ["fs"] }
+
 [build-dependencies]
 uniffi = { version = "0.27.3", features = ["build"], optional = true }
 
@@ -123,4 +127,5 @@ check-cfg = [
 	"cfg(ldk_bench)",
 	"cfg(tokio_unstable)",
 	"cfg(cln_test)",
+	"cfg(lnd_test)",
 ]
