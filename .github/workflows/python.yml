@@ -26,9 +26,18 @@ jobs:
 
       - name: Wait for services to be fully initialized
         run: |
-          echo "Waiting for services to be ready..."
-          timeout 90 bash -c 'until docker compose ps | grep -q "bitcoin.*healthy" && docker compose ps | grep -q "electrs.*healthy"; do sleep 5; done'
-          echo "All services are healthy"
+          echo "Waiting for Bitcoin to be ready..."
+          timeout 60 bash -c 'until docker exec ldk-node-bitcoin-1 bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockchaininfo > /dev/null 2>&1; do echo "Waiting for Bitcoin..."; sleep 3; done'
+          echo "Bitcoin is ready"
+
+          echo "Waiting for Esplora to be ready..."
+          # Try to get Esplora's status with retries and a timeout
+          timeout 90 bash -c 'until curl -s http://127.0.0.1:3002/blocks/tip/hash > /dev/null 2>&1; do echo "Waiting for Esplora..."; sleep 3; done'
+          echo "Esplora is ready"
+
+          # This is critical - give Esplora extra time to fully index after it starts accepting connections
+          echo "Giving Esplora extra time to finish indexing..."
+          sleep 10
 
       - name: Install testing prerequisites
         run: |

@@ -51,14 +51,25 @@ def mine_and_wait(esplora_endpoint, blocks):
 def wait_for_block(esplora_endpoint, block_hash):
     url = esplora_endpoint + "/block/" + block_hash + "/status"
     esplora_picked_up_block = False
-    while not esplora_picked_up_block:
-        res = requests.get(url)
+    max_retries = 30
+    retry_count = 0
+
+    while not esplora_picked_up_block and retry_count < max_retries:
         try:
-            json = res.json()
-            esplora_picked_up_block = json['in_best_chain']
-        except:
-            pass
-        time.sleep(1)
+            res = requests.get(url, timeout=10)
+            try:
+                json = res.json()
+                esplora_picked_up_block = json['in_best_chain']
+            except:
+                pass
+        except Exception as e:
+            print(f"Request error: {e}, retrying ({retry_count+1}/{max_retries})...")
+
+        retry_count += 1
+        time.sleep(0.5)
+
+    if not esplora_picked_up_block:
+        raise TimeoutError(f"Block {block_hash} not found after {max_retries} attempts")
 
 def wait_for_tx(esplora_endpoint, txid):
     url = esplora_endpoint + "/tx/" + txid
