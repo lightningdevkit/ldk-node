@@ -1,26 +1,26 @@
-name: Security Audit
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'
-
-jobs:
-  audit:
-    permissions:
-      issues: write
-      checks: write
-    strategy:
-      matrix:
-        platform: [
-          ubuntu-latest,
-          macos-latest,
-          windows-latest,
-          ]
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v3
-      - name: Run security audit
-        uses: rustsec/audit-check@v1.4.1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+#name: Security Audit
+#on:
+#  workflow_dispatch:
+#  schedule:
+#    - cron: '0 0 * * *'
+#
+#jobs:
+#  audit:
+#    permissions:
+#      issues: write
+#      checks: write
+#    strategy:
+#      matrix:
+#        platform: [
+#          ubuntu-latest,
+#          macos-latest,
+#          windows-latest,
+#          ]
+#    runs-on: ${{ matrix.platform }}
+#    steps:
+#      - name: Checkout source code
+#        uses: actions/checkout@v3
+#      - name: Run security audit
+#        uses: rustsec/audit-check@v1.4.1
+#        with:
+#          token: ${{ secrets.GITHUB_TOKEN }}

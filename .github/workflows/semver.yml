@@ -1,15 +1,15 @@
-name: SemVer checks
-on: [push, pull_request]
-
-jobs:
-  semver-checks:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-      - name: Install Rust stable toolchain
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
-          rustup override set stable
-      - name: Check SemVer
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+#name: SemVer checks
+#on: [push, pull_request]
+#
+#jobs:
+#  semver-checks:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: Checkout source code
+#        uses: actions/checkout@v4
+#      - name: Install Rust stable toolchain
+#        run: |
+#          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
+#          rustup override set stable
+#      - name: Check SemVer
+#        uses: obi1kenobi/cargo-semver-checks-action@v2

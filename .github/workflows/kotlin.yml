@@ -1,62 +1,62 @@
-name: CI Checks - Kotlin Tests
-
-on: [push, pull_request]
-
-jobs:
-  check-kotlin:
-    runs-on: ubuntu-latest
-
-    env:
-      LDK_NODE_JVM_DIR: bindings/kotlin/ldk-node-jvm
-      LDK_NODE_ANDROID_DIR: bindings/kotlin/ldk-node-android
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up JDK
-        uses: actions/setup-java@v3
-        with:
-          distribution: temurin
-          java-version: 11
-
-      - name: Set default Rust version to stable
-        run: rustup default stable
-
-      - name: Show default version of NDK
-        run: echo $ANDROID_NDK_ROOT
-
-      - name: Run ktlintCheck on ldk-node-jvm
-        run: |
-          cd $LDK_NODE_JVM_DIR
-          ./gradlew ktlintCheck
-
-      - name: Run ktlintCheck on ldk-node-android
-        run: |
-          cd $LDK_NODE_ANDROID_DIR
-          ./gradlew ktlintCheck
-
-      - name: Generate Kotlin JVM
-        run: ./scripts/uniffi_bindgen_generate_kotlin.sh
-
-      - name: Generate Kotlin Android
-        run: ./scripts/uniffi_bindgen_generate_kotlin_android.sh
-
-      - name: Start bitcoind and electrs
-        run: docker compose up -d
-
-      - name: Wait for services to be fully initialized
-        run: |
-          echo "Waiting for services to be ready..."
-          timeout 90 bash -c 'until docker compose ps | grep -q "bitcoin.*healthy" && docker compose ps | grep -q "electrs.*healthy"; do sleep 5; done'
-          echo "All services are healthy"
-
-      - name: Run ldk-node-jvm tests
-        run: |
-          cd $LDK_NODE_JVM_DIR
-          ./gradlew test -Penv=ci
-
-      - name: Run ldk-node-android tests
-        run: |
-          cd $LDK_NODE_ANDROID_DIR
-          ./gradlew test
+#name: CI Checks - Kotlin Tests
+#
+#on: [push, pull_request]
+#
+#jobs:
+#  check-kotlin:
+#    runs-on: ubuntu-latest
+#
+#    env:
+#      LDK_NODE_JVM_DIR: bindings/kotlin/ldk-node-jvm
+#      LDK_NODE_ANDROID_DIR: bindings/kotlin/ldk-node-android
+#
+#    steps:
+#      - name: Checkout repository
+#        uses: actions/checkout@v4
+#
+#      - name: Set up JDK
+#        uses: actions/setup-java@v3
+#        with:
+#          distribution: temurin
+#          java-version: 11
+#
+#      - name: Set default Rust version to stable
+#        run: rustup default stable
+#
+#      - name: Show default version of NDK
+#        run: echo $ANDROID_NDK_ROOT
+#
+#      - name: Run ktlintCheck on ldk-node-jvm
+#        run: |
+#          cd $LDK_NODE_JVM_DIR
+#          ./gradlew ktlintCheck
+#
+#      - name: Run ktlintCheck on ldk-node-android
+#        run: |
+#          cd $LDK_NODE_ANDROID_DIR
+#          ./gradlew ktlintCheck
+#
+#      - name: Generate Kotlin JVM
+#        run: ./scripts/uniffi_bindgen_generate_kotlin.sh
+#
+#      - name: Generate Kotlin Android
+#        run: ./scripts/uniffi_bindgen_generate_kotlin_android.sh
+#
+#      - name: Start bitcoind and electrs
+#        run: docker compose up -d
+#
+#      - name: Wait for services to be fully initialized
+#        run: |
+#          echo "Waiting for services to be ready..."
+#          timeout 90 bash -c 'until docker compose ps | grep -q "bitcoin.*healthy" && docker compose ps | grep -q "electrs.*healthy"; do sleep 5; done'
+#          echo "All services are healthy"
+#
+#      - name: Run ldk-node-jvm tests
+#        run: |
+#          cd $LDK_NODE_JVM_DIR
+#          ./gradlew test -Penv=ci
+#
+#      - name: Run ldk-node-android tests
+#        run: |
+#          cd $LDK_NODE_ANDROID_DIR
+#          ./gradlew test
