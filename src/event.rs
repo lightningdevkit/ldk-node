@@ -20,7 +20,7 @@ use crate::logger::Logger;
 
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
-	PaymentStore,
+	PaymentStore, PaymentStoreUpdateResult,
 };
 
 use crate::io::{
@@ -906,14 +906,17 @@ where
 				};
 
 				match self.payment_store.update(&update) {
-					Ok(true) => (),
-					Ok(false) => {
+					Ok(PaymentStoreUpdateResult::Updated)
+					| Ok(PaymentStoreUpdateResult::Unchanged) => (
+						// No need to do anything if the idempotent update was applied, which might
+						// be the result of a replayed event.
+					),
+					Ok(PaymentStoreUpdateResult::NotFound) => {
 						log_error!(
 							self.logger,
-							"Payment with ID {} couldn't be found in store",
+							"Claimed payment with ID {} couldn't be found in store",
 							payment_id,
 						);
-						debug_assert!(false);
 					},
 					Err(e) => {
 						log_error!(
