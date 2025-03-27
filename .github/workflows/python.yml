@@ -24,6 +24,12 @@ jobs:
       - name: Start bitcoind and electrs
         run: docker compose up -d
 
+      - name: Wait for services to be fully initialized
+        run: |
+          echo "Waiting for services to be ready..."
+          timeout 90 bash -c 'until docker compose ps | grep -q "bitcoin.*healthy" && docker compose ps | grep -q "electrs.*healthy"; do sleep 5; done'
+          echo "All services are healthy"
+
       - name: Install testing prerequisites
         run: |
           pip3 install requests

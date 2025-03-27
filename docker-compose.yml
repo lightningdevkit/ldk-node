@@ -47,6 +47,11 @@ services:
       - "3002:3002"
     networks:
       - bitcoin-electrs
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:3002/blocks/tip/hash" ]
+      interval: 5s
+      timeout: 10s
+      retries: 5
 
 networks:
   bitcoin-electrs:
