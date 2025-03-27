@@ -659,6 +659,26 @@ where
 						};
 					}
 
+					// If the LSP skimmed anything, update our stored payment.
+					if counterparty_skimmed_fee_msat > 0 {
+						match info.kind {
+							PaymentKind::Bolt11Jit { .. } => {
+								let update = PaymentDetailsUpdate {
+									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
+									..PaymentDetailsUpdate::new(payment_id)
+								};
+								match self.payment_store.update(&update) {
+									Ok(_) => (),
+									Err(e) => {
+										log_error!(self.logger, "Failed to access payment store: {}", e);
+										return Err(ReplayEvent());
+									},
+								};
+							}
+							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for JIT payments."),
+						}
+					}
+
 					// If this is known by the store but ChannelManager doesn't know the preimage,
 					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
 					// user interaction.

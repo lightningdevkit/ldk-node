@@ -1137,7 +1137,15 @@ fn lsps2_client_service_integration() {
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
-	expect_payment_received_event!(client_node, expected_received_amount_msat);
+	let client_payment_id =
+		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
+	let client_payment = client_node.payment(&client_payment_id).unwrap();
+	match client_payment.kind {
+		PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 
 	let expected_channel_overprovisioning_msat =
 		(expected_received_amount_msat * channel_over_provisioning_ppm as u64) / 1_000_000;
