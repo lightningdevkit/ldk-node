@@ -7,8 +7,8 @@
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{
-	default_user_config, Config, EsploraSyncConfig, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	WALLET_KEYS_SEED_LEN,
+	default_user_config, may_announce_channel, AnnounceError, Config, EsploraSyncConfig,
+	DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
@@ -32,8 +32,7 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
-use crate::Node;
-use crate::{io, NodeMetrics};
+use crate::{io, Node, NodeMetrics};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::io::Cursor;
@@ -912,6 +911,23 @@ fn build_with_store_internal(
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
 	logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
+	if let Err(err) = may_announce_channel(&config) {
+		if config.announcement_addresses.is_some() {
+			log_error!(logger, "Announcement addresses were set but some required configuration options for node announcement are missing: {}", err);
+			let build_error = if matches!(err, AnnounceError::MissingNodeAlias) {
+				BuildError::InvalidNodeAlias
+			} else {
+				BuildError::InvalidListeningAddresses
+			};
+			return Err(build_error);
+		}
+
+		if config.node_alias.is_some() {
+			log_error!(logger, "Node alias was set but some required configuration options for node announcement are missing: {}", err);
+			return Err(BuildError::InvalidListeningAddresses);
+		}
+	}
+
 	// Initialize the status fields.
 	let is_listening = Arc::new(AtomicBool::new(false));
 	let node_metrics = match read_node_metrics(Arc::clone(&kv_store), Arc::clone(&logger)) {

@@ -1077,23 +1077,21 @@ where
 				is_announced,
 				params: _,
 			} => {
-				if is_announced && !may_announce_channel(&*self.config) {
-					log_error!(
-						self.logger,
-						"Rejecting inbound announced channel from peer {} as not all required details are set. Please ensure node alias and listening addresses have been configured.",
-						counterparty_node_id,
-					);
+				if is_announced {
+					if let Err(err) = may_announce_channel(&*self.config) {
+						log_error!(self.logger, "Rejecting inbound announced channel from peer {} due to missing configuration: {}", counterparty_node_id, err);
 
-					self.channel_manager
-						.force_close_without_broadcasting_txn(
-							&temporary_channel_id,
-							&counterparty_node_id,
-							"Channel request rejected".to_string(),
-						)
-						.unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to reject channel: {:?}", e)
-						});
-					return Ok(());
+						self.channel_manager
+							.force_close_without_broadcasting_txn(
+								&temporary_channel_id,
+								&counterparty_node_id,
+								"Channel request rejected".to_string(),
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to reject channel: {:?}", e)
+							});
+						return Ok(());
+					}
 				}
 
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
