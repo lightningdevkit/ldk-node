@@ -64,7 +64,13 @@ fn main() {
 	}
 
 	let mut ldk_node_config = Config::default();
-	let config_file = load_config(Path::new(arg)).expect("Invalid configuration file.");
+	let config_file = match load_config(Path::new(arg)) {
+		Ok(config) => config,
+		Err(e) => {
+			eprintln!("Invalid configuration file: {}", e);
+			std::process::exit(-1);
+		},
+	};
 
 	ldk_node_config.storage_dir_path = config_file.storage_dir_path.clone();
 	ldk_node_config.listening_addresses = Some(vec![config_file.listening_addr]);
