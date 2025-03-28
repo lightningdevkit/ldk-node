@@ -310,9 +310,7 @@ pub(crate) fn setup_node(
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let mut sync_config = EsploraSyncConfig::default();
-			sync_config.onchain_wallet_sync_interval_secs = 100000;
-			sync_config.lightning_wallet_sync_interval_secs = 100000;
+			let sync_config = EsploraSyncConfig { background_sync_config: None };
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		},
 		TestChainSource::BitcoindRpc(bitcoind) => {

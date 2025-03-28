@@ -1219,14 +1219,13 @@ impl Node {
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
 	/// cache.
 	///
-	/// **Note:** The wallets are regularly synced in the background, which is configurable via the
-	/// respective config object, e.g., via
-	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`] and
-	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]. Therefore, using this blocking
-	/// sync method is almost always redundant and should be avoided where possible.
+	/// **Note:** The wallets are regularly synced in the background if background syncing is enabled
+	/// via [`EsploraSyncConfig::background_sync_config`]. Therefore, using this blocking sync method
+	/// is almost always redundant when background syncing is enabled and should be avoided where possible.
+	/// However, if background syncing is disabled (i.e., `background_sync_config` is set to `None`),
+	/// this method must be called manually to keep wallets in sync with the chain state.
 	///
-	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::onchain_wallet_sync_interval_secs
-	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::lightning_wallet_sync_interval_secs
+	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {

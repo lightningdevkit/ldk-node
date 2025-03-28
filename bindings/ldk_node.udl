@@ -19,10 +19,14 @@ dictionary AnchorChannelsConfig {
 	u64 per_channel_reserve_sats;
 };
 
-dictionary EsploraSyncConfig {
+dictionary BackgroundSyncConfig {
 	u64 onchain_wallet_sync_interval_secs;
 	u64 lightning_wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;
+};
+
+dictionary EsploraSyncConfig {
+	BackgroundSyncConfig? background_sync_config;
 };
 
 dictionary LSPS2ServiceConfig {

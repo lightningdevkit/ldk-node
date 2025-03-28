@@ -282,7 +282,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config
 }
 
-/// Options related to syncing the Lightning and on-chain wallets via an Esplora backend.
+/// Options related to background syncing the Lightning and on-chain wallets.
 ///
 /// ### Defaults
 ///
@@ -292,28 +292,51 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 /// | `lightning_wallet_sync_interval_secs`  | 30                 |
 /// | `fee_rate_cache_update_interval_secs`  | 600                |
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct EsploraSyncConfig {
+pub struct BackgroundSyncConfig {
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
+	/// **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
 	pub onchain_wallet_sync_interval_secs: u64,
+
 	/// The time in-between background sync attempts of the LDK wallet, in seconds.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
+	/// **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
 	pub lightning_wallet_sync_interval_secs: u64,
+
 	/// The time in-between background update attempts to our fee rate cache, in seconds.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
+	/// **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
 	pub fee_rate_cache_update_interval_secs: u64,
 }
 
-impl Default for EsploraSyncConfig {
+impl Default for BackgroundSyncConfig {
 	fn default() -> Self {
 		Self {
 			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
 			lightning_wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
 			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
 		}
+	}
+}
+
+/// Configuration for syncing with an Esplora backend.
+///
+/// Background syncing is enabled by default, using the default values specified in
+/// [`BackgroundSyncConfig`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct EsploraSyncConfig {
+	/// Background sync configuration.
+	///
+	/// If set to `None`, background syncing will be disabled. Users will need to manually
+	/// sync via `Node::sync_wallets` for the wallets and fee rate updates.
+	///
+	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
+	pub background_sync_config: Option<BackgroundSyncConfig>,
+}
+
+impl Default for EsploraSyncConfig {
+	fn default() -> Self {
+		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }
 	}
 }
 
