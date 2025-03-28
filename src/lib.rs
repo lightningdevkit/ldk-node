@@ -414,7 +414,7 @@ impl Node {
 		let bcast_node_metrics = Arc::clone(&self.node_metrics);
 		let mut stop_bcast = self.stop_sender.subscribe();
 		let node_alias = self.config.node_alias.clone();
-		if may_announce_channel(&self.config) {
+		if may_announce_channel(&self.config).is_ok() {
 			runtime.spawn(async move {
 				// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 				#[cfg(not(test))]
@@ -457,8 +457,10 @@ impl Node {
 								continue;
 							}
 
-							let addresses = if let Some(addresses) = bcast_config.listening_addresses.clone() {
-								addresses
+							let addresses = if let Some(announcement_addresses) = bcast_config.announcement_addresses.clone() {
+								announcement_addresses
+							} else if let Some(listening_addresses) = bcast_config.listening_addresses.clone() {
+								listening_addresses
 							} else {
 								debug_assert!(false, "We checked whether the node may announce, so listening addresses should always be set");
 								continue;
@@ -800,6 +802,14 @@ impl Node {
 	/// Returns our own listening addresses.
 	pub fn listening_addresses(&self) -> Option<Vec<SocketAddress>> {
 		self.config.listening_addresses.clone()
+	}
+
+	/// Returns the addresses that the node will announce to the network.
+	pub fn announcement_addresses(&self) -> Option<Vec<SocketAddress>> {
+		self.config
+			.announcement_addresses
+			.clone()
+			.or_else(|| self.config.listening_addresses.clone())
 	}
 
 	/// Returns our node alias.
@@ -1201,19 +1211,19 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
-		if may_announce_channel(&self.config) {
-			self.open_channel_inner(
-				node_id,
-				address,
-				channel_amount_sats,
-				push_to_counterparty_msat,
-				channel_config,
-				true,
-			)
-		} else {
-			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node. Please make sure to configure listening addreesses and node alias");
+		if let Err(err) = may_announce_channel(&self.config) {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed);
 		}
+
+		self.open_channel_inner(
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			true,
+		)
 	}
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate

@@ -7,6 +7,7 @@ dictionary Config {
 	string storage_dir_path;
 	Network network;
 	sequence<SocketAddress>? listening_addresses;
+	sequence<SocketAddress>? announcement_addresses;
 	NodeAlias? node_alias;
 	sequence<PublicKey> trusted_peers_0conf;
 	u64 probing_liquidity_limit_multiplier;
@@ -84,6 +85,8 @@ interface Builder {
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
+	void set_announcement_addresses(sequence<SocketAddress> announcement_addresses);
+	[Throws=BuildError]
 	void set_node_alias(string node_alias);
 	[Throws=BuildError]
 	Node build();
@@ -112,6 +115,7 @@ interface Node {
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
+	sequence<SocketAddress>? announcement_addresses();
 	NodeAlias? node_alias();
 	Bolt11Payment bolt11_payment();
 	Bolt12Payment bolt12_payment();
@@ -319,6 +323,7 @@ enum BuildError {
 	"InvalidSystemTime",
 	"InvalidChannelMonitor",
 	"InvalidListeningAddresses",
+	"InvalidAnnouncementAddresses",
 	"InvalidNodeAlias",
 	"ReadFailed",
 	"WriteFailed",

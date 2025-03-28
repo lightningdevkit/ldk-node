@@ -11,8 +11,9 @@ use common::{
 	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_received_event, expect_payment_successful_event, generate_blocks_and_wait,
 	logging::{init_log_logger, validate_log_entry, TestLogWriter},
-	open_channel, premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd,
-	setup_builder, setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	open_channel, premine_and_distribute_funds, random_config, random_listening_addresses,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, wait_for_tx,
+	TestChainSource, TestSyncStore,
 };
 
 use ldk_node::config::EsploraSyncConfig;
@@ -24,6 +25,7 @@ use ldk_node::payment::{
 use ldk_node::{Builder, Event, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
+use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::util::persist::KVStore;
 
 use bitcoincore_rpc::RpcApi;
@@ -883,6 +885,97 @@ fn simple_bolt12_send_receive() {
 		},
 	}
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(overpaid_amount));
+}
+
+#[test]
+fn test_node_announcement_propagation() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	// Node A will use both listening and announcement addresses
+	let mut config_a = random_config(true);
+	let node_a_alias_string = "ldk-node-a".to_string();
+	let mut node_a_alias_bytes = [0u8; 32];
+	node_a_alias_bytes[..node_a_alias_string.as_bytes().len()]
+		.copy_from_slice(node_a_alias_string.as_bytes());
+	let node_a_node_alias = Some(NodeAlias(node_a_alias_bytes));
+	let node_a_announcement_addresses = random_listening_addresses();
+	config_a.node_config.node_alias = node_a_node_alias.clone();
+	config_a.node_config.listening_addresses = Some(random_listening_addresses());
+	config_a.node_config.announcement_addresses = Some(node_a_announcement_addresses.clone());
+
+	// Node B will only use listening addresses
+	let mut config_b = random_config(true);
+	let node_b_alias_string = "ldk-node-b".to_string();
+	let mut node_b_alias_bytes = [0u8; 32];
+	node_b_alias_bytes[..node_b_alias_string.as_bytes().len()]
+		.copy_from_slice(node_b_alias_string.as_bytes());
+	let node_b_node_alias = Some(NodeAlias(node_b_alias_bytes));
+	let node_b_listening_addresses = random_listening_addresses();
+	config_b.node_config.node_alias = node_b_node_alias.clone();
+	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
+	config_b.node_config.announcement_addresses = None;
+
+	let node_a = setup_node(&chain_source, config_a, None);
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	node_a.sync_wallets().unwrap();
+
+	// Open an announced channel from node_a to node_b
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Wait until node_b broadcasts a node announcement
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
+	// Sleep to make sure the node announcement propagates
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	// Get node info from the other node's perspective
+	let node_a_info = node_b.network_graph().node(&NodeId::from_pubkey(&node_a.node_id())).unwrap();
+	let node_a_announcement_info = node_a_info.announcement_info.as_ref().unwrap();
+
+	let node_b_info = node_a.network_graph().node(&NodeId::from_pubkey(&node_b.node_id())).unwrap();
+	let node_b_announcement_info = node_b_info.announcement_info.as_ref().unwrap();
+
+	// Assert that the aliases and addresses match the expected values
+	#[cfg(not(feature = "uniffi"))]
+	assert_eq!(node_a_announcement_info.alias(), &node_a_node_alias.unwrap());
+	#[cfg(feature = "uniffi")]
+	assert_eq!(node_a_announcement_info.alias, node_a_alias_string);
+
+	#[cfg(not(feature = "uniffi"))]
+	assert_eq!(node_a_announcement_info.addresses(), &node_a_announcement_addresses);
+	#[cfg(feature = "uniffi")]
+	assert_eq!(node_a_announcement_info.addresses, node_a_announcement_addresses);
+
+	#[cfg(not(feature = "uniffi"))]
+	assert_eq!(node_b_announcement_info.alias(), &node_b_node_alias.unwrap());
+	#[cfg(feature = "uniffi")]
+	assert_eq!(node_b_announcement_info.alias, node_b_alias_string);
+
+	#[cfg(not(feature = "uniffi"))]
+	assert_eq!(node_b_announcement_info.addresses(), &node_b_listening_addresses);
+	#[cfg(feature = "uniffi")]
+	assert_eq!(node_b_announcement_info.addresses, node_b_listening_addresses);
 }
 
 #[test]

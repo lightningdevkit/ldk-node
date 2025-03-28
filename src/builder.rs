@@ -7,8 +7,8 @@
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{
-	default_user_config, Config, EsploraSyncConfig, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	WALLET_KEYS_SEED_LEN,
+	default_user_config, may_announce_channel, AnnounceError, Config, EsploraSyncConfig,
+	DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
@@ -32,8 +32,7 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
-use crate::Node;
-use crate::{io, NodeMetrics};
+use crate::{io, Node, NodeMetrics};
 
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::io::Cursor;
@@ -148,6 +147,8 @@ pub enum BuildError {
 	InvalidChannelMonitor,
 	/// The given listening addresses are invalid, e.g. too many were passed.
 	InvalidListeningAddresses,
+	/// The given announcement addresses are invalid, e.g. too many were passed.
+	InvalidAnnouncementAddresses,
 	/// The provided alias is invalid.
 	InvalidNodeAlias,
 	/// We failed to read data from the [`KVStore`].
@@ -184,6 +185,9 @@ impl fmt::Display for BuildError {
 				write!(f, "Failed to watch a deserialized ChannelMonitor")
 			},
 			Self::InvalidListeningAddresses => write!(f, "Given listening addresses are invalid."),
+			Self::InvalidAnnouncementAddresses => {
+				write!(f, "Given announcement addresses are invalid.")
+			},
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
@@ -410,6 +414,22 @@ impl NodeBuilder {
 		}
 
 		self.config.listening_addresses = Some(listening_addresses);
+		Ok(self)
+	}
+
+	/// Sets the IP address and TCP port which [`Node`] will announce to the gossip network that it accepts connections on.
+	///
+	/// **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+	///
+	/// [`listening_addresses`]: Self::set_listening_addresses
+	pub fn set_announcement_addresses(
+		&mut self, announcement_addresses: Vec<SocketAddress>,
+	) -> Result<&mut Self, BuildError> {
+		if announcement_addresses.len() > 100 {
+			return Err(BuildError::InvalidAnnouncementAddresses);
+		}
+
+		self.config.announcement_addresses = Some(announcement_addresses);
 		Ok(self)
 	}
 
@@ -776,6 +796,17 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
 	}
 
+	/// Sets the IP address and TCP port which [`Node`] will announce to the gossip network that it accepts connections on.
+	///
+	/// **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+	///
+	/// [`listening_addresses`]: Self::set_listening_addresses
+	pub fn set_announcement_addresses(
+		&self, announcement_addresses: Vec<SocketAddress>,
+	) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_announcement_addresses(announcement_addresses).map(|_| ())
+	}
+
 	/// Sets the node alias that will be used when broadcasting announcements to the gossip
 	/// network.
 	///
@@ -880,6 +911,23 @@ fn build_with_store_internal(
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
 	logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
+	if let Err(err) = may_announce_channel(&config) {
+		if config.announcement_addresses.is_some() {
+			log_error!(logger, "Announcement addresses were set but some required configuration options for node announcement are missing: {}", err);
+			let build_error = if matches!(err, AnnounceError::MissingNodeAlias) {
+				BuildError::InvalidNodeAlias
+			} else {
+				BuildError::InvalidListeningAddresses
+			};
+			return Err(build_error);
+		}
+
+		if config.node_alias.is_some() {
+			log_error!(logger, "Node alias was set but some required configuration options for node announcement are missing: {}", err);
+			return Err(BuildError::InvalidListeningAddresses);
+		}
+	}
+
 	// Initialize the status fields.
 	let is_listening = Arc::new(AtomicBool::new(false));
 	let node_metrics = match read_node_metrics(Arc::clone(&kv_store), Arc::clone(&logger)) {
