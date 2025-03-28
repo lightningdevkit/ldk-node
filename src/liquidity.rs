@@ -675,11 +675,14 @@ where
 
 				let mut config = *self.channel_manager.get_current_default_configuration();
 
-				// Set the HTLC-value-in-flight to 100% of the channel value to ensure we can
-				// forward the payment.
-				config
-					.channel_handshake_config
-					.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
+				// We set these LSP-specific values during Node building, here we're making sure it's actually set.
+				debug_assert_eq!(
+					config
+						.channel_handshake_config
+						.max_inbound_htlc_value_in_flight_percent_of_channel,
+					100
+				);
+				debug_assert!(config.accept_forwards_to_priv_channels);
 
 				// We set the forwarding fee to 0 for now as we're getting paid by the channel fee.
 				//

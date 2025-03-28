@@ -1240,6 +1240,22 @@ fn lsps2_client_service_integration() {
 		(expected_received_amount_msat + expected_channel_overprovisioning_msat) / 1000;
 	let channel_value_sats = client_node.list_channels().first().unwrap().channel_value_sats;
 	assert_eq!(channel_value_sats, expected_channel_size_sat);
+
+	println!("Generating regular invoice!");
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let amount_msat = 5_000_000;
+	let invoice = client_node
+		.bolt11_payment()
+		.receive(amount_msat, &invoice_description.into(), 1024)
+		.unwrap();
+
+	// Have the payer_node pay the invoice, to check regular forwards service_node -> client_node
+	// are working as expected.
+	println!("Paying regular invoice!");
+	let payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
+	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_received_event!(client_node, amount_msat);
 }
 
 #[test]
