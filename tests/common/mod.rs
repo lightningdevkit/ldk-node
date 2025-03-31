@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-#![cfg(any(test, cln_test, vss_test))]
+#![cfg(any(test, cln_test, lnd_test, vss_test))]
 #![allow(dead_code)]
 
 pub(crate) mod logging;

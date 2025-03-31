@@ -1,0 +1,33 @@
+name: CI Checks - LND Integration Tests
+
+on: [push, pull_request]
+
+jobs:
+  check-lnd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create temporary directory for LND data
+        id: create-temp-dir
+        run: echo "LND_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
+
+      - name: Start bitcoind, electrs, and LND
+        run: docker compose -f docker-compose-lnd.yml up -d
+        env:
+          LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
+
+      - name: Set permissions for LND data directory
+        # In PR 4622 (https://github.com/lightningnetwork/lnd/pull/4622),
+        # LND sets file permissions to 0700, preventing test code from accessing them.
+        # This step ensures the test suite has the necessary permissions.
+        run: sudo chmod -R 755 $LND_DATA_DIR
+        env:
+          LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
+
+      - name: Run LND integration tests
+        run: LND_CERT_PATH=$LND_DATA_DIR/tls.cert LND_MACAROON_PATH=$LND_DATA_DIR/data/chain/bitcoin/regtest/admin.macaroon
+          RUSTFLAGS="--cfg lnd_test" cargo test --test integration_tests_lnd -- --exact --show-output
+        env:
+          LND_DATA_DIR: ${{ env.LND_DATA_DIR }}

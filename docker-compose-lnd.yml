@@ -1,0 +1,87 @@
+services:
+  bitcoin:
+    image: blockstream/bitcoind:24.1
+    platform: linux/amd64
+    command:
+      [
+        "bitcoind",
+        "-printtoconsole",
+        "-regtest=1",
+        "-rpcallowip=0.0.0.0/0",
+        "-rpcbind=0.0.0.0",
+        "-rpcuser=user",
+        "-rpcpassword=pass",
+        "-fallbackfee=0.00001",
+        "-zmqpubrawblock=tcp://0.0.0.0:28332",
+        "-zmqpubrawtx=tcp://0.0.0.0:28333"
+      ]
+    ports:
+      - "18443:18443"  # Regtest RPC port
+      - "18444:18444"  # Regtest P2P port
+      - "28332:28332"  # ZMQ block port
+      - "28333:28333"  # ZMQ tx port
+    networks:
+      - bitcoin-electrs
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=user", "-rpcpassword=pass", "getblockchaininfo"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  electrs:
+    image: blockstream/esplora:electrs-cd9f90c115751eb9d2bca9a4da89d10d048ae931
+    platform: linux/amd64
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "/app/electrs_bitcoin/bin/electrs",
+        "-vvvv",
+        "--timestamp",
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=bitcoin:18443",
+        "--http-addr=0.0.0.0:3002",
+        "--electrum-rpc-addr=0.0.0.0:50001"
+      ]
+    ports:
+      - "3002:3002"
+      - "50001:50001"
+    networks:
+      - bitcoin-electrs
+
+  lnd:
+    image: lightninglabs/lnd:v0.18.5-beta
+    container_name: ldk-node-lnd
+    depends_on:
+      - bitcoin
+    volumes:
+      - ${LND_DATA_DIR}:/root/.lnd
+    ports:
+      - "8081:8081"
+      - "9735:9735"
+    command:
+      - "--noseedbackup"
+      - "--trickledelay=5000"
+      - "--alias=ldk-node-lnd-test"
+      - "--externalip=lnd:9735"
+      - "--bitcoin.active"
+      - "--bitcoin.regtest"
+      - "--bitcoin.node=bitcoind"
+      - "--bitcoind.rpchost=bitcoin:18443"
+      - "--bitcoind.rpcuser=user"
+      - "--bitcoind.rpcpass=pass"
+      - "--bitcoind.zmqpubrawblock=tcp://bitcoin:28332"
+      - "--bitcoind.zmqpubrawtx=tcp://bitcoin:28333"
+      - "--accept-keysend"
+      - "--rpclisten=0.0.0.0:8081"
+      - "--tlsextradomain=lnd"
+      - "--tlsextraip=0.0.0.0"
+    networks:
+      - bitcoin-electrs
+
+networks:
+  bitcoin-electrs:
+    driver: bridge
