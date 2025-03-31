@@ -641,25 +641,29 @@ where
 	}
 
 	pub(crate) fn remove(&self, id: &PaymentId) -> Result<(), Error> {
-		let store_key = hex_utils::to_string(&id.0);
-		self.kv_store
-			.remove(
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&store_key,
-				false,
-			)
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Removing payment data for key {}/{}/{} failed due to: {}",
+		let removed = self.payments.lock().unwrap().remove(id).is_some();
+		if removed {
+			let store_key = hex_utils::to_string(&id.0);
+			self.kv_store
+				.remove(
 					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					store_key,
-					e
-				);
-				Error::PersistenceFailed
-			})
+					&store_key,
+					false,
+				)
+				.map_err(|e| {
+					log_error!(
+						self.logger,
+						"Removing payment data for key {}/{}/{} failed due to: {}",
+						PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+						PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+						store_key,
+						e
+					);
+					Error::PersistenceFailed
+				})?;
+		}
+		Ok(())
 	}
 
 	pub(crate) fn get(&self, id: &PaymentId) -> Option<PaymentDetails> {
