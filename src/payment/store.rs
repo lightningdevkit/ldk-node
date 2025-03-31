@@ -686,14 +686,7 @@ where
 	pub(crate) fn list_filter<F: FnMut(&&PaymentDetails) -> bool>(
 		&self, f: F,
 	) -> Vec<PaymentDetails> {
-		self.payments
-			.lock()
-			.unwrap()
-			.iter()
-			.map(|(_, p)| p)
-			.filter(f)
-			.cloned()
-			.collect::<Vec<PaymentDetails>>()
+		self.payments.lock().unwrap().values().filter(f).cloned().collect::<Vec<PaymentDetails>>()
 	}
 
 	fn persist_info(&self, id: &PaymentId, payment: &PaymentDetails) -> Result<(), Error> {
