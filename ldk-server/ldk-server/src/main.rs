@@ -29,7 +29,8 @@ use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use hex::DisplayHex;
 use ldk_node::config::Config;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
-use ldk_node::logger::LogLevel;
+#[cfg(feature = "experimental-lsps2-support")]
+use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_server_protos::events;
 use ldk_server_protos::events::{event_envelope, EventEnvelope};
 use ldk_server_protos::types::Payment;
@@ -63,7 +64,13 @@ fn main() {
 	}
 
 	let mut ldk_node_config = Config::default();
-	let config_file = load_config(Path::new(arg)).expect("Invalid configuration file.");
+	let config_file = match load_config(Path::new(arg)) {
+		Ok(config) => config,
+		Err(e) => {
+			eprintln!("Invalid configuration file: {}", e);
+			std::process::exit(-1);
+		},
+	};
 
 	ldk_node_config.storage_dir_path = config_file.storage_dir_path.clone();
 	ldk_node_config.listening_addresses = Some(vec![config_file.listening_addr]);
@@ -79,6 +86,12 @@ fn main() {
 		bitcoind_rpc_addr.port(),
 		config_file.bitcoind_rpc_user,
 		config_file.bitcoind_rpc_password,
+	);
+
+	// LSPS2 support is highly experimental and for testing purposes only.
+	#[cfg(feature = "experimental-lsps2-support")]
+	builder.set_liquidity_provider_lsps2(
+		config_file.lsps2_service_config.expect("Missing liquidity.lsps2_server config"),
 	);
 
 	let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
