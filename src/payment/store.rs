@@ -641,25 +641,29 @@ where
 	}
 
 	pub(crate) fn remove(&self, id: &PaymentId) -> Result<(), Error> {
-		let store_key = hex_utils::to_string(&id.0);
-		self.kv_store
-			.remove(
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&store_key,
-				false,
-			)
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Removing payment data for key {}/{}/{} failed due to: {}",
+		let removed = self.payments.lock().unwrap().remove(id).is_some();
+		if removed {
+			let store_key = hex_utils::to_string(&id.0);
+			self.kv_store
+				.remove(
 					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					store_key,
-					e
-				);
-				Error::PersistenceFailed
-			})
+					&store_key,
+					false,
+				)
+				.map_err(|e| {
+					log_error!(
+						self.logger,
+						"Removing payment data for key {}/{}/{} failed due to: {}",
+						PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+						PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+						store_key,
+						e
+					);
+					Error::PersistenceFailed
+				})?;
+		}
+		Ok(())
 	}
 
 	pub(crate) fn get(&self, id: &PaymentId) -> Option<PaymentDetails> {
@@ -682,14 +686,7 @@ where
 	pub(crate) fn list_filter<F: FnMut(&&PaymentDetails) -> bool>(
 		&self, f: F,
 	) -> Vec<PaymentDetails> {
-		self.payments
-			.lock()
-			.unwrap()
-			.iter()
-			.map(|(_, p)| p)
-			.filter(f)
-			.cloned()
-			.collect::<Vec<PaymentDetails>>()
+		self.payments.lock().unwrap().values().filter(f).cloned().collect::<Vec<PaymentDetails>>()
 	}
 
 	fn persist_info(&self, id: &PaymentId, payment: &PaymentDetails) -> Result<(), Error> {
