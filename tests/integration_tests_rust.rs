@@ -30,11 +30,13 @@ use lightning::util::persist::KVStore;
 
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash;
+use bitcoin::Address;
 use bitcoin::Amount;
-
 use log::LevelFilter;
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[test]
@@ -302,6 +304,10 @@ fn onchain_send_receive() {
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	// This is a Bitcoin Testnet address. Sending funds to this address from the Regtest network will fail
+	let static_address = "tb1q0d40e5rta4fty63z64gztf8c3v20cvet6v2jdh";
+	let unchecked_address = Address::<NetworkUnchecked>::from_str(static_address).unwrap();
+	let addr_c = unchecked_address.assume_checked();
 
 	let premine_amount_sat = 1_100_000;
 	premine_and_distribute_funds(
@@ -364,6 +370,16 @@ fn onchain_send_receive() {
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
 		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None)
+	);
+
+	assert_eq!(
+		Err(NodeError::InvalidAddress),
+		node_a.onchain_payment().send_to_address(&addr_c, expected_node_a_balance + 1, None)
+	);
+
+	assert_eq!(
+		Err(NodeError::InvalidAddress),
+		node_a.onchain_payment().send_all_to_address(&addr_c, true, None)
 	);
 
 	let amount_to_send_sats = 54321;
