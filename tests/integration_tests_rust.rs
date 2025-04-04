@@ -24,9 +24,9 @@ use ldk_node::payment::{
 };
 use ldk_node::{Builder, Event, NodeError};
 
-use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::util::persist::KVStore;
+use lightning::{ln::channelmanager::PaymentId, offers::offer::Offer};
 
 use bitcoincore_rpc::RpcApi;
 
@@ -35,7 +35,7 @@ use bitcoin::Amount;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use log::LevelFilter;
 
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 #[test]
 fn channel_full_cycle() {
@@ -1274,4 +1274,86 @@ fn facade_logging() {
 	for (_, entry) in logger.retrieve_logs().iter().enumerate() {
 		validate_log_entry(entry);
 	}
+}
+
+#[test]
+fn simple_bolt12_pay_with_expiry() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Sleep until we broadcasted a node announcement.
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
+	// Sleep one more sec to make sure the node announcement propagates.
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	let expected_amount_msat = 100_000_000;
+	let offer = node_b
+		.bolt12_payment()
+		.receive(expected_amount_msat, "we should have time before expiry", Some(86400), None)
+		.unwrap();
+
+	// Make sure that we are able to parse it back!
+	let offer = Offer::from_str(&offer.to_string()).unwrap();
+
+	let payment_id = node_a.bolt12_payment().send(&offer, None, None);
+
+	assert!(payment_id.is_ok(), "Payment should not fail: {:?}", payment_id);
+
+	let payment_id = payment_id.unwrap();
+	expect_payment_successful_event!(node_a, Some(payment_id), None);
+	let node_a_payments =
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+	assert_eq!(node_a_payments.len(), 1);
+	match node_a_payments.first().unwrap().kind {
+		PaymentKind::Bolt12Offer { hash, preimage, secret: _, offer_id, .. } => {
+			assert!(hash.is_some());
+			assert!(preimage.is_some());
+			assert_eq!(offer_id, offer.id());
+		},
+		_ => {
+			panic!("Unexpected payment kind");
+		},
+	}
+	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+
+	expect_payment_received_event!(node_b, expected_amount_msat);
+	let node_b_payments =
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+	assert_eq!(node_b_payments.len(), 1);
+	match node_b_payments.first().unwrap().kind {
+		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
+			assert!(hash.is_some());
+			assert!(preimage.is_some());
+			assert!(secret.is_some());
+			assert_eq!(offer_id, offer.id());
+		},
+		_ => {
+			panic!("Unexpected payment kind");
+		},
+	}
+	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
 }
