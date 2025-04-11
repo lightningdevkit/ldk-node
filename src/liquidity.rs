@@ -1308,7 +1308,7 @@ type PaymentInfo = lightning_liquidity::lsps1::msgs::PaymentInfo;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentInfo {
 	/// A Lightning payment using BOLT 11.
-	pub bolt11: Option<lightning_liquidity::lsps1::msgs::Bolt11PaymentInfo>,
+	pub bolt11: Option<crate::uniffi_types::Bolt11PaymentInfo>,
 	/// An onchain payment.
 	pub onchain: Option<OnchainPaymentInfo>,
 }
@@ -1316,7 +1316,10 @@ pub struct PaymentInfo {
 #[cfg(feature = "uniffi")]
 impl From<lightning_liquidity::lsps1::msgs::PaymentInfo> for PaymentInfo {
 	fn from(value: lightning_liquidity::lsps1::msgs::PaymentInfo) -> Self {
-		PaymentInfo { bolt11: value.bolt11, onchain: value.onchain.map(|o| o.into()) }
+		PaymentInfo {
+			bolt11: value.bolt11.map(|b| b.into()),
+			onchain: value.onchain.map(|o| o.into()),
+		}
 	}
 }
 
