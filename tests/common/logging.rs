@@ -48,7 +48,6 @@ impl LogFacadeLog for MockLogFacadeLogger {
 			record.line().unwrap(),
 			record.args()
 		);
-		println!("{message}");
 		self.logs.lock().unwrap().push(message);
 	}
 
