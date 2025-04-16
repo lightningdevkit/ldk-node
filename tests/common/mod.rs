@@ -12,7 +12,7 @@ pub(crate) mod logging;
 
 use logging::TestLogWriter;
 
-use ldk_node::config::{Config, EsploraSyncConfig};
+use ldk_node::config::{Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
@@ -33,11 +33,9 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Network, OutPoint, Txid};
 
-use bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
-use bitcoincore_rpc::Client as BitcoindClient;
-use bitcoincore_rpc::RpcApi;
-
-use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
+use electrsd::corepc_node::Client as BitcoindClient;
+use electrsd::corepc_node::Node as BitcoinD;
+use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 
 use rand::distributions::Alphanumeric;
@@ -171,10 +169,10 @@ pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe =
-		env::var("BITCOIND_EXE").ok().or_else(|| bitcoind::downloaded_exe_path().ok()).expect(
+		env::var("BITCOIND_EXE").ok().or_else(|| corepc_node::downloaded_exe_path().ok()).expect(
 			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
 		);
-	let mut bitcoind_conf = bitcoind::Conf::default();
+	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
@@ -257,6 +255,7 @@ type TestNode = Node;
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
 	Esplora(&'a ElectrsD),
+	Electrum(&'a ElectrsD),
 	BitcoindRpc(&'a BitcoinD),
 }
 
@@ -313,6 +312,11 @@ pub(crate) fn setup_node(
 			let sync_config = EsploraSyncConfig { background_sync_config: None };
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		},
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let sync_config = ElectrumSyncConfig { background_sync_config: None };
+			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
+		},
 		TestChainSource::BitcoindRpc(bitcoind) => {
 			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
 			let rpc_port = bitcoind.params.rpc_socket.port();
@@ -359,17 +363,14 @@ pub(crate) fn setup_node(
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
-	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
+	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	print!("Generating {} blocks...", num);
-	let cur_height = bitcoind.get_block_count().expect("failed to get current block height");
-	let address = bitcoind
-		.get_new_address(Some("test"), Some(AddressType::Legacy))
-		.expect("failed to get new address")
-		.require_network(bitcoin::Network::Regtest)
-		.expect("failed to get new address");
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let cur_height = blockchain_info.blocks;
+	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
-	let _block_hashes_res = bitcoind.generate_to_address(num as u64, &address);
+	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
 	wait_for_block(electrs, cur_height as usize + num);
 	print!(" Done!");
 	println!("\n");
@@ -450,13 +451,12 @@ where
 pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
-	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
+	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	generate_blocks_and_wait(bitcoind, electrs, 101);
 
 	for addr in addrs {
-		let txid =
-			bitcoind.send_to_address(&addr, amount, None, None, None, None, None, None).unwrap();
+		let txid = bitcoind.send_to_address(&addr, amount).unwrap().0.parse().unwrap();
 		wait_for_tx(electrs, txid);
 	}
 

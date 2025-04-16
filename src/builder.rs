@@ -7,8 +7,8 @@
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{
-	default_user_config, may_announce_channel, AnnounceError, Config, EsploraSyncConfig,
-	DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
+	default_user_config, may_announce_channel, AnnounceError, Config, ElectrumSyncConfig,
+	EsploraSyncConfig, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
@@ -83,6 +83,7 @@ const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
 	Esplora { server_url: String, sync_config: Option<EsploraSyncConfig> },
+	Electrum { server_url: String, sync_config: Option<ElectrumSyncConfig> },
 	BitcoindRpc { rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String },
 }
 
@@ -281,6 +282,18 @@ impl NodeBuilder {
 	) -> &mut Self {
 		self.chain_data_source_config =
 			Some(ChainDataSourceConfig::Esplora { server_url, sync_config });
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data from the given Electrum server.
+	///
+	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_electrum(
+		&mut self, server_url: String, sync_config: Option<ElectrumSyncConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::Electrum { server_url, sync_config });
 		self
 	}
 
@@ -691,6 +704,16 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_chain_source_esplora(server_url, sync_config);
 	}
 
+	/// Configures the [`Node`] instance to source its chain data from the given Electrum server.
+	///
+	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_electrum(
+		&self, server_url: String, sync_config: Option<ElectrumSyncConfig>,
+	) {
+		self.inner.write().unwrap().set_chain_source_electrum(server_url, sync_config);
+	}
+
 	/// Configures the [`Node`] instance to source its chain data from the given Bitcoin Core RPC
 	/// endpoint.
 	pub fn set_chain_source_bitcoind_rpc(
@@ -1013,6 +1036,20 @@ fn build_with_store_internal(
 		Some(ChainDataSourceConfig::Esplora { server_url, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
 			Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				sync_config,
+				Arc::clone(&wallet),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+		Some(ChainDataSourceConfig::Electrum { server_url, sync_config }) => {
+			let sync_config = sync_config.unwrap_or(ElectrumSyncConfig::default());
+			Arc::new(ChainSource::new_electrum(
 				server_url.clone(),
 				sync_config,
 				Arc::clone(&wallet),

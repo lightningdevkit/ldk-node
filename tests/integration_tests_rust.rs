@@ -28,11 +28,11 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::util::persist::KVStore;
 
-use bitcoincore_rpc::RpcApi;
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
 use bitcoin::hashes::Hash;
 use bitcoin::Amount;
-use lightning_invoice::{Bolt11InvoiceDescription, Description};
+
 use log::LevelFilter;
 
 use std::sync::Arc;
@@ -41,6 +41,14 @@ use std::sync::Arc;
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
+}
+
+#[test]
+fn channel_full_cycle_electrum() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
@@ -500,16 +508,10 @@ fn onchain_wallet_recovery() {
 
 	let txid = bitcoind
 		.client
-		.send_to_address(
-			&addr_2,
-			Amount::from_sat(premine_amount_sat),
-			None,
-			None,
-			None,
-			None,
-			None,
-			None,
-		)
+		.send_to_address(&addr_2, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
 		.unwrap();
 	wait_for_tx(&electrsd.client, txid);
 
@@ -542,16 +544,10 @@ fn onchain_wallet_recovery() {
 
 	let txid = bitcoind
 		.client
-		.send_to_address(
-			&addr_6,
-			Amount::from_sat(premine_amount_sat),
-			None,
-			None,
-			None,
-			None,
-			None,
-			None,
-		)
+		.send_to_address(&addr_6, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
 		.unwrap();
 	wait_for_tx(&electrsd.client, txid);
 

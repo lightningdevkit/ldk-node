@@ -236,6 +236,12 @@ impl Node {
 			self.config.network
 		);
 
+		// Start up any runtime-dependant chain sources (e.g. Electrum)
+		self.chain_source.start(Arc::clone(&runtime)).map_err(|e| {
+			log_error!(self.logger, "Failed to start chain syncing: {}", e);
+			e
+		})?;
+
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
 		let runtime_ref = &runtime;
@@ -639,6 +645,9 @@ impl Node {
 		let metrics_runtime = Arc::clone(&runtime);
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
+
+		// Stop any runtime-dependant chain sources.
+		self.chain_source.stop();
 
 		// Stop the runtime.
 		match self.stop_sender.send(()) {
@@ -1251,6 +1260,13 @@ impl Node {
 				async move {
 					match chain_source.as_ref() {
 						ChainSource::Esplora { .. } => {
+							chain_source.update_fee_rate_estimates().await?;
+							chain_source
+								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
+								.await?;
+							chain_source.sync_onchain_wallet().await?;
+						},
+						ChainSource::Electrum { .. } => {
 							chain_source.update_fee_rate_estimates().await?;
 							chain_source
 								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)

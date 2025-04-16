@@ -15,8 +15,8 @@ use lnd_grpc_rust::lnrpc::{
 };
 use lnd_grpc_rust::{connect, LndClient};
 
-use bitcoincore_rpc::Auth;
-use bitcoincore_rpc::Client as BitcoindClient;
+use electrsd::corepc_client::client_sync::Auth;
+use electrsd::corepc_node::Client as BitcoindClient;
 
 use electrum_client::Client as ElectrumClient;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
@@ -30,8 +30,8 @@ use tokio::fs;
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_lnd() {
 	// Setup bitcoind / electrs clients
-	let bitcoind_client = BitcoindClient::new(
-		"127.0.0.1:18443",
+	let bitcoind_client = BitcoindClient::new_with_auth(
+		"http://127.0.0.1:18443",
 		Auth::UserPass("user".to_string(), "pass".to_string()),
 	)
 	.unwrap();

@@ -36,7 +36,7 @@ lightning-persister = { version = "0.1.0" }
 lightning-background-processor = { version = "0.1.0", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.1.0" }
 lightning-block-sync = { version = "0.1.0", features = ["rpc-client", "tokio"] }
-lightning-transaction-sync = { version = "0.1.0", features = ["esplora-async-https", "time"] }
+lightning-transaction-sync = { version = "0.1.0", features = ["esplora-async-https", "time", "electrum"] }
 lightning-liquidity = { version = "0.1.0", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["std"] }
@@ -63,6 +63,7 @@ lightning-liquidity = { version = "0.1.0", features = ["std"] }
 
 bdk_chain = { version = "0.21.1", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.20.1", default-features = false, features = ["async-https-rustls", "tokio"]}
+bdk_electrum = { version = "0.20.1", default-features = false, features = ["use-rustls"]}
 bdk_wallet = { version = "1.0.0", default-features = false, features = ["std", "keys-bip39"]}
 
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
@@ -76,6 +77,7 @@ rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros" ] }
 esplora-client = { version = "0.11", default-features = false, features = ["tokio", "async-https-rustls"] }
+electrum-client = { version = "0.22.0", default-features = true }
 libc = "0.2"
 uniffi = { version = "0.27.3", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
@@ -92,16 +94,15 @@ winapi = { version = "0.3", features = ["winbase"] }
 lightning = { version = "0.1.0", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
 #lightning = { path = "../rust-lightning/lightning", features = ["std", "_test_utils"] }
-electrum-client = { version = "0.21.0", default-features = true }
-bitcoincore-rpc = { version = "0.19.0", default-features = false }
 proptest = "1.0.0"
 regex = "1.5.6"
 
 [target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.29.0", features = ["legacy", "esplora_a33e97e1", "bitcoind_25_0"] }
+electrsd = { version = "0.33.0", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
 
 [target.'cfg(no_download)'.dev-dependencies]
-electrsd = { version = "0.29.0", features = ["legacy"] }
+electrsd = { version = "0.33.0", default-features = false, features = ["legacy"] }
+corepc-node = { version = "0.7.0", default-features = false, features = ["27_2"] }
 
 [target.'cfg(cln_test)'.dev-dependencies]
 clightningrpc = { version = "0.3.0-beta.8", default-features = false }
