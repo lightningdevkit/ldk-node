@@ -47,7 +47,7 @@ use lightning::routing::scoring::{
 use lightning::sign::EntropySource;
 
 use lightning::util::persist::{
-	read_channel_monitors, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	read_channel_monitors, KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
@@ -633,6 +633,148 @@ impl NodeBuilder {
 			logger,
 			kv_store,
 		)
+	}
+}
+
+#[derive(Debug)]
+pub struct KVStoreBuilder {
+	config: Config,
+	entropy_source_config: Option<EntropySourceConfig>,
+	log_writer_config: Option<LogWriterConfig>,
+}
+
+impl KVStoreBuilder {
+	/// Creates a new builder instance with the default configuration.
+	pub fn new() -> Self {
+		let config = Config::default();
+		Self::from_config(config)
+	}
+
+	/// Creates a new builder instance from an [`Config`].
+	pub fn from_config(config: Config) -> Self {
+		let entropy_source_config = None;
+		let log_writer_config = None;
+		Self { config, entropy_source_config, log_writer_config }
+	}
+
+	//TODO: I think these methods should be extracted out to EntropySourceConfigBuilder. Both NodeBuilder
+	// and KVStoreBuilder can directly take EntropySourceConfig as arg.
+	/// Configures the builder instance to source its entropy from a seed file on disk.
+	///
+	/// If the given file does not exist a new random seed file will be generated and
+	/// stored at the given location.
+	pub fn set_entropy_seed_path(&mut self, seed_path: String) -> &mut Self {
+		self.entropy_source_config = Some(EntropySourceConfig::SeedFile(seed_path));
+		self
+	}
+
+	/// Configures the builder instance to source its entropy from the given 64 seed bytes.
+	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: Vec<u8>) -> Result<&mut Self, BuildError> {
+		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
+			return Err(BuildError::InvalidSeedBytes);
+		}
+		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
+		bytes.copy_from_slice(&seed_bytes);
+		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(bytes));
+		Ok(self)
+	}
+
+	/// Configures the builder instance to source its entropy from a [BIP 39] mnemonic.
+	///
+	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+	pub fn set_entropy_bip39_mnemonic(
+		&mut self, mnemonic: Mnemonic, passphrase: Option<String>,
+	) -> &mut Self {
+		self.entropy_source_config =
+			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
+		self
+	}
+
+	//TODO: Once we have KVStoreBuilder, we can have NodeBuilder directly take Arc<dyn KVStore> as arg.
+	/// Builds a [`VssStore`] backend based implementation of [`KVStore`].
+	pub fn build_vss_store(
+		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<VssStore, BuildError> {
+		use bitcoin::key::Secp256k1;
+
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
+
+		let config = Arc::new(self.config.clone());
+
+		let vss_xprv = derive_vss_xprv(config, &seed_bytes, Arc::clone(&logger))?;
+
+		let lnurl_auth_xprv = vss_xprv
+			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: 138 }])
+			.map_err(|e| {
+				log_error!(logger, "Failed to derive VSS secret: {}", e);
+				BuildError::KVStoreSetupFailed
+			})?;
+
+		let lnurl_auth_jwt_provider =
+			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers)
+				.map_err(|e| {
+					log_error!(logger, "Failed to create LnurlAuthToJwtProvider: {}", e);
+					BuildError::KVStoreSetupFailed
+				})?;
+
+		let header_provider = Arc::new(lnurl_auth_jwt_provider);
+
+		self.build_vss_store_with_header_provider(vss_url, store_id, header_provider)
+	}
+
+	/// Builds a [`VssStore`] backend based implementation of [`KVStore`].
+	pub fn build_vss_store_with_header_provider(
+		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<VssStore, BuildError> {
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
+
+		let config = Arc::new(self.config.clone());
+
+		let vss_xprv = derive_vss_xprv(config.clone(), &seed_bytes, Arc::clone(&logger))?;
+
+		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
+
+		Ok(VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider).map_err(|e| {
+			log_error!(logger, "Failed to setup VssStore: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?)
+	}
+
+	/// Builds a [`FilesystemStore`] backend based implementation of [`KVStore`].
+	pub fn build_fs_store(&self) -> Result<FilesystemStore, BuildError> {
+		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
+		storage_dir_path.push("fs_store");
+
+		fs::create_dir_all(storage_dir_path.clone())
+			.map_err(|_| BuildError::StoragePathAccessFailed)?;
+		Ok(FilesystemStore::new(storage_dir_path))
+	}
+
+	/// Builds a [`SqliteStore`] backend based implementation of [`KVStore`].
+	pub fn build_sqlite_store(&self) -> Result<SqliteStore, BuildError> {
+		let storage_dir_path = self.config.storage_dir_path.clone();
+		fs::create_dir_all(storage_dir_path.clone())
+			.map_err(|_| BuildError::StoragePathAccessFailed)?;
+
+		Ok(SqliteStore::new(
+			storage_dir_path.into(),
+			Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+			Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+		)
+		.map_err(|_| BuildError::KVStoreSetupFailed)?)
 	}
 }
 
