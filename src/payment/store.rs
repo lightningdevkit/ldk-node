@@ -590,6 +590,13 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 	}
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub(crate) enum PaymentStoreUpdateResult {
+	Updated,
+	Unchanged,
+	NotFound,
+}
+
 pub(crate) struct PaymentStore<L: Deref>
 where
 	L::Target: LdkLogger,
@@ -670,17 +677,22 @@ where
 		self.payments.lock().unwrap().get(id).cloned()
 	}
 
-	pub(crate) fn update(&self, update: &PaymentDetailsUpdate) -> Result<bool, Error> {
-		let mut updated = false;
+	pub(crate) fn update(
+		&self, update: &PaymentDetailsUpdate,
+	) -> Result<PaymentStoreUpdateResult, Error> {
 		let mut locked_payments = self.payments.lock().unwrap();
 
 		if let Some(payment) = locked_payments.get_mut(&update.id) {
-			updated = payment.update(update);
+			let updated = payment.update(update);
 			if updated {
 				self.persist_info(&update.id, payment)?;
+				Ok(PaymentStoreUpdateResult::Updated)
+			} else {
+				Ok(PaymentStoreUpdateResult::Unchanged)
 			}
+		} else {
+			Ok(PaymentStoreUpdateResult::NotFound)
 		}
-		Ok(updated)
 	}
 
 	pub(crate) fn list_filter<F: FnMut(&&PaymentDetails) -> bool>(
@@ -789,9 +801,22 @@ mod tests {
 		assert_eq!(Ok(true), payment_store.insert(payment));
 		assert!(payment_store.get(&id).is_some());
 
+		// Check update returns `Updated`
 		let mut update = PaymentDetailsUpdate::new(id);
 		update.status = Some(PaymentStatus::Succeeded);
-		assert_eq!(Ok(true), payment_store.update(&update));
+		assert_eq!(Ok(PaymentStoreUpdateResult::Updated), payment_store.update(&update));
+
+		// Check no-op update yields `Unchanged`
+		let mut update = PaymentDetailsUpdate::new(id);
+		update.status = Some(PaymentStatus::Succeeded);
+		assert_eq!(Ok(PaymentStoreUpdateResult::Unchanged), payment_store.update(&update));
+
+		// Check bogus update yields `NotFound`
+		let bogus_id = PaymentId([84u8; 32]);
+		let mut update = PaymentDetailsUpdate::new(bogus_id);
+		update.status = Some(PaymentStatus::Succeeded);
+		assert_eq!(Ok(PaymentStoreUpdateResult::NotFound), payment_store.update(&update));
+
 		assert!(payment_store.get(&id).is_some());
 
 		assert_eq!(PaymentStatus::Succeeded, payment_store.get(&id).unwrap().status);

@@ -16,7 +16,7 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
-	PaymentStatus, PaymentStore,
+	PaymentStatus, PaymentStore, PaymentStoreUpdateResult,
 };
 use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
@@ -408,13 +408,25 @@ impl Bolt11Payment {
 			..PaymentDetailsUpdate::new(payment_id)
 		};
 
-		if !self.payment_store.update(&update)? {
-			log_error!(
-				self.logger,
-				"Failed to manually fail unknown payment with hash: {}",
-				payment_hash
-			);
-			return Err(Error::InvalidPaymentHash);
+		match self.payment_store.update(&update) {
+			Ok(PaymentStoreUpdateResult::Updated) | Ok(PaymentStoreUpdateResult::Unchanged) => (),
+			Ok(PaymentStoreUpdateResult::NotFound) => {
+				log_error!(
+					self.logger,
+					"Failed to manually fail unknown payment with hash {}",
+					payment_hash,
+				);
+				return Err(Error::InvalidPaymentHash);
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to manually fail payment with hash {}: {}",
+					payment_hash,
+					e
+				);
+				return Err(e);
+			},
 		}
 
 		self.channel_manager.fail_htlc_backwards(&payment_hash);
