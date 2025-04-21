@@ -9,7 +9,7 @@
 //!
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 
-use crate::config::LDK_PAYMENT_RETRY_TIMEOUT;
+use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
@@ -19,6 +19,7 @@ use crate::types::{ChannelManager, PaymentStore};
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
+use lightning::onion_message::messenger::Destination;
 use lightning::util::string::UntrustedString;
 
 use rand::RngCore;
@@ -42,6 +43,11 @@ type Refund = lightning::offers::refund::Refund;
 #[cfg(feature = "uniffi")]
 type Refund = Arc<crate::ffi::Refund>;
 
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
+
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
 /// Should be retrieved by calling [`Node::bolt12_payment`].
@@ -53,15 +59,16 @@ pub struct Bolt12Payment {
 	channel_manager: Arc<ChannelManager>,
 	payment_store: Arc<PaymentStore>,
 	logger: Arc<Logger>,
+	config: Arc<Config>,
 }
 
 impl Bolt12Payment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
-		logger: Arc<Logger>,
+		logger: Arc<Logger>, config: Arc<Config>,
 	) -> Self {
-		Self { runtime, channel_manager, payment_store, logger }
+		Self { runtime, channel_manager, payment_store, logger, config }
 	}
 
 	/// Send a payment given an offer.
@@ -118,7 +125,7 @@ impl Bolt12Payment {
 					hash: None,
 					preimage: None,
 					secret: None,
-					offer_id: offer.id(),
+					offer_id: Some(offer.id()),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
 				};
@@ -143,7 +150,7 @@ impl Bolt12Payment {
 							hash: None,
 							preimage: None,
 							secret: None,
-							offer_id: offer.id(),
+							offer_id: Some(offer.id()),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
 						};
@@ -225,7 +232,7 @@ impl Bolt12Payment {
 					hash: None,
 					preimage: None,
 					secret: None,
-					offer_id: offer.id(),
+					offer_id: Some(offer.id()),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
 				};
@@ -250,7 +257,7 @@ impl Bolt12Payment {
 							hash: None,
 							preimage: None,
 							secret: None,
-							offer_id: offer.id(),
+							offer_id: Some(offer.id()),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
 						};
@@ -266,6 +273,105 @@ impl Bolt12Payment {
 						Err(Error::PaymentSendingFailed)
 					},
 				}
+			},
+		}
+	}
+
+	/// Send a payment to an offer resolved from a Human-Readable Name ([BIP 353]).
+	///
+	/// Paying to Human-Readable Names makes it more intuitive to make payments for offers
+	/// as users can simply send payments to HRNs such as `user@example.com`.
+	///
+	/// This can be used to pay so-called "zero-amount" offers, i.e., an offer that leaves the
+	/// amount paid to be determined by the user.
+	///
+	/// If `dns_resolvers_node_ids` in [`Config.hrn_config`] is empty, this operation will fail.
+	///
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	pub fn send_to_human_readable_name(
+		&self, hrn: &HumanReadableName, amount_msat: u64,
+	) -> Result<PaymentId, Error> {
+		let hrn = maybe_deref(hrn);
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		let mut random_bytes = [0u8; 32];
+		rand::thread_rng().fill_bytes(&mut random_bytes);
+		let payment_id = PaymentId(random_bytes);
+		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let max_total_routing_fee_msat = None;
+
+		let destinations: Vec<Destination> = match &self.config.hrn_config {
+			Some(hrn_config) => Ok(hrn_config
+				.dns_resolvers_node_ids
+				.iter()
+				.map(|node_id| Destination::Node(*node_id))
+				.collect()),
+			None => Err(Error::DnsResolversUnavailable),
+		}?;
+
+		match self.channel_manager.pay_for_offer_from_human_readable_name(
+			hrn.clone(),
+			amount_msat,
+			payment_id,
+			retry_strategy,
+			max_total_routing_fee_msat,
+			destinations,
+		) {
+			Ok(()) => {
+				log_info!(
+					self.logger,
+					"Initiated sending {} msats to ₿{}@{}",
+					amount_msat,
+					hrn.user(),
+					hrn.domain()
+				);
+				let kind = PaymentKind::Bolt12Offer {
+					hash: None,
+					preimage: None,
+					secret: None,
+					offer_id: None,
+					payer_note: None,
+					quantity: None,
+				};
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					Some(amount_msat),
+					None,
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
+				self.payment_store.insert(payment)?;
+				Ok(payment_id)
+			},
+			Err(()) => {
+				log_error!(
+					self.logger,
+					"Failed to send payment to ₿{}@{}",
+					hrn.user(),
+					hrn.domain()
+				);
+				let kind = PaymentKind::Bolt12Offer {
+					hash: None,
+					preimage: None,
+					secret: None,
+					offer_id: None,
+					payer_note: None,
+					quantity: None,
+				};
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					Some(amount_msat),
+					None,
+					PaymentDirection::Outbound,
+					PaymentStatus::Failed,
+				);
+				self.payment_store.insert(payment)?;
+				Err(Error::PaymentSendingFailed)
 			},
 		}
 	}

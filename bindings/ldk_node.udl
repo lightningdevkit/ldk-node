@@ -197,6 +197,8 @@ interface Bolt12Payment {
 	[Throws=NodeError]
 	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note);
 	[Throws=NodeError]
+	PaymentId send_to_human_readable_name([ByRef]HumanReadableName hrn, u64 amount_msat);
+	[Throws=NodeError]
 	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
 	Offer receive_variable_amount([ByRef]string description, u32? expiry_secs);
@@ -246,6 +248,13 @@ interface LSPS1Liquidity {
 	LSPS1OrderStatus request_channel(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel);
 	[Throws=NodeError]
 	LSPS1OrderStatus check_order_status(OrderId order_id);
+};
+
+interface HumanReadableName {
+	[Throws=NodeError, Name=from_encoded]
+	constructor([ByRef] string encoded);
+	string user();
+	string domain();
 };
 
 [Error]
@@ -302,6 +311,7 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+	"HrnParsingFailed",
 };
 
 dictionary NodeStatus {
@@ -402,7 +412,7 @@ interface PaymentKind {
 	Onchain(Txid txid, ConfirmationStatus status);
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, u64? counterparty_skimmed_fee_msat, LSPFeeLimits lsp_fee_limits);
-	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
+	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId? offer_id, UntrustedString? payer_note, u64? quantity);
 	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, UntrustedString? payer_note, u64? quantity);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
 };

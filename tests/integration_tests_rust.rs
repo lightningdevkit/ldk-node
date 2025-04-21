@@ -820,7 +820,7 @@ fn simple_bolt12_send_receive() {
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
-			assert_eq!(offer_id, offer.id());
+			assert_eq!(offer_id, Some(offer.id()));
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
 			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
@@ -841,7 +841,7 @@ fn simple_bolt12_send_receive() {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert!(secret.is_some());
-			assert_eq!(offer_id, offer.id());
+			assert_eq!(offer_id, Some(offer.id()));
 		},
 		_ => {
 			panic!("Unexpected payment kind");
@@ -886,7 +886,7 @@ fn simple_bolt12_send_receive() {
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
-			assert_eq!(offer_id, offer.id());
+			assert_eq!(offer_id, Some(offer.id()));
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
 			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
@@ -910,7 +910,7 @@ fn simple_bolt12_send_receive() {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert!(secret.is_some());
-			assert_eq!(offer_id, offer.id());
+			assert_eq!(offer_id, Some(offer.id()));
 		},
 		_ => {
 			panic!("Unexpected payment kind");

@@ -742,7 +742,7 @@ where
 							hash: Some(payment_hash),
 							preimage: payment_preimage,
 							secret: Some(payment_secret),
-							offer_id,
+							offer_id: Some(offer_id),
 							payer_note,
 							quantity,
 						};
@@ -1417,8 +1417,30 @@ where
 					);
 				}
 			},
-			LdkEvent::InvoiceReceived { .. } => {
-				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
+			LdkEvent::InvoiceReceived { payment_id, invoice, context, responder: _ } => {
+				let update = PaymentDetailsUpdate {
+					hash: Some(Some(invoice.payment_hash())),
+					quantity: invoice.quantity(),
+					..PaymentDetailsUpdate::new(payment_id)
+				};
+
+				match self.payment_store.update(&update) {
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
+
+				match self
+					.channel_manager
+					.send_payment_for_bolt12_invoice(&invoice, context.as_ref())
+				{
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(self.logger, "Error while paying invoice: {:?}", e);
+					},
+				};
 			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
 				let runtime_lock = self.runtime.read().unwrap();

@@ -185,6 +185,19 @@ impl Default for Config {
 	}
 }
 
+/// Configuration options for Human-Readable Names ([BIP 353]).
+///
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+#[derive(Debug, Clone)]
+pub struct HumanReadableNamesConfig {
+	/// The DNS resolvers to be used for resolving Human-Readable Names.
+	///
+	/// If not empty, the values set will be used as DNS resolvers when sending to HRNs.
+	///
+	/// **Note:** If empty, payments to HRNs will fail.
+	pub dns_resolvers_node_ids: Vec<PublicKey>,
+}
+
 /// Configuration options pertaining to 'Anchor' channels, i.e., channels for which the
 /// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
 ///
@@ -306,6 +319,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
 	user_config.manually_accept_inbound_channels = true;
+	user_config.manually_handle_bolt12_invoices = true;
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 

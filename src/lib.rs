@@ -874,6 +874,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.logger),
+			Arc::clone(&self.config),
 		)
 	}
 
@@ -887,6 +888,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.logger),
+			Arc::clone(&self.config),
 		))
 	}
 

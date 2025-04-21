@@ -12,7 +12,7 @@
 
 pub use crate::config::{
 	default_config, AnchorChannelsConfig, BackgroundSyncConfig, ElectrumSyncConfig,
-	EsploraSyncConfig, MaxDustHTLCExposure,
+	EsploraSyncConfig, HumanReadableNamesConfig, MaxDustHTLCExposure,
 };
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig, OnchainPaymentInfo, PaymentInfo};
@@ -35,6 +35,8 @@ pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
 
 pub use lightning_liquidity::lsps1::msgs::ChannelInfo as ChannelOrderInfo;
 pub use lightning_liquidity::lsps1::msgs::{OrderId, OrderParameters, PaymentState};
+
+pub use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 
 pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Txid};
 
@@ -1114,6 +1116,59 @@ impl UniffiCustomTypeConverter for DateTime {
 
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.to_rfc3339()
+	}
+}
+
+pub struct HumanReadableName {
+	pub(crate) inner: LdkHumanReadableName,
+}
+
+impl HumanReadableName {
+	/// Returns the underlying HumanReadableName [`LdkHumanReadableName`]
+	pub fn into_inner(&self) -> LdkHumanReadableName {
+		self.inner.clone()
+	}
+
+	pub fn from_encoded(encoded: &str) -> Result<Self, Error> {
+		let hrn = match LdkHumanReadableName::from_encoded(encoded) {
+			Ok(hrn) => Ok(hrn),
+			Err(_) => Err(Error::HrnParsingFailed),
+		}?;
+
+		Ok(Self { inner: hrn })
+	}
+
+	pub fn user(&self) -> String {
+		self.inner.user().to_string()
+	}
+
+	pub fn domain(&self) -> String {
+		self.inner.domain().to_string()
+	}
+}
+
+impl From<LdkHumanReadableName> for HumanReadableName {
+	fn from(ldk_hrn: LdkHumanReadableName) -> Self {
+		HumanReadableName { inner: ldk_hrn }
+	}
+}
+
+impl From<HumanReadableName> for LdkHumanReadableName {
+	fn from(wrapper: HumanReadableName) -> Self {
+		wrapper.into_inner()
+	}
+}
+
+impl Deref for HumanReadableName {
+	type Target = LdkHumanReadableName;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<LdkHumanReadableName> for HumanReadableName {
+	fn as_ref(&self) -> &LdkHumanReadableName {
+		self.deref()
 	}
 }
 
