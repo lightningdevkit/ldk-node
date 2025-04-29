@@ -1,3 +1,60 @@
+# 0.5.0 - Apr. 29, 2025
+Besides numerous API improvements and bugfixes this fifth minor release notably adds support for sourcing chain and fee rate data from an Electrum backend, requesting channels via the [bLIP-51 / LSPS1](https://github.com/lightning/blips/blob/master/blip-0051.md) protocol, as well as experimental support for operating as a [bLIP-52 / LSPS2](https://github.com/lightning/blips/blob/master/blip-0052.md) service.
+
+## Feature and API updates
+- The `PaymentSuccessful` event now exposes a `payment_preimage` field (#392).
+- The node now emits `PaymentForwarded` events for forwarded payments (#404).
+- The ability to send custom TLVs as part of spontaneous payments has been added (#411).
+- The ability to override the used fee rates for on-chain sending has been added (#434).
+- The ability to set a description hash when creating a BOLT11 invoice has been added (#438).
+- The ability to export pathfinding scores has been added (#458).
+- The ability to request inbound channels from an LSP via the bLIP-51 / LSPS1 protocol has been added (#418).
+- The `ChannelDetails` returned by `Node::list_channels` now exposes fields for the channel's SCIDs (#444).
+- Lightning peer-to-peer gossip data is now being verified when syncing from a Bitcoin Core RPC backend (#428).
+- The logging sub-system was reworked to allow logging to backends using the Rust [`log`](https://crates.io/crates/log) facade, as well as via a custom logger trait (#407, #450, #454).
+- On-chain transactions are now added to the internal payment store and exposed via `Node::list_payments` (#432).
+- Inbound announced channels are now rejected if not all requirements for operating as a forwarding node (set listening addresses and node alias) have been met (#467).
+- Initial support for operating as an bLIP-52 / LSPS2 service has been added (#420).
+    - **Note**: bLIP-52 / LSPS2 support is considered 'alpha'/'experimental' and should *not* yet be used in production.
+- The `Builder::set_entropy_seed_bytes` method now takes an array rather than a `Vec` (#493).
+- The builder will now return a `NetworkMismatch` error in case of network switching (#485).
+- The `Bolt11Jit` payment variant now exposes a field telling how much fee the LSP withheld (#497).
+- The ability to disable syncing Lightning and on-chain wallets in the background has been added. If it is disabled, the user is responsible for running `Node::sync_wallets` manually (#508).
+- The ability to configure the node's announcement addresses independently from the listening addresses has been added (#484).
+- The ability to choose whether to honor the Anchor reserves when calling `send_all_to_address` has been added (#345).
+- The ability to sync the node via an Electrum backend has been added (#486).
+
+## Bug Fixes and Improvements
+- When syncing from Bitcoin Core RPC, syncing mempool entries has been made more efficient (#410, #465).
+- We now ensure the our configured fallback rates are used when the configured chain source would return huge bogus values during fee estimation (#430).
+- We now re-enabled trying to bump Anchor channel transactions for trusted counterparties in the `ContentiousClaimable` case to reduce the risk of losing funds in certain edge cases (#461).
+- An issue that would potentially have us panic on retrying the chain listening initialization when syncing from Bitcoin Core RPC has been fixed (#471).
+- The `Node::remove_payment` now also removes the respective entry from the in-memory state, not only from the persisted payment store (#514).
+
+## Compatibility Notes
+- The filesystem logger was simplified and its default path changed to `ldk_node.log` in the configured storage directory (#394).
+- The BDK dependency has been bumped to `bdk_wallet` v1.0 (#426).
+- The LDK dependency has been bumped to `lightning` v0.1 (#426).
+- The `rusqlite` dependency has been bumped to v0.31 (#403).
+- The minimum supported Rust version (MSRV) has been bumped to v1.75 (#429).
+
+In total, this release features 53 files changed, 6147 insertions, 1193 deletions, in 191 commits from 14 authors in alphabetical order:
+
+- alexanderwiederin
+- Andrei
+- Artur Gontijo
+- Ayla Greystone
+- Elias Rohrer
+- elnosh
+- Enigbe Ochekliye
+- Evan Feenstra
+- G8XSU
+- Joost Jager
+- maan2003
+- moisesPompilio
+- Rob N
+- Vincenzo Palazzo
+
 # 0.4.3 - Jan. 23, 2025
 
 This patch release fixes the broken Rust build resulting from `cargo` treating the recent v0.1.0 release of `lightning-liquidity` as API-compatible with the previous v0.1.0-alpha.6 release (even though it's not).
