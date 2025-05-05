@@ -27,7 +27,6 @@ pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::types::ChannelId;
 pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::OfferId;
-pub use lightning::offers::refund::Refund;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
 
@@ -58,6 +57,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
+use lightning::offers::refund::Refund as LdkRefund;
 use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 
@@ -278,15 +278,123 @@ impl std::fmt::Display for Offer {
 	}
 }
 
-impl UniffiCustomTypeConverter for Refund {
-	type Builtin = String;
+/// A `Refund` is a request to send an [`Bolt12Invoice`] without a preceding [`Offer`].
+///
+/// Typically, after an invoice is paid, the recipient may publish a refund allowing the sender to
+/// recoup their funds. A refund may be used more generally as an "offer for money", such as with a
+/// bitcoin ATM.
+///
+/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+/// [`Offer`]: lightning::offers::offer::Offer
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refund {
+	pub(crate) inner: LdkRefund,
+}
 
-	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Refund::from_str(&val).map_err(|_| Error::InvalidRefund.into())
+impl Refund {
+	pub fn from_str(refund_str: &str) -> Result<Self, Error> {
+		refund_str.parse()
 	}
 
-	fn from_custom(obj: Self) -> Self::Builtin {
-		obj.to_string()
+	/// A complete description of the purpose of the refund.
+	///
+	/// Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+	pub fn description(&self) -> String {
+		self.inner.description().to_string()
+	}
+
+	/// Seconds since the Unix epoch when an invoice should no longer be sent.
+	///
+	/// If `None`, the refund does not expire.
+	pub fn absolute_expiry_seconds(&self) -> Option<u64> {
+		self.inner.absolute_expiry().map(|duration| duration.as_secs())
+	}
+
+	/// Whether the refund has expired.
+	pub fn is_expired(&self) -> bool {
+		self.inner.is_expired()
+	}
+
+	/// The issuer of the refund, possibly beginning with `user@domain` or `domain`.
+	///
+	/// Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+	pub fn issuer(&self) -> Option<String> {
+		self.inner.issuer().map(|printable| printable.to_string())
+	}
+
+	/// An unpredictable series of bytes, typically containing information about the derivation of
+	/// [`payer_signing_pubkey`].
+	///
+	/// [`payer_signing_pubkey`]: Self::payer_signing_pubkey
+	pub fn payer_metadata(&self) -> Vec<u8> {
+		self.inner.payer_metadata().to_vec()
+	}
+
+	/// A chain that the refund is valid for.
+	pub fn chain(&self) -> Option<Network> {
+		Network::try_from(self.inner.chain()).ok()
+	}
+
+	/// The amount to refund in msats (i.e., the minimum lightning-payable unit for [`chain`]).
+	///
+	/// [`chain`]: Self::chain
+	pub fn amount_msats(&self) -> u64 {
+		self.inner.amount_msats()
+	}
+
+	/// The quantity of an item that refund is for.
+	pub fn quantity(&self) -> Option<u64> {
+		self.inner.quantity()
+	}
+
+	/// A public node id to send to in the case where there are no [`paths`].
+	///
+	/// Otherwise, a possibly transient pubkey.
+	///
+	/// [`paths`]: lightning::offers::refund::Refund::paths
+	pub fn payer_signing_pubkey(&self) -> PublicKey {
+		self.inner.payer_signing_pubkey()
+	}
+
+	/// Payer provided note to include in the invoice.
+	pub fn payer_note(&self) -> Option<String> {
+		self.inner.payer_note().map(|printable| printable.to_string())
+	}
+}
+
+impl std::str::FromStr for Refund {
+	type Err = Error;
+
+	fn from_str(refund_str: &str) -> Result<Self, Self::Err> {
+		refund_str
+			.parse::<LdkRefund>()
+			.map(|refund| Refund { inner: refund })
+			.map_err(|_| Error::InvalidRefund)
+	}
+}
+
+impl From<LdkRefund> for Refund {
+	fn from(refund: LdkRefund) -> Self {
+		Refund { inner: refund }
+	}
+}
+
+impl Deref for Refund {
+	type Target = LdkRefund;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<LdkRefund> for Refund {
+	fn as_ref(&self) -> &LdkRefund {
+		self.deref()
+	}
+}
+
+impl std::fmt::Display for Refund {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
 	}
 }
 
@@ -818,9 +926,11 @@ mod tests {
 		time::{SystemTime, UNIX_EPOCH},
 	};
 
-	use lightning::offers::offer::{OfferBuilder, Quantity};
-
 	use super::*;
+	use lightning::offers::{
+		offer::{OfferBuilder, Quantity},
+		refund::RefundBuilder,
+	};
 
 	fn create_test_invoice() -> (LdkBolt11Invoice, Bolt11Invoice) {
 		let invoice_string = "lnbc1pn8g249pp5f6ytj32ty90jhvw69enf30hwfgdhyymjewywcmfjevflg6s4z86qdqqcqzzgxqyz5vqrzjqwnvuc0u4txn35cafc7w94gxvq5p3cu9dd95f7hlrh0fvs46wpvhdfjjzh2j9f7ye5qqqqryqqqqthqqpysp5mm832athgcal3m7h35sc29j63lmgzvwc5smfjh2es65elc2ns7dq9qrsgqu2xcje2gsnjp0wn97aknyd3h58an7sjj6nhcrm40846jxphv47958c6th76whmec8ttr2wmg6sxwchvxmsc00kqrzqcga6lvsf9jtqgqy5yexa";
@@ -857,6 +967,28 @@ mod tests {
 		let wrapped_offer = Offer::from(ldk_offer.clone());
 
 		(ldk_offer, wrapped_offer)
+	}
+
+	fn create_test_refund() -> (LdkRefund, Refund) {
+		let payer_key = bitcoin::secp256k1::PublicKey::from_str(
+			"02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
+		)
+		.unwrap();
+
+		let expiry =
+			(SystemTime::now() + Duration::from_secs(3600)).duration_since(UNIX_EPOCH).unwrap();
+
+		let builder = RefundBuilder::new("Test refund".to_string().into(), payer_key, 100_000)
+			.unwrap()
+			.description("Test refund description".to_string())
+			.absolute_expiry(expiry)
+			.quantity(3)
+			.issuer("test_issuer".to_string());
+
+		let ldk_refund = builder.build().unwrap();
+		let wrapped_refund = Refund::from(ldk_refund.clone());
+
+		(ldk_refund, wrapped_refund)
 	}
 
 	#[test]
@@ -1074,5 +1206,82 @@ mod tests {
 				panic!("Wrapped offer had an issuer signing pubkey but LDK offer did not!");
 			},
 		}
+	}
+
+	#[test]
+	fn test_refund_roundtrip() {
+		let (ldk_refund, _) = create_test_refund();
+
+		let refund_str = ldk_refund.to_string();
+
+		let parsed_refund = Refund::from_str(&refund_str);
+		assert!(parsed_refund.is_ok(), "Failed to parse refund from string!");
+
+		let invalid_result = Refund::from_str("invalid_refund_string");
+		assert!(invalid_result.is_err());
+		assert!(matches!(invalid_result.err().unwrap(), Error::InvalidRefund));
+	}
+
+	#[test]
+	fn test_refund_properties() {
+		let (ldk_refund, wrapped_refund) = create_test_refund();
+
+		assert_eq!(ldk_refund.description().to_string(), wrapped_refund.description());
+		assert_eq!(ldk_refund.amount_msats(), wrapped_refund.amount_msats());
+		assert_eq!(ldk_refund.is_expired(), wrapped_refund.is_expired());
+
+		match (ldk_refund.absolute_expiry(), wrapped_refund.absolute_expiry_seconds()) {
+			(Some(ldk_expiry), Some(wrapped_expiry)) => {
+				assert_eq!(ldk_expiry.as_secs(), wrapped_expiry);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK refund had an expiry but wrapped refund did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped refund had an expiry but LDK refund did not!");
+			},
+		}
+
+		match (ldk_refund.quantity(), wrapped_refund.quantity()) {
+			(Some(ldk_expiry), Some(wrapped_expiry)) => {
+				assert_eq!(ldk_expiry, wrapped_expiry);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK refund had an quantity but wrapped refund did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped refund had an quantity but LDK refund did not!");
+			},
+		}
+
+		match (ldk_refund.issuer(), wrapped_refund.issuer()) {
+			(Some(ldk_issuer), Some(wrapped_issuer)) => {
+				assert_eq!(ldk_issuer.to_string(), wrapped_issuer);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK refund had an issuer but wrapped refund did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped refund had an issuer but LDK refund did not!");
+			},
+		}
+
+		assert_eq!(ldk_refund.payer_metadata().to_vec(), wrapped_refund.payer_metadata());
+		assert_eq!(ldk_refund.payer_signing_pubkey(), wrapped_refund.payer_signing_pubkey());
+
+		if let Ok(network) = Network::try_from(ldk_refund.chain()) {
+			assert_eq!(wrapped_refund.chain(), Some(network));
+		}
+
+		assert_eq!(ldk_refund.payer_note().map(|p| p.to_string()), wrapped_refund.payer_note());
 	}
 }

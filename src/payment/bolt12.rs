@@ -20,7 +20,6 @@ use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
-use lightning::offers::refund::Refund;
 use lightning::util::string::UntrustedString;
 
 use rand::RngCore;
@@ -33,6 +32,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 type Offer = LdkOffer;
 #[cfg(feature = "uniffi")]
 type Offer = Arc<crate::ffi::Offer>;
+
+#[cfg(not(feature = "uniffi"))]
+type Refund = lightning::offers::refund::Refund;
+#[cfg(feature = "uniffi")]
+type Refund = Arc<crate::ffi::Refund>;
 
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
@@ -334,8 +338,11 @@ impl Bolt12Payment {
 	///
 	/// The returned [`Bolt12Invoice`] is for informational purposes only (i.e., isn't needed to
 	/// retrieve the refund).
+	///
+	/// [`Refund`]: lightning::offers::refund::Refund
 	pub fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
-		let invoice = self.channel_manager.request_refund_payment(refund).map_err(|e| {
+		let refund = maybe_deref(refund);
+		let invoice = self.channel_manager.request_refund_payment(&refund).map_err(|e| {
 			log_error!(self.logger, "Failed to request refund payment: {:?}", e);
 			Error::InvoiceRequestCreationFailed
 		})?;
@@ -366,6 +373,8 @@ impl Bolt12Payment {
 	}
 
 	/// Returns a [`Refund`] object that can be used to offer a refund payment of the amount given.
+	///
+	/// [`Refund`]: lightning::offers::refund::Refund
 	pub fn initiate_refund(
 		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
 		payer_note: Option<String>,
@@ -427,6 +436,6 @@ impl Bolt12Payment {
 
 		self.payment_store.insert(payment)?;
 
-		Ok(refund)
+		Ok(maybe_wrap(refund))
 	}
 }

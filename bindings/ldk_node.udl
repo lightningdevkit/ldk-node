@@ -760,6 +760,22 @@ interface Offer {
 	PublicKey? issuer_signing_pubkey();
 };
 
+[Traits=(Debug, Display, Eq)]
+interface Refund {
+	[Throws=NodeError, Name=from_str]
+	constructor([ByRef] string refund_str);
+	string description();
+	u64? absolute_expiry_seconds();
+	boolean is_expired();
+	string? issuer();
+	sequence<u8> payer_metadata();
+	Network? chain();
+	u64 amount_msats();
+	u64? quantity();
+	PublicKey payer_signing_pubkey();
+	string? payer_note();
+};
+
 [Custom]
 typedef string Txid;
 
@@ -777,9 +793,6 @@ typedef string NodeId;
 
 [Custom]
 typedef string Address;
-
-[Custom]
-typedef string Refund;
 
 [Custom]
 typedef string Bolt12Invoice;
