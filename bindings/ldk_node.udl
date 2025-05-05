@@ -736,6 +736,30 @@ interface Bolt11Invoice {
 	PublicKey recover_payee_pub_key();
 };
 
+[Enum]
+interface OfferAmount {
+	Bitcoin(u64 amount_msats);
+	Currency(string iso4217_code, u64 amount);
+};
+
+[Traits=(Debug, Display, Eq)]
+interface Offer {
+	[Throws=NodeError, Name=from_str]
+	constructor([ByRef] string offer_str);
+	OfferId id();
+	boolean is_expired();
+	string? description();
+	string? issuer();
+	OfferAmount? amount();
+	boolean is_valid_quantity(u64 quantity);
+	boolean expects_quantity();
+	boolean supports_chain(Network chain);
+	sequence<Network> chains();
+	sequence<u8>? metadata();
+	u64? absolute_expiry_seconds();
+	PublicKey? issuer_signing_pubkey();
+};
+
 [Custom]
 typedef string Txid;
 
@@ -753,9 +777,6 @@ typedef string NodeId;
 
 [Custom]
 typedef string Address;
-
-[Custom]
-typedef string Offer;
 
 [Custom]
 typedef string Refund;

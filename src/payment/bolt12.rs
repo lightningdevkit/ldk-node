@@ -11,13 +11,14 @@
 
 use crate::config::LDK_PAYMENT_RETRY_TIMEOUT;
 use crate::error::Error;
+use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::invoice::Bolt12Invoice;
-use lightning::offers::offer::{Amount, Offer, Quantity};
+use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::offers::refund::Refund;
 use lightning::util::string::UntrustedString;
@@ -27,6 +28,11 @@ use rand::RngCore;
 use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(not(feature = "uniffi"))]
+type Offer = LdkOffer;
+#[cfg(feature = "uniffi")]
+type Offer = Arc<crate::ffi::Offer>;
 
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
@@ -59,6 +65,7 @@ impl Bolt12Payment {
 	pub fn send(
 		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
 	) -> Result<PaymentId, Error> {
+		let offer = maybe_deref(offer);
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -160,6 +167,7 @@ impl Bolt12Payment {
 	pub fn send_using_amount(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 	) -> Result<PaymentId, Error> {
+		let offer = maybe_deref(offer);
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -254,11 +262,9 @@ impl Bolt12Payment {
 		}
 	}
 
-	/// Returns a payable offer that can be used to request and receive a payment of the amount
-	/// given.
-	pub fn receive(
+	pub(crate) fn receive_inner(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
-	) -> Result<Offer, Error> {
+	) -> Result<LdkOffer, Error> {
 		let absolute_expiry = expiry_secs.map(|secs| {
 			(SystemTime::now() + Duration::from_secs(secs as u64))
 				.duration_since(UNIX_EPOCH)
@@ -291,6 +297,15 @@ impl Bolt12Payment {
 		Ok(finalized_offer)
 	}
 
+	/// Returns a payable offer that can be used to request and receive a payment of the amount
+	/// given.
+	pub fn receive(
+		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
+	) -> Result<Offer, Error> {
+		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity)?;
+		Ok(maybe_wrap(offer))
+	}
+
 	/// Returns a payable offer that can be used to request and receive a payment for which the
 	/// amount is to be determined by the user, also known as a "zero-amount" offer.
 	pub fn receive_variable_amount(
@@ -312,7 +327,7 @@ impl Bolt12Payment {
 			Error::OfferCreationFailed
 		})?;
 
-		Ok(offer)
+		Ok(maybe_wrap(offer))
 	}
 
 	/// Requests a refund payment for the given [`Refund`].

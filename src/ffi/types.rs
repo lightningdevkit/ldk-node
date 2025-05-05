@@ -26,7 +26,7 @@ pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::types::ChannelId;
 pub use lightning::offers::invoice::Bolt12Invoice;
-pub use lightning::offers::offer::{Offer, OfferId};
+pub use lightning::offers::offer::OfferId;
 pub use lightning::offers::refund::Refund;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
@@ -57,6 +57,7 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
 use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 
@@ -114,15 +115,166 @@ impl UniffiCustomTypeConverter for Address {
 	}
 }
 
-impl UniffiCustomTypeConverter for Offer {
-	type Builtin = String;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfferAmount {
+	Bitcoin { amount_msats: u64 },
+	Currency { iso4217_code: String, amount: u64 },
+}
 
-	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Offer::from_str(&val).map_err(|_| Error::InvalidOffer.into())
+impl From<LdkAmount> for OfferAmount {
+	fn from(ldk_amount: LdkAmount) -> Self {
+		match ldk_amount {
+			LdkAmount::Bitcoin { amount_msats } => OfferAmount::Bitcoin { amount_msats },
+			LdkAmount::Currency { iso4217_code, amount } => OfferAmount::Currency {
+				iso4217_code: iso4217_code.iter().map(|&b| b as char).collect(),
+				amount,
+			},
+		}
+	}
+}
+
+/// An `Offer` is a potentially long-lived proposal for payment of a good or service.
+///
+/// An offer is a precursor to an [`InvoiceRequest`]. A merchant publishes an offer from which a
+/// customer may request an [`Bolt12Invoice`] for a specific quantity and using an amount sufficient
+/// to cover that quantity (i.e., at least `quantity * amount`). See [`Offer::amount`].
+///
+/// Offers may be denominated in currency other than bitcoin but are ultimately paid using the
+/// latter.
+///
+/// Through the use of [`BlindedMessagePath`]s, offers provide recipient privacy.
+///
+/// [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+/// [`Offer`]: lightning::offers::Offer:amount
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+	pub(crate) inner: LdkOffer,
+}
+
+impl Offer {
+	pub fn from_str(offer_str: &str) -> Result<Self, Error> {
+		offer_str.parse()
 	}
 
-	fn from_custom(obj: Self) -> Self::Builtin {
-		obj.to_string()
+	/// Returns the id of the offer.
+	pub fn id(&self) -> OfferId {
+		OfferId(self.inner.id().0)
+	}
+
+	/// Whether the offer has expired.
+	pub fn is_expired(&self) -> bool {
+		self.inner.is_expired()
+	}
+
+	/// A complete description of the purpose of the payment.
+	///
+	/// Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+	pub fn description(&self) -> Option<String> {
+		self.inner.description().map(|printable| printable.to_string())
+	}
+
+	/// The issuer of the offer, possibly beginning with `user@domain` or `domain`.
+	///
+	/// Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+	pub fn issuer(&self) -> Option<String> {
+		self.inner.issuer().map(|printable| printable.to_string())
+	}
+
+	/// The minimum amount required for a successful payment of a single item.
+	pub fn amount(&self) -> Option<OfferAmount> {
+		self.inner.amount().map(|amount| amount.into())
+	}
+
+	/// Returns whether the given quantity is valid for the offer.
+	pub fn is_valid_quantity(&self, quantity: u64) -> bool {
+		self.inner.is_valid_quantity(quantity)
+	}
+
+	/// Returns whether a quantity is expected in an [`InvoiceRequest`] for the offer.
+	///
+	/// [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+	pub fn expects_quantity(&self) -> bool {
+		self.inner.expects_quantity()
+	}
+
+	/// Returns whether the given chain is supported by the offer.
+	pub fn supports_chain(&self, chain: Network) -> bool {
+		self.inner.supports_chain(chain.chain_hash())
+	}
+
+	/// The chains that may be used when paying a requested invoice (e.g., bitcoin mainnet).
+	///
+	/// Payments must be denominated in units of the minimal lightning-payable unit (e.g., msats)
+	/// for the selected chain.
+	pub fn chains(&self) -> Vec<Network> {
+		self.inner.chains().into_iter().filter_map(Network::from_chain_hash).collect()
+	}
+
+	/// Opaque bytes set by the originator.
+	///
+	/// Useful for authentication and validating fields since it is reflected in `invoice_request`
+	/// messages along with all the other fields from the `offer`.
+	pub fn metadata(&self) -> Option<Vec<u8>> {
+		self.inner.metadata().cloned()
+	}
+
+	/// Seconds since the Unix epoch when an invoice should no longer be requested.
+	///
+	/// If `None`, the offer does not expire.
+	pub fn absolute_expiry_seconds(&self) -> Option<u64> {
+		self.inner.absolute_expiry().map(|duration| duration.as_secs())
+	}
+
+	/// The public key corresponding to the key used by the recipient to sign invoices.
+	/// - If [`Offer::paths`] is empty, MUST be `Some` and contain the recipient's node id for
+	///   sending an [`InvoiceRequest`].
+	/// - If [`Offer::paths`] is not empty, MAY be `Some` and contain a transient id.
+	/// - If `None`, the signing pubkey will be the final blinded node id from the
+	///   [`BlindedMessagePath`] in [`Offer::paths`] used to send the [`InvoiceRequest`].
+	///
+	/// See also [`Bolt12Invoice::signing_pubkey`].
+	///
+	/// [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+	/// [`Bolt12Invoice::signing_pubkey`]: lightning::offers::invoice::Bolt12Invoice::signing_pubkey
+	pub fn issuer_signing_pubkey(&self) -> Option<PublicKey> {
+		self.inner.issuer_signing_pubkey()
+	}
+}
+
+impl std::str::FromStr for Offer {
+	type Err = Error;
+
+	fn from_str(offer_str: &str) -> Result<Self, Self::Err> {
+		offer_str
+			.parse::<LdkOffer>()
+			.map(|offer| Offer { inner: offer })
+			.map_err(|_| Error::InvalidOffer)
+	}
+}
+
+impl From<LdkOffer> for Offer {
+	fn from(offer: LdkOffer) -> Self {
+		Offer { inner: offer }
+	}
+}
+
+impl Deref for Offer {
+	type Target = LdkOffer;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<LdkOffer> for Offer {
+	fn as_ref(&self) -> &LdkOffer {
+		self.deref()
+	}
+}
+
+impl std::fmt::Display for Offer {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
 	}
 }
 
@@ -661,6 +813,13 @@ impl UniffiCustomTypeConverter for DateTime {
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		num::NonZeroU64,
+		time::{SystemTime, UNIX_EPOCH},
+	};
+
+	use lightning::offers::offer::{OfferBuilder, Quantity};
+
 	use super::*;
 
 	fn create_test_invoice() -> (LdkBolt11Invoice, Bolt11Invoice) {
@@ -668,6 +827,36 @@ mod tests {
 		let ldk_invoice: LdkBolt11Invoice = invoice_string.parse().unwrap();
 		let wrapped_invoice = Bolt11Invoice::from(ldk_invoice.clone());
 		(ldk_invoice, wrapped_invoice)
+	}
+
+	fn create_test_offer() -> (LdkOffer, Offer) {
+		let pubkey = bitcoin::secp256k1::PublicKey::from_str(
+			"02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
+		)
+		.unwrap();
+
+		let expiry =
+			(SystemTime::now() + Duration::from_secs(3600)).duration_since(UNIX_EPOCH).unwrap();
+
+		let quantity = NonZeroU64::new(10_000).unwrap();
+
+		let builder = OfferBuilder::new(pubkey)
+			.description("Test offer description".to_string())
+			.amount_msats(100_000)
+			.issuer("Offer issuer".to_string())
+			.absolute_expiry(expiry)
+			.chain(Network::Bitcoin)
+			.supported_quantity(Quantity::Bounded(quantity))
+			.metadata(vec![
+				0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
+				0xcd, 0xef,
+			])
+			.unwrap();
+
+		let ldk_offer = builder.build().unwrap();
+		let wrapped_offer = Offer::from(ldk_offer.clone());
+
+		(ldk_offer, wrapped_offer)
 	}
 
 	#[test]
@@ -778,5 +967,112 @@ mod tests {
 			ldk_invoice.payment_hash().to_byte_array().to_vec(),
 			parsed_invoice.payment_hash().to_byte_array().to_vec()
 		);
+	}
+
+	#[test]
+	fn test_offer() {
+		let (ldk_offer, wrapped_offer) = create_test_offer();
+		match (ldk_offer.description(), wrapped_offer.description()) {
+			(Some(ldk_desc), Some(wrapped_desc)) => {
+				assert_eq!(ldk_desc.to_string(), wrapped_desc);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK offer had a description but wrapped offer did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped offer had a description but LDK offer did not!");
+			},
+		}
+
+		match (ldk_offer.amount(), wrapped_offer.amount()) {
+			(Some(ldk_amount), Some(wrapped_amount)) => {
+				let ldk_amount: OfferAmount = ldk_amount.into();
+				assert_eq!(ldk_amount, wrapped_amount);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK offer had an amount but wrapped offer did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped offer had an amount but LDK offer did not!");
+			},
+		}
+
+		match (ldk_offer.issuer(), wrapped_offer.issuer()) {
+			(Some(ldk_issuer), Some(wrapped_issuer)) => {
+				assert_eq!(ldk_issuer.to_string(), wrapped_issuer);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK offer had an issuer but wrapped offer did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped offer had an issuer but LDK offer did not!");
+			},
+		}
+
+		assert_eq!(ldk_offer.is_expired(), wrapped_offer.is_expired());
+		assert_eq!(ldk_offer.id(), wrapped_offer.id());
+		assert_eq!(ldk_offer.is_valid_quantity(10_000), wrapped_offer.is_valid_quantity(10_000));
+		assert_eq!(ldk_offer.expects_quantity(), wrapped_offer.expects_quantity());
+		assert_eq!(
+			ldk_offer.supports_chain(Network::Bitcoin.chain_hash()),
+			wrapped_offer.supports_chain(Network::Bitcoin)
+		);
+		assert_eq!(
+			ldk_offer.chains(),
+			wrapped_offer.chains().iter().map(|c| c.chain_hash()).collect::<Vec<_>>()
+		);
+		match (ldk_offer.metadata(), wrapped_offer.metadata()) {
+			(Some(ldk_metadata), Some(wrapped_metadata)) => {
+				assert_eq!(ldk_metadata.clone(), wrapped_metadata);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK offer had metadata but wrapped offer did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped offer had metadata but LDK offer did not!");
+			},
+		}
+
+		match (ldk_offer.absolute_expiry(), wrapped_offer.absolute_expiry_seconds()) {
+			(Some(ldk_expiry), Some(wrapped_expiry)) => {
+				assert_eq!(ldk_expiry.as_secs(), wrapped_expiry);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK offer had an absolute expiry but wrapped offer did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped offer had an absolute expiry but LDK offer did not!");
+			},
+		}
+
+		match (ldk_offer.issuer_signing_pubkey(), wrapped_offer.issuer_signing_pubkey()) {
+			(Some(ldk_expiry_signing_pubkey), Some(wrapped_issuer_signing_pubkey)) => {
+				assert_eq!(ldk_expiry_signing_pubkey, wrapped_issuer_signing_pubkey);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK offer had an issuer signing pubkey but wrapped offer did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped offer had an issuer signing pubkey but LDK offer did not!");
+			},
+		}
 	}
 }
