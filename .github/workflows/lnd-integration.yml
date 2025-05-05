@@ -1,0 +1,52 @@
+name: CI Checks - LND Integration Tests
+
+on: [push, pull_request]
+
+jobs:
+  check-lnd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check and install CMake if needed
+        # lnd_grpc_rust (via prost-build v0.10.4) requires CMake >= 3.5 but is incompatible with CMake >= 4.0.
+        # This step checks if CMake is missing, below 3.5, or 4.0 or higher, and installs CMake 3.31.6 if needed,
+        # ensuring compatibility with prost-build in ubuntu-latest.
+        run: |
+          if ! command -v cmake &> /dev/null ||
+             [ "$(cmake --version | head -n1 | cut -d' ' -f3)" \< "3.5" ] ||
+             [ "$(cmake --version | head -n1 | cut -d' ' -f3)" \> "4.0" ]; then
+            sudo apt-get update
+            sudo apt-get remove -y cmake
+            wget https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-Linux-x86_64.sh
+            echo "518c76bd18cc4ca5faab891db69b1289dc1bf134f394f0983a19576711b95210  cmake-3.31.6-Linux-x86_64.sh" | sha256sum -c - || {
+              echo "Error: The checksum of the downloaded file does not match the expected value!"
+              exit 1
+            }
+            chmod +x cmake-3.31.6-Linux-x86_64.sh
+            sudo ./cmake-3.31.6-Linux-x86_64.sh --prefix=/usr/local --skip-license
+          fi
+
+      - name: Create temporary directory for LND data
+        id: create-temp-dir
+        run: echo "LND_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
+
+      - name: Start bitcoind, electrs, and LND
+        run: docker compose -f docker-compose-lnd.yml up -d
+        env:
+          LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
+
+      - name: Set permissions for LND data directory
+        # In PR 4622 (https://github.com/lightningnetwork/lnd/pull/4622),
+        # LND sets file permissions to 0700, preventing test code from accessing them.
+        # This step ensures the test suite has the necessary permissions.
+        run: sudo chmod -R 755 $LND_DATA_DIR
+        env:
+          LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
+
+      - name: Run LND integration tests
+        run: LND_CERT_PATH=$LND_DATA_DIR/tls.cert LND_MACAROON_PATH=$LND_DATA_DIR/data/chain/bitcoin/regtest/admin.macaroon
+          RUSTFLAGS="--cfg lnd_test" cargo test --test integration_tests_lnd -- --exact --show-output
+        env:
+          LND_DATA_DIR: ${{ env.LND_DATA_DIR }}

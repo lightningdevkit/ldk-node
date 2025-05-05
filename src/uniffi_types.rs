@@ -11,10 +11,11 @@
 // Make sure to add any re-exported items that need to be used in uniffi below.
 
 pub use crate::config::{
-	default_config, AnchorChannelsConfig, EsploraSyncConfig, MaxDustHTLCExposure,
+	default_config, AnchorChannelsConfig, BackgroundSyncConfig, ElectrumSyncConfig,
+	EsploraSyncConfig, MaxDustHTLCExposure,
 };
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
-pub use crate::liquidity::{LSPS1OrderStatus, OnchainPaymentInfo, PaymentInfo};
+pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig, OnchainPaymentInfo, PaymentInfo};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,

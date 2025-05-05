@@ -15,10 +15,12 @@ use crate::{
 use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
 use crate::fee_estimator::ConfirmationTarget;
+use crate::liquidity::LiquiditySource;
+use crate::logger::Logger;
 
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
-	PaymentStore,
+	PaymentStore, PaymentStoreUpdateResult,
 };
 
 use crate::io::{
@@ -446,6 +448,7 @@ where
 	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<Graph>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore<L>>,
 	peer_store: Arc<PeerStore<L>>,
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
@@ -462,6 +465,7 @@ where
 		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, logger: L, config: Arc<Config>,
 	) -> Self {
@@ -473,6 +477,7 @@ where
 			connection_manager,
 			output_sweeper,
 			network_graph,
+			liquidity_source,
 			payment_store,
 			peer_store,
 			logger,
@@ -654,6 +659,26 @@ where
 						};
 					}
 
+					// If the LSP skimmed anything, update our stored payment.
+					if counterparty_skimmed_fee_msat > 0 {
+						match info.kind {
+							PaymentKind::Bolt11Jit { .. } => {
+								let update = PaymentDetailsUpdate {
+									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
+									..PaymentDetailsUpdate::new(payment_id)
+								};
+								match self.payment_store.update(&update) {
+									Ok(_) => (),
+									Err(e) => {
+										log_error!(self.logger, "Failed to access payment store: {}", e);
+										return Err(ReplayEvent());
+									},
+								};
+							}
+							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for JIT payments."),
+						}
+					}
+
 					// If this is known by the store but ChannelManager doesn't know the preimage,
 					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
 					// user interaction.
@@ -726,6 +751,7 @@ where
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Inbound,
 							PaymentStatus::Pending,
 						);
@@ -766,6 +792,7 @@ where
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Inbound,
 							PaymentStatus::Pending,
 						);
@@ -879,14 +906,17 @@ where
 				};
 
 				match self.payment_store.update(&update) {
-					Ok(true) => (),
-					Ok(false) => {
+					Ok(PaymentStoreUpdateResult::Updated)
+					| Ok(PaymentStoreUpdateResult::Unchanged) => (
+						// No need to do anything if the idempotent update was applied, which might
+						// be the result of a replayed event.
+					),
+					Ok(PaymentStoreUpdateResult::NotFound) => {
 						log_error!(
 							self.logger,
-							"Payment with ID {} couldn't be found in store",
+							"Claimed payment with ID {} couldn't be found in store",
 							payment_id,
 						);
-						debug_assert!(false);
 					},
 					Err(e) => {
 						log_error!(
@@ -932,6 +962,7 @@ where
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
+					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
@@ -1010,7 +1041,11 @@ where
 			LdkEvent::PaymentPathFailed { .. } => {},
 			LdkEvent::ProbeSuccessful { .. } => {},
 			LdkEvent::ProbeFailed { .. } => {},
-			LdkEvent::HTLCHandlingFailed { .. } => {},
+			LdkEvent::HTLCHandlingFailed { failed_next_destination, .. } => {
+				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
+					liquidity_source.handle_htlc_handling_failed(failed_next_destination);
+				}
+			},
 			LdkEvent::PendingHTLCsForwardable { time_forwardable } => {
 				let forwarding_channel_manager = self.channel_manager.clone();
 				let min = time_forwardable.as_millis() as u64;
@@ -1045,23 +1080,21 @@ where
 				is_announced,
 				params: _,
 			} => {
-				if is_announced && !may_announce_channel(&*self.config) {
-					log_error!(
-						self.logger,
-						"Rejecting inbound announced channel from peer {} as not all required details are set. Please ensure node alias and listening addresses have been configured.",
-						counterparty_node_id,
-					);
+				if is_announced {
+					if let Err(err) = may_announce_channel(&*self.config) {
+						log_error!(self.logger, "Rejecting inbound announced channel from peer {} due to missing configuration: {}", counterparty_node_id, err);
 
-					self.channel_manager
-						.force_close_without_broadcasting_txn(
-							&temporary_channel_id,
-							&counterparty_node_id,
-							"Channel request rejected".to_string(),
-						)
-						.unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to reject channel: {:?}", e)
-						});
-					return Ok(());
+						self.channel_manager
+							.force_close_without_broadcasting_txn(
+								&temporary_channel_id,
+								&counterparty_node_id,
+								"Channel request rejected".to_string(),
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to reject channel: {:?}", e)
+							});
+						return Ok(());
+					}
 				}
 
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
@@ -1176,23 +1209,6 @@ where
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
 			} => {
-				let event = Event::PaymentForwarded {
-					prev_channel_id: prev_channel_id.expect("prev_channel_id expected for events generated by LDK versions greater than 0.0.107."),
-					next_channel_id: next_channel_id.expect("next_channel_id expected for events generated by LDK versions greater than 0.0.107."),
-					prev_user_channel_id: prev_user_channel_id.map(UserChannelId),
-					next_user_channel_id: next_user_channel_id.map(UserChannelId),
-					prev_node_id,
-					next_node_id,
-					total_fee_earned_msat,
-					skimmed_fee_msat,
-					claim_from_onchain_tx,
-					outbound_amount_forwarded_msat,
-				};
-				self.event_queue.add_event(event).map_err(|e| {
-					log_error!(self.logger, "Failed to push to event queue: {}", e);
-					ReplayEvent()
-				})?;
-
 				let read_only_network_graph = self.network_graph.read_only();
 				let nodes = read_only_network_graph.nodes();
 				let channels = self.channel_manager.list_channels();
@@ -1225,14 +1241,13 @@ where
 					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
 				let fee_earned = total_fee_earned_msat.unwrap_or(0);
-				let outbound_amount_forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
 				if claim_from_onchain_tx {
 					log_info!(
 						self.logger,
 						"Forwarded payment{}{} of {}msat, earning {}msat in fees from claiming onchain.",
 						from_prev_str,
 						to_next_str,
-						outbound_amount_forwarded_msat,
+						outbound_amount_forwarded_msat.unwrap_or(0),
 						fee_earned,
 					);
 				} else {
@@ -1241,10 +1256,31 @@ where
 						"Forwarded payment{}{} of {}msat, earning {}msat in fees.",
 						from_prev_str,
 						to_next_str,
-						outbound_amount_forwarded_msat,
+						outbound_amount_forwarded_msat.unwrap_or(0),
 						fee_earned,
 					);
 				}
+
+				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
+					liquidity_source.handle_payment_forwarded(next_channel_id);
+				}
+
+				let event = Event::PaymentForwarded {
+					prev_channel_id: prev_channel_id.expect("prev_channel_id expected for events generated by LDK versions greater than 0.0.107."),
+					next_channel_id: next_channel_id.expect("next_channel_id expected for events generated by LDK versions greater than 0.0.107."),
+					prev_user_channel_id: prev_user_channel_id.map(UserChannelId),
+					next_user_channel_id: next_user_channel_id.map(UserChannelId),
+					prev_node_id,
+					next_node_id,
+					total_fee_earned_msat,
+					skimmed_fee_msat,
+					claim_from_onchain_tx,
+					outbound_amount_forwarded_msat,
+				};
+				self.event_queue.add_event(event).map_err(|e| {
+					log_error!(self.logger, "Failed to push to event queue: {}", e);
+					ReplayEvent()
+				})?;
 			},
 			LdkEvent::ChannelPending {
 				channel_id,
@@ -1318,6 +1354,14 @@ where
 					counterparty_node_id,
 				);
 
+				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
+					liquidity_source.handle_channel_ready(
+						user_channel_id,
+						&channel_id,
+						&counterparty_node_id,
+					);
+				}
+
 				let event = Event::ChannelReady {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -1356,7 +1400,22 @@ where
 				};
 			},
 			LdkEvent::DiscardFunding { .. } => {},
-			LdkEvent::HTLCIntercepted { .. } => {},
+			LdkEvent::HTLCIntercepted {
+				requested_next_hop_scid,
+				intercept_id,
+				expected_outbound_amount_msat,
+				payment_hash,
+				..
+			} => {
+				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
+					liquidity_source.handle_htlc_intercepted(
+						requested_next_hop_scid,
+						intercept_id,
+						expected_outbound_amount_msat,
+						payment_hash,
+					);
+				}
+			},
 			LdkEvent::InvoiceReceived { .. } => {
 				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
 			},

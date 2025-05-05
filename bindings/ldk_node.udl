@@ -7,6 +7,7 @@ dictionary Config {
 	string storage_dir_path;
 	Network network;
 	sequence<SocketAddress>? listening_addresses;
+	sequence<SocketAddress>? announcement_addresses;
 	NodeAlias? node_alias;
 	sequence<PublicKey> trusted_peers_0conf;
 	u64 probing_liquidity_limit_multiplier;
@@ -19,10 +20,30 @@ dictionary AnchorChannelsConfig {
 	u64 per_channel_reserve_sats;
 };
 
-dictionary EsploraSyncConfig {
+dictionary BackgroundSyncConfig {
 	u64 onchain_wallet_sync_interval_secs;
 	u64 lightning_wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;
+};
+
+dictionary EsploraSyncConfig {
+	BackgroundSyncConfig? background_sync_config;
+};
+
+dictionary ElectrumSyncConfig {
+	BackgroundSyncConfig? background_sync_config;
+};
+
+dictionary LSPS2ServiceConfig {
+	string? require_token;
+	boolean advertise_service;
+	u32 channel_opening_fee_ppm;
+	u32 channel_over_provisioning_ppm;
+	u64 min_channel_opening_fee_msat;
+	u32 min_channel_lifetime;
+	u32 max_client_to_self_delay;
+	u64 min_payment_size_msat;
+	u64 max_payment_size_msat;
 };
 
 enum LogLevel {
@@ -55,6 +76,7 @@ interface Builder {
 	void set_entropy_seed_bytes(sequence<u8> seed_bytes);
 	void set_entropy_bip39_mnemonic(Mnemonic mnemonic, string? passphrase);
 	void set_chain_source_esplora(string server_url, EsploraSyncConfig? config);
+	void set_chain_source_electrum(string server_url, ElectrumSyncConfig? config);
 	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
@@ -62,11 +84,13 @@ interface Builder {
 	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(string? log_file_path, LogLevel? max_log_level);
-	void set_log_facade_logger(LogLevel? max_log_level);
+	void set_log_facade_logger();
 	void set_custom_logger(LogWriter log_writer);
 	void set_network(Network network);
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
+	[Throws=BuildError]
+	void set_announcement_addresses(sequence<SocketAddress> announcement_addresses);
 	[Throws=BuildError]
 	void set_node_alias(string node_alias);
 	[Throws=BuildError]
@@ -92,9 +116,11 @@ interface Node {
 	Event wait_next_event();
 	[Async]
 	Event next_event_async();
+	[Throws=NodeError]
 	void event_handled();
 	PublicKey node_id();
 	sequence<SocketAddress>? listening_addresses();
+	sequence<SocketAddress>? announcement_addresses();
 	NodeAlias? node_alias();
 	Bolt11Payment bolt11_payment();
 	Bolt12Payment bolt12_payment();
@@ -302,6 +328,7 @@ enum BuildError {
 	"InvalidSystemTime",
 	"InvalidChannelMonitor",
 	"InvalidListeningAddresses",
+	"InvalidAnnouncementAddresses",
 	"InvalidNodeAlias",
 	"ReadFailed",
 	"WriteFailed",
@@ -309,6 +336,7 @@ enum BuildError {
 	"KVStoreSetupFailed",
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
+	"NetworkMismatch",
 };
 
 [Trait]
@@ -373,7 +401,7 @@ interface ClosureReason {
 interface PaymentKind {
 	Onchain(Txid txid, ConfirmationStatus status);
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
-	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, LSPFeeLimits lsp_fee_limits);
+	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, u64? counterparty_skimmed_fee_msat, LSPFeeLimits lsp_fee_limits);
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
 	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, UntrustedString? payer_note, u64? quantity);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
@@ -412,6 +440,7 @@ dictionary PaymentDetails {
 	PaymentId id;
 	PaymentKind kind;
 	u64? amount_msat;
+	u64? fee_paid_msat;
 	PaymentDirection direction;
 	PaymentStatus status;
 	u64 latest_update_timestamp;

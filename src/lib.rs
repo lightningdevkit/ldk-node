@@ -236,6 +236,12 @@ impl Node {
 			self.config.network
 		);
 
+		// Start up any runtime-dependant chain sources (e.g. Electrum)
+		self.chain_source.start(Arc::clone(&runtime)).map_err(|e| {
+			log_error!(self.logger, "Failed to start chain syncing: {}", e);
+			e
+		})?;
+
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
 		let runtime_ref = &runtime;
@@ -414,7 +420,7 @@ impl Node {
 		let bcast_node_metrics = Arc::clone(&self.node_metrics);
 		let mut stop_bcast = self.stop_sender.subscribe();
 		let node_alias = self.config.node_alias.clone();
-		if may_announce_channel(&self.config) {
+		if may_announce_channel(&self.config).is_ok() {
 			runtime.spawn(async move {
 				// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 				#[cfg(not(test))]
@@ -457,8 +463,10 @@ impl Node {
 								continue;
 							}
 
-							let addresses = if let Some(addresses) = bcast_config.listening_addresses.clone() {
-								addresses
+							let addresses = if let Some(announcement_addresses) = bcast_config.announcement_addresses.clone() {
+								announcement_addresses
+							} else if let Some(listening_addresses) = bcast_config.listening_addresses.clone() {
+								listening_addresses
 							} else {
 								debug_assert!(false, "We checked whether the node may announce, so listening addresses should always be set");
 								continue;
@@ -525,6 +533,7 @@ impl Node {
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
+			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.runtime),
@@ -636,6 +645,9 @@ impl Node {
 		let metrics_runtime = Arc::clone(&runtime);
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
+
+		// Stop any runtime-dependant chain sources.
+		self.chain_source.stop();
 
 		// Stop the runtime.
 		match self.stop_sender.send(()) {
@@ -780,15 +792,15 @@ impl Node {
 	/// Confirm the last retrieved event handled.
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
-	pub fn event_handled(&self) {
-		self.event_queue.event_handled().unwrap_or_else(|e| {
+	pub fn event_handled(&self) -> Result<(), Error> {
+		self.event_queue.event_handled().map_err(|e| {
 			log_error!(
 				self.logger,
 				"Couldn't mark event handled due to persistence failure: {}",
 				e
 			);
-			panic!("Couldn't mark event handled due to persistence failure");
-		});
+			e
+		})
 	}
 
 	/// Returns our own node id
@@ -799,6 +811,14 @@ impl Node {
 	/// Returns our own listening addresses.
 	pub fn listening_addresses(&self) -> Option<Vec<SocketAddress>> {
 		self.config.listening_addresses.clone()
+	}
+
+	/// Returns the addresses that the node will announce to the network.
+	pub fn announcement_addresses(&self) -> Option<Vec<SocketAddress>> {
+		self.config
+			.announcement_addresses
+			.clone()
+			.or_else(|| self.config.listening_addresses.clone())
 	}
 
 	/// Returns our node alias.
@@ -1200,32 +1220,31 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
-		if may_announce_channel(&self.config) {
-			self.open_channel_inner(
-				node_id,
-				address,
-				channel_amount_sats,
-				push_to_counterparty_msat,
-				channel_config,
-				true,
-			)
-		} else {
-			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node. Please make sure to configure listening addreesses and node alias");
+		if let Err(err) = may_announce_channel(&self.config) {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed);
 		}
+
+		self.open_channel_inner(
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			true,
+		)
 	}
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
 	/// cache.
 	///
-	/// **Note:** The wallets are regularly synced in the background, which is configurable via the
-	/// respective config object, e.g., via
-	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`] and
-	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]. Therefore, using this blocking
-	/// sync method is almost always redundant and should be avoided where possible.
+	/// **Note:** The wallets are regularly synced in the background if background syncing is enabled
+	/// via [`EsploraSyncConfig::background_sync_config`]. Therefore, using this blocking sync method
+	/// is almost always redundant when background syncing is enabled and should be avoided where possible.
+	/// However, if background syncing is disabled (i.e., `background_sync_config` is set to `None`),
+	/// this method must be called manually to keep wallets in sync with the chain state.
 	///
-	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::onchain_wallet_sync_interval_secs
-	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::lightning_wallet_sync_interval_secs
+	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -1241,6 +1260,13 @@ impl Node {
 				async move {
 					match chain_source.as_ref() {
 						ChainSource::Esplora { .. } => {
+							chain_source.update_fee_rate_estimates().await?;
+							chain_source
+								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
+								.await?;
+							chain_source.sync_onchain_wallet().await?;
+						},
+						ChainSource::Electrum { .. } => {
 							chain_source.update_fee_rate_estimates().await?;
 							chain_source
 								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)

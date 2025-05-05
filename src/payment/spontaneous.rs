@@ -140,6 +140,7 @@ impl SpontaneousPayment {
 					payment_id,
 					kind,
 					Some(amount_msat),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -161,6 +162,7 @@ impl SpontaneousPayment {
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);

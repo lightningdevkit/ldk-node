@@ -5,12 +5,15 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-#![cfg(any(test, cln_test, vss_test))]
+#![cfg(any(test, cln_test, lnd_test, vss_test))]
 #![allow(dead_code)]
 
-use ldk_node::config::{Config, EsploraSyncConfig};
+pub(crate) mod logging;
+
+use logging::TestLogWriter;
+
+use ldk_node::config::{Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::logger::LogLevel;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
@@ -30,11 +33,9 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Network, OutPoint, Txid};
 
-use bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
-use bitcoincore_rpc::Client as BitcoindClient;
-use bitcoincore_rpc::RpcApi;
-
-use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
+use electrsd::corepc_node::Client as BitcoindClient;
+use electrsd::corepc_node::Node as BitcoinD;
+use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 
 use rand::distributions::Alphanumeric;
@@ -50,7 +51,7 @@ macro_rules! expect_event {
 		match $node.wait_next_event() {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
@@ -67,7 +68,7 @@ macro_rules! expect_channel_pending_event {
 			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				funding_txo
 			},
 			ref e => {
@@ -85,7 +86,7 @@ macro_rules! expect_channel_ready_event {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				user_channel_id
 			},
 			ref e => {
@@ -103,7 +104,11 @@ macro_rules! expect_payment_received_event {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
-				$node.event_handled();
+				let payment = $node.payment(&payment_id.unwrap()).unwrap();
+				if !matches!(payment.kind, PaymentKind::Onchain { .. }) {
+					assert_eq!(payment.fee_paid_msat, None);
+				}
+				$node.event_handled().unwrap();
 				payment_id
 			},
 			ref e => {
@@ -128,7 +133,7 @@ macro_rules! expect_payment_claimable_event {
 				assert_eq!(payment_hash, $payment_hash);
 				assert_eq!(payment_id, $payment_id);
 				assert_eq!(claimable_amount_msat, $claimable_amount_msat);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				claimable_amount_msat
 			},
 			ref e => {
@@ -148,8 +153,10 @@ macro_rules! expect_payment_successful_event {
 				if let Some(fee_msat) = $fee_paid_msat {
 					assert_eq!(fee_paid_msat, fee_msat);
 				}
+				let payment = $node.payment(&$payment_id.unwrap()).unwrap();
+				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
@@ -162,10 +169,10 @@ pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe =
-		env::var("BITCOIND_EXE").ok().or_else(|| bitcoind::downloaded_exe_path().ok()).expect(
+		env::var("BITCOIND_EXE").ok().or_else(|| corepc_node::downloaded_exe_path().ok()).expect(
 			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
 		);
-	let mut bitcoind_conf = bitcoind::Conf::default();
+	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
@@ -215,29 +222,29 @@ pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	Some(NodeAlias(bytes))
 }
 
-pub(crate) fn random_config(anchor_channels: bool) -> Config {
-	let mut config = Config::default();
+pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
+	let mut node_config = Config::default();
 
 	if !anchor_channels {
-		config.anchor_channels_config = None;
+		node_config.anchor_channels_config = None;
 	}
 
-	config.network = Network::Regtest;
-	println!("Setting network: {}", config.network);
+	node_config.network = Network::Regtest;
+	println!("Setting network: {}", node_config.network);
 
 	let rand_dir = random_storage_path();
 	println!("Setting random LDK storage dir: {}", rand_dir.display());
-	config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
+	node_config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
 
 	let rand_listening_addresses = random_listening_addresses();
 	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
-	config.listening_addresses = Some(rand_listening_addresses);
+	node_config.listening_addresses = Some(rand_listening_addresses);
 
 	let alias = random_node_alias();
 	println!("Setting random LDK node alias: {:?}", alias);
-	config.node_alias = alias;
+	node_config.node_alias = alias;
 
-	config
+	TestConfig { node_config, ..Default::default() }
 }
 
 #[cfg(feature = "uniffi")]
@@ -248,7 +255,14 @@ type TestNode = Node;
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
 	Esplora(&'a ElectrsD),
+	Electrum(&'a ElectrsD),
 	BitcoindRpc(&'a BitcoinD),
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct TestConfig {
+	pub node_config: Config,
+	pub log_writer: TestLogWriter,
 }
 
 macro_rules! setup_builder {
@@ -273,10 +287,11 @@ pub(crate) fn setup_two_nodes(
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	if allow_0conf {
-		config_b.trusted_peers_0conf.push(node_a.node_id());
+		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
 	if anchor_channels && anchors_trusted_no_reserve {
 		config_b
+			.node_config
 			.anchor_channels_config
 			.as_mut()
 			.unwrap()
@@ -288,16 +303,19 @@ pub(crate) fn setup_two_nodes(
 }
 
 pub(crate) fn setup_node(
-	chain_source: &TestChainSource, config: Config, seed_bytes: Option<Vec<u8>>,
+	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
 ) -> TestNode {
-	setup_builder!(builder, config);
+	setup_builder!(builder, config.node_config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let mut sync_config = EsploraSyncConfig::default();
-			sync_config.onchain_wallet_sync_interval_secs = 100000;
-			sync_config.lightning_wallet_sync_interval_secs = 100000;
+			let sync_config = EsploraSyncConfig { background_sync_config: None };
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+		},
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let sync_config = ElectrumSyncConfig { background_sync_config: None };
+			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
 		},
 		TestChainSource::BitcoindRpc(bitcoind) => {
 			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
@@ -309,14 +327,32 @@ pub(crate) fn setup_node(
 		},
 	}
 
-	let log_file_path = format!("{}/{}", config.storage_dir_path, "ldk_node.log");
-	builder.set_filesystem_logger(Some(log_file_path), Some(LogLevel::Gossip));
-
-	if let Some(seed) = seed_bytes {
-		builder.set_entropy_seed_bytes(seed).unwrap();
+	match &config.log_writer {
+		TestLogWriter::FileWriter => {
+			builder.set_filesystem_logger(None, None);
+		},
+		TestLogWriter::LogFacade => {
+			builder.set_log_facade_logger();
+		},
+		TestLogWriter::Custom(custom_log_writer) => {
+			builder.set_custom_logger(Arc::clone(custom_log_writer));
+		},
 	}
 
-	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
+	if let Some(seed) = seed_bytes {
+		#[cfg(feature = "uniffi")]
+		{
+			builder.set_entropy_seed_bytes(seed).unwrap();
+		}
+		#[cfg(not(feature = "uniffi"))]
+		{
+			let mut bytes = [0u8; 64];
+			bytes.copy_from_slice(&seed);
+			builder.set_entropy_seed_bytes(bytes);
+		}
+	}
+
+	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
 	assert!(node.status().is_running);
@@ -327,17 +363,14 @@ pub(crate) fn setup_node(
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
-	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
+	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	print!("Generating {} blocks...", num);
-	let cur_height = bitcoind.get_block_count().expect("failed to get current block height");
-	let address = bitcoind
-		.get_new_address(Some("test"), Some(AddressType::Legacy))
-		.expect("failed to get new address")
-		.require_network(bitcoin::Network::Regtest)
-		.expect("failed to get new address");
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let cur_height = blockchain_info.blocks;
+	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
-	let _block_hashes_res = bitcoind.generate_to_address(num as u64, &address);
+	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
 	wait_for_block(electrs, cur_height as usize + num);
 	print!(" Done!");
 	println!("\n");
@@ -418,13 +451,12 @@ where
 pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
-	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
+	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	generate_blocks_and_wait(bitcoind, electrs, 101);
 
 	for addr in addrs {
-		let txid =
-			bitcoind.send_to_address(&addr, amount, None, None, None, None, None, None).unwrap();
+		let txid = bitcoind.send_to_address(&addr, amount).unwrap().0.parse().unwrap();
 		wait_for_tx(electrs, txid);
 	}
 
@@ -673,7 +705,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -711,7 +743,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -834,7 +866,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let (received_keysend_amount, received_custom_records) = match next_event {
 		ref e @ Event::PaymentReceived { amount_msat, ref custom_records, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			(amount_msat, custom_records)
 		},
 		ref e => {

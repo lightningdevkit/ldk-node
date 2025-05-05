@@ -16,7 +16,7 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
-	PaymentStatus, PaymentStore,
+	PaymentStatus, PaymentStore, PaymentStoreUpdateResult,
 };
 use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
@@ -160,6 +160,7 @@ impl Bolt11Payment {
 					payment_id,
 					kind,
 					invoice.amount_milli_satoshis(),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -182,6 +183,7 @@ impl Bolt11Payment {
 							payment_id,
 							kind,
 							invoice.amount_milli_satoshis(),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -293,6 +295,7 @@ impl Bolt11Payment {
 					payment_id,
 					kind,
 					Some(amount_msat),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -315,6 +318,7 @@ impl Bolt11Payment {
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -404,13 +408,25 @@ impl Bolt11Payment {
 			..PaymentDetailsUpdate::new(payment_id)
 		};
 
-		if !self.payment_store.update(&update)? {
-			log_error!(
-				self.logger,
-				"Failed to manually fail unknown payment with hash: {}",
-				payment_hash
-			);
-			return Err(Error::InvalidPaymentHash);
+		match self.payment_store.update(&update) {
+			Ok(PaymentStoreUpdateResult::Updated) | Ok(PaymentStoreUpdateResult::Unchanged) => (),
+			Ok(PaymentStoreUpdateResult::NotFound) => {
+				log_error!(
+					self.logger,
+					"Failed to manually fail unknown payment with hash {}",
+					payment_hash,
+				);
+				return Err(Error::InvalidPaymentHash);
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to manually fail payment with hash {}: {}",
+					payment_hash,
+					e
+				);
+				return Err(e);
+			},
 		}
 
 		self.channel_manager.fail_htlc_backwards(&payment_hash);
@@ -531,6 +547,7 @@ impl Bolt11Payment {
 			id,
 			kind,
 			amount_msat,
+			None,
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
@@ -596,9 +613,8 @@ impl Bolt11Payment {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let (node_id, address) = liquidity_source
-			.get_lsps2_service_details()
-			.ok_or(Error::LiquiditySourceUnavailable)?;
+		let (node_id, address) =
+			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let rt_lock = self.runtime.read().unwrap();
 		let runtime = rt_lock.as_ref().unwrap();
@@ -660,12 +676,14 @@ impl Bolt11Payment {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
+			counterparty_skimmed_fee_msat: None,
 			lsp_fee_limits,
 		};
 		let payment = PaymentDetails::new(
 			id,
 			kind,
 			amount_msat,
+			None,
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);

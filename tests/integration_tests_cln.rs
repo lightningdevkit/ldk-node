@@ -18,8 +18,8 @@ use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use clightningrpc::lightningrpc::LightningRPC;
 use clightningrpc::responses::NetworkAddress;
 
-use bitcoincore_rpc::Auth;
-use bitcoincore_rpc::Client as BitcoindClient;
+use electrsd::corepc_client::client_sync::Auth;
+use electrsd::corepc_node::Client as BitcoindClient;
 
 use electrum_client::Client as ElectrumClient;
 use lightning_invoice::Bolt11Invoice;
@@ -33,8 +33,8 @@ use std::str::FromStr;
 #[test]
 fn test_cln() {
 	// Setup bitcoind / electrs clients
-	let bitcoind_client = BitcoindClient::new(
-		"127.0.0.1:18443",
+	let bitcoind_client = BitcoindClient::new_with_auth(
+		"http://127.0.0.1:18443",
 		Auth::UserPass("user".to_string(), "pass".to_string()),
 	)
 	.unwrap();
@@ -45,7 +45,7 @@ fn test_cln() {
 
 	// Setup LDK Node
 	let config = common::random_config(true);
-	let mut builder = Builder::from_config(config);
+	let mut builder = Builder::from_config(config.node_config);
 	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
 
 	let node = builder.build().unwrap();

@@ -18,7 +18,7 @@ fn channel_full_cycle_with_vss_store() {
 	println!("== Node A ==");
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config_a = common::random_config(true);
-	let mut builder_a = Builder::from_config(config_a);
+	let mut builder_a = Builder::from_config(config_a.node_config);
 	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 	let node_a = builder_a
@@ -32,7 +32,7 @@ fn channel_full_cycle_with_vss_store() {
 
 	println!("\n== Node B ==");
 	let config_b = common::random_config(true);
-	let mut builder_b = Builder::from_config(config_b);
+	let mut builder_b = Builder::from_config(config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b
 		.build_with_vss_store_and_fixed_headers(

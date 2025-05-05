@@ -49,7 +49,6 @@ use bitcoin::{
 
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
@@ -99,6 +98,10 @@ where
 		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
 	}
 
+	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
+		self.inner.lock().unwrap().tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
+	}
+
 	pub(crate) fn current_best_block(&self) -> BestBlock {
 		let checkpoint = self.inner.lock().unwrap().latest_checkpoint();
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
@@ -146,11 +149,6 @@ where
 	fn update_payment_store<'a>(
 		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
 	) -> Result<(), Error> {
-		let latest_update_timestamp = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or(Duration::from_secs(0))
-			.as_secs();
-
 		for wtx in locked_wallet.transactions() {
 			let id = PaymentId(wtx.tx_node.txid.to_byte_array());
 			let txid = wtx.tx_node.txid;
@@ -187,25 +185,34 @@ where
 			// here to determine the `PaymentKind`, but that's not really satisfactory, so
 			// we're punting on it until we can come up with a better solution.
 			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
+			let fee = locked_wallet.calculate_fee(&wtx.tx_node.tx).unwrap_or(Amount::ZERO);
 			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
 			let (direction, amount_msat) = if sent > received {
 				let direction = PaymentDirection::Outbound;
-				let amount_msat = Some(sent.to_sat().saturating_sub(received.to_sat()) * 1000);
+				let amount_msat = Some(
+					sent.to_sat().saturating_sub(fee.to_sat()).saturating_sub(received.to_sat())
+						* 1000,
+				);
 				(direction, amount_msat)
 			} else {
 				let direction = PaymentDirection::Inbound;
-				let amount_msat = Some(received.to_sat().saturating_sub(sent.to_sat()) * 1000);
+				let amount_msat = Some(
+					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee.to_sat()))
+						* 1000,
+				);
 				(direction, amount_msat)
 			};
 
-			let payment = PaymentDetails {
+			let fee_paid_msat = Some(fee.to_sat() * 1000);
+
+			let payment = PaymentDetails::new(
 				id,
 				kind,
 				amount_msat,
+				fee_paid_msat,
 				direction,
-				status: payment_status,
-				latest_update_timestamp,
-			};
+				payment_status,
+			);
 
 			self.payment_store.insert_or_update(&payment)?;
 		}
