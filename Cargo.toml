@@ -47,7 +47,7 @@ lightning-liquidity = { version = "0.1.0", features = ["std"] }
 #lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["futures"] }
 #lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["rpc-client", "tokio"] }
-#lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["esplora-async-https", "time"] }
+#lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["esplora-async-https", "electrum", "time"] }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 
 #lightning = { path = "../rust-lightning/lightning", features = ["std"] }
@@ -58,7 +58,7 @@ lightning-liquidity = { version = "0.1.0", features = ["std"] }
 #lightning-background-processor = { path = "../rust-lightning/lightning-background-processor", features = ["futures"] }
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-block-sync = { path = "../rust-lightning/lightning-block-sync", features = ["rpc-client", "tokio"] }
-#lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async-https", "time"] }
+#lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async-https", "electrum", "time"] }
 #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity", features = ["std"] }
 
 bdk_chain = { version = "0.21.1", default-features = false, features = ["std"] }
