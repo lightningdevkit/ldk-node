@@ -14,7 +14,7 @@ use logging::TestLogWriter;
 
 use ldk_node::config::{Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentMetadataDetail, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
 };
@@ -653,10 +653,23 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	});
 	assert_eq!(outbound_payments_b.len(), 0);
 
-	let inbound_payments_b = node_b.list_payments_with_filter(|p| {
-		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
-	});
-	assert_eq!(inbound_payments_b.len(), 1);
+	if cfg!(feature = "legacy_payment_store") {
+		let inbound_payments_b = node_b.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+		});
+		assert_eq!(inbound_payments_b.len(), 1);
+	} else {
+		// Payment inbound are saved in the payment metadata store when they are pending
+		let inbound_metadata_b = node_b.list_payments_metadata_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound
+				&& matches!(p.payment_metadata_detail, PaymentMetadataDetail::Bolt11 { .. })
+		});
+		assert_eq!(inbound_metadata_b.len(), 1);
+		let inbound_payments_b = node_b.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+		});
+		assert_eq!(inbound_payments_b.len(), 0);
+	}
 
 	expect_event!(node_a, PaymentSuccessful);
 	expect_event!(node_b, PaymentReceived);
@@ -893,10 +906,22 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
 		5
 	);
-	assert_eq!(
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
-		6
-	);
+	if cfg!(feature = "legacy_payment_store") {
+		assert_eq!(
+			node_b
+				.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. }))
+				.len(),
+			6
+		);
+	} else {
+		assert_eq!(
+			node_b
+				.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. }))
+				.len(),
+			5
+		);
+	}
+
 	assert_eq!(
 		node_a
 			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
