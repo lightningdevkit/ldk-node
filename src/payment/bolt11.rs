@@ -15,12 +15,13 @@ use crate::error::Error;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
-	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
-	PaymentStatus, PaymentStore, PaymentStoreUpdateResult,
+	JitChannelFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
+	PaymentMetadata, PaymentMetadataDetail, PaymentStatus, PaymentStore, PaymentStoreUpdateResult,
 };
 use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::types::ChannelManager;
+use crate::PaymentMetadataStore;
 
 use lightning::ln::bolt11_payment;
 use lightning::ln::channelmanager::{
@@ -36,7 +37,10 @@ use lightning_invoice::Bolt11InvoiceDescription as LdkBolt11InvoiceDescription;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+
+use super::store::{PaymentDataWithFallback, PaymentMetadataUpdate};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
@@ -68,6 +72,7 @@ pub struct Bolt11Payment {
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	metadata_store: Arc<PaymentMetadataStore<Arc<Logger>>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
@@ -79,8 +84,9 @@ impl Bolt11Payment {
 		channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore<Arc<Logger>>>, peer_store: Arc<PeerStore<Arc<Logger>>>,
-		config: Arc<Config>, logger: Arc<Logger>,
+		payment_store: Arc<PaymentStore<Arc<Logger>>>,
+		metadata_store: Arc<PaymentMetadataStore<Arc<Logger>>>,
+		peer_store: Arc<PeerStore<Arc<Logger>>>, config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
 			runtime,
@@ -88,6 +94,7 @@ impl Bolt11Payment {
 			connection_manager,
 			liquidity_source,
 			payment_store,
+			metadata_store,
 			peer_store,
 			config,
 			logger,
@@ -112,7 +119,7 @@ impl Bolt11Payment {
 		})?;
 
 		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
-		if let Some(payment) = self.payment_store.get(&payment_id) {
+		if let Ok(payment) = self.get_payment_data_with_fallback(&payment_id) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
@@ -225,7 +232,7 @@ impl Bolt11Payment {
 
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
-		if let Some(payment) = self.payment_store.get(&payment_id) {
+		if let Ok(payment) = self.get_payment_data_with_fallback(&payment_id) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
@@ -363,24 +370,39 @@ impl Bolt11Payment {
 			return Err(Error::InvalidPaymentPreimage);
 		}
 
-		if let Some(details) = self.payment_store.get(&payment_id) {
-			if let Some(expected_amount_msat) = details.amount_msat {
-				if claimable_amount_msat < expected_amount_msat {
-					log_error!(
-						self.logger,
-						"Failed to manually claim payment {} as the claimable amount is less than expected",
-						payment_id
-					);
-					return Err(Error::InvalidAmount);
-				}
-			}
-		} else {
+		let payment = self.get_payment_data_with_fallback(&payment_id)?;
+		let expected_amount_msat = payment
+			.payment_details
+			.and_then(|detail| detail.amount_msat)
+			.or_else(|| {
+				payment.payment_metadata.as_ref().and_then(|metadata| {
+					if let PaymentMetadataDetail::Bolt11 { invoice, .. } =
+						&metadata.payment_metadata_detail
+					{
+						Bolt11Invoice::from_str(invoice.as_str())
+							.ok()
+							.and_then(|invoice| invoice.amount_milli_satoshis())
+					} else {
+						None
+					}
+				})
+			})
+			.ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to manually claim payment {}: missing amount or metadata",
+					payment_id
+				);
+				Error::InvalidAmount
+			})?;
+
+		if claimable_amount_msat < expected_amount_msat {
 			log_error!(
 				self.logger,
-				"Failed to manually claim unknown payment with hash: {}",
-				payment_hash
+				"Failed to manually claim payment {} as the claimable amount is less than expected",
+				payment_id
 			);
-			return Err(Error::InvalidPaymentHash);
+			return Err(Error::InvalidAmount);
 		}
 
 		self.channel_manager.claim_funds(preimage);
@@ -402,31 +424,69 @@ impl Bolt11Payment {
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	pub fn fail_for_hash(&self, payment_hash: PaymentHash) -> Result<(), Error> {
 		let payment_id = PaymentId(payment_hash.0);
+		let payment = self.get_payment_data_with_fallback(&payment_id)?;
+		if payment.payment_metadata.is_some() {
+			let update = PaymentMetadataUpdate {
+				status: Some(PaymentStatus::Failed),
+				..PaymentMetadataUpdate::new(payment_id)
+			};
+			match self.metadata_store.update(&update) {
+				Ok(PaymentStoreUpdateResult::Updated) | Ok(PaymentStoreUpdateResult::Unchanged) => {
+					()
+				},
+				Ok(PaymentStoreUpdateResult::NotFound) => {
+					log_error!(
+						self.logger,
+						"Failed to manually fail unknown payment with hash {}",
+						payment_hash,
+					);
+					return Err(Error::InvalidPaymentHash);
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to manually fail payment with hash {}: {}",
+						payment_hash,
+						e
+					);
+					return Err(e);
+				},
+			}
+		}
+		if payment.payment_details.is_some() {
+			let update = PaymentDetailsUpdate {
+				status: Some(PaymentStatus::Failed),
+				..PaymentDetailsUpdate::new(payment_id)
+			};
+			match self.payment_store.update(&update) {
+				Ok(PaymentStoreUpdateResult::Updated) | Ok(PaymentStoreUpdateResult::Unchanged) => {
+					()
+				},
+				Ok(PaymentStoreUpdateResult::NotFound) => {
+					log_error!(
+						self.logger,
+						"Failed to manually fail unknown payment with hash {}",
+						payment_hash,
+					);
+					return Err(Error::InvalidPaymentHash);
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to manually fail payment with hash {}: {}",
+						payment_hash,
+						e
+					);
+					return Err(e);
+				},
+			}
+		} else {
+			let detail = PaymentDetails {
+				status: PaymentStatus::Failed,
+				..payment.get_payment_detail(|| Error::InvalidPaymentHash)?
+			};
 
-		let update = PaymentDetailsUpdate {
-			status: Some(PaymentStatus::Failed),
-			..PaymentDetailsUpdate::new(payment_id)
-		};
-
-		match self.payment_store.update(&update) {
-			Ok(PaymentStoreUpdateResult::Updated) | Ok(PaymentStoreUpdateResult::Unchanged) => (),
-			Ok(PaymentStoreUpdateResult::NotFound) => {
-				log_error!(
-					self.logger,
-					"Failed to manually fail unknown payment with hash {}",
-					payment_hash,
-				);
-				return Err(Error::InvalidPaymentHash);
-			},
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to manually fail payment with hash {}: {}",
-					payment_hash,
-					e
-				);
-				return Err(e);
-			},
+			self.payment_store.insert(detail)?;
 		}
 
 		self.channel_manager.fail_htlc_backwards(&payment_hash);
@@ -498,6 +558,64 @@ impl Bolt11Payment {
 		self.receive_inner(None, description, expiry_secs, Some(payment_hash))
 	}
 
+	#[cfg(not(feature = "legacy_payment_store"))]
+	pub(crate) fn receive_inner(
+		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
+		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
+	) -> Result<Bolt11Invoice, Error> {
+		let invoice = {
+			let invoice_params = Bolt11InvoiceParameters {
+				amount_msats: amount_msat,
+				description: invoice_description.clone(),
+				invoice_expiry_delta_secs: Some(expiry_secs),
+				payment_hash: manual_claim_payment_hash,
+				..Default::default()
+			};
+
+			match self.channel_manager.create_bolt11_invoice(invoice_params) {
+				Ok(inv) => {
+					log_info!(self.logger, "Invoice created: {}", inv);
+					inv
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to create invoice: {}", e);
+					return Err(Error::InvoiceCreationFailed);
+				},
+			}
+		};
+
+		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+		let payment_secret = invoice.payment_secret();
+		let id = PaymentId(payment_hash.0);
+		let preimage = if manual_claim_payment_hash.is_none() {
+			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
+			// will know the preimage at this point.
+			let res = self
+				.channel_manager
+				.get_payment_preimage(payment_hash, payment_secret.clone())
+				.ok();
+			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
+			res
+		} else {
+			None
+		};
+
+		let payment_metadata_detail =
+			PaymentMetadataDetail::Bolt11 { invoice: invoice.clone().to_string(), preimage };
+
+		let payment_metadata = PaymentMetadata::new(
+			id,
+			PaymentDirection::Inbound,
+			payment_metadata_detail,
+			None,
+			PaymentStatus::Pending,
+		);
+		self.metadata_store.insert(payment_metadata)?;
+
+		Ok(invoice)
+	}
+
+	#[cfg(feature = "legacy_payment_store")]
 	pub(crate) fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
@@ -604,8 +722,95 @@ impl Bolt11Payment {
 			max_proportional_lsp_fee_limit_ppm_msat,
 		)
 	}
+	#[cfg(not(feature = "legacy_payment_store"))]
+	pub(crate) fn receive_via_jit_channel_inner(
+		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
+		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<Bolt11Invoice, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
-	fn receive_via_jit_channel_inner(
+		let (node_id, address) =
+			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let rt_lock = self.runtime.read().unwrap();
+		let runtime = rt_lock.as_ref().unwrap();
+
+		let peer_info = PeerInfo { node_id, address };
+
+		let con_node_id = peer_info.node_id;
+		let con_addr = peer_info.address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		tokio::task::block_in_place(move || {
+			runtime.block_on(async move {
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+			})
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
+			tokio::task::block_in_place(move || {
+				runtime.block_on(async move {
+					if let Some(amount_msat) = amount_msat {
+						liquidity_source
+							.lsps2_receive_to_jit_channel(
+								amount_msat,
+								description,
+								expiry_secs,
+								max_total_lsp_fee_limit_msat,
+							)
+							.await
+							.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
+					} else {
+						liquidity_source
+							.lsps2_receive_variable_amount_to_jit_channel(
+								description,
+								expiry_secs,
+								max_proportional_lsp_fee_limit_ppm_msat,
+							)
+							.await
+							.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
+					}
+				})
+			})?;
+
+		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+		let payment_secret = invoice.payment_secret();
+		let id = PaymentId(payment_hash.0);
+		let preimage =
+			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
+
+		let payment_metadata_detail =
+			PaymentMetadataDetail::Bolt11 { invoice: invoice.clone().to_string(), preimage };
+		let jit_channel_fee_limit = JitChannelFeeLimits {
+			counterparty_skimmed_fee_msat: None,
+			max_total_opening_fee_msat: lsp_total_opening_fee,
+			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
+		};
+
+		let payment_metadata = PaymentMetadata::new(
+			id,
+			PaymentDirection::Inbound,
+			payment_metadata_detail,
+			Some(jit_channel_fee_limit),
+			PaymentStatus::Pending,
+		);
+		self.metadata_store.insert(payment_metadata)?;
+
+		// Persist LSP peer to make sure we reconnect on restart.
+		self.peer_store.add_peer(peer_info)?;
+
+		Ok(invoice)
+	}
+
+	#[cfg(feature = "legacy_payment_store")]
+	pub(crate) fn receive_via_jit_channel_inner(
 		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
@@ -665,7 +870,7 @@ impl Bolt11Payment {
 		// Register payment in payment store.
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 		let payment_secret = invoice.payment_secret();
-		let lsp_fee_limits = LSPFeeLimits {
+		let lsp_fee_limits = crate::payment::LSPFeeLimits {
 			max_total_opening_fee_msat: lsp_total_opening_fee,
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
 		};
@@ -777,5 +982,17 @@ impl Bolt11Payment {
 			})?;
 
 		Ok(())
+	}
+
+	fn get_payment_data_with_fallback(
+		&self, payment_id: &PaymentId,
+	) -> Result<PaymentDataWithFallback, Error> {
+		PaymentDataWithFallback::new(
+			payment_id,
+			Arc::new(self.logger.clone()),
+			self.metadata_store.clone(),
+			self.payment_store.clone(),
+			|| Error::InvalidPaymentHash,
+		)
 	}
 }

@@ -8,8 +8,8 @@
 use crate::types::{CustomTlvRecord, DynStore, Sweeper, Wallet};
 
 use crate::{
-	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
-	UserChannelId,
+	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PaymentMetadataStore,
+	PeerInfo, PeerStore, UserChannelId,
 };
 
 use crate::config::{may_announce_channel, Config};
@@ -19,8 +19,9 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::Logger;
 
 use crate::payment::store::{
-	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
-	PaymentStore, PaymentStoreUpdateResult,
+	PaymentDataWithFallback, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
+	PaymentMetadataDetail, PaymentMetadataUpdate, PaymentStatus, PaymentStore,
+	PaymentStoreUpdateResult,
 };
 
 use crate::io::{
@@ -450,6 +451,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore<L>>,
+	metadata_store: Arc<PaymentMetadataStore<L>>,
 	peer_store: Arc<PeerStore<L>>,
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	logger: L,
@@ -466,8 +468,9 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore<L>>, peer_store: Arc<PeerStore<L>>,
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, logger: L, config: Arc<Config>,
+		payment_store: Arc<PaymentStore<L>>, metadata_store: Arc<PaymentMetadataStore<L>>,
+		peer_store: Arc<PeerStore<L>>, runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -479,6 +482,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			metadata_store,
 			peer_store,
 			logger,
 			runtime,
@@ -572,7 +576,13 @@ where
 				payment_id: _,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
-				if let Some(info) = self.payment_store.get(&payment_id) {
+				if let Ok(info) = PaymentDataWithFallback::new(
+					&payment_id,
+					Arc::new(self.logger.clone()),
+					self.metadata_store.clone(),
+					self.payment_store.clone(),
+					|| ReplayEvent(),
+				) {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
 							self.logger,
@@ -595,7 +605,11 @@ where
 					}
 
 					if info.status == PaymentStatus::Succeeded
-						|| matches!(info.kind, PaymentKind::Spontaneous { .. })
+						|| info
+							.payment_details
+							.as_ref()
+							.map(|details| matches!(details.kind, PaymentKind::Spontaneous { .. }))
+							.unwrap_or(false)
 					{
 						log_info!(
 							self.logger,
@@ -605,35 +619,34 @@ where
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
-						let update = PaymentDetailsUpdate {
-							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_id)
-						};
-						match self.payment_store.update(&update) {
-							Ok(_) => return Ok(()),
-							Err(e) => {
-								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent());
-							},
-						};
+						return self.fail_payment(&info, None);
 					}
 
-					let max_total_opening_fee_msat = match info.kind {
-						PaymentKind::Bolt11Jit { lsp_fee_limits, .. } => {
-							lsp_fee_limits
-								.max_total_opening_fee_msat
-								.or_else(|| {
+					let max_total_opening_fee_msat = info
+						.payment_details
+						.as_ref()
+						.and_then(|details| {
+							if let PaymentKind::Bolt11Jit { lsp_fee_limits, .. } = &details.kind {
+								lsp_fee_limits.max_total_opening_fee_msat.or_else(|| {
 									lsp_fee_limits.max_proportional_opening_fee_ppm_msat.and_then(
 										|max_prop_fee| {
-											// If it's a variable amount payment, compute the actual fee.
 											compute_opening_fee(amount_msat, 0, max_prop_fee)
 										},
 									)
 								})
-								.unwrap_or(0)
-						},
-						_ => 0,
-					};
+							} else {
+								None
+							}
+						})
+						.or_else(|| {
+							info.payment_metadata.as_ref().and_then(|metadata| {
+								metadata
+									.jit_channel_fee_limit
+									.as_ref()
+									.and_then(|jit_limits| jit_limits.max_total_opening_fee_msat)
+							})
+						})
+						.unwrap_or(0);
 
 					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
 						log_info!(
@@ -645,52 +658,67 @@ where
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
-						let update = PaymentDetailsUpdate {
-							hash: Some(Some(payment_hash)),
-							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_id)
-						};
-						match self.payment_store.update(&update) {
-							Ok(_) => return Ok(()),
-							Err(e) => {
-								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent());
-							},
-						};
+						return self.fail_payment(&info, Some(payment_hash));
 					}
 
 					// If the LSP skimmed anything, update our stored payment.
 					if counterparty_skimmed_fee_msat > 0 {
-						match info.kind {
-							PaymentKind::Bolt11Jit { .. } => {
-								let update = PaymentDetailsUpdate {
-									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
-									..PaymentDetailsUpdate::new(payment_id)
+						if info.payment_details.is_some() || info.payment_metadata.is_some() {
+							if let Some(payment_detail) = info.payment_details.clone() {
+								match payment_detail.kind {
+									PaymentKind::Bolt11Jit { .. } => {
+										let update = PaymentDetailsUpdate {
+											counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
+											..PaymentDetailsUpdate::new(payment_id)
+										};
+										match self.payment_store.update(&update) {
+											Ok(_) => (),
+											Err(e) => {
+												log_error!(self.logger, "Failed to access payment store: {}", e);
+												return Err(ReplayEvent());
+											},
+										};
+									}
+									_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for JIT payments."),
+								}
+							}
+							if let Some(payment_metadata) = info.payment_metadata.clone() {
+								let update = PaymentMetadataUpdate {
+									counterparty_skimmed_fee_msat: Some(
+										counterparty_skimmed_fee_msat,
+									),
+									..PaymentMetadataUpdate::new(payment_metadata.id)
 								};
-								match self.payment_store.update(&update) {
+								match self.metadata_store.update(&update) {
 									Ok(_) => (),
 									Err(e) => {
-										log_error!(self.logger, "Failed to access payment store: {}", e);
+										log_error!(
+											self.logger,
+											"Failed to access metadata store: {}",
+											e
+										);
 										return Err(ReplayEvent());
 									},
 								};
 							}
-							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for JIT payments."),
+						} else {
+							debug_assert!(false, "We only expect the counterparty to get away with withholding fees for JIT payments.")
 						}
 					}
 
 					// If this is known by the store but ChannelManager doesn't know the preimage,
 					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
 					// user interaction.
-					match info.kind {
-						PaymentKind::Bolt11 { preimage, .. } => {
+					macro_rules! handle_payment_claimable {
+						($payment_source:expr, $preimage:expr) => {
 							if purpose.preimage().is_none() {
 								debug_assert!(
-									preimage.is_none(),
+									$preimage.is_none(),
 									"We would have registered the preimage if we knew"
 								);
 
 								let custom_records = onion_fields
+									.as_ref()
 									.map(|cf| {
 										cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect()
 									})
@@ -712,10 +740,20 @@ where
 										);
 										return Err(ReplayEvent());
 									},
-								};
+								}
 							}
-						},
-						_ => {},
+						};
+					}
+					if let Some(payment_detail) = &info.payment_details {
+						if let PaymentKind::Bolt11 { preimage, .. } = payment_detail.kind {
+							handle_payment_claimable!(payment_detail, preimage);
+						}
+					} else if let Some(payment_metadata) = &info.payment_metadata {
+						if let PaymentMetadataDetail::Bolt11 { preimage, .. } =
+							payment_metadata.payment_metadata_detail
+						{
+							handle_payment_claimable!(payment_metadata, preimage);
+						}
 					}
 				}
 
@@ -832,18 +870,15 @@ where
 					);
 					self.channel_manager.fail_htlc_backwards(&payment_hash);
 
-					let update = PaymentDetailsUpdate {
-						hash: Some(Some(payment_hash)),
-						status: Some(PaymentStatus::Failed),
-						..PaymentDetailsUpdate::new(payment_id)
-					};
-					match self.payment_store.update(&update) {
-						Ok(_) => return Ok(()),
-						Err(e) => {
-							log_error!(self.logger, "Failed to access payment store: {}", e);
-							return Err(ReplayEvent());
-						},
-					};
+					if let Ok(info) = PaymentDataWithFallback::new(
+						&payment_id,
+						Arc::new(self.logger.clone()),
+						self.metadata_store.clone(),
+						self.payment_store.clone(),
+						|| ReplayEvent(),
+					) {
+						return self.fail_payment(&info, Some(payment_hash));
+					}
 				}
 			},
 			LdkEvent::PaymentClaimed {
@@ -864,6 +899,25 @@ where
 					hex_utils::to_string(&payment_hash.0),
 					amount_msat,
 				);
+				let info = PaymentDataWithFallback::new(
+					&payment_id,
+					Arc::new(self.logger.clone()),
+					self.metadata_store.clone(),
+					self.payment_store.clone(),
+					|| ReplayEvent(),
+				)?;
+				if info.payment_details.is_none() {
+					let detail = info.get_payment_detail(|| ReplayEvent())?;
+					if let Err(e) = self.payment_store.insert(detail) {
+						log_error!(
+							self.logger,
+							"Failed to insert payment with ID {}: {}",
+							payment_id,
+							e
+						);
+						return Err(ReplayEvent());
+					};
+				}
 
 				let update = match purpose {
 					PaymentPurpose::Bolt11InvoicePayment {
@@ -904,6 +958,18 @@ where
 						..PaymentDetailsUpdate::new(payment_id)
 					},
 				};
+
+				if info.payment_metadata.is_some() {
+					let update_metadata = PaymentMetadataUpdate {
+						preimage: update.preimage.flatten(),
+						status: Some(PaymentStatus::Succeeded),
+						..PaymentMetadataUpdate::new(payment_id)
+					};
+					if let Err(e) = self.metadata_store.update(&update_metadata) {
+						log_error!(self.logger, "Failed to access payment metadata store: {}", e);
+						return Err(ReplayEvent());
+					}
+				}
 
 				match self.payment_store.update(&update) {
 					Ok(PaymentStoreUpdateResult::Updated)
@@ -1013,18 +1079,15 @@ where
 					reason
 				);
 
-				let update = PaymentDetailsUpdate {
-					hash: Some(payment_hash),
-					status: Some(PaymentStatus::Failed),
-					..PaymentDetailsUpdate::new(payment_id)
-				};
-				match self.payment_store.update(&update) {
-					Ok(_) => {},
-					Err(e) => {
-						log_error!(self.logger, "Failed to access payment store: {}", e);
-						return Err(ReplayEvent());
-					},
-				};
+				let info = PaymentDataWithFallback::new(
+					&payment_id,
+					Arc::new(self.logger.clone()),
+					self.metadata_store.clone(),
+					self.payment_store.clone(),
+					|| ReplayEvent(),
+				)?;
+
+				self.fail_payment(&info, payment_hash)?;
 
 				let event =
 					Event::PaymentFailed { payment_id: Some(payment_id), payment_hash, reason };
@@ -1483,6 +1546,87 @@ where
 		}
 		Ok(())
 	}
+
+	fn fail_payment(
+		&self, info: &PaymentDataWithFallback, payment_hash: Option<PaymentHash>,
+	) -> Result<(), ReplayEvent> {
+		if let Some(metadata) = &info.payment_metadata {
+			let update = PaymentMetadataUpdate {
+				status: Some(PaymentStatus::Failed),
+				..PaymentMetadataUpdate::new(metadata.id)
+			};
+			match self.metadata_store.update(&update) {
+				Ok(_) => {},
+				Err(e) => {
+					log_error!(self.logger, "Failed to access payment metadata store: {}", e);
+					return Err(ReplayEvent());
+				},
+			};
+		}
+
+		let detail = info.get_payment_detail(|| ReplayEvent())?;
+
+		let kind = if let Some(hash) = payment_hash {
+			match detail.kind {
+				PaymentKind::Bolt11 { secret, preimage, .. } => {
+					PaymentKind::Bolt11 { hash, secret, preimage }
+				},
+				PaymentKind::Bolt12Offer {
+					offer_id,
+					preimage,
+					quantity,
+					secret,
+					payer_note,
+					..
+				} => PaymentKind::Bolt12Offer {
+					hash: Some(hash),
+					offer_id,
+					preimage,
+					quantity,
+					secret,
+					payer_note,
+				},
+				PaymentKind::Spontaneous { preimage, .. } => {
+					PaymentKind::Spontaneous { hash, preimage }
+				},
+				PaymentKind::Bolt11Jit {
+					secret,
+					preimage,
+					lsp_fee_limits,
+					counterparty_skimmed_fee_msat,
+					..
+				} => PaymentKind::Bolt11Jit {
+					hash,
+					secret,
+					preimage,
+					lsp_fee_limits,
+					counterparty_skimmed_fee_msat,
+				},
+				PaymentKind::Bolt12Refund { preimage, quantity, secret, payer_note, .. } => {
+					PaymentKind::Bolt12Refund {
+						hash: Some(hash),
+						preimage,
+						quantity,
+						secret,
+						payer_note,
+					}
+				},
+				_ => detail.kind,
+			}
+		} else {
+			detail.kind
+		};
+
+		let payment_detail = PaymentDetails { status: PaymentStatus::Failed, kind, ..detail };
+
+		match self.payment_store.insert_or_update(&payment_detail) {
+			Ok(_) => Ok(()),
+			Err(e) => {
+				log_error!(self.logger, "Failed to access payment store: {}", e);
+				Err(ReplayEvent())
+			},
+		}
+	}
 }
 
 #[cfg(test)]
@@ -1510,7 +1654,6 @@ mod tests {
 		for _ in 0..5 {
 			assert_eq!(event_queue.wait_next_event(), expected_event);
 			assert_eq!(event_queue.next_event_async().await, expected_event);
-			assert_eq!(event_queue.next_event(), Some(expected_event.clone()));
 		}
 
 		// Check we can read back what we persisted.

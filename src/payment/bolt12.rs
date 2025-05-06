@@ -16,12 +16,14 @@ use crate::payment::store::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
 use crate::types::ChannelManager;
+use crate::PaymentMetadataStore;
 
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::{Amount, Offer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::offers::refund::Refund;
+use lightning::util::ser::Writeable;
 use lightning::util::string::UntrustedString;
 
 use rand::RngCore;
@@ -29,6 +31,8 @@ use rand::RngCore;
 use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::store::{PaymentMetadata, PaymentMetadataDetail};
 
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
@@ -40,6 +44,7 @@ pub struct Bolt12Payment {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
 	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	metadata_store: Arc<PaymentMetadataStore<Arc<Logger>>>,
 	logger: Arc<Logger>,
 }
 
@@ -47,9 +52,9 @@ impl Bolt12Payment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore<Arc<Logger>>>,
-		logger: Arc<Logger>,
+		metadata_store: Arc<PaymentMetadataStore<Arc<Logger>>>, logger: Arc<Logger>,
 	) -> Self {
-		Self { runtime, channel_manager, payment_store, logger }
+		Self { runtime, channel_manager, payment_store, metadata_store, logger }
 	}
 
 	/// Send a payment given an offer.
@@ -316,7 +321,7 @@ impl Bolt12Payment {
 
 		Ok(offer)
 	}
-
+	#[cfg(not(feature = "legacy_payment_store"))]
 	/// Requests a refund payment for the given [`Refund`].
 	///
 	/// The returned [`Bolt12Invoice`] is for informational purposes only (i.e., isn't needed to
@@ -330,24 +335,22 @@ impl Bolt12Payment {
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(payment_hash.0);
 
-		let kind = PaymentKind::Bolt12Refund {
-			hash: Some(payment_hash),
+		let payment_metadata_detail = PaymentMetadataDetail::Bolt12Refund {
+			refund: refund.clone(),
+			invoice: invoice.encode(),
 			preimage: None,
-			secret: None,
-			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
-			quantity: refund.quantity(),
+			hrn: None,
+			dnssec_proof: None,
 		};
 
-		let payment = PaymentDetails::new(
+		let payment_metadata = PaymentMetadata::new(
 			payment_id,
-			kind,
-			Some(refund.amount_msats()),
-			None,
 			PaymentDirection::Inbound,
+			payment_metadata_detail,
+			None,
 			PaymentStatus::Pending,
 		);
-
-		self.payment_store.insert(payment)?;
+		self.metadata_store.insert(payment_metadata)?;
 
 		Ok(invoice)
 	}
@@ -415,5 +418,41 @@ impl Bolt12Payment {
 		self.payment_store.insert(payment)?;
 
 		Ok(refund)
+	}
+
+	#[cfg(feature = "legacy_payment_store")]
+	/// Requests a refund payment for the given [`Refund`].
+	///
+	/// The returned [`Bolt12Invoice`] is for informational purposes only (i.e., isn't needed to
+	/// retrieve the refund).
+	pub fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
+		let invoice = self.channel_manager.request_refund_payment(refund).map_err(|e| {
+			log_error!(self.logger, "Failed to request refund payment: {:?}", e);
+			Error::InvoiceRequestCreationFailed
+		})?;
+
+		let payment_hash = invoice.payment_hash();
+		let payment_id = PaymentId(payment_hash.0);
+
+		let kind = PaymentKind::Bolt12Refund {
+			hash: Some(payment_hash),
+			preimage: None,
+			secret: None,
+			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
+			quantity: refund.quantity(),
+		};
+
+		let payment = PaymentDetails::new(
+			payment_id,
+			kind,
+			Some(refund.amount_msats()),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		self.payment_store.insert(payment)?;
+
+		Ok(invoice)
 	}
 }

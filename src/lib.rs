@@ -132,7 +132,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
-use payment::store::PaymentStore;
+use payment::store::{PaymentMetadata, PaymentMetadataStore, PaymentStore};
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
 	UnifiedQrPayment,
@@ -197,6 +197,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	metadata_store: Arc<PaymentMetadataStore<Arc<Logger>>>,
 	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 }
@@ -535,6 +536,7 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.metadata_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
@@ -837,6 +839,7 @@ impl Node {
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.metadata_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
@@ -854,6 +857,7 @@ impl Node {
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.metadata_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
@@ -869,6 +873,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.metadata_store),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -882,6 +887,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.metadata_store),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -1485,6 +1491,44 @@ impl Node {
 	/// Retrieves all payments.
 	pub fn list_payments(&self) -> Vec<PaymentDetails> {
 		self.payment_store.list_filter(|_| true)
+	}
+
+	/// Retrieve the details of a specific payment metadata with the given id.
+	///
+	/// Returns `Some` if the payment metadata was known and `None` otherwise.
+	pub fn payment_metadata(&self, payment_id: &PaymentId) -> Option<PaymentMetadata> {
+		self.metadata_store.get(payment_id)
+	}
+
+	/// Remove the payment metadata with the given id from the store.
+	pub fn remove_payment_metadata(&self, payment_id: &PaymentId) -> Result<(), Error> {
+		self.metadata_store.remove(&payment_id)
+	}
+
+	/// Retrieves all payment metadata that match the given predicate.
+	///
+	/// For example, you could retrieve all metadata for inbound payments as follows:
+	/// ```
+	/// # use ldk_node::Builder;
+	/// # use ldk_node::config::Config;
+	/// # use ldk_node::payment::PaymentDirection;
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut config = Config::default();
+	/// # config.network = Network::Regtest;
+	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();
+	/// # let builder = Builder::from_config(config);
+	/// # let node = builder.build().unwrap();
+	/// node.list_payments_metadata_with_filter(|m| m.direction == PaymentDirection::Inbound);
+	/// ```
+	pub fn list_payments_metadata_with_filter<F: FnMut(&&PaymentMetadata) -> bool>(
+		&self, f: F,
+	) -> Vec<PaymentMetadata> {
+		self.metadata_store.list_filter(f)
+	}
+
+	/// Retrieves all payments.
+	pub fn list_payments_metadata(&self) -> Vec<PaymentMetadata> {
+		self.metadata_store.list_filter(|_| true)
 	}
 
 	/// Retrieves a list of known peers.
