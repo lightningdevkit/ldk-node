@@ -26,6 +26,7 @@ panic = 'abort'     # Abort on panic
 
 [features]
 default = []
+legacy_payment_store = []
 
 [dependencies]
 lightning = { version = "0.1.0", features = ["std"] }
@@ -129,4 +130,5 @@ check-cfg = [
 	"cfg(tokio_unstable)",
 	"cfg(cln_test)",
 	"cfg(lnd_test)",
+	"cfg(legacy_payment_store)",
 ]
