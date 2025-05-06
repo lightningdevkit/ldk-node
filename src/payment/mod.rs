@@ -19,7 +19,8 @@ pub use bolt12::Bolt12Payment;
 pub use onchain::OnchainPayment;
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
-	ConfirmationStatus, LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
+	ConfirmationStatus, JitChannelFeeLimits, LSPFeeLimits, PaymentDetails, PaymentDirection,
+	PaymentKind, PaymentMetadata, PaymentMetadataDetail, PaymentStatus,
 };
 pub use unified_qr::{QrPaymentResult, UnifiedQrPayment};
 

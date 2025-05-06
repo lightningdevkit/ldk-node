@@ -8,21 +8,28 @@
 use crate::hex_utils;
 use crate::io::{
 	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::Error;
 
+use bitcoin::hashes::Hash;
+use bitcoin::io::Read;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
+use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::OfferId;
-use lightning::util::ser::{Readable, Writeable};
+use lightning::offers::refund::Refund;
+use lightning::onion_message::dns_resolution::{DNSSECProof, HumanReadableName};
+use lightning::util::ser::{Hostname, Readable, Writeable, Writer};
 use lightning::util::string::UntrustedString;
 use lightning::{
 	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
 	impl_writeable_tlv_based_enum, write_tlv_fields,
 };
 
+use lightning_invoice::Bolt11Invoice;
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
 use bitcoin::{BlockHash, Txid};
@@ -30,6 +37,7 @@ use bitcoin::{BlockHash, Txid};
 use std::collections::hash_map;
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -726,6 +734,570 @@ where
 	}
 }
 
+/// Represents a payment metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaymentMetadata {
+	/// The identifier of this payment.
+	pub id: PaymentId,
+	/// The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+	pub latest_update_timestamp: u64,
+	/// The direction of the payment.
+	pub direction: PaymentDirection,
+	/// The status of the payment.
+	pub status: PaymentStatus,
+	/// The metadata detail of the payment.
+	///
+	/// This can be a BOLT 11 invoice, a BOLT 12 offer, or a BOLT 12 refund.
+	pub payment_metadata_detail: PaymentMetadataDetail,
+	/// The limits applying to how much fee we allow an LSP to deduct from the payment amount.
+	pub jit_channel_fee_limit: Option<JitChannelFeeLimits>,
+}
+
+impl PaymentMetadata {
+	pub(crate) fn new(
+		id: PaymentId, direction: PaymentDirection, payment_metadata_detail: PaymentMetadataDetail,
+		jit_channel_fee_limit: Option<JitChannelFeeLimits>, status: PaymentStatus,
+	) -> Self {
+		let latest_update_timestamp = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
+
+		PaymentMetadata {
+			id,
+			latest_update_timestamp,
+			direction,
+			payment_metadata_detail,
+			jit_channel_fee_limit,
+			status,
+		}
+	}
+
+	pub(crate) fn update(&mut self, update: &PaymentMetadataUpdate) -> bool {
+		debug_assert_eq!(
+			self.id, update.id,
+			"We should only ever override payment metadata data for the same payment id"
+		);
+
+		let mut updated = false;
+
+		macro_rules! update_if_necessary {
+			($val: expr, $update: expr) => {
+				if $val != $update {
+					$val = $update;
+					updated = true;
+				}
+			};
+		}
+
+		if let Some(preimage_opt) = update.preimage {
+			match self.payment_metadata_detail {
+				PaymentMetadataDetail::Bolt11 { ref mut preimage, .. } => {
+					update_if_necessary!(*preimage, Some(preimage_opt));
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(hrn_opt) = update.hrn.clone() {
+			match self.payment_metadata_detail {
+				PaymentMetadataDetail::Bolt12Offer { ref mut hrn, .. } => {
+					update_if_necessary!(*hrn, Some(hrn_opt.clone()));
+				},
+				PaymentMetadataDetail::Bolt12Refund { ref mut hrn, .. } => {
+					update_if_necessary!(*hrn, Some(hrn_opt.clone()));
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(dnssec_proof_opt) = update.dnssec_proof.clone() {
+			match self.payment_metadata_detail {
+				PaymentMetadataDetail::Bolt12Offer { ref mut dnssec_proof, .. } => {
+					update_if_necessary!(*dnssec_proof, Some(dnssec_proof_opt.clone()));
+				},
+				PaymentMetadataDetail::Bolt12Refund { ref mut dnssec_proof, .. } => {
+					update_if_necessary!(*dnssec_proof, Some(dnssec_proof_opt.clone()));
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(direction) = update.direction {
+			update_if_necessary!(self.direction, direction);
+		}
+		if let Some(counterparty_skimmed_fee_msat) = update.counterparty_skimmed_fee_msat {
+			if let Some(jit_channel_fee_limit) = &mut self.jit_channel_fee_limit {
+				update_if_necessary!(
+					jit_channel_fee_limit.counterparty_skimmed_fee_msat,
+					Some(counterparty_skimmed_fee_msat)
+				);
+			} else {
+				updated = true;
+			}
+		}
+		if let Some(state) = &update.status {
+			update_if_necessary!(self.status, *state);
+		}
+
+		if updated {
+			self.latest_update_timestamp = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs();
+		}
+
+		updated
+	}
+}
+
+impl Writeable for PaymentMetadata {
+	fn write<W: lightning::util::ser::Writer>(
+		&self, writer: &mut W,
+	) -> Result<(), lightning::io::Error> {
+		write_tlv_fields!(writer, {
+			(0, self.id, required),
+			(1, self.latest_update_timestamp, required),
+			(2, self.direction, required),
+			(3, self.status, required),
+			(4, self.payment_metadata_detail, required),
+			(5, self.jit_channel_fee_limit, option),
+		});
+		Ok(())
+	}
+}
+
+impl Readable for PaymentMetadata {
+	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<PaymentMetadata, DecodeError> {
+		_init_and_read_len_prefixed_tlv_fields!(reader, {
+			(0, id, required),
+			(1, latest_update_timestamp, required),
+			(2, direction, required),
+			(3, status, required),
+			(4, payment_metadata_detail, required),
+			(5, jit_channel_fee_limit, option),
+		});
+
+		Ok(PaymentMetadata {
+			id: id.0.ok_or(DecodeError::InvalidValue)?,
+			latest_update_timestamp: latest_update_timestamp.0.ok_or(DecodeError::InvalidValue)?,
+			direction: direction.0.ok_or(DecodeError::InvalidValue)?,
+			status: status.0.ok_or(DecodeError::InvalidValue)?,
+			payment_metadata_detail: payment_metadata_detail.0.ok_or(DecodeError::InvalidValue)?,
+			jit_channel_fee_limit,
+		})
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Defines fee limits for Just-In-Time (JIT) channels opened by a Lightning Service Provider (LSP)
+/// to provide inbound liquidity, as per the LSPS2 protocol (bLIP-52). Used in `PaymentMetadata` to
+/// track and constrain costs associated with dynamically opened channels for payments.
+pub struct JitChannelFeeLimits {
+	/// The maximal total amount we allow any configured LSP withhold from us when forwarding the
+	/// payment.
+	pub max_total_opening_fee_msat: Option<u64>,
+	/// The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+	/// LSP withhold from us when forwarding the payment.
+	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
+	/// The value, in thousands of a satoshi, that was deducted from this payment as an extra
+	/// fee taken by our channel counterparty.
+	///
+	/// Will only be `Some` once we received the payment. Will always be `None` for LDK Node
+	/// v0.4 and prior.
+	pub counterparty_skimmed_fee_msat: Option<u64>,
+}
+impl_writeable_tlv_based!(JitChannelFeeLimits, {
+	(0, max_total_opening_fee_msat, option),
+	(1, max_proportional_opening_fee_ppm_msat, option),
+	(2, counterparty_skimmed_fee_msat, option),
+});
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Represents the metadata details of a payment.
+///
+/// This enum encapsulates various types of payment metadata, such as BOLT 11 invoices,
+/// BOLT 12 offers, and BOLT 12 refunds, along with their associated details.
+pub enum PaymentMetadataDetail {
+	/// A [BOLT 11] metadata.
+	///
+	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+	Bolt11 {
+		/// The invoice associated with the payment.
+		invoice: String,
+		/// The pre-image used by the payment.
+		preimage: Option<PaymentPreimage>,
+	},
+	/// A [BOLT 12] 'offer' payment metadata, i.e., a payment metadata for an [`Offer`].
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	/// [`Offer`]: crate::lightning::offers::offer::Offer
+	Bolt12Offer {
+		/// The ID of the offer this payment is for.
+		offer_id: OfferId,
+		/// The pre-image used by the payment.
+		preimage: Option<PaymentPreimage>,
+		/// The DNSSEC proof associated with the payment.
+		dnssec_proof: Option<DNSSECProofWrapper>,
+		/// The human-readable name associated with the payment.
+		hrn: Option<HumanReadableName>,
+		/// The quantity of an item requested in the offer.
+		quantity: Option<u64>,
+		/// The payment hash, i.e., the hash of the `preimage`.
+		hash: Option<PaymentHash>,
+	},
+	/// A [BOLT 12] 'refund' payment metadata, i.e., a payment metadata for a [`Refund`].
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	/// [`Refund`]: lightning::offers::refund::Refund
+	Bolt12Refund {
+		/// The refund details associated with the payment.
+		refund: Refund,
+		/// The human-readable name associated with the refund payment.
+		hrn: Option<HumanReadableName>,
+		/// The DNSSEC proof associated with the refund payment.
+		dnssec_proof: Option<DNSSECProofWrapper>,
+		/// The invoice associated with the refund payment.
+		invoice: Vec<u8>,
+		/// The pre-image used by the refund payment.
+		preimage: Option<PaymentPreimage>,
+	},
+}
+impl_writeable_tlv_based_enum! { PaymentMetadataDetail,
+	(0, Bolt11) => {
+		(0, invoice, required),
+		(1, preimage, option),
+	},
+	(4, Bolt12Offer) => {
+		(0, offer_id, required),
+		(1, preimage, option),
+		(2, dnssec_proof, option),
+		(3, hrn, option),
+		(4, quantity, option),
+		(5, hash, option),
+	},
+	(6, Bolt12Refund) => {
+		(0, refund, required),
+		(1, hrn, option),
+		(2, dnssec_proof, option),
+		(4, invoice, required),
+		(5, preimage, option),
+	}
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// A wrapper for `DNSSECProof` to enable serialization and deserialization,
+/// allowing it to be stored in the payment store.
+pub struct DNSSECProofWrapper(pub DNSSECProof);
+
+impl Writeable for DNSSECProofWrapper {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), lightning::io::Error> {
+		(self.0.name.as_str().len() as u8).write(w)?;
+		w.write_all(&self.0.name.as_str().as_bytes())?;
+		self.0.proof.write(w)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for DNSSECProofWrapper {
+	fn read<R: Read>(r: &mut R) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let s = Hostname::read(r)?;
+		let name = s.try_into().map_err(|_| DecodeError::InvalidValue)?;
+		let proof = Vec::<u8>::read(r)?;
+
+		Ok(DNSSECProofWrapper(DNSSECProof { name, proof }))
+	}
+}
+
+pub(crate) struct PaymentMetadataStore<L: Deref>
+where
+	L::Target: LdkLogger,
+{
+	metadata: Mutex<HashMap<PaymentId, PaymentMetadata>>,
+	kv_store: Arc<DynStore>,
+	logger: L,
+}
+
+impl<L: Deref> PaymentMetadataStore<L>
+where
+	L::Target: LdkLogger,
+{
+	pub(crate) fn new(metadata: Vec<PaymentMetadata>, kv_store: Arc<DynStore>, logger: L) -> Self {
+		let metadata = Mutex::new(HashMap::from_iter(
+			metadata.into_iter().map(|payment| (payment.id, payment)),
+		));
+		Self { metadata, kv_store, logger }
+	}
+
+	pub(crate) fn insert(&self, payment: PaymentMetadata) -> Result<bool, Error> {
+		let mut locked_payments = self.metadata.lock().unwrap();
+
+		let updated = locked_payments.insert(payment.id, payment.clone()).is_some();
+		self.persist_info(&payment.id, &payment)?;
+		Ok(updated)
+	}
+
+	pub(crate) fn remove(&self, id: &PaymentId) -> Result<(), Error> {
+		let removed = self.metadata.lock().unwrap().remove(id).is_some();
+		if removed {
+			let store_key = hex_utils::to_string(&id.0);
+			self.kv_store
+				.remove(
+					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+					PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+					&store_key,
+					false,
+				)
+				.map_err(|e| {
+					log_error!(
+						self.logger,
+						"Removing payment data for key {}/{}/{} failed due to: {}",
+						PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+						PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+						store_key,
+						e
+					);
+					Error::PersistenceFailed
+				})?;
+		}
+		Ok(())
+	}
+
+	pub(crate) fn get(&self, id: &PaymentId) -> Option<PaymentMetadata> {
+		self.metadata.lock().unwrap().get(id).cloned()
+	}
+
+	pub(crate) fn update(
+		&self, update: &PaymentMetadataUpdate,
+	) -> Result<PaymentStoreUpdateResult, Error> {
+		let mut locked_payments_metadata = self.metadata.lock().unwrap();
+
+		if let Some(payment) = locked_payments_metadata.get_mut(&update.id) {
+			let updated = payment.update(update);
+			if updated {
+				self.persist_info(&update.id, payment)?;
+				Ok(PaymentStoreUpdateResult::Updated)
+			} else {
+				Ok(PaymentStoreUpdateResult::Unchanged)
+			}
+		} else {
+			Ok(PaymentStoreUpdateResult::NotFound)
+		}
+	}
+
+	pub(crate) fn list_filter<F: FnMut(&&PaymentMetadata) -> bool>(
+		&self, f: F,
+	) -> Vec<PaymentMetadata> {
+		self.metadata.lock().unwrap().values().filter(f).cloned().collect::<Vec<PaymentMetadata>>()
+	}
+
+	fn persist_info(&self, id: &PaymentId, payment: &PaymentMetadata) -> Result<(), Error> {
+		let store_key = hex_utils::to_string(&id.0);
+		let data = payment.encode();
+		self.kv_store
+			.write(
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key,
+				&data,
+			)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Write for key {}/{}/{} failed due to: {}",
+					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+					PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+					store_key,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
+		Ok(())
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaymentMetadataUpdate {
+	pub id: PaymentId,
+	pub direction: Option<PaymentDirection>,
+	pub preimage: Option<PaymentPreimage>,
+	pub status: Option<PaymentStatus>,
+	pub hrn: Option<HumanReadableName>, // Hashed Recipient Name
+	pub dnssec_proof: Option<DNSSECProofWrapper>, // Prova DNSSEC
+	pub counterparty_skimmed_fee_msat: Option<u64>,
+}
+
+impl PaymentMetadataUpdate {
+	pub fn new(id: PaymentId) -> Self {
+		Self {
+			id,
+			direction: None,
+			preimage: None,
+			status: None,
+			hrn: None,
+			dnssec_proof: None,
+			counterparty_skimmed_fee_msat: None,
+		}
+	}
+}
+
+impl From<&PaymentMetadata> for PaymentMetadataUpdate {
+	fn from(value: &PaymentMetadata) -> Self {
+		let (preimage, hrn, dnssec_proof) = match &value.payment_metadata_detail {
+			PaymentMetadataDetail::Bolt11 { preimage, .. } => (preimage, None, None),
+			PaymentMetadataDetail::Bolt12Offer { preimage, hrn, dnssec_proof, .. } => {
+				(preimage, hrn.clone(), dnssec_proof.clone())
+			},
+			PaymentMetadataDetail::Bolt12Refund { preimage, hrn, dnssec_proof, .. } => {
+				(preimage, hrn.clone(), dnssec_proof.clone())
+			},
+		};
+		let counterparty_skimmed_fee_msat = match value.jit_channel_fee_limit {
+			Some(ref limit) => limit.counterparty_skimmed_fee_msat,
+			None => None,
+		};
+
+		Self {
+			id: value.id,
+			direction: Some(value.direction),
+			preimage: *preimage,
+			status: Some(value.status.clone()),
+			hrn,
+			dnssec_proof,
+			counterparty_skimmed_fee_msat,
+		}
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// A struct that holds both `PaymentDetails` and `PaymentMetadata`.
+/// Ensures that if one does not exist, the other must exist, aiding in the backward compatibility
+/// between `PaymentDetails` and `PaymentMetadata` for pending payments.
+pub struct PaymentDataWithFallback {
+	pub payment_metadata: Option<PaymentMetadata>,
+	pub payment_details: Option<PaymentDetails>,
+	pub status: PaymentStatus,
+	pub direction: PaymentDirection,
+}
+
+impl PaymentDataWithFallback {
+	pub(crate) fn new<L, E>(
+		payment_id: &PaymentId, logger: Arc<L>, metadata_store: Arc<PaymentMetadataStore<L>>,
+		payment_store: Arc<PaymentStore<L>>, error_fn: impl Fn() -> E,
+	) -> Result<Self, E>
+	where
+		L: Deref,
+		L::Target: LdkLogger,
+	{
+		let mut payment_metadata = None;
+		let mut payment_details = None;
+		let mut status = None;
+		let mut direction = None;
+
+		if let Some(metadata) = metadata_store.get(&payment_id) {
+			payment_metadata = Some(metadata.clone());
+			status = Some(metadata.status);
+			direction = Some(metadata.direction);
+		}
+		if let Some(payment) = payment_store.get(&payment_id) {
+			payment_details = Some(payment.clone());
+			status = Some(payment.status);
+			direction = Some(payment.direction);
+		}
+		if status.is_none() || direction.is_none() {
+			log_error!(
+				logger,
+				"Payment with id {} not found in either metadata or payment store",
+				payment_id
+			);
+			return Err(error_fn());
+		}
+
+		Ok(Self {
+			payment_metadata,
+			payment_details,
+			direction: direction.unwrap(),
+			status: status.unwrap(),
+		})
+	}
+
+	/// Retrieves payment details, creating them from payment metadata if they don't exist.
+	/// Returns an error from `error_fn` if neither details nor metadata are available.
+	pub fn get_payment_detail<E>(&self, error_fn: impl Fn() -> E) -> Result<PaymentDetails, E> {
+		if let Some(detail) = &self.payment_details {
+			return Ok(detail.clone());
+		} else if let Some(metadata) = &self.payment_metadata {
+			let mut amount_msat = None;
+			let kind = match &metadata.payment_metadata_detail {
+				PaymentMetadataDetail::Bolt11 { invoice, preimage } => {
+					let invoice = Bolt11Invoice::from_str(invoice.as_str()).unwrap();
+					let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+					let payment_secret = invoice.payment_secret();
+					amount_msat = invoice.amount_milli_satoshis();
+					match &metadata.jit_channel_fee_limit {
+						Some(jit_channel_fee_limit) => {
+							let lsp_fee_limits = LSPFeeLimits {
+								max_proportional_opening_fee_ppm_msat: jit_channel_fee_limit
+									.max_proportional_opening_fee_ppm_msat,
+								max_total_opening_fee_msat: jit_channel_fee_limit
+									.max_total_opening_fee_msat,
+							};
+							PaymentKind::Bolt11Jit {
+								hash: payment_hash,
+								secret: Some(payment_secret.clone()),
+								preimage: *preimage,
+								lsp_fee_limits,
+								counterparty_skimmed_fee_msat: jit_channel_fee_limit
+									.counterparty_skimmed_fee_msat,
+							}
+						},
+						None => PaymentKind::Bolt11 {
+							hash: payment_hash,
+							secret: Some(payment_secret.clone()),
+							preimage: *preimage,
+						},
+					}
+				},
+				PaymentMetadataDetail::Bolt12Offer {
+					offer_id, preimage, hash, quantity, ..
+				} => PaymentKind::Bolt12Offer {
+					hash: *hash,
+					offer_id: *offer_id,
+					preimage: *preimage,
+					quantity: *quantity,
+					secret: None,
+					payer_note: None,
+				},
+				PaymentMetadataDetail::Bolt12Refund { refund, preimage, invoice, .. } => {
+					let invoice = Bolt12Invoice::try_from(invoice.to_vec()).unwrap();
+					let payment_hash = PaymentHash(invoice.payment_hash().0);
+					amount_msat = Some(invoice.amount_msats());
+					PaymentKind::Bolt12Refund {
+						preimage: *preimage,
+						hash: Some(payment_hash),
+						secret: None,
+						payer_note: refund
+							.payer_note()
+							.map(|note| UntrustedString(note.0.to_string())),
+						quantity: refund.quantity(),
+					}
+				},
+			};
+
+			return Ok(PaymentDetails::new(
+				metadata.id,
+				kind,
+				amount_msat,
+				None,
+				metadata.direction,
+				metadata.status,
+			));
+		} else {
+			return Err(error_fn());
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -956,5 +1528,71 @@ mod tests {
 				},
 			}
 		}
+	}
+
+	#[test]
+	fn payment_metadata_info_is_persisted() {
+		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let logger = Arc::new(TestLogger::new());
+		let metadata_store = PaymentMetadataStore::new(Vec::new(), Arc::clone(&store), logger);
+
+		let hash = PaymentHash([42u8; 32]);
+		let id = PaymentId([42u8; 32]);
+		assert!(metadata_store.get(&id).is_none());
+
+		let store_key = hex_utils::to_string(&hash.0);
+		assert!(store
+			.read(
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key
+			)
+			.is_err());
+		let payment_metadata_detail =
+			PaymentMetadataDetail::Bolt11 { invoice: "test".to_string(), preimage: None };
+		let payment_metadata = PaymentMetadata::new(
+			id,
+			PaymentDirection::Inbound,
+			payment_metadata_detail,
+			None,
+			PaymentStatus::Pending,
+		);
+
+		assert_eq!(Ok(false), metadata_store.insert(payment_metadata.clone()));
+		assert!(metadata_store.get(&id).is_some());
+		assert!(store
+			.read(
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key
+			)
+			.is_ok());
+
+		assert_eq!(Ok(true), metadata_store.insert(payment_metadata.clone()));
+		assert!(metadata_store.get(&id).is_some());
+
+		// Check update returns `Updated`
+		let mut update = PaymentMetadataUpdate::new(id);
+		update.status = Some(PaymentStatus::Succeeded);
+		assert_eq!(Ok(PaymentStoreUpdateResult::Updated), metadata_store.update(&update));
+
+		// Check no-op update yields `Unchanged`
+		let mut update = PaymentMetadataUpdate::new(id);
+		update.status = Some(PaymentStatus::Succeeded);
+		assert_eq!(Ok(PaymentStoreUpdateResult::Unchanged), metadata_store.update(&update));
+
+		// Check bogus update yields `NotFound`
+		let bogus_id = PaymentId([84u8; 32]);
+		let mut update = PaymentMetadataUpdate::new(bogus_id);
+		update.status = Some(PaymentStatus::Succeeded);
+		assert_eq!(Ok(PaymentStoreUpdateResult::NotFound), metadata_store.update(&update));
+
+		assert!(metadata_store.get(&id).is_some());
+
+		assert_eq!(PaymentStatus::Succeeded, metadata_store.get(&id).unwrap().status);
+
+		// Check remove
+		assert_eq!(Ok(()), metadata_store.remove(&id));
+		assert!(metadata_store.get(&id).is_none());
 	}
 }
