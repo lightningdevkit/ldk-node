@@ -96,3 +96,7 @@ jobs:
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
           RUSTFLAGS="--cfg no_download" cargo test --features uniffi
+      - name: Test with legacy_payment_store feature on Rust ${{ matrix.toolchain }}
+        if: "matrix.platform != 'windows-latest'"
+        run: |
+          RUSTFLAGS="--cfg no_download" cargo test --features legacy_payment_store
