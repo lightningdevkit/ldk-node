@@ -14,6 +14,7 @@ use crate::io::{
 	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
+use crate::payment::store::PaymentMetadata;
 use crate::peer_store::PeerStore;
 use crate::sweep::DeprecatedSpendableOutputInfo;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
@@ -225,6 +226,36 @@ where
 			std::io::Error::new(
 				std::io::ErrorKind::InvalidData,
 				"Failed to deserialize PaymentDetails",
+			)
+		})?;
+		res.push(payment);
+	}
+	Ok(res)
+}
+
+/// Read previously persisted payment metadata information from the store.
+pub(crate) fn read_metadata<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<Vec<PaymentMetadata>, std::io::Error>
+where
+	L::Target: LdkLogger,
+{
+	let mut res = Vec::new();
+
+	for stored_key in kv_store.list(
+		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	)? {
+		let mut reader = Cursor::new(kv_store.read(
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PAYMENT_METADATA_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			&stored_key,
+		)?);
+		let payment = PaymentMetadata::read(&mut reader).map_err(|e| {
+			log_error!(logger, "Failed to deserialize PaymentMetadata: {}", e);
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"Failed to deserialize PaymentMetadata",
 			)
 		})?;
 		res.push(payment);

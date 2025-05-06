@@ -23,7 +23,7 @@ use crate::liquidity::{
 };
 use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::store::PaymentStore;
+use crate::payment::store::{PaymentMetadataStore, PaymentStore};
 use crate::peer_store::PeerStore;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -1023,6 +1023,18 @@ fn build_with_store_internal(
 		},
 	};
 
+	let metadata_store = match io::utils::read_metadata(Arc::clone(&kv_store), Arc::clone(&logger))
+	{
+		Ok(metadata) => Arc::new(PaymentMetadataStore::new(
+			metadata,
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(_) => {
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
@@ -1513,6 +1525,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		metadata_store,
 		is_listening,
 		node_metrics,
 	})
