@@ -13,6 +13,11 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	SendingParameters? sending_parameters;
+	HumanReadableNamesConfig? hrn_config;
+};
+
+dictionary HumanReadableNamesConfig {
+	sequence<PublicKey> dns_resolvers_node_ids;
 };
 
 dictionary AnchorChannelsConfig {
@@ -312,6 +317,7 @@ enum NodeError {
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
 	"HrnParsingFailed",
+	"DnsResolversUnavailable",
 };
 
 dictionary NodeStatus {
@@ -347,6 +353,7 @@ enum BuildError {
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
 	"NetworkMismatch",
+	"DnsResolversUnavailable",
 };
 
 [Trait]

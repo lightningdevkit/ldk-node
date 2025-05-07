@@ -103,6 +103,7 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `sending_parameters`                   | None               |
+/// | `hrn_config`                           | None               |
 ///
 /// See [`AnchorChannelsConfig`] and [`SendingParameters`] for more information regarding their
 /// respective default values.
@@ -167,6 +168,10 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub sending_parameters: Option<SendingParameters>,
+	/// Configuration options for Human-Readable Names ([BIP 353]).
+	///
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	pub hrn_config: Option<HumanReadableNamesConfig>,
 }
 
 impl Default for Config {
@@ -181,6 +186,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
 			node_alias: None,
+			hrn_config: None,
 		}
 	}
 }

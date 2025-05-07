@@ -174,6 +174,10 @@ pub enum BuildError {
 	LoggerSetupFailed,
 	/// The given network does not match the node's previously configured network.
 	NetworkMismatch,
+	/// The [`dns_resolvers_node_ids`] provided for HRN resolution is empty.
+	///
+	/// [`dns_resolvers_node_ids`]: crate::config::HumanReadableNamesConfig::dns_resolvers_node_ids
+	DnsResolversUnavailable,
 }
 
 impl fmt::Display for BuildError {
@@ -200,6 +204,9 @@ impl fmt::Display for BuildError {
 			Self::InvalidNodeAlias => write!(f, "Given node alias is invalid."),
 			Self::NetworkMismatch => {
 				write!(f, "Given network does not match the node's previously configured network.")
+			},
+			Self::DnsResolversUnavailable => {
+				write!(f, "The DNS resolvers provided for HRN resolution is empty.")
 			},
 		}
 	}
@@ -1490,6 +1497,12 @@ fn build_with_store_internal(
 				return Err(BuildError::ReadFailed);
 			}
 		},
+	};
+
+	if let Some(hrn_config) = &config.hrn_config {
+		if hrn_config.dns_resolvers_node_ids.is_empty() {
+			return Err(BuildError::DnsResolversUnavailable);
+		}
 	};
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
