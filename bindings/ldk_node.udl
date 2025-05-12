@@ -776,6 +776,31 @@ interface Refund {
 	string? payer_note();
 };
 
+interface Bolt12Invoice {
+	[Throws=NodeError, Name=from_str]
+	constructor([ByRef] string invoice_str);
+	PaymentHash payment_hash();
+	u64 amount_msats();
+	OfferAmount? amount();
+	PublicKey signing_pubkey();
+	u64 created_at();
+	u64? absolute_expiry_seconds();
+	u64 relative_expiry();
+	boolean is_expired();
+	string? description();
+	string? issuer();
+	string? payer_note();
+	sequence<u8>? metadata();
+	u64? quantity();
+	sequence<u8> signable_hash();
+	PublicKey payer_signing_pubkey();
+	PublicKey? issuer_signing_pubkey();
+	sequence<u8> chain();
+	sequence<sequence<u8>>? offer_chains();
+	sequence<Address> fallback_addresses();
+	sequence<u8> encode();
+};
+
 [Custom]
 typedef string Txid;
 
@@ -793,9 +818,6 @@ typedef string NodeId;
 
 [Custom]
 typedef string Address;
-
-[Custom]
-typedef string Bolt12Invoice;
 
 [Custom]
 typedef string OfferId;

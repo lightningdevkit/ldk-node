@@ -17,7 +17,6 @@ use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, Payme
 use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::ln::channelmanager::{PaymentId, Retry};
-use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::util::string::UntrustedString;
@@ -27,6 +26,11 @@ use rand::RngCore;
 use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(not(feature = "uniffi"))]
+type Bolt12Invoice = lightning::offers::invoice::Bolt12Invoice;
+#[cfg(feature = "uniffi")]
+type Bolt12Invoice = Arc<crate::ffi::Bolt12Invoice>;
 
 #[cfg(not(feature = "uniffi"))]
 type Offer = LdkOffer;
@@ -340,6 +344,7 @@ impl Bolt12Payment {
 	/// retrieve the refund).
 	///
 	/// [`Refund`]: lightning::offers::refund::Refund
+	/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
 	pub fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
 		let refund = maybe_deref(refund);
 		let invoice = self.channel_manager.request_refund_payment(&refund).map_err(|e| {
@@ -369,7 +374,7 @@ impl Bolt12Payment {
 
 		self.payment_store.insert(payment)?;
 
-		Ok(invoice)
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a [`Refund`] object that can be used to offer a refund payment of the amount given.

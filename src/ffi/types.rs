@@ -25,7 +25,6 @@ pub use crate::payment::{MaxTotalRoutingFeeLimit, QrPaymentResult, SendingParame
 pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::types::ChannelId;
-pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::OfferId;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::util::string::UntrustedString;
@@ -56,6 +55,7 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
 use lightning::offers::refund::Refund as LdkRefund;
 use lightning::util::ser::Writeable;
@@ -398,20 +398,218 @@ impl std::fmt::Display for Refund {
 	}
 }
 
-impl UniffiCustomTypeConverter for Bolt12Invoice {
-	type Builtin = String;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bolt12Invoice {
+	pub(crate) inner: LdkBolt12Invoice,
+}
 
-	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
-			if let Ok(invoice) = Bolt12Invoice::try_from(bytes_vec) {
-				return Ok(invoice);
-			}
-		}
-		Err(Error::InvalidInvoice.into())
+impl Bolt12Invoice {
+	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
+		invoice_str.parse()
 	}
 
-	fn from_custom(obj: Self) -> Self::Builtin {
-		hex_utils::to_string(&obj.encode())
+	/// SHA256 hash of the payment preimage that will be given in return for paying the invoice.
+	pub fn payment_hash(&self) -> PaymentHash {
+		PaymentHash(self.inner.payment_hash().0)
+	}
+
+	/// The minimum amount required for a successful payment of the invoice.
+	pub fn amount_msats(&self) -> u64 {
+		self.inner.amount_msats()
+	}
+
+	/// The minimum amount required for a successful payment of a single item.
+	///
+	/// From [`Offer::amount`]; `None` if the invoice was created in response to a [`Refund`] or if
+	/// the [`Offer`] did not set it.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`Offer::amount`]: lightning::offers::offer::Offer::amount
+	/// [`Refund`]: lightning::offers::refund::Refund
+	pub fn amount(&self) -> Option<OfferAmount> {
+		self.inner.amount().map(|amount| amount.into())
+	}
+
+	/// A typically transient public key corresponding to the key used to sign the invoice.
+	///
+	/// If the invoices was created in response to an [`Offer`], then this will be:
+	/// - [`Offer::issuer_signing_pubkey`] if it's `Some`, otherwise
+	/// - the final blinded node id from a [`BlindedMessagePath`] in [`Offer::paths`] if `None`.
+	///
+	/// If the invoice was created in response to a [`Refund`], then it is a valid pubkey chosen by
+	/// the recipient.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+	/// [`Offer::paths`]: lightning::offers::offer::Offer::paths
+	/// [`Refund`]: lightning::offers::refund::Refund
+	pub fn signing_pubkey(&self) -> PublicKey {
+		self.inner.signing_pubkey()
+	}
+
+	/// Duration since the Unix epoch when the invoice was created.
+	pub fn created_at(&self) -> u64 {
+		self.inner.created_at().as_secs()
+	}
+
+	/// Seconds since the Unix epoch when an invoice should no longer be requested.
+	///
+	/// From [`Offer::absolute_expiry`] or [`Refund::absolute_expiry`].
+	///
+	/// [`Offer::absolute_expiry`]: lightning::offers::offer::Offer::absolute_expiry
+	pub fn absolute_expiry_seconds(&self) -> Option<u64> {
+		self.inner.absolute_expiry().map(|duration| duration.as_secs())
+	}
+
+	/// When the invoice has expired and therefore should no longer be paid.
+	pub fn relative_expiry(&self) -> u64 {
+		self.inner.relative_expiry().as_secs()
+	}
+
+	/// Whether the invoice has expired.
+	pub fn is_expired(&self) -> bool {
+		self.inner.is_expired()
+	}
+
+	/// A complete description of the purpose of the originating offer or refund.
+	///
+	/// From [`Offer::description`] or [`Refund::description`].
+	///
+	/// [`Offer::description`]: lightning::offers::offer::Offer::description
+	/// [`Refund::description`]: lightning::offers::refund::Refund::description
+	pub fn description(&self) -> Option<String> {
+		self.inner.description().map(|printable| printable.to_string())
+	}
+
+	/// The issuer of the offer or refund.
+	///
+	/// From [`Offer::issuer`] or [`Refund::issuer`].
+	///
+	/// [`Offer::issuer`]: lightning::offers::offer::Offer::issuer
+	/// [`Refund::issuer`]: lightning::offers::refund::Refund::issuer
+	pub fn issuer(&self) -> Option<String> {
+		self.inner.issuer().map(|printable| printable.to_string())
+	}
+
+	/// A payer-provided note reflected back in the invoice.
+	///
+	/// From [`InvoiceRequest::payer_note`] or [`Refund::payer_note`].
+	///
+	/// [`Refund::payer_note`]: lightning::offers::refund::Refund::payer_note
+	pub fn payer_note(&self) -> Option<String> {
+		self.inner.payer_note().map(|note| note.to_string())
+	}
+
+	/// Opaque bytes set by the originating [`Offer`].
+	///
+	/// From [`Offer::metadata`]; `None` if the invoice was created in response to a [`Refund`] or
+	/// if the [`Offer`] did not set it.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`Offer::metadata`]: lightning::offers::offer::Offer::metadata
+	/// [`Refund`]: lightning::offers::refund::Refund
+	pub fn metadata(&self) -> Option<Vec<u8>> {
+		self.inner.metadata().cloned()
+	}
+
+	/// The quantity of items requested or refunded for.
+	///
+	/// From [`InvoiceRequest::quantity`] or [`Refund::quantity`].
+	///
+	/// [`Refund::quantity`]: lightning::offers::refund::Refund::quantity
+	pub fn quantity(&self) -> Option<u64> {
+		self.inner.quantity()
+	}
+
+	/// Hash that was used for signing the invoice.
+	pub fn signable_hash(&self) -> Vec<u8> {
+		self.inner.signable_hash().to_vec()
+	}
+
+	/// A possibly transient pubkey used to sign the invoice request or to send an invoice for a
+	/// refund in case there are no [`message_paths`].
+	///
+	/// [`message_paths`]: lightning::offers::invoice::Bolt12Invoice
+	pub fn payer_signing_pubkey(&self) -> PublicKey {
+		self.inner.payer_signing_pubkey()
+	}
+
+	/// The public key used by the recipient to sign invoices.
+	///
+	/// From [`Offer::issuer_signing_pubkey`] and may be `None`; also `None` if the invoice was
+	/// created in response to a [`Refund`].
+	///
+	/// [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+	/// [`Refund`]: lightning::offers::refund::Refund
+	pub fn issuer_signing_pubkey(&self) -> Option<PublicKey> {
+		self.inner.issuer_signing_pubkey()
+	}
+
+	/// The chain that must be used when paying the invoice; selected from [`offer_chains`] if the
+	/// invoice originated from an offer.
+	///
+	/// From [`InvoiceRequest::chain`] or [`Refund::chain`].
+	///
+	/// [`offer_chains`]: lightning::offers::invoice::Bolt12Invoice::offer_chains
+	/// [`InvoiceRequest::chain`]: lightning::offers::invoice_request::InvoiceRequest::chain
+	/// [`Refund::chain`]: lightning::offers::refund::Refund::chain
+	pub fn chain(&self) -> Vec<u8> {
+		self.inner.chain().to_bytes().to_vec()
+	}
+
+	/// The chains that may be used when paying a requested invoice.
+	///
+	/// From [`Offer::chains`]; `None` if the invoice was created in response to a [`Refund`].
+	///
+	/// [`Offer::chains`]: lightning::offers::offer::Offer::chains
+	/// [`Refund`]: lightning::offers::refund::Refund
+	pub fn offer_chains(&self) -> Option<Vec<Vec<u8>>> {
+		self.inner
+			.offer_chains()
+			.map(|chains| chains.iter().map(|chain| chain.to_bytes().to_vec()).collect())
+	}
+
+	/// Fallback addresses for paying the invoice on-chain, in order of most-preferred to
+	/// least-preferred.
+	pub fn fallback_addresses(&self) -> Vec<Address> {
+		self.inner.fallbacks()
+	}
+
+	/// Writes `self` out to a `Vec<u8>`.
+	pub fn encode(&self) -> Vec<u8> {
+		self.inner.encode()
+	}
+}
+
+impl std::str::FromStr for Bolt12Invoice {
+	type Err = Error;
+
+	fn from_str(invoice_str: &str) -> Result<Self, Self::Err> {
+		if let Some(bytes_vec) = hex_utils::to_vec(invoice_str) {
+			if let Ok(invoice) = LdkBolt12Invoice::try_from(bytes_vec) {
+				return Ok(Bolt12Invoice { inner: invoice });
+			}
+		}
+		Err(Error::InvalidInvoice)
+	}
+}
+
+impl From<LdkBolt12Invoice> for Bolt12Invoice {
+	fn from(invoice: LdkBolt12Invoice) -> Self {
+		Bolt12Invoice { inner: invoice }
+	}
+}
+
+impl Deref for Bolt12Invoice {
+	type Target = LdkBolt12Invoice;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<LdkBolt12Invoice> for Bolt12Invoice {
+	fn as_ref(&self) -> &LdkBolt12Invoice {
+		self.deref()
 	}
 }
 
@@ -932,7 +1130,7 @@ mod tests {
 		refund::RefundBuilder,
 	};
 
-	fn create_test_invoice() -> (LdkBolt11Invoice, Bolt11Invoice) {
+	fn create_test_bolt11_invoice() -> (LdkBolt11Invoice, Bolt11Invoice) {
 		let invoice_string = "lnbc1pn8g249pp5f6ytj32ty90jhvw69enf30hwfgdhyymjewywcmfjevflg6s4z86qdqqcqzzgxqyz5vqrzjqwnvuc0u4txn35cafc7w94gxvq5p3cu9dd95f7hlrh0fvs46wpvhdfjjzh2j9f7ye5qqqqryqqqqthqqpysp5mm832athgcal3m7h35sc29j63lmgzvwc5smfjh2es65elc2ns7dq9qrsgqu2xcje2gsnjp0wn97aknyd3h58an7sjj6nhcrm40846jxphv47958c6th76whmec8ttr2wmg6sxwchvxmsc00kqrzqcga6lvsf9jtqgqy5yexa";
 		let ldk_invoice: LdkBolt11Invoice = invoice_string.parse().unwrap();
 		let wrapped_invoice = Bolt11Invoice::from(ldk_invoice.clone());
@@ -991,6 +1189,19 @@ mod tests {
 		(ldk_refund, wrapped_refund)
 	}
 
+	fn create_test_bolt12_invoice() -> (LdkBolt12Invoice, Bolt12Invoice) {
+		let invoice_hex = "0020a5b7104b95f17442d6638143ded62b02c2fda98cdf35841713fd0f44b59286560a000e04682cb028502006226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f520227105601015821034b4f0765a115caeff6787a8fb2d976c02467a36aea32901539d76473817937c65904546573745a9c00000068000001000003e75203dee4b3e5d48650caf1faadda53ac6e0dc3f509cc5e9c46defb8aeeec14010348e84fab39b226b1e0696cb6fb40bdb293952c184cf02007fa6e983cd311d189004e7bd75ff9ef069642f2abfa5916099e5a16144e1a6d9b4f246624d3b57d2895d5d2e46fe8661e49717d1663ad2c07b023738370a3e44a960f683040b1862fe36e22347c2dbe429c51af377bdbe01ca0e103f295d1678c68b628957a53a820afcc25763cc67b38aca82067bdf52dc68c061a02575d91c01beca64cc09735c395e91d034841d3e61b58948da631192ce556b85b01028e2284ead4ce184981f4d0f387f8d47295d4fa1dab6a6ae3a417550ac1c8b1aa007b38c926212fbf23154c6ff707621d6eedafc4298b133111d90934bb9d5a2103f0c8e4a3f3daa992334aad300677f23b4285db2ee5caf0a0ecc39c6596c3c4e42318040bec46add3626501f6e422be9c791adc81ea5c83ff0bfa91b7d42bcac0ed128a640fe970da584cff80fd5c12a8ea9b546a2d63515343a933daa21c0000000000000000001800000000000000011d24b2dfac5200000000a404682ca218a820a4a878fb352e63673c05eb07e53563fc8022ff039ad4c66e65848a7cde7ee780aa022710ae03020000b02103800fd75bf6b1e7c5f3fab33a372f6599730e0fae7a30fa4e5c8fbc69c3a87981f0403c9a40e6c9d08e12b0a155101d23a170b4f5b38051b0a0a09a794ce49e820f65d50c8fad7518200d3a28331aa5c668a8f7d70206aaf8bea2e8f05f0904b6e033";
+
+		let invoice_bytes = hex_utils::to_vec(invoice_hex).expect("Valid hex string");
+
+		let ldk_invoice =
+			LdkBolt12Invoice::try_from(invoice_bytes).expect("Valid Bolt12Invoice bytes");
+
+		let wrapped_invoice = Bolt12Invoice { inner: ldk_invoice.clone() };
+
+		(ldk_invoice, wrapped_invoice)
+	}
+
 	#[test]
 	fn test_invoice_description_conversion() {
 		let hash = "09d08d4865e8af9266f6cc7c0ae23a1d6bf868207cf8f7c5979b9f6ed850dfb0".to_string();
@@ -1003,7 +1214,7 @@ mod tests {
 
 	#[test]
 	fn test_bolt11_invoice_basic_properties() {
-		let (ldk_invoice, wrapped_invoice) = create_test_invoice();
+		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
 
 		assert_eq!(
 			ldk_invoice.payment_hash().to_string(),
@@ -1029,7 +1240,7 @@ mod tests {
 
 	#[test]
 	fn test_bolt11_invoice_time_related_fields() {
-		let (ldk_invoice, wrapped_invoice) = create_test_invoice();
+		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
 
 		assert_eq!(ldk_invoice.expiry_time().as_secs(), wrapped_invoice.expiry_time_seconds());
 		assert_eq!(
@@ -1048,7 +1259,7 @@ mod tests {
 
 	#[test]
 	fn test_bolt11_invoice_description() {
-		let (ldk_invoice, wrapped_invoice) = create_test_invoice();
+		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
 
 		let ldk_description = ldk_invoice.description();
 		let wrapped_description = wrapped_invoice.description();
@@ -1072,7 +1283,7 @@ mod tests {
 
 	#[test]
 	fn test_bolt11_invoice_route_hints() {
-		let (ldk_invoice, wrapped_invoice) = create_test_invoice();
+		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
 
 		let wrapped_route_hints = wrapped_invoice.route_hints();
 		let ldk_route_hints = ldk_invoice.route_hints();
@@ -1091,7 +1302,7 @@ mod tests {
 
 	#[test]
 	fn test_bolt11_invoice_roundtrip() {
-		let (ldk_invoice, wrapped_invoice) = create_test_invoice();
+		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
 
 		let invoice_str = wrapped_invoice.to_string();
 		let parsed_invoice: LdkBolt11Invoice = invoice_str.parse().unwrap();
@@ -1283,5 +1494,131 @@ mod tests {
 		}
 
 		assert_eq!(ldk_refund.payer_note().map(|p| p.to_string()), wrapped_refund.payer_note());
+	}
+
+	#[test]
+	fn test_bolt12_invoice_properties() {
+		let (ldk_invoice, wrapped_invoice) = create_test_bolt12_invoice();
+
+		assert_eq!(
+			ldk_invoice.payment_hash().0.to_vec(),
+			wrapped_invoice.payment_hash().0.to_vec()
+		);
+		assert_eq!(ldk_invoice.amount_msats(), wrapped_invoice.amount_msats());
+		assert_eq!(ldk_invoice.is_expired(), wrapped_invoice.is_expired());
+
+		assert_eq!(ldk_invoice.signing_pubkey(), wrapped_invoice.signing_pubkey());
+
+		assert_eq!(ldk_invoice.created_at().as_secs(), wrapped_invoice.created_at());
+
+		match (ldk_invoice.absolute_expiry(), wrapped_invoice.absolute_expiry_seconds()) {
+			(Some(ldk_expiry), Some(wrapped_expiry)) => {
+				assert_eq!(ldk_expiry.as_secs(), wrapped_expiry);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK invoice had an absolute expiry but wrapped invoice did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped invoice had an absolute expiry but LDK invoice did not!");
+			},
+		}
+
+		assert_eq!(ldk_invoice.relative_expiry().as_secs(), wrapped_invoice.relative_expiry());
+
+		match (ldk_invoice.description(), wrapped_invoice.description()) {
+			(Some(ldk_desc), Some(wrapped_desc)) => {
+				assert_eq!(ldk_desc.to_string(), wrapped_desc);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK invoice had a description but wrapped invoice did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped invoice had a description but LDK invoice did not!");
+			},
+		}
+
+		match (ldk_invoice.issuer(), wrapped_invoice.issuer()) {
+			(Some(ldk_issuer), Some(wrapped_issuer)) => {
+				assert_eq!(ldk_issuer.to_string(), wrapped_issuer);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK invoice had an issuer but wrapped invoice did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped invoice had an issuer but LDK invoice did not!");
+			},
+		}
+
+		match (ldk_invoice.payer_note(), wrapped_invoice.payer_note()) {
+			(Some(ldk_note), Some(wrapped_note)) => {
+				assert_eq!(ldk_note.to_string(), wrapped_note);
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK invoice had a payer note but wrapped invoice did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped invoice had a payer note but LDK invoice did not!");
+			},
+		}
+
+		match (ldk_invoice.metadata(), wrapped_invoice.metadata()) {
+			(Some(ldk_metadata), Some(wrapped_metadata)) => {
+				assert_eq!(ldk_metadata.as_slice(), wrapped_metadata.as_slice());
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK invoice had metadata but wrapped invoice did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped invoice had metadata but LDK invoice did not!");
+			},
+		}
+
+		assert_eq!(ldk_invoice.quantity(), wrapped_invoice.quantity());
+
+		assert_eq!(ldk_invoice.chain().to_bytes().to_vec(), wrapped_invoice.chain());
+
+		match (ldk_invoice.offer_chains(), wrapped_invoice.offer_chains()) {
+			(Some(ldk_chains), Some(wrapped_chains)) => {
+				assert_eq!(ldk_chains.len(), wrapped_chains.len());
+				for (i, ldk_chain) in ldk_chains.iter().enumerate() {
+					assert_eq!(ldk_chain.to_bytes().to_vec(), wrapped_chains[i]);
+				}
+			},
+			(None, None) => {
+				// Both fields are missing which is expected behaviour when converting
+			},
+			(Some(_), None) => {
+				panic!("LDK invoice had offer chains but wrapped invoice did not!");
+			},
+			(None, Some(_)) => {
+				panic!("Wrapped invoice had offer chains but LDK invoice did not!");
+			},
+		}
+
+		let ldk_fallbacks = ldk_invoice.fallbacks();
+		let wrapped_fallbacks = wrapped_invoice.fallback_addresses();
+		assert_eq!(ldk_fallbacks.len(), wrapped_fallbacks.len());
+		for (i, ldk_fallback) in ldk_fallbacks.iter().enumerate() {
+			assert_eq!(*ldk_fallback, wrapped_fallbacks[i]);
+		}
+
+		assert_eq!(ldk_invoice.encode(), wrapped_invoice.encode());
+
+		assert_eq!(ldk_invoice.signable_hash().to_vec(), wrapped_invoice.signable_hash());
 	}
 }
