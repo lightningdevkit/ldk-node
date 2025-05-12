@@ -23,6 +23,8 @@
 //! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`send`], etc.:
 //!
 //! ```no_run
+//! # #[cfg(not(feature = "uniffi"))]
+//! # {
 //! use ldk_node::Builder;
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
@@ -57,6 +59,7 @@
 //!
 //! 	node.stop().unwrap();
 //! }
+//! # }
 //! ```
 //!
 //! [`build`]: Builder::build

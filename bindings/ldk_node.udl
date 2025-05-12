@@ -698,6 +698,44 @@ dictionary NodeAnnouncementInfo {
 	sequence<SocketAddress> addresses;
 };
 
+enum Currency {
+	"Bitcoin",
+	"BitcoinTestnet",
+	"Regtest",
+	"Simnet",
+	"Signet",
+};
+
+dictionary RouteHintHop {
+	PublicKey src_node_id;
+	u64 short_channel_id;
+	u16 cltv_expiry_delta;
+	u64? htlc_minimum_msat;
+	u64? htlc_maximum_msat;
+	RoutingFees fees;
+};
+
+interface Bolt11Invoice {
+	[Throws=NodeError, Name=from_str]
+	constructor([ByRef] string invoice_str);
+	sequence<u8> signable_hash();
+	PaymentHash payment_hash();
+	PaymentSecret payment_secret();
+	u64? amount_milli_satoshis();
+	u64 expiry_time_seconds();
+	u64 seconds_since_epoch();
+	u64 seconds_until_expiry();
+	boolean is_expired();
+	boolean would_expire(u64 at_time_seconds);
+	Bolt11InvoiceDescription description();
+	u64 min_final_cltv_expiry_delta();
+	Network network();
+	Currency currency();
+	sequence<Address> fallback_addresses();
+	sequence<sequence<RouteHintHop>> route_hints();
+	PublicKey recover_payee_pub_key();
+};
+
 [Custom]
 typedef string Txid;
 
@@ -715,9 +753,6 @@ typedef string NodeId;
 
 [Custom]
 typedef string Address;
-
-[Custom]
-typedef string Bolt11Invoice;
 
 [Custom]
 typedef string Offer;
