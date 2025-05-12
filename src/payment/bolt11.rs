@@ -13,31 +13,48 @@ use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::error::Error;
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_error, log_info, LdkNodeLogger, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus, PaymentStore,
 };
 use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
-use crate::types::{ChannelManager, KeysManager};
-
-use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
-use lightning::ln::invoice_utils::{
-	create_invoice_from_channelmanager_and_duration_since_epoch,
-	create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash,
-};
-use lightning::ln::{PaymentHash, PaymentPreimage};
-use lightning::routing::router::{PaymentParameters, RouteParameters};
+use crate::types::ChannelManager;
 
 use lightning::ln::bolt11_payment;
-use lightning_invoice::{Bolt11Invoice, Currency};
+use lightning::ln::channelmanager::{
+	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry, RetryableSendFailure,
+};
+use lightning::routing::router::{PaymentParameters, RouteParameters};
+
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
+use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::Bolt11InvoiceDescription as LdkBolt11InvoiceDescription;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+
+#[cfg(not(feature = "uniffi"))]
+type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
+#[cfg(feature = "uniffi")]
+type Bolt11InvoiceDescription = crate::uniffi_types::Bolt11InvoiceDescription;
+
+macro_rules! maybe_convert_description {
+	($description: expr) => {{
+		#[cfg(not(feature = "uniffi"))]
+		{
+			$description
+		}
+		#[cfg(feature = "uniffi")]
+		{
+			&LdkBolt11InvoiceDescription::try_from($description)?
+		}
+	}};
+}
 
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
@@ -48,31 +65,27 @@ use std::time::SystemTime;
 pub struct Bolt11Payment {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
-	connection_manager: Arc<ConnectionManager<Arc<LdkNodeLogger>>>,
-	keys_manager: Arc<KeysManager>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<LdkNodeLogger>>>>,
-	payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>,
-	peer_store: Arc<PeerStore<Arc<LdkNodeLogger>>>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
-	logger: Arc<LdkNodeLogger>,
+	logger: Arc<Logger>,
 }
 
 impl Bolt11Payment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>,
-		connection_manager: Arc<ConnectionManager<Arc<LdkNodeLogger>>>,
-		keys_manager: Arc<KeysManager>,
-		liquidity_source: Option<Arc<LiquiditySource<Arc<LdkNodeLogger>>>>,
-		payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>,
-		peer_store: Arc<PeerStore<Arc<LdkNodeLogger>>>, config: Arc<Config>,
-		logger: Arc<LdkNodeLogger>,
+		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+		payment_store: Arc<PaymentStore<Arc<Logger>>>, peer_store: Arc<PeerStore<Arc<Logger>>>,
+		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
 			runtime,
 			channel_manager,
 			connection_manager,
-			keys_manager,
 			liquidity_source,
 			payment_store,
 			peer_store,
@@ -409,8 +422,9 @@ impl Bolt11Payment {
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
 	pub fn receive(
-		&self, amount_msat: u64, description: &str, expiry_secs: u32,
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_convert_description!(description);
 		self.receive_inner(Some(amount_msat), description, expiry_secs, None)
 	}
 
@@ -429,8 +443,10 @@ impl Bolt11Payment {
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
 	pub fn receive_for_hash(
-		&self, amount_msat: u64, description: &str, expiry_secs: u32, payment_hash: PaymentHash,
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_convert_description!(description);
 		self.receive_inner(Some(amount_msat), description, expiry_secs, Some(payment_hash))
 	}
 
@@ -439,8 +455,9 @@ impl Bolt11Payment {
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
 	pub fn receive_variable_amount(
-		&self, description: &str, expiry_secs: u32,
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_convert_description!(description);
 		self.receive_inner(None, description, expiry_secs, None)
 	}
 
@@ -459,50 +476,26 @@ impl Bolt11Payment {
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
 	pub fn receive_variable_amount_for_hash(
-		&self, description: &str, expiry_secs: u32, payment_hash: PaymentHash,
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_convert_description!(description);
 		self.receive_inner(None, description, expiry_secs, Some(payment_hash))
 	}
 
-	fn receive_inner(
-		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
-		manual_claim_payment_hash: Option<PaymentHash>,
+	pub(crate) fn receive_inner(
+		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
+		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
 	) -> Result<Bolt11Invoice, Error> {
-		let currency = Currency::from(self.config.network);
-		let keys_manager = Arc::clone(&self.keys_manager);
-		let duration = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
-			.expect("for the foreseeable future this shouldn't happen");
-
 		let invoice = {
-			let invoice_res = if let Some(payment_hash) = manual_claim_payment_hash {
-				create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash(
-					&self.channel_manager,
-					keys_manager,
-					Arc::clone(&self.logger),
-					currency,
-					amount_msat,
-					description.to_string(),
-					duration,
-					expiry_secs,
-					payment_hash,
-					None,
-				)
-			} else {
-				create_invoice_from_channelmanager_and_duration_since_epoch(
-					&self.channel_manager,
-					keys_manager,
-					Arc::clone(&self.logger),
-					currency,
-					amount_msat,
-					description.to_string(),
-					duration,
-					expiry_secs,
-					None,
-				)
+			let invoice_params = Bolt11InvoiceParameters {
+				amount_msats: amount_msat,
+				description: invoice_description.clone(),
+				invoice_expiry_delta_secs: Some(expiry_secs),
+				payment_hash: manual_claim_payment_hash,
+				..Default::default()
 			};
 
-			match invoice_res {
+			match self.channel_manager.create_bolt11_invoice(invoice_params) {
 				Ok(inv) => {
 					log_info!(self.logger, "Invoice created: {}", inv);
 					inv
@@ -557,9 +550,10 @@ impl Bolt11Payment {
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn receive_via_jit_channel(
-		&self, amount_msat: u64, description: &str, expiry_secs: u32,
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_convert_description!(description);
 		self.receive_via_jit_channel_inner(
 			Some(amount_msat),
 			description,
@@ -581,9 +575,10 @@ impl Bolt11Payment {
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn receive_variable_amount_via_jit_channel(
-		&self, description: &str, expiry_secs: u32,
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_convert_description!(description);
 		self.receive_via_jit_channel_inner(
 			None,
 			description,
@@ -594,15 +589,15 @@ impl Bolt11Payment {
 	}
 
 	fn receive_via_jit_channel_inner(
-		&self, amount_msat: Option<u64>, description: &str, expiry_secs: u32,
-		max_total_lsp_fee_limit_msat: Option<u64>,
+		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
+		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let (node_id, address) = liquidity_source
-			.get_liquidity_source_details()
+			.get_lsps2_service_details()
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let rt_lock = self.runtime.read().unwrap();
@@ -748,7 +743,7 @@ impl Bolt11Payment {
 				Error::InvalidInvoice
 			})?
 		} else {
-			bolt11_payment::payment_parameters_from_zero_amount_invoice(&invoice, amount_msat).map_err(|_| {
+			bolt11_payment::payment_parameters_from_variable_amount_invoice(&invoice, amount_msat).map_err(|_| {
 				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being not \"zero-amount\".");
 				Error::InvalidInvoice
 			})?

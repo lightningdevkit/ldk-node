@@ -8,10 +8,11 @@
 use crate::types::{CustomTlvRecord, DynStore, Sweeper, Wallet};
 
 use crate::{
-	hex_utils, BumpTransactionEventHandler, ChannelManager, Config, Error, Graph, PeerInfo,
-	PeerStore, UserChannelId,
+	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
+	UserChannelId,
 };
 
+use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
 use crate::fee_estimator::ConfirmationTarget;
 
@@ -24,7 +25,7 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_debug, log_error, log_info, Logger};
+use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 
 use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{ClosureReason, PaymentPurpose, ReplayEvent};
@@ -32,11 +33,12 @@ use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::RouteHop;
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 
@@ -121,6 +123,16 @@ pub enum Event {
 		/// This will be `None` if the payment was settled via an on-chain transaction. See the
 		/// caveat described for the `total_fee_earned_msat` field.
 		next_user_channel_id: Option<UserChannelId>,
+		/// The node id of the previous node.
+		///
+		/// This is only `None` for HTLCs received prior to LDK Node v0.5 or for events serialized by
+		/// versions prior to v0.5.
+		prev_node_id: Option<PublicKey>,
+		/// The node id of the next node.
+		///
+		/// This is only `None` for HTLCs received prior to LDK Node v0.5 or for events serialized by
+		/// versions prior to v0.5.
+		next_node_id: Option<PublicKey>,
 		/// The total fee, in milli-satoshis, which was earned as a result of the payment.
 		///
 		/// Note that if we force-closed the channel over which we forwarded an HTLC while the HTLC
@@ -283,7 +295,9 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(7, PaymentForwarded) => {
 		(0, prev_channel_id, required),
+		(1, prev_node_id, option),
 		(2, next_channel_id, required),
+		(3, next_node_id, option),
 		(4, prev_user_channel_id, option),
 		(6, next_user_channel_id, option),
 		(8, total_fee_earned_msat, option),
@@ -306,7 +320,7 @@ impl_writeable_tlv_based_enum!(Event,
 
 pub struct EventQueue<L: Deref>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	queue: Arc<Mutex<VecDeque<Event>>>,
 	waker: Arc<Mutex<Option<Waker>>>,
@@ -317,7 +331,7 @@ where
 
 impl<L: Deref> EventQueue<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -396,7 +410,7 @@ where
 
 impl<L: Deref> ReadableArgs<(Arc<DynStore>, L)> for EventQueue<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	#[inline]
 	fn read<R: lightning::io::Read>(
@@ -460,7 +474,7 @@ impl Future for EventFuture {
 
 pub(crate) struct EventHandler<L: Deref + Clone + Sync + Send + 'static>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	event_queue: Arc<EventQueue<L>>,
 	wallet: Arc<Wallet>,
@@ -478,7 +492,7 @@ where
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub fn new(
 		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>,
@@ -587,6 +601,7 @@ where
 				claim_deadline,
 				onion_fields,
 				counterparty_skimmed_fee_msat,
+				payment_id: _,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				log_info!(
@@ -857,6 +872,7 @@ where
 				htlcs: _,
 				sender_intended_total_msat: _,
 				onion_fields,
+				payment_id: _,
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				log_info!(
@@ -1089,16 +1105,30 @@ where
 				counterparty_node_id,
 				funding_satoshis,
 				channel_type,
-				push_msat: _,
-				is_announced: _,
+				channel_negotiation_type: _,
+				is_announced,
 				params: _,
 			} => {
+				if is_announced && !may_announce_channel(&*self.config) {
+					log_error!(
+						self.logger,
+						"Rejecting inbound announced channel from peer {} as not all required details are set. Please ensure node alias and listening addresses have been configured.",
+						counterparty_node_id,
+					);
+
+					self.channel_manager
+						.force_close_without_broadcasting_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+							"Channel request rejected".to_string(),
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to reject channel: {:?}", e)
+						});
+					return Ok(());
+				}
+
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
-
-				// TODO: We should use `is_announced` flag above and reject announced channels if
-				// we're not a forwading node, once we add a 'forwarding mode' based on listening
-				// address / node alias being set.
-
 				if anchor_channel {
 					if let Some(anchor_channels_config) =
 						self.config.anchor_channels_config.as_ref()
@@ -1203,6 +1233,8 @@ where
 				next_channel_id,
 				prev_user_channel_id,
 				next_user_channel_id,
+				prev_node_id,
+				next_node_id,
 				total_fee_earned_msat,
 				skimmed_fee_msat,
 				claim_from_onchain_tx,
@@ -1213,6 +1245,8 @@ where
 					next_channel_id: next_channel_id.expect("next_channel_id expected for events generated by LDK versions greater than 0.0.107."),
 					prev_user_channel_id: prev_user_channel_id.map(UserChannelId),
 					next_user_channel_id: next_user_channel_id.map(UserChannelId),
+					prev_node_id,
+					next_node_id,
 					total_fee_earned_msat,
 					skimmed_fee_msat,
 					claim_from_onchain_tx,
@@ -1418,30 +1452,29 @@ where
 				}
 			},
 			LdkEvent::BumpTransaction(bte) => {
-				let (channel_id, counterparty_node_id) = match bte {
+				match bte {
 					BumpTransactionEvent::ChannelClose {
 						ref channel_id,
 						ref counterparty_node_id,
 						..
-					} => (channel_id, counterparty_node_id),
-					BumpTransactionEvent::HTLCResolution {
-						ref channel_id,
-						ref counterparty_node_id,
-						..
-					} => (channel_id, counterparty_node_id),
-				};
-
-				if let Some(anchor_channels_config) = self.config.anchor_channels_config.as_ref() {
-					if anchor_channels_config
-						.trusted_peers_no_reserve
-						.contains(counterparty_node_id)
-					{
-						log_debug!(self.logger,
-							"Ignoring BumpTransactionEvent for channel {} due to trusted counterparty {}",
-							channel_id, counterparty_node_id
-						);
-						return Ok(());
-					}
+					} => {
+						// Skip bumping channel closes if our counterparty is trusted.
+						if let Some(anchor_channels_config) =
+							self.config.anchor_channels_config.as_ref()
+						{
+							if anchor_channels_config
+								.trusted_peers_no_reserve
+								.contains(counterparty_node_id)
+							{
+								log_debug!(self.logger,
+									"Ignoring BumpTransactionEvent::ChannelClose for channel {} due to trusted counterparty {}",
+									channel_id, counterparty_node_id
+								);
+								return Ok(());
+							}
+						}
+					},
+					BumpTransactionEvent::HTLCResolution { .. } => {},
 				}
 
 				self.bump_tx_event_handler.handle_event(&bte);

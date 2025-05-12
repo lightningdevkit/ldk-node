@@ -10,10 +10,8 @@ use crate::io::utils::{
 	write_bdk_wallet_indexer, write_bdk_wallet_local_chain, write_bdk_wallet_network,
 	write_bdk_wallet_tx_graph,
 };
-use crate::logger::{log_error, LdkNodeLogger};
+use crate::logger::{log_error, LdkLogger, Logger};
 use crate::types::DynStore;
-
-use lightning::util::logger::Logger;
 
 use bdk_chain::Merge;
 use bdk_wallet::{ChangeSet, WalletPersister};
@@ -22,11 +20,11 @@ use std::sync::Arc;
 pub(crate) struct KVStoreWalletPersister {
 	latest_change_set: Option<ChangeSet>,
 	kv_store: Arc<DynStore>,
-	logger: Arc<LdkNodeLogger>,
+	logger: Arc<Logger>,
 }
 
 impl KVStoreWalletPersister {
-	pub(crate) fn new(kv_store: Arc<DynStore>, logger: Arc<LdkNodeLogger>) -> Self {
+	pub(crate) fn new(kv_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
 		Self { latest_change_set: None, kv_store, logger }
 	}
 }

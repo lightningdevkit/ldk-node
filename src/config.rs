@@ -7,9 +7,7 @@
 
 //! Objects for configuring the node.
 
-//! Objects for configuring the node.
-
-use crate::logger::LdkNodeLogger;
+use crate::logger::LogLevel;
 use crate::payment::SendingParameters;
 use crate::prober::ProbabilisticScoringParameters;
 
@@ -18,7 +16,6 @@ use lightning::routing::gossip::NodeAlias;
 use lightning::util::config::ChannelConfig as LdkChannelConfig;
 use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
 use lightning::util::config::UserConfig;
-use lightning::util::logger::Level as LogLevel;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
@@ -26,14 +23,21 @@ use bitcoin::Network;
 use std::time::Duration;
 
 // Config defaults
-const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node/";
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
-const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
+
+/// The default log level.
+pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
+
+/// The default log file name.
+pub const DEFAULT_LOG_FILENAME: &'static str = "ldk_node.log";
+
+/// The default storage directory.
+pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
@@ -49,7 +53,7 @@ pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
 
 // The time in-between peer reconnection attempts.
-pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(60);
 
 // The time in-between RGS sync attempts.
 pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -107,9 +111,6 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
 	pub storage_dir_path: String,
-	/// In the default configuration logs can be found in the `logs` subdirectory in
-	/// [`Config::storage_dir_path`], and the log level is set to [`DEFAULT_LOG_LEVEL`].
-	pub logging_config: LoggingConfig,
 	/// The used Bitcoin network.
 	pub network: Network,
 	/// The addresses on which the node will listen for incoming connections.
@@ -170,7 +171,6 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
-			logging_config: LoggingConfig::default(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
 			trusted_peers_0conf: Vec::new(),
@@ -179,34 +179,6 @@ impl Default for Config {
 			sending_parameters: None,
 			node_alias: None,
 			scoring_parameters: ProbabilisticScoringParameters::default(),
-		}
-	}
-}
-
-/// Configuration options for logging.
-#[derive(Debug, Clone)]
-pub enum LoggingConfig {
-	/// An opinionated filesystem logger.
-	///
-	/// This logger will always write at `{log_dir}/ldk_node_latest.log`, which is a symlink to the
-	/// most recent log file, which is created and timestamped at initialization.
-	Filesystem {
-		/// The absolute path where logs are stored.
-		log_dir: String,
-		/// The level at which we log messages.
-		///
-		/// Any messages below this level will be excluded from the logs.
-		log_level: LogLevel,
-	},
-	/// A custom logger.
-	Custom(std::sync::Arc<LdkNodeLogger>),
-}
-
-impl Default for LoggingConfig {
-	fn default() -> Self {
-		Self::Filesystem {
-			log_dir: format!("{}/{}", DEFAULT_STORAGE_DIR_PATH, "logs"),
-			log_level: DEFAULT_LOG_LEVEL,
 		}
 	}
 }
@@ -244,13 +216,11 @@ pub struct AnchorChannelsConfig {
 	/// on-chain.
 	///
 	/// Channels with these peers won't count towards the retained on-chain reserve and we won't
-	/// take any action to get the required transactions confirmed ourselves.
+	/// take any action to get the required channel closing transactions confirmed ourselves.
 	///
 	/// **Note:** Trusting the channel counterparty to take the necessary actions to get the
-	/// required Anchor spending and HTLC transactions confirmed on-chain is potentially insecure
-	/// as the channel may not be closed if they refuse to do so, potentially leaving the user
-	/// funds stuck *or* even allow the counterparty to steal any in-flight funds after the
-	/// corresponding HTLCs time out.
+	/// required Anchor spending transactions confirmed on-chain is potentially insecure
+	/// as the channel may not be closed if they refuse to do so.
 	pub trusted_peers_no_reserve: Vec<PublicKey>,
 	/// The amount of satoshis per anchors-negotiated channel with an untrusted peer that we keep
 	/// as an emergency reserve in our on-chain wallet.
@@ -262,9 +232,9 @@ pub struct AnchorChannelsConfig {
 	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`], we will always try to spend the Anchor
 	/// outputs with *any* on-chain funds available, i.e., the total reserve value as well as any
 	/// spendable funds available in the on-chain wallet. Therefore, this per-channel multiplier is
-	/// really a emergencey reserve that we maintain at all time to reduce reduce the risk of
+	/// really a emergency reserve that we maintain at all time to reduce reduce the risk of
 	/// insufficient funds at time of a channel closure. To this end, we will refuse to open
-	/// outbound or accept inbound channels if we don't have sufficient on-chain funds availble to
+	/// outbound or accept inbound channels if we don't have sufficient on-chain funds available to
 	/// cover the additional reserve requirement.
 	///
 	/// **Note:** Depending on the fee market at the time of closure, this reserve amount might or

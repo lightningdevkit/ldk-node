@@ -13,7 +13,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::{
 	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, LdkNodeLogger};
+use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
 use crate::sweep::DeprecatedSpendableOutputInfo;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
@@ -24,7 +24,6 @@ use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
-use lightning::util::logger::Logger;
 use lightning::util::persist::{
 	KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -72,7 +71,7 @@ pub(crate) fn read_or_generate_seed_file<L: Deref>(
 	keys_seed_path: &str, logger: L,
 ) -> std::io::Result<[u8; WALLET_KEYS_SEED_LEN]>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	if Path::new(&keys_seed_path).exists() {
 		let seed = fs::read(keys_seed_path).map_err(|e| {
@@ -99,6 +98,17 @@ where
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
 		thread_rng().fill_bytes(&mut key);
 
+		if let Some(parent_dir) = Path::new(&keys_seed_path).parent() {
+			fs::create_dir_all(parent_dir).map_err(|e| {
+				log_error!(
+					logger,
+					"Failed to create parent directory for key seed file: {}.",
+					keys_seed_path
+				);
+				e
+			})?;
+		}
+
 		let mut f = fs::File::create(keys_seed_path).map_err(|e| {
 			log_error!(logger, "Failed to create keys seed file: {}", keys_seed_path);
 			e
@@ -123,7 +133,7 @@ pub(crate) fn read_network_graph<L: Deref + Clone>(
 	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<NetworkGraph<L>, std::io::Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let mut reader = Cursor::new(kv_store.read(
 		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -141,7 +151,7 @@ pub(crate) fn read_scorer<G: Deref<Target = NetworkGraph<L>>, L: Deref + Clone>(
 	kv_store: Arc<DynStore>, network_graph: G, logger: L,
 ) -> Result<ProbabilisticScorer<G, L>, std::io::Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let params = ProbabilisticScoringDecayParameters::default();
 	let mut reader = Cursor::new(kv_store.read(
@@ -161,7 +171,7 @@ pub(crate) fn read_event_queue<L: Deref + Clone>(
 	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<EventQueue<L>, std::io::Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let mut reader = Cursor::new(kv_store.read(
 		EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -179,7 +189,7 @@ pub(crate) fn read_peer_info<L: Deref + Clone>(
 	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<PeerStore<L>, std::io::Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let mut reader = Cursor::new(kv_store.read(
 		PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -197,7 +207,7 @@ pub(crate) fn read_payments<L: Deref>(
 	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<Vec<PaymentDetails>, std::io::Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let mut res = Vec::new();
 
@@ -226,7 +236,7 @@ where
 pub(crate) fn read_output_sweeper(
 	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
 	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
-	logger: Arc<LdkNodeLogger>,
+	logger: Arc<Logger>,
 ) -> Result<Sweeper, std::io::Error> {
 	let mut reader = Cursor::new(kv_store.read(
 		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -264,7 +274,7 @@ pub(crate) fn migrate_deprecated_spendable_outputs<L: Deref>(
 	sweeper: Arc<Sweeper>, kv_store: Arc<DynStore>, logger: L,
 ) -> Result<(), std::io::Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let best_block = sweeper.current_best_block();
 
@@ -349,7 +359,7 @@ pub(crate) fn read_node_metrics<L: Deref>(
 	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<NodeMetrics, std::io::Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let mut reader = Cursor::new(kv_store.read(
 		NODE_METRICS_PRIMARY_NAMESPACE,
@@ -366,7 +376,7 @@ pub(crate) fn write_node_metrics<L: Deref>(
 	node_metrics: &NodeMetrics, kv_store: Arc<DynStore>, logger: L,
 ) -> Result<(), Error>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	let data = node_metrics.encode();
 	kv_store
@@ -486,7 +496,7 @@ macro_rules! impl_read_write_change_set_type {
 			kv_store: Arc<DynStore>, logger: L,
 		) -> Result<Option<$change_set_type>, std::io::Error>
 		where
-			L::Target: Logger,
+			L::Target: LdkLogger,
 		{
 			let bytes = match kv_store.read($primary_namespace, $secondary_namespace, $key) {
 				Ok(bytes) => bytes,
@@ -526,7 +536,7 @@ macro_rules! impl_read_write_change_set_type {
 			value: &$change_set_type, kv_store: Arc<DynStore>, logger: L,
 		) -> Result<(), std::io::Error>
 		where
-			L::Target: Logger,
+			L::Target: LdkLogger,
 		{
 			let data = ChangeSetSerWrapper(value).encode();
 			kv_store.write($primary_namespace, $secondary_namespace, $key, &data).map_err(|e| {
@@ -600,7 +610,7 @@ impl_read_write_change_set_type!(
 
 // Reads the full BdkWalletChangeSet or returns default fields
 pub(crate) fn read_bdk_wallet_change_set(
-	kv_store: Arc<DynStore>, logger: Arc<LdkNodeLogger>,
+	kv_store: Arc<DynStore>, logger: Arc<Logger>,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 

@@ -5,58 +5,173 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-pub(crate) use lightning::util::logger::Logger;
+//! Logging-related objects.
+
+pub(crate) use lightning::util::logger::{Logger as LdkLogger, Record as LdkRecord};
 pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace};
 
-use lightning::util::logger::{Level, Record};
+pub use lightning::util::logger::Level as LogLevel;
 
 use chrono::Utc;
+use log::{debug, error, info, trace, warn};
 
-use std::fmt::Debug;
+#[cfg(not(feature = "uniffi"))]
+use core::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::Arc;
 
-/// A logger for LDK Node.
-pub struct LdkNodeLogger {
-	level: Level,
-	writer: Box<dyn Fn(&Record) + Send + Sync>,
+/// A unit of logging output with metadata to enable filtering `module_path`,
+/// `file`, and `line` to inform on log's source.
+#[cfg(not(feature = "uniffi"))]
+pub struct LogRecord<'a> {
+	/// The verbosity level of the message.
+	pub level: LogLevel,
+	/// The message body.
+	pub args: fmt::Arguments<'a>,
+	/// The module path of the message.
+	pub module_path: &'a str,
+	/// The line containing the message.
+	pub line: u32,
 }
 
-impl LdkNodeLogger {
-	/// Creates a new `LdkNodeLogger`.
-	pub fn new(level: Level, writer: Box<dyn Fn(&Record) + Send + Sync>) -> Self {
-		Self { level, writer }
-	}
+/// A unit of logging output with metadata to enable filtering `module_path`,
+/// `file`, and `line` to inform on log's source.
+///
+/// This version is used when the `uniffi` feature is enabled.
+/// It is similar to the non-`uniffi` version, but it omits the lifetime parameter
+/// for the `LogRecord`, as the Uniffi-exposed interface cannot handle lifetimes.
+#[cfg(feature = "uniffi")]
+pub struct LogRecord {
+	/// The verbosity level of the message.
+	pub level: LogLevel,
+	/// The message body.
+	pub args: String,
+	/// The module path of the message.
+	pub module_path: String,
+	/// The line containing the message.
+	pub line: u32,
 }
 
-impl Debug for LdkNodeLogger {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		write!(f, "LdkNodeLogger level: {}", self.level)
-	}
-}
-
-impl Logger for LdkNodeLogger {
-	fn log(&self, record: Record) {
-		if record.level < self.level {
-			return;
+#[cfg(feature = "uniffi")]
+impl<'a> From<LdkRecord<'a>> for LogRecord {
+	fn from(record: LdkRecord) -> Self {
+		Self {
+			level: record.level,
+			args: record.args.to_string(),
+			module_path: record.module_path.to_string(),
+			line: record.line,
 		}
-		(self.writer)(&record)
 	}
 }
 
-pub(crate) struct FilesystemLogWriter {
-	log_file: Mutex<fs::File>,
+#[cfg(not(feature = "uniffi"))]
+impl<'a> From<LdkRecord<'a>> for LogRecord<'a> {
+	fn from(record: LdkRecord<'a>) -> Self {
+		Self {
+			level: record.level,
+			args: record.args,
+			module_path: record.module_path,
+			line: record.line,
+		}
+	}
 }
 
-impl FilesystemLogWriter {
-	pub fn new(log_dir: String) -> Result<Self, ()> {
-		let log_file_name =
-			format!("ldk_node_{}.log", chrono::offset::Local::now().format("%Y_%m_%d"));
-		let log_file_path = format!("{}/{}", log_dir, log_file_name);
+/// Defines the behavior required for writing log records.
+///
+/// Implementors of this trait are responsible for handling log messages,
+/// which may involve formatting, filtering, and forwarding them to specific
+/// outputs.
+#[cfg(not(feature = "uniffi"))]
+pub trait LogWriter: Send + Sync {
+	/// Log the record.
+	fn log<'a>(&self, record: LogRecord<'a>);
+}
 
-		if let Some(parent_dir) = Path::new(&log_file_path).parent() {
+/// Defines the behavior required for writing log records.
+///
+/// Implementors of this trait are responsible for handling log messages,
+/// which may involve formatting, filtering, and forwarding them to specific
+/// outputs.
+/// This version is used when the `uniffi` feature is enabled.
+/// It is similar to the non-`uniffi` version, but it omits the lifetime parameter
+/// for the `LogRecord`, as the Uniffi-exposed interface cannot handle lifetimes.
+#[cfg(feature = "uniffi")]
+pub trait LogWriter: Send + Sync {
+	/// Log the record.
+	fn log(&self, record: LogRecord);
+}
+
+/// Defines a writer for [`Logger`].
+pub(crate) enum Writer {
+	/// Writes logs to the file system.
+	FileWriter { file_path: String, max_log_level: LogLevel },
+	/// Forwards logs to the `log` facade.
+	LogFacadeWriter { max_log_level: LogLevel },
+	/// Forwards logs to a custom writer.
+	CustomWriter(Arc<dyn LogWriter>),
+}
+
+impl LogWriter for Writer {
+	fn log(&self, record: LogRecord) {
+		match self {
+			Writer::FileWriter { file_path, max_log_level } => {
+				if record.level < *max_log_level {
+					return;
+				}
+
+				let log = format!(
+					"{} {:<5} [{}:{}] {}\n",
+					Utc::now().format("%Y-%m-%d %H:%M:%S"),
+					record.level.to_string(),
+					record.module_path,
+					record.line,
+					record.args
+				);
+
+				fs::OpenOptions::new()
+					.create(true)
+					.append(true)
+					.open(file_path)
+					.expect("Failed to open log file")
+					.write_all(log.as_bytes())
+					.expect("Failed to write to log file")
+			},
+			Writer::LogFacadeWriter { max_log_level } => {
+				if record.level < *max_log_level {
+					return;
+				}
+				macro_rules! log_with_level {
+					($log_level:expr, $target: expr, $($args:tt)*) => {
+						match $log_level {
+							LogLevel::Gossip | LogLevel::Trace => trace!(target: $target, $($args)*),
+							LogLevel::Debug => debug!(target: $target, $($args)*),
+							LogLevel::Info => info!(target: $target, $($args)*),
+							LogLevel::Warn => warn!(target: $target, $($args)*),
+							LogLevel::Error => error!(target: $target, $($args)*),
+						}
+					};
+				}
+
+				let target = format!("[{}:{}]", record.module_path, record.line);
+				log_with_level!(record.level, &target, " {}", record.args)
+			},
+			Writer::CustomWriter(custom_logger) => custom_logger.log(record),
+		}
+	}
+}
+
+pub(crate) struct Logger {
+	/// Specifies the logger's writer.
+	writer: Writer,
+}
+
+impl Logger {
+	/// Creates a new logger with a filesystem writer. The parameters to this function
+	/// are the path to the log file, and the log level.
+	pub fn new_fs_writer(file_path: String, max_log_level: LogLevel) -> Result<Self, ()> {
+		if let Some(parent_dir) = Path::new(&file_path).parent() {
 			fs::create_dir_all(parent_dir)
 				.map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {}", e))?;
 
@@ -64,37 +179,40 @@ impl FilesystemLogWriter {
 			fs::OpenOptions::new()
 				.create(true)
 				.append(true)
-				.open(&log_file_path)
+				.open(&file_path)
 				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
 		}
 
-		let log_file = Mutex::new(
-			fs::OpenOptions::new()
-				.create(true)
-				.append(true)
-				.open(log_file_path.clone())
-				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?,
-		);
-		Ok(Self { log_file })
+		Ok(Self { writer: Writer::FileWriter { file_path, max_log_level } })
 	}
 
-	pub fn write(&self, log: &String) {
-		self.log_file
-			.lock()
-			.expect("log file lock poisoned")
-			.write_all(log.as_bytes())
-			.expect("Failed to write to log file")
+	pub fn new_log_facade(max_log_level: LogLevel) -> Self {
+		Self { writer: Writer::LogFacadeWriter { max_log_level } }
+	}
+
+	pub fn new_custom_writer(log_writer: Arc<dyn LogWriter>) -> Self {
+		Self { writer: Writer::CustomWriter(log_writer) }
 	}
 }
 
-pub(crate) fn default_format(record: &Record) -> String {
-	let raw_log = record.args.to_string();
-	format!(
-		"{} {:<5} [{}:{}] {}\n",
-		Utc::now().format("%Y-%m-%d %H:%M:%S"),
-		record.level.to_string(),
-		record.module_path,
-		record.line,
-		raw_log
-	)
+impl LdkLogger for Logger {
+	fn log(&self, record: LdkRecord) {
+		match &self.writer {
+			Writer::FileWriter { file_path: _, max_log_level } => {
+				if record.level < *max_log_level {
+					return;
+				}
+				self.writer.log(record.into());
+			},
+			Writer::LogFacadeWriter { max_log_level } => {
+				if record.level < *max_log_level {
+					return;
+				}
+				self.writer.log(record.into());
+			},
+			Writer::CustomWriter(_arc) => {
+				self.writer.log(record.into());
+			},
+		}
+	}
 }

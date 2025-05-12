@@ -11,7 +11,6 @@ use lightning::ln::functional_test_utils::{
 };
 use lightning::util::persist::{read_channel_monitors, KVStore, KVSTORE_NAMESPACE_KEY_MAX_LEN};
 
-use lightning::chain::channelmonitor::CLOSED_CHANNEL_UPDATE_ID;
 use lightning::events::ClosureReason;
 use lightning::util::test_utils;
 use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
@@ -186,5 +185,5 @@ pub(crate) fn do_test_store<K: KVStore>(store_0: &K, store_1: &K) {
 	check_added_monitors!(nodes[1], 1);
 
 	// Make sure everything is persisted as expected after close.
-	check_persisted_data!(CLOSED_CHANNEL_UPDATE_ID);
+	check_persisted_data!(11);
 }

@@ -15,7 +15,10 @@ use common::{
 };
 
 use ldk_node::config::EsploraSyncConfig;
-use ldk_node::payment::{PaymentKind, QrPaymentResult, SendingParameters};
+use ldk_node::payment::{
+	ConfirmationStatus, PaymentDirection, PaymentKind, PaymentStatus, QrPaymentResult,
+	SendingParameters,
+};
 use ldk_node::{Builder, Event, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
@@ -24,6 +27,7 @@ use lightning::util::persist::KVStore;
 use bitcoincore_rpc::RpcApi;
 
 use bitcoin::Amount;
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
 use std::sync::Arc;
 
@@ -189,7 +193,12 @@ fn multi_hop_sending() {
 		max_channel_saturation_power_of_half: Some(2),
 	};
 
-	let invoice = nodes[4].bolt11_payment().receive(2_500_000, &"asdf", 9217).unwrap();
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let invoice = nodes[4]
+		.bolt11_payment()
+		.receive(2_500_000, &invoice_description.clone().into(), 9217)
+		.unwrap();
 	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
@@ -293,6 +302,24 @@ fn onchain_spend_receive() {
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
+	let node_a_payments = node_a.list_payments();
+	let node_b_payments = node_b.list_payments();
+	for payments in [&node_a_payments, &node_b_payments] {
+		assert_eq!(payments.len(), 1)
+	}
+	for p in [node_a_payments.first().unwrap(), node_b_payments.first().unwrap()] {
+		assert_eq!(p.amount_msat, Some(premine_amount_sat * 1000));
+		assert_eq!(p.direction, PaymentDirection::Inbound);
+		// We got only 1-conf here, so we're only pending for now.
+		assert_eq!(p.status, PaymentStatus::Pending);
+		match p.kind {
+			PaymentKind::Onchain { status, .. } => {
+				assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			},
+			_ => panic!("Unexpected payment kind"),
+		}
+	}
+
 	let channel_amount_sat = 1_000_000;
 	let reserve_amount_sat = 25_000;
 	open_channel(&node_b, &node_a, channel_amount_sat, true, &electrsd);
@@ -302,6 +329,13 @@ fn onchain_spend_receive() {
 	node_b.sync_wallets().unwrap();
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let node_a_payments =
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_a_payments.len(), 1);
+	let node_b_payments =
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_b_payments.len(), 2);
 
 	let onchain_fee_buffer_sat = 1000;
 	let expected_node_a_balance = premine_amount_sat - reserve_amount_sat;
@@ -315,11 +349,12 @@ fn onchain_spend_receive() {
 
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1)
+		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None)
 	);
 
 	let amount_to_send_sats = 1000;
-	let txid = node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats).unwrap();
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
@@ -333,8 +368,15 @@ fn onchain_spend_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
+	let node_a_payments =
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_a_payments.len(), 2);
+	let node_b_payments =
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_b_payments.len(), 3);
+
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true).unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
@@ -349,8 +391,15 @@ fn onchain_spend_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
+	let node_a_payments =
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_a_payments.len(), 3);
+	let node_b_payments =
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_b_payments.len(), 4);
+
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false).unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false, None).unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 	wait_for_tx(&electrsd.client, txid);
 
@@ -365,6 +414,13 @@ fn onchain_spend_receive() {
 	assert_eq!(node_a.list_balances().total_onchain_balance_sats, expected_node_a_balance);
 	assert!(node_b.list_balances().spendable_onchain_balance_sats > expected_node_b_balance_lower);
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
+
+	let node_a_payments =
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_a_payments.len(), 4);
+	let node_b_payments =
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+	assert_eq!(node_b_payments.len(), 5);
 }
 
 #[test]
@@ -606,7 +662,8 @@ fn simple_bolt12_send_receive() {
 		.unwrap();
 
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
-	let node_a_payments = node_a.list_payments();
+	let node_a_payments =
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
 	assert_eq!(node_a_payments.len(), 1);
 	match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer {
@@ -632,7 +689,8 @@ fn simple_bolt12_send_receive() {
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
 
 	expect_payment_received_event!(node_b, expected_amount_msat);
-	let node_b_payments = node_b.list_payments();
+	let node_b_payments =
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
 	assert_eq!(node_b_payments.len(), 1);
 	match node_b_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
@@ -669,7 +727,9 @@ fn simple_bolt12_send_receive() {
 		.unwrap();
 
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
-	let node_a_payments = node_a.list_payments_with_filter(|p| p.id == payment_id);
+	let node_a_payments = node_a.list_payments_with_filter(|p| {
+		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == payment_id
+	});
 	assert_eq!(node_a_payments.len(), 1);
 	let payment_hash = match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer {
@@ -697,7 +757,9 @@ fn simple_bolt12_send_receive() {
 
 	expect_payment_received_event!(node_b, expected_amount_msat);
 	let node_b_payment_id = PaymentId(payment_hash.0);
-	let node_b_payments = node_b.list_payments_with_filter(|p| p.id == node_b_payment_id);
+	let node_b_payments = node_b.list_payments_with_filter(|p| {
+		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == node_b_payment_id
+	});
 	assert_eq!(node_b_payments.len(), 1);
 	match node_b_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
@@ -724,13 +786,18 @@ fn simple_bolt12_send_receive() {
 	expect_payment_received_event!(node_a, overpaid_amount);
 
 	let node_b_payment_id = node_b
-		.list_payments_with_filter(|p| p.amount_msat == Some(overpaid_amount))
+		.list_payments_with_filter(|p| {
+			matches!(p.kind, PaymentKind::Bolt12Refund { .. })
+				&& p.amount_msat == Some(overpaid_amount)
+		})
 		.first()
 		.unwrap()
 		.id;
 	expect_payment_successful_event!(node_b, Some(node_b_payment_id), None);
 
-	let node_b_payments = node_b.list_payments_with_filter(|p| p.id == node_b_payment_id);
+	let node_b_payments = node_b.list_payments_with_filter(|p| {
+		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_b_payment_id
+	});
 	assert_eq!(node_b_payments.len(), 1);
 	match node_b_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Refund {
@@ -754,7 +821,9 @@ fn simple_bolt12_send_receive() {
 	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(overpaid_amount));
 
 	let node_a_payment_id = PaymentId(invoice.payment_hash().0);
-	let node_a_payments = node_a.list_payments_with_filter(|p| p.id == node_a_payment_id);
+	let node_a_payments = node_a.list_payments_with_filter(|p| {
+		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_a_payment_id
+	});
 	assert_eq!(node_a_payments.len(), 1);
 	match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => {
@@ -773,6 +842,7 @@ fn simple_bolt12_send_receive() {
 fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
+
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
@@ -815,6 +885,7 @@ fn generate_bip21_uri() {
 fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
+
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
@@ -868,11 +939,10 @@ fn unified_qr_send_receive() {
 
 	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
 
-	// Removed one character from the offer to fall back on to invoice.
-	// Still needs work
-	let uri_str_with_invalid_offer = &uri_str[..uri_str.len() - 1];
+	// Cut off the BOLT12 part to fallback to BOLT11.
+	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_with_invalid_offer) {
+		match node_a.unified_qr_payment().send(uri_str_without_offer) {
 			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -893,11 +963,9 @@ fn unified_qr_send_receive() {
 	let onchain_uqr_payment =
 		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
 
-	// Removed a character from the offer, so it would move on to the other parameters.
-	let txid = match node_a
-		.unified_qr_payment()
-		.send(&onchain_uqr_payment.as_str()[..onchain_uqr_payment.len() - 1])
-	{
+	// Cut off any lightning part to fallback to on-chain only.
+	let uri_str_without_lightning = onchain_uqr_payment.split("&lightning=").next().unwrap();
+	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning) {
 		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},

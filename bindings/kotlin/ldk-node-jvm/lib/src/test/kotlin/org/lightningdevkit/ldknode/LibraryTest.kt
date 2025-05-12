@@ -9,6 +9,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 fun runCommandAndWait(vararg cmd: String): String {
     println("Running command \"${cmd.joinToString(" ")}\"")
@@ -92,6 +93,60 @@ fun waitForBlock(esploraEndpoint: String, blockHash: String) {
     }
 }
 
+class CustomLogWriter(private var currentLogLevel: LogLevel = LogLevel.INFO) :
+    LogWriter {
+    enum class LogLevel {
+        ERROR, WARN, INFO, DEBUG, TRACE, GOSSIP
+    }
+
+    private val logMessages = mutableListOf<String>()
+
+    fun setLogLevel(level: LogLevel) {
+        currentLogLevel = level
+    }
+
+    fun getLogMessages(): List<String> {
+        return logMessages.toList()
+    }
+
+    override fun log(record: LogRecord) {
+        val recordLevel =
+            when (record.level.toString().lowercase()) {
+                "error" -> LogLevel.ERROR
+                "warn" -> LogLevel.WARN
+                "info" -> LogLevel.INFO
+                "debug" -> LogLevel.DEBUG
+                "trace" -> LogLevel.TRACE
+                "gossip" -> LogLevel.GOSSIP
+                else -> LogLevel.INFO
+            }
+
+        if (isLevelEnabled(recordLevel)) {
+            val logMessage = formatRecord(record)
+            logMessages.add(logMessage)
+            println("$logMessage")
+        }
+    }
+
+    private fun formatRecord(record: LogRecord): String {
+        val timestamp =
+            java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+        return String.format(
+            "%s %-6s [%s:%s] %s\n",
+            timestamp,
+            record.level,
+            record.modulePath,
+            record.line,
+            record.args
+        )
+    }
+
+    private fun isLevelEnabled(level: LogLevel): Boolean {
+        return level.ordinal <= currentLogLevel.ordinal
+    }
+}
+
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class LibraryTest {
 
@@ -106,6 +161,9 @@ class LibraryTest {
     }
 
     @Test fun fullCycle() {
+        val logWriter1 = CustomLogWriter(CustomLogWriter.LogLevel.GOSSIP)
+        val logWriter2 = CustomLogWriter(CustomLogWriter.LogLevel.GOSSIP)
+
         val tmpDir1 = createTempDirectory("ldk_node").toString()
         println("Random dir 1: $tmpDir1")
         val tmpDir2 = createTempDirectory("ldk_node").toString()
@@ -118,7 +176,6 @@ class LibraryTest {
         config1.storageDirPath = tmpDir1
         config1.listeningAddresses = listOf(listenAddress1)
         config1.network = Network.REGTEST
-        config1.logLevel = LogLevel.TRACE
 
         println("Config 1: $config1")
 
@@ -126,13 +183,15 @@ class LibraryTest {
         config2.storageDirPath = tmpDir2
         config2.listeningAddresses = listOf(listenAddress2)
         config2.network = Network.REGTEST
-        config2.logLevel = LogLevel.TRACE
         println("Config 2: $config2")
 
         val builder1 = Builder.fromConfig(config1)
         builder1.setChainSourceEsplora(esploraEndpoint, null)
+        builder1.setCustomLogger(logWriter1)
+
         val builder2 = Builder.fromConfig(config2)
         builder2.setChainSourceEsplora(esploraEndpoint, null)
+        builder2.setCustomLogger(logWriter2)
 
         val node1 = builder1.build()
         val node2 = builder2.build()
@@ -222,7 +281,8 @@ class LibraryTest {
             else -> return
         }
 
-        val invoice = node2.bolt11Payment().receive(2500000u, "asdf", 9217u)
+        val description = Bolt11InvoiceDescription.Direct("asdf")
+        val invoice = node2.bolt11Payment().receive(2500000u, description, 9217u)
 
         node1.bolt11Payment().send(invoice, null)
 
@@ -236,8 +296,8 @@ class LibraryTest {
         assert(paymentReceivedEvent is Event.PaymentReceived)
         node2.eventHandled()
 
-        assert(node1.listPayments().size == 1)
-        assert(node2.listPayments().size == 1)
+        assert(node1.listPayments().size == 3)
+        assert(node2.listPayments().size == 2)
 
         node2.closeChannel(userChannelId, nodeId1)
 
@@ -263,6 +323,9 @@ class LibraryTest {
         assert(spendableBalance1AfterClose > 95000u)
         assert(spendableBalance1AfterClose < 100000u)
         assertEquals(102500uL, spendableBalance2AfterClose)
+
+        assertTrue(logWriter1.getLogMessages().isNotEmpty())
+        assertTrue(logWriter2.getLogMessages().isNotEmpty())
 
         node1.stop()
         node2.stop()

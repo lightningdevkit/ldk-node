@@ -21,7 +21,7 @@ use crate::fee_estimator::{
 	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::write_node_metrics;
-use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkNodeLogger, Logger};
+use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
@@ -31,6 +31,7 @@ use lightning::util::ser::Writeable;
 
 use lightning_transaction_sync::EsploraSyncClient;
 
+use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
 use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 use lightning_block_sync::SpvClient;
@@ -112,13 +113,13 @@ pub(crate) enum ChainSource {
 		esplora_client: EsploraAsyncClient,
 		onchain_wallet: Arc<Wallet>,
 		onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
-		tx_sync: Arc<EsploraSyncClient<Arc<LdkNodeLogger>>>,
+		tx_sync: Arc<EsploraSyncClient<Arc<Logger>>>,
 		lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 		fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>,
 		config: Arc<Config>,
-		logger: Arc<LdkNodeLogger>,
+		logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	},
 	BitcoindRpc {
@@ -131,7 +132,7 @@ pub(crate) enum ChainSource {
 		tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>,
 		config: Arc<Config>,
-		logger: Arc<LdkNodeLogger>,
+		logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	},
 }
@@ -140,7 +141,7 @@ impl ChainSource {
 	pub(crate) fn new_esplora(
 		server_url: String, sync_config: EsploraSyncConfig, onchain_wallet: Arc<Wallet>,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<LdkNodeLogger>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
@@ -170,7 +171,7 @@ impl ChainSource {
 		host: String, port: u16, rpc_user: String, rpc_password: String,
 		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
 		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<LdkNodeLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let bitcoind_rpc_client =
 			Arc::new(BitcoindRpcClient::new(host, port, rpc_user, rpc_password));
@@ -189,6 +190,13 @@ impl ChainSource {
 			config,
 			logger,
 			node_metrics,
+		}
+	}
+
+	pub(crate) fn as_utxo_source(&self) -> Option<Arc<dyn UtxoSource>> {
+		match self {
+			Self::BitcoindRpc { bitcoind_rpc_client, .. } => Some(bitcoind_rpc_client.rpc_client()),
+			_ => None,
 		}
 	}
 
@@ -273,44 +281,51 @@ impl ChainSource {
 					}
 				}
 
-				let channel_manager_best_block_hash =
-					channel_manager.current_best_block().block_hash;
-				let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
-				let onchain_wallet_best_block_hash = onchain_wallet.current_best_block().block_hash;
-
-				let mut chain_listeners = vec![
-					(
-						onchain_wallet_best_block_hash,
-						&**onchain_wallet as &(dyn Listen + Send + Sync),
-					),
-					(
-						channel_manager_best_block_hash,
-						&*channel_manager as &(dyn Listen + Send + Sync),
-					),
-					(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
-				];
-
-				// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
-				// before giving them to `ChainMonitor` it the first place. However, this isn't
-				// trivial as we load them on initialization (in the `Builder`) and only gain
-				// network access during `start`. For now, we just make sure we get the worst known
-				// block hash and sychronize them via `ChainMonitor`.
-				if let Some(worst_channel_monitor_block_hash) = chain_monitor
-					.list_monitors()
-					.iter()
-					.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
-					.map(|m| m.current_best_block())
-					.min_by_key(|b| b.height)
-					.map(|b| b.block_hash)
-				{
-					chain_listeners.push((
-						worst_channel_monitor_block_hash,
-						&*chain_monitor as &(dyn Listen + Send + Sync),
-					));
-				}
+				log_info!(
+					logger,
+					"Starting initial synchronization of chain listeners. This might take a while..",
+				);
 
 				loop {
+					let channel_manager_best_block_hash =
+						channel_manager.current_best_block().block_hash;
+					let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
+					let onchain_wallet_best_block_hash =
+						onchain_wallet.current_best_block().block_hash;
+
+					let mut chain_listeners = vec![
+						(
+							onchain_wallet_best_block_hash,
+							&**onchain_wallet as &(dyn Listen + Send + Sync),
+						),
+						(
+							channel_manager_best_block_hash,
+							&*channel_manager as &(dyn Listen + Send + Sync),
+						),
+						(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
+					];
+
+					// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
+					// before giving them to `ChainMonitor` it the first place. However, this isn't
+					// trivial as we load them on initialization (in the `Builder`) and only gain
+					// network access during `start`. For now, we just make sure we get the worst known
+					// block hash and sychronize them via `ChainMonitor`.
+					if let Some(worst_channel_monitor_block_hash) = chain_monitor
+						.list_monitors()
+						.iter()
+						.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
+						.map(|m| m.current_best_block())
+						.min_by_key(|b| b.height)
+						.map(|b| b.block_hash)
+					{
+						chain_listeners.push((
+							worst_channel_monitor_block_hash,
+							&*chain_monitor as &(dyn Listen + Send + Sync),
+						));
+					}
+
 					let mut locked_header_cache = header_cache.lock().await;
+					let now = SystemTime::now();
 					match synchronize_listeners(
 						bitcoind_rpc_client.as_ref(),
 						config.network,
@@ -321,6 +336,11 @@ impl ChainSource {
 					{
 						Ok(chain_tip) => {
 							{
+								log_info!(
+									logger,
+									"Finished synchronizing listeners in {}ms",
+									now.elapsed().unwrap().as_millis()
+								);
 								*latest_chain_tip.write().unwrap() = Some(chain_tip);
 								let unix_time_secs_opt = SystemTime::now()
 									.duration_since(UNIX_EPOCH)
@@ -365,6 +385,8 @@ impl ChainSource {
 				fee_rate_update_interval.reset();
 				fee_rate_update_interval
 					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+				log_info!(logger, "Starting continuous polling for chain updates.");
 
 				// Start the polling loop.
 				loop {
@@ -684,13 +706,15 @@ impl ChainSource {
 					&mut *locked_header_cache,
 					&chain_listener,
 				);
-				let mut chain_polling_interval =
-					tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
-				chain_polling_interval
-					.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+				let now = SystemTime::now();
 				match spv_client.poll_best_tip().await {
 					Ok((ChainTip::Better(tip), true)) => {
+						log_trace!(
+							logger,
+							"Finished polling best tip in {}ms",
+							now.elapsed().unwrap().as_millis()
+						);
 						*latest_chain_tip.write().unwrap() = Some(tip);
 					},
 					Ok(_) => {},
@@ -703,11 +727,19 @@ impl ChainSource {
 				}
 
 				let cur_height = channel_manager.current_best_block().height;
+
+				let now = SystemTime::now();
 				match bitcoind_rpc_client
 					.get_mempool_transactions_and_timestamp_at_height(cur_height)
 					.await
 				{
 					Ok(unconfirmed_txs) => {
+						log_trace!(
+							logger,
+							"Finished polling mempool of size {} in {}ms",
+							unconfirmed_txs.len(),
+							now.elapsed().unwrap().as_millis()
+						);
 						let _ = onchain_wallet.apply_unconfirmed_txs(unconfirmed_txs);
 					},
 					Err(e) => {
@@ -787,18 +819,12 @@ impl ChainSource {
 				for target in confirmation_targets {
 					let num_blocks = get_num_block_defaults_for_target(target);
 
+					// Convert the retrieved fee rate and fall back to 1 sat/vb if we fail or it
+					// yields less than that. This is mostly necessary to continue on
+					// `signet`/`regtest` where we might not get estimates (or bogus values).
 					let converted_estimate_sat_vb =
-						esplora_client::convert_fee_rate(num_blocks, estimates.clone()).map_err(
-							|e| {
-								log_error!(
-									logger,
-									"Failed to convert fee rate estimates for {:?}: {}",
-									target,
-									e
-								);
-								Error::FeerateEstimationUpdateFailed
-							},
-						)?;
+						esplora_client::convert_fee_rate(num_blocks, estimates.clone())
+							.map_or(1.0, |converted| converted.max(1.0));
 
 					let fee_rate =
 						FeeRate::from_sat_per_kwu((converted_estimate_sat_vb * 250.0) as u64);
@@ -1123,7 +1149,7 @@ impl Filter for ChainSource {
 
 fn periodically_archive_fully_resolved_monitors(
 	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-	kv_store: Arc<DynStore>, logger: Arc<LdkNodeLogger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+	kv_store: Arc<DynStore>, logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 ) -> Result<(), Error> {
 	let mut locked_node_metrics = node_metrics.write().unwrap();
 	let cur_height = channel_manager.current_best_block().height;

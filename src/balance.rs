@@ -10,8 +10,9 @@ use crate::sweep::value_from_descriptor;
 use lightning::chain::channelmonitor::Balance as LdkBalance;
 use lightning::chain::channelmonitor::BalanceSource;
 use lightning::ln::types::ChannelId;
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
+
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Txid};
@@ -324,9 +325,9 @@ pub enum PendingSweepBalance {
 	},
 	/// A spending transaction has been confirmed on-chain and is awaiting threshold confirmations.
 	///
-	/// It will be considered irrevocably confirmed after reaching [`ANTI_REORG_DELAY`].
+	/// It will be pruned after reaching [`PRUNE_DELAY_BLOCKS`] confirmations.
 	///
-	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	/// [`PRUNE_DELAY_BLOCKS`]: lightning::util::sweep::PRUNE_DELAY_BLOCKS
 	AwaitingThresholdConfirmations {
 		/// The identifier of the channel this balance belongs to.
 		channel_id: Option<ChannelId>,

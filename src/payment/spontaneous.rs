@@ -9,7 +9,7 @@
 
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
-use crate::logger::{log_error, log_info, LdkNodeLogger, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
 };
@@ -17,9 +17,10 @@ use crate::payment::SendingParameters;
 use crate::types::{ChannelManager, CustomTlvRecord, KeysManager};
 
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::EntropySource;
+
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use bitcoin::secp256k1::PublicKey;
 
@@ -37,17 +38,16 @@ pub struct SpontaneousPayment {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
-	payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>,
+	payment_store: Arc<PaymentStore<Arc<Logger>>>,
 	config: Arc<Config>,
-	logger: Arc<LdkNodeLogger>,
+	logger: Arc<Logger>,
 }
 
 impl SpontaneousPayment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		payment_store: Arc<PaymentStore<Arc<LdkNodeLogger>>>, config: Arc<Config>,
-		logger: Arc<LdkNodeLogger>,
+		payment_store: Arc<PaymentStore<Arc<Logger>>>, config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self { runtime, channel_manager, keys_manager, payment_store, config, logger }
 	}
@@ -122,7 +122,7 @@ impl SpontaneousPayment {
 			None => RecipientOnionFields::spontaneous_empty(),
 		};
 
-		match self.channel_manager.send_spontaneous_payment_with_retry(
+		match self.channel_manager.send_spontaneous_payment(
 			Some(payment_preimage),
 			recipient_fields,
 			PaymentId(payment_hash.0),

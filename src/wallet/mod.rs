@@ -7,27 +7,31 @@
 
 use persist::KVStoreWalletPersister;
 
-use crate::logger::{log_debug, log_error, log_info, log_trace, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
+use crate::payment::store::{ConfirmationStatus, PaymentStore};
+use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
+use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BestBlock, Listen};
 
 use lightning::events::bump_transaction::{Utxo, WalletSource};
+use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
-	ChangeDestinationSource, EntropySource, InMemorySigner, KeyMaterial, KeysManager, NodeSigner,
-	OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
+	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
+	Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 
 use lightning::util::message_signing;
 use lightning_invoice::RawBolt11Invoice;
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
-use bdk_chain::ChainPosition;
 use bdk_wallet::{Balance, KeychainKind, PersistedWallet, SignOptions, Update};
 
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
@@ -39,11 +43,13 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{
-	Amount, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, WitnessProgram, WitnessVersion,
+	Amount, FeeRate, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, WitnessProgram,
+	WitnessVersion,
 };
 
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
@@ -58,13 +64,14 @@ pub(crate) struct Wallet<B: Deref, E: Deref, L: Deref>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
 	persister: Mutex<KVStoreWalletPersister>,
 	broadcaster: B,
 	fee_estimator: E,
+	payment_store: Arc<PaymentStore<Arc<Logger>>>,
 	logger: L,
 }
 
@@ -72,15 +79,16 @@ impl<B: Deref, E: Deref, L: Deref> Wallet<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
-		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E, logger: L,
+		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E,
+		payment_store: Arc<PaymentStore<Arc<Logger>>>, logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
-		Self { inner, persister, broadcaster, fee_estimator, logger }
+		Self { inner, persister, broadcaster, fee_estimator, payment_store, logger }
 	}
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
@@ -103,6 +111,11 @@ where
 				let mut locked_persister = self.persister.lock().unwrap();
 				locked_wallet.persist(&mut locked_persister).map_err(|e| {
 					log_error!(self.logger, "Failed to persist wallet: {}", e);
+					Error::PersistenceFailed
+				})?;
+
+				self.update_payment_store(&mut *locked_wallet).map_err(|e| {
+					log_error!(self.logger, "Failed to update payment store: {}", e);
 					Error::PersistenceFailed
 				})?;
 
@@ -130,6 +143,76 @@ where
 		Ok(())
 	}
 
+	fn update_payment_store<'a>(
+		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
+	) -> Result<(), Error> {
+		let latest_update_timestamp = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
+
+		for wtx in locked_wallet.transactions() {
+			let id = PaymentId(wtx.tx_node.txid.to_byte_array());
+			let txid = wtx.tx_node.txid;
+			let (payment_status, confirmation_status) = match wtx.chain_position {
+				bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
+					let confirmation_height = anchor.block_id.height;
+					let cur_height = locked_wallet.latest_checkpoint().height();
+					let payment_status = if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1
+					{
+						PaymentStatus::Succeeded
+					} else {
+						PaymentStatus::Pending
+					};
+					let confirmation_status = ConfirmationStatus::Confirmed {
+						block_hash: anchor.block_id.hash,
+						height: confirmation_height,
+						timestamp: anchor.confirmation_time,
+					};
+					(payment_status, confirmation_status)
+				},
+				bdk_chain::ChainPosition::Unconfirmed { .. } => {
+					(PaymentStatus::Pending, ConfirmationStatus::Unconfirmed)
+				},
+			};
+			// TODO: It would be great to introduce additional variants for
+			// `ChannelFunding` and `ChannelClosing`. For the former, we could just
+			// take a reference to `ChannelManager` here and check against
+			// `list_channels`. But for the latter the best approach is much less
+			// clear: for force-closes/HTLC spends we should be good querying
+			// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
+			// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
+			// spent to a wallet address. The only solution I can come up with is to
+			// create and persist a list of 'static pending outputs' that we could use
+			// here to determine the `PaymentKind`, but that's not really satisfactory, so
+			// we're punting on it until we can come up with a better solution.
+			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
+			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
+			let (direction, amount_msat) = if sent > received {
+				let direction = PaymentDirection::Outbound;
+				let amount_msat = Some(sent.to_sat().saturating_sub(received.to_sat()) * 1000);
+				(direction, amount_msat)
+			} else {
+				let direction = PaymentDirection::Inbound;
+				let amount_msat = Some(received.to_sat().saturating_sub(sent.to_sat()) * 1000);
+				(direction, amount_msat)
+			};
+
+			let payment = PaymentDetails {
+				id,
+				kind,
+				amount_msat,
+				direction,
+				status: payment_status,
+				latest_update_timestamp,
+			};
+
+			self.payment_store.insert_or_update(&payment)?;
+		}
+
+		Ok(())
+	}
+
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,
@@ -139,11 +222,7 @@ where
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
 
-		tx_builder
-			.add_recipient(output_script, amount)
-			.fee_rate(fee_rate)
-			.nlocktime(locktime)
-			.enable_rbf();
+		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
 
 		let mut psbt = match tx_builder.finish() {
 			Ok(psbt) => {
@@ -243,9 +322,12 @@ where
 
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
+		fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
+		// Use the set fee_rate or default to fee estimation.
 		let confirmation_target = ConfirmationTarget::OnchainPayment;
-		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
+		let fee_rate =
+			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
 
 		let tx = {
 			let mut locked_wallet = self.inner.lock().unwrap();
@@ -255,10 +337,7 @@ where
 				OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
 					let mut tx_builder = locked_wallet.build_tx();
 					let amount = Amount::from_sat(amount_sats);
-					tx_builder
-						.add_recipient(address.script_pubkey(), amount)
-						.fee_rate(fee_rate)
-						.enable_rbf();
+					tx_builder.add_recipient(address.script_pubkey(), amount).fee_rate(fee_rate);
 					tx_builder
 				},
 				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
@@ -277,8 +356,7 @@ where
 								change_address_info.address.script_pubkey(),
 								Amount::from_sat(cur_anchor_reserve_sats),
 							)
-							.fee_rate(fee_rate)
-							.enable_rbf();
+							.fee_rate(fee_rate);
 						match tmp_tx_builder.finish() {
 							Ok(psbt) => psbt.unsigned_tx,
 							Err(err) => {
@@ -316,17 +394,12 @@ where
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
 						.add_recipient(address.script_pubkey(), estimated_spendable_amount)
-						.fee_absolute(estimated_tx_fee)
-						.enable_rbf();
+						.fee_absolute(estimated_tx_fee);
 					tx_builder
 				},
 				OnchainSendAmount::AllDrainingReserve => {
 					let mut tx_builder = locked_wallet.build_tx();
-					tx_builder
-						.drain_wallet()
-						.drain_to(address.script_pubkey())
-						.fee_rate(fee_rate)
-						.enable_rbf();
+					tx_builder.drain_wallet().drain_to(address.script_pubkey()).fee_rate(fee_rate);
 					tx_builder
 				},
 			};
@@ -459,7 +532,7 @@ impl<B: Deref, E: Deref, L: Deref> Listen for Wallet<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn filtered_block_connected(
 		&self, _header: &bitcoin::block::Header,
@@ -487,7 +560,12 @@ where
 		}
 
 		match locked_wallet.apply_block(block, height) {
-			Ok(()) => (),
+			Ok(()) => {
+				if let Err(e) = self.update_payment_store(&mut *locked_wallet) {
+					log_error!(self.logger, "Failed to update payment store: {}", e);
+					return;
+				}
+			},
 			Err(e) => {
 				log_error!(
 					self.logger,
@@ -519,14 +597,14 @@ impl<B: Deref, E: Deref, L: Deref> WalletSource for Wallet<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut utxos = Vec::new();
 		let confirmed_txs: Vec<Txid> = locked_wallet
 			.transactions()
-			.filter(|t| matches!(t.chain_position, ChainPosition::Confirmed(_)))
+			.filter(|t| t.chain_position.is_confirmed())
 			.map(|t| t.tx_node.txid)
 			.collect();
 		let unspent_confirmed_utxos =
@@ -661,7 +739,7 @@ pub(crate) struct WalletKeysManager<B: Deref, E: Deref, L: Deref>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	inner: KeysManager,
 	wallet: Arc<Wallet<B, E, L>>,
@@ -672,7 +750,7 @@ impl<B: Deref, E: Deref, L: Deref> WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
 	///
@@ -703,7 +781,7 @@ impl<B: Deref, E: Deref, L: Deref> NodeSigner for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
 		self.inner.get_node_id(recipient)
@@ -715,8 +793,8 @@ where
 		self.inner.ecdh(recipient, other_key, tweak)
 	}
 
-	fn get_inbound_payment_key_material(&self) -> KeyMaterial {
-		self.inner.get_inbound_payment_key_material()
+	fn get_inbound_payment_key(&self) -> ExpandedKey {
+		self.inner.get_inbound_payment_key()
 	}
 
 	fn sign_invoice(
@@ -734,19 +812,13 @@ where
 	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
 		self.inner.sign_bolt12_invoice(invoice)
 	}
-
-	fn sign_bolt12_invoice_request(
-		&self, invoice_request: &lightning::offers::invoice_request::UnsignedInvoiceRequest,
-	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
-		self.inner.sign_bolt12_invoice_request(invoice_request)
-	}
 }
 
 impl<B: Deref, E: Deref, L: Deref> OutputSpender for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
 	fn spend_spendable_outputs<C: Signing>(
@@ -769,7 +841,7 @@ impl<B: Deref, E: Deref, L: Deref> EntropySource for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
 		self.inner.get_secure_random_bytes()
@@ -780,7 +852,7 @@ impl<B: Deref, E: Deref, L: Deref> SignerProvider for WalletKeysManager<B, E, L>
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	type EcdsaSigner = InMemorySigner;
 
@@ -831,7 +903,7 @@ impl<B: Deref, E: Deref, L: Deref> ChangeDestinationSource for WalletKeysManager
 where
 	B::Target: BroadcasterInterface,
 	E::Target: FeeEstimator,
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
 		let address = self.wallet.get_new_internal_address().map_err(|e| {

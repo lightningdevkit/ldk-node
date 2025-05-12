@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::{log_error, Logger};
+use crate::logger::{log_error, LdkLogger};
 
 use lightning::chain::chaininterface::BroadcasterInterface;
 
@@ -20,7 +20,7 @@ const BCAST_PACKAGE_QUEUE_SIZE: usize = 50;
 
 pub(crate) struct TransactionBroadcaster<L: Deref>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	queue_sender: mpsc::Sender<Vec<Transaction>>,
 	queue_receiver: Mutex<mpsc::Receiver<Vec<Transaction>>>,
@@ -29,7 +29,7 @@ where
 
 impl<L: Deref> TransactionBroadcaster<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(logger: L) -> Self {
 		let (queue_sender, queue_receiver) = mpsc::channel(BCAST_PACKAGE_QUEUE_SIZE);
@@ -43,7 +43,7 @@ where
 
 impl<L: Deref> BroadcasterInterface for TransactionBroadcaster<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	fn broadcast_transactions(&self, txs: &[&Transaction]) {
 		let package = txs.iter().map(|&t| t.clone()).collect::<Vec<Transaction>>();

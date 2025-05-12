@@ -12,13 +12,13 @@
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use crate::error::Error;
-use crate::logger::{log_error, LdkNodeLogger, Logger};
+use crate::logger::{log_error, LdkLogger, Logger};
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
 use crate::Config;
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
-use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
 use bip21::de::ParamKind;
 use bip21::{DeserializationError, DeserializeParams, Param, SerializeParams};
@@ -50,13 +50,13 @@ pub struct UnifiedQrPayment {
 	bolt11_invoice: Arc<Bolt11Payment>,
 	bolt12_payment: Arc<Bolt12Payment>,
 	config: Arc<Config>,
-	logger: Arc<LdkNodeLogger>,
+	logger: Arc<Logger>,
 }
 
 impl UnifiedQrPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
-		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<LdkNodeLogger>,
+		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger }
 	}
@@ -99,14 +99,21 @@ impl UnifiedQrPayment {
 			},
 		};
 
-		let bolt11_invoice =
-			match self.bolt11_invoice.receive(amount_msats, description, expiry_sec) {
-				Ok(invoice) => Some(invoice),
-				Err(e) => {
-					log_error!(self.logger, "Failed to create invoice {}", e);
-					return Err(Error::InvoiceCreationFailed);
-				},
-			};
+		let invoice_description = Bolt11InvoiceDescription::Direct(
+			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
+		);
+		let bolt11_invoice = match self.bolt11_invoice.receive_inner(
+			Some(amount_msats),
+			&invoice_description,
+			expiry_sec,
+			None,
+		) {
+			Ok(invoice) => Some(invoice),
+			Err(e) => {
+				log_error!(self.logger, "Failed to create invoice {}", e);
+				return Err(Error::InvoiceCreationFailed);
+			},
+		};
 
 		let extras = Extras { bolt11_invoice, bolt12_offer };
 
@@ -156,8 +163,11 @@ impl UnifiedQrPayment {
 			},
 		};
 
-		let txid =
-			self.onchain_payment.send_to_address(&uri_network_checked.address, amount.to_sat())?;
+		let txid = self.onchain_payment.send_to_address(
+			&uri_network_checked.address,
+			amount.to_sat(),
+			None,
+		)?;
 
 		Ok(QrPaymentResult::Onchain { txid })
 	}
@@ -256,22 +266,19 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
 			"lightning" => {
 				let bolt11_value =
 					String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
-				if let Ok(invoice) = bolt11_value.parse::<Bolt11Invoice>() {
-					self.bolt11_invoice = Some(invoice);
-					Ok(bip21::de::ParamKind::Known)
-				} else {
-					Ok(bip21::de::ParamKind::Unknown)
-				}
+				let invoice = bolt11_value
+					.parse::<Bolt11Invoice>()
+					.map_err(|_| Error::UriParameterParsingFailed)?;
+				self.bolt11_invoice = Some(invoice);
+				Ok(bip21::de::ParamKind::Known)
 			},
 			"lno" => {
 				let bolt12_value =
 					String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
-				if let Ok(offer) = bolt12_value.parse::<Offer>() {
-					self.bolt12_offer = Some(offer);
-					Ok(bip21::de::ParamKind::Known)
-				} else {
-					Ok(bip21::de::ParamKind::Unknown)
-				}
+				let offer =
+					bolt12_value.parse::<Offer>().map_err(|_| Error::UriParameterParsingFailed)?;
+				self.bolt12_offer = Some(offer);
+				Ok(bip21::de::ParamKind::Known)
 			},
 			_ => Ok(bip21::de::ParamKind::Unknown),
 		}

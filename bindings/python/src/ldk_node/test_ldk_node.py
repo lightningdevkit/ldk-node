@@ -185,7 +185,8 @@ class TestLdkNode(unittest.TestCase):
         print("EVENT:", channel_ready_event_2)
         node_2.event_handled()
 
-        invoice = node_2.bolt11_payment().receive(2500000, "asdf", 9217)
+        description = Bolt11InvoiceDescription.DIRECT("asdf")
+        invoice = node_2.bolt11_payment().receive(2500000, description, 9217)
         node_1.bolt11_payment().send(invoice, None)
 
         payment_successful_event_1 = node_1.wait_next_event()

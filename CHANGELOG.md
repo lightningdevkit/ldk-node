@@ -1,3 +1,11 @@
+# 0.4.3 - Jan. 23, 2025
+
+This patch release fixes the broken Rust build resulting from `cargo` treating the recent v0.1.0 release of `lightning-liquidity` as API-compatible with the previous v0.1.0-alpha.6 release (even though it's not).
+
+In total, this release features 1 files changed, 1 insertions, 1 deletions in 1 commits from 1 author, in alphabetical order:
+
+- Elias Rohrer
+
 # 0.4.2 - Oct 28, 2024
 
 This patch release fixes an issue that prohibited the node from using available confirmed on-chain funds to spend/bump Anchor outputs (#387).

@@ -12,13 +12,13 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
 	error::Error,
-	logger::LdkNodeLogger,
+	logger::Logger,
 	types::{ChannelManager, Graph, Router, Scorer},
 };
 use bitcoin::secp256k1::PublicKey;
 use lightning::{
 	io::Cursor,
-	ln::{channel_state::ChannelDetails, channelmanager::PaymentId, PaymentHash},
+	ln::{channel_state::ChannelDetails, channelmanager::PaymentId},
 	log_error,
 	routing::{
 		router::{Path, PaymentParameters, Route, RouteParameters, Router as _},
@@ -32,6 +32,7 @@ use lightning::{
 		ser::{ReadableArgs as _, Writeable},
 	},
 };
+use lightning_types::payment::PaymentHash;
 
 /// The parameters used to configure the [`ProbabilisticScorer`] used by the node.
 #[derive(Debug, Clone, Default)]
@@ -48,14 +49,14 @@ pub struct Prober {
 	router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
 	network_graph: Arc<Graph>,
-	logger: Arc<LdkNodeLogger>,
+	logger: Arc<Logger>,
 	node_id: PublicKey,
 }
 
 impl Prober {
 	pub(crate) fn new(
 		channel_manager: Arc<ChannelManager>, router: Arc<Router>, scorer: Arc<Mutex<Scorer>>,
-		network_graph: Arc<Graph>, logger: Arc<LdkNodeLogger>, node_id: PublicKey,
+		network_graph: Arc<Graph>, logger: Arc<Logger>, node_id: PublicKey,
 	) -> Self {
 		Self { channel_manager, router, scorer, network_graph, logger, node_id }
 	}

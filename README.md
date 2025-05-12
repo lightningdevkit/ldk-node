@@ -44,7 +44,7 @@ fn main() {
 	node.event_handled();
 
 	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
-	node.bolt11_payment().send(&invoice).unwrap();
+	node.bolt11_payment().send(&invoice, None).unwrap();
 
 	node.stop().unwrap();
 }
@@ -64,7 +64,7 @@ LDK Node currently comes with a decidedly opinionated set of design choices:
 LDK Node itself is written in [Rust][rust] and may therefore be natively added as a library dependency to any `std` Rust program. However, beyond its Rust API it also offers language bindings for [Swift][swift], [Kotlin][kotlin], and [Python][python] based on the [UniFFI](https://github.com/mozilla/uniffi-rs/). Moreover, [Flutter bindings][flutter_bindings] are also available.
 
 ## MSRV
-The Minimum Supported Rust Version (MSRV) is currently 1.67.0.
+The Minimum Supported Rust Version (MSRV) is currently 1.75.0.
 
 [api_docs]: https://docs.rs/ldk-node/*/ldk_node/
 [api_docs_node]: https://docs.rs/ldk-node/*/ldk_node/struct.Node.html

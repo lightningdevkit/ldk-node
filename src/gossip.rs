@@ -5,42 +5,45 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use crate::chain::ChainSource;
 use crate::config::RGS_SYNC_TIMEOUT_SECS;
-use crate::logger::{log_trace, LdkNodeLogger, Logger};
-use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync};
+use crate::logger::{log_error, log_trace, LdkLogger, Logger};
+use crate::types::{GossipSync, Graph, P2PGossipSync, PeerManager, RapidGossipSync, UtxoLookup};
 use crate::Error;
 
-use lightning::routing::utxo::UtxoLookup;
+use lightning_block_sync::gossip::{FutureSpawner, GossipVerifier};
 
+use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub(crate) enum GossipSource {
 	P2PNetwork {
 		gossip_sync: Arc<P2PGossipSync>,
+		logger: Arc<Logger>,
 	},
 	RapidGossipSync {
 		gossip_sync: Arc<RapidGossipSync>,
 		server_url: String,
 		latest_sync_timestamp: AtomicU32,
-		logger: Arc<LdkNodeLogger>,
+		logger: Arc<Logger>,
 	},
 }
 
 impl GossipSource {
-	pub fn new_p2p(network_graph: Arc<Graph>, logger: Arc<LdkNodeLogger>) -> Self {
+	pub fn new_p2p(network_graph: Arc<Graph>, logger: Arc<Logger>) -> Self {
 		let gossip_sync = Arc::new(P2PGossipSync::new(
 			network_graph,
-			None::<Arc<dyn UtxoLookup + Send + Sync>>,
-			logger,
+			None::<Arc<UtxoLookup>>,
+			Arc::clone(&logger),
 		));
-		Self::P2PNetwork { gossip_sync }
+		Self::P2PNetwork { gossip_sync, logger }
 	}
 
 	pub fn new_rgs(
 		server_url: String, latest_sync_timestamp: u32, network_graph: Arc<Graph>,
-		logger: Arc<LdkNodeLogger>,
+		logger: Arc<Logger>,
 	) -> Self {
 		let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
 		let latest_sync_timestamp = AtomicU32::new(latest_sync_timestamp);
@@ -58,9 +61,30 @@ impl GossipSource {
 		}
 	}
 
+	pub(crate) fn set_gossip_verifier(
+		&self, chain_source: Arc<ChainSource>, peer_manager: Arc<PeerManager>,
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	) {
+		match self {
+			Self::P2PNetwork { gossip_sync, logger } => {
+				if let Some(utxo_source) = chain_source.as_utxo_source() {
+					let spawner = RuntimeSpawner::new(Arc::clone(&runtime), Arc::clone(&logger));
+					let gossip_verifier = Arc::new(GossipVerifier::new(
+						utxo_source,
+						spawner,
+						Arc::clone(gossip_sync),
+						peer_manager,
+					));
+					gossip_sync.add_utxo_lookup(Some(gossip_verifier));
+				}
+			},
+			_ => (),
+		}
+	}
+
 	pub async fn update_rgs_snapshot(&self, do_full_sync: bool) -> Result<u32, Error> {
 		match self {
-			Self::P2PNetwork { gossip_sync: _ } => Ok(0),
+			Self::P2PNetwork { gossip_sync: _, .. } => Ok(0),
 			Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger } => {
 				let query_timestamp =
 					if do_full_sync { 0 } else { latest_sync_timestamp.load(Ordering::Acquire) };
@@ -87,9 +111,15 @@ impl GossipSource {
 							Error::GossipUpdateFailed
 						})?;
 
-						let new_latest_sync_timestamp = gossip_sync
-							.update_network_graph(&update_data)
-							.map_err(|_| Error::GossipUpdateFailed)?;
+						let new_latest_sync_timestamp =
+							gossip_sync.update_network_graph(&update_data).map_err(|e| {
+								log_trace!(
+									logger,
+									"Failed to update network graph with RGS data: {:?}",
+									e
+								);
+								Error::GossipUpdateFailed
+							})?;
 						latest_sync_timestamp.store(new_latest_sync_timestamp, Ordering::Release);
 						Ok(new_latest_sync_timestamp)
 					},
@@ -100,5 +130,32 @@ impl GossipSource {
 				}
 			},
 		}
+	}
+}
+
+pub(crate) struct RuntimeSpawner {
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	logger: Arc<Logger>,
+}
+
+impl RuntimeSpawner {
+	pub(crate) fn new(
+		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, logger: Arc<Logger>,
+	) -> Self {
+		Self { runtime, logger }
+	}
+}
+
+impl FutureSpawner for RuntimeSpawner {
+	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			log_error!(self.logger, "Tried spawing a future while the runtime wasn't available. This should never happen.");
+			debug_assert!(false, "Tried spawing a future while the runtime wasn't available. This should never happen.");
+			return;
+		}
+
+		let runtime = rt_lock.as_ref().unwrap();
+		runtime.spawn(future);
 	}
 }

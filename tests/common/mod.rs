@@ -10,17 +10,20 @@
 
 use ldk_node::config::{Config, EsploraSyncConfig, LoggingConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
+use ldk_node::logger::LogLevel;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, LogLevel, Node, NodeError,
-	PendingSweepBalance,
+	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
 };
 
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStore;
 use lightning::util::test_utils::TestStore;
+
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
 use lightning_persister::fs_store::FilesystemStore;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -234,15 +237,6 @@ pub(crate) fn random_config(anchor_channels: bool) -> Config {
 	println!("Setting random LDK node alias: {:?}", alias);
 	config.node_alias = alias;
 
-	let alias = random_node_alias();
-	println!("Setting random LDK node alias: {:?}", alias);
-	config.node_alias = alias;
-
-	config.logging_config = LoggingConfig::Filesystem {
-		log_dir: rand_dir.join("logs").to_str().unwrap().to_owned(),
-		log_level: LogLevel::Gossip,
-	};
-
 	config
 }
 
@@ -314,6 +308,9 @@ pub(crate) fn setup_node(
 			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
 		},
 	}
+
+	let log_file_path = format!("{}/{}", config.storage_dir_path, "ldk_node.log");
+	builder.set_filesystem_logger(Some(log_file_path), Some(LogLevel::Gossip));
 
 	if let Some(seed) = seed_bytes {
 		builder.set_entropy_seed_bytes(seed).unwrap();
@@ -487,6 +484,36 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
+	// Check we saw the node funding transactions.
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		1
+	);
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		0
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		1
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		0
+	);
+
 	// Check we haven't got any events yet
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
@@ -518,6 +545,15 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
+
+	// Check we now see the channel funding transaction as outbound.
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		1
+	);
 
 	let onchain_fee_buffer_sat = 5000;
 	let node_a_anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
@@ -557,28 +593,37 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nB receive");
 	let invoice_amount_1_msat = 2500_000;
-	let invoice = node_b.bolt11_payment().receive(invoice_amount_1_msat, &"asdf", 9217).unwrap();
+	let invoice_description: Bolt11InvoiceDescription =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(invoice_amount_1_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
 
 	println!("\nA send");
 	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
 	assert_eq!(node_a.bolt11_payment().send(&invoice, None), Err(NodeError::DuplicatePayment));
 
-	assert_eq!(node_a.list_payments().first().unwrap().id, payment_id);
+	assert!(!node_a.list_payments_with_filter(|p| p.id == payment_id).is_empty());
 
-	let outbound_payments_a =
-		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	let outbound_payments_a = node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(outbound_payments_a.len(), 1);
 
-	let inbound_payments_a =
-		node_a.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	let inbound_payments_a = node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(inbound_payments_a.len(), 0);
 
-	let outbound_payments_b =
-		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	let outbound_payments_b = node_b.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(outbound_payments_b.len(), 0);
 
-	let inbound_payments_b =
-		node_b.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound);
+	let inbound_payments_b = node_b.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
 	assert_eq!(inbound_payments_b.len(), 1);
 
 	expect_event!(node_a, PaymentSuccessful);
@@ -603,7 +648,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 2500_000;
-	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(invoice_amount_2_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
 
 	let underpaid_amount = invoice_amount_2_msat - 1;
 	assert_eq!(
@@ -612,7 +660,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	println!("\nB overpaid receive");
-	let invoice = node_b.bolt11_payment().receive(invoice_amount_2_msat, &"asdf", 9217).unwrap();
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(invoice_amount_2_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
 
 	println!("\nA overpaid send");
@@ -641,8 +692,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Test "zero-amount" invoice payment
 	println!("\nB receive_variable_amount_payment");
-	let variable_amount_invoice =
-		node_b.bolt11_payment().receive_variable_amount(&"asdf", 9217).unwrap();
+	let variable_amount_invoice = node_b
+		.bolt11_payment()
+		.receive_variable_amount(&invoice_description.clone().into(), 9217)
+		.unwrap();
 	let determined_amount_msat = 2345_678;
 	assert_eq!(
 		Err(NodeError::InvalidInvoice),
@@ -681,7 +734,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let manual_payment_hash = PaymentHash(Sha256::hash(&manual_preimage.0).to_byte_array());
 	let manual_invoice = node_b
 		.bolt11_payment()
-		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_payment_hash)
+		.receive_for_hash(
+			invoice_amount_3_msat,
+			&invoice_description.clone().into(),
+			9217,
+			manual_payment_hash,
+		)
 		.unwrap();
 	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).unwrap();
 
@@ -719,7 +777,12 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		PaymentHash(Sha256::hash(&manual_fail_preimage.0).to_byte_array());
 	let manual_fail_invoice = node_b
 		.bolt11_payment()
-		.receive_for_hash(invoice_amount_3_msat, &"asdf", 9217, manual_fail_payment_hash)
+		.receive_for_hash(
+			invoice_amount_3_msat,
+			&invoice_description.into(),
+			9217,
+			manual_fail_payment_hash,
+		)
 		.unwrap();
 	let manual_fail_payment_id = node_a.bolt11_payment().send(&manual_fail_invoice, None).unwrap();
 
@@ -794,8 +857,26 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_b.payment(&keysend_payment_id).unwrap().kind,
 		PaymentKind::Spontaneous { .. }
 	));
-	assert_eq!(node_a.list_payments().len(), 6);
-	assert_eq!(node_b.list_payments().len(), 7);
+	assert_eq!(
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		5
+	);
+	assert_eq!(
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		6
+	);
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
+			.len(),
+		1
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
+			.len(),
+		1
+	);
 
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
@@ -854,7 +935,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.sync_wallets().unwrap();
 
 		assert!(node_b.list_balances().lightning_balances.is_empty());
-		assert!(node_b.list_balances().pending_balances_from_channel_closures.is_empty());
+		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
 
 		// Check node_a properly sees all balances and sweeps them.
 		assert_eq!(node_a.list_balances().lightning_balances.len(), 1);
@@ -915,6 +996,22 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	assert_eq!(node_a.list_balances().total_anchor_channels_reserve_sats, 0);
 	assert_eq!(node_b.list_balances().total_anchor_channels_reserve_sats, 0);
+
+	// Now we should have seen the channel closing transaction on-chain.
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		2
+	);
+	assert_eq!(
+		node_b
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		2
+	);
 
 	// Check we handled all events
 	assert_eq!(node_a.next_event(), None);

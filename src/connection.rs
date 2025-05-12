@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::{log_error, log_info, Logger};
+use crate::logger::{log_error, log_info, LdkLogger};
 use crate::types::PeerManager;
 use crate::Error;
 
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 pub(crate) struct ConnectionManager<L: Deref + Clone + Sync + Send>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pending_connections:
 		Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>,
@@ -31,7 +31,7 @@ where
 
 impl<L: Deref + Clone + Sync + Send> ConnectionManager<L>
 where
-	L::Target: Logger,
+	L::Target: LdkLogger,
 {
 	pub(crate) fn new(peer_manager: Arc<PeerManager>, logger: L) -> Self {
 		let pending_connections = Mutex::new(HashMap::new());
