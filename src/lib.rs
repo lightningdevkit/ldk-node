@@ -643,7 +643,9 @@ impl Node {
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
-		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
+		let mut runtime_lock = self.runtime.write().unwrap();
+		let runtime = runtime_lock.take().ok_or(Error::NotRunning)?;
+
 		#[cfg(tokio_unstable)]
 		let metrics_runtime = Arc::clone(&runtime);
 
