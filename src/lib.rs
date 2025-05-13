@@ -127,8 +127,9 @@ pub use builder::NodeBuilder as Builder;
 
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	default_user_config, may_announce_channel, ChannelConfig, Config,
+	LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -672,13 +673,10 @@ impl Node {
 		let event_handling_stopped_logger = Arc::clone(&self.logger);
 		let mut event_handling_stopped_receiver = self.event_handling_stopped_sender.subscribe();
 
-		// FIXME: For now, we wait up to 100 secs (BDK_WALLET_SYNC_TIMEOUT_SECS + 10) to allow
-		// event handling to exit gracefully even if it was blocked on the BDK wallet syncing. We
-		// should drop this considerably post upgrading to BDK 1.0.
 		let timeout_res = tokio::task::block_in_place(move || {
 			runtime.block_on(async {
 				tokio::time::timeout(
-					Duration::from_secs(100),
+					Duration::from_secs(LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS),
 					event_handling_stopped_receiver.changed(),
 				)
 				.await
