@@ -1029,6 +1029,7 @@ fn build_with_store_internal(
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
 		Arc::clone(&payment_store),
+		Arc::clone(&config),
 		Arc::clone(&logger),
 	));
 
