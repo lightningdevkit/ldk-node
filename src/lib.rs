@@ -643,6 +643,9 @@ impl Node {
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
+		// We hold the write lock for the duration of this method to avoid any conflicts with
+		// inflight tasks when users would potentially concurrently try restart the node before
+		// `stop` returned.
 		let mut runtime_lock = self.runtime.write().unwrap();
 		let runtime = runtime_lock.take().ok_or(Error::NotRunning)?;
 
