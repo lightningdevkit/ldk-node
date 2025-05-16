@@ -445,7 +445,7 @@ impl ChainSource {
 					if let Some(worst_channel_monitor_block_hash) = chain_monitor
 						.list_monitors()
 						.iter()
-						.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
+						.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
 						.map(|m| m.current_best_block())
 						.min_by_key(|b| b.height)
 						.map(|b| b.block_hash)

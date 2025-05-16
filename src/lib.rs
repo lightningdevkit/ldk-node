@@ -1426,8 +1426,8 @@ impl Node {
 
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
-		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
-			match self.chain_monitor.get_monitor(funding_txo) {
+		for channel_id in self.chain_monitor.list_monitors() {
+			match self.chain_monitor.get_monitor(channel_id) {
 				Ok(monitor) => {
 					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
 					// LDK Node 0.1 depended on 0.0.115 already.

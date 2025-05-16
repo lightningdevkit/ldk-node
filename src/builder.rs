@@ -1275,8 +1275,8 @@ fn build_with_store_internal(
 
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
-		let funding_outpoint = channel_monitor.get_funding_txo().0;
-		chain_monitor.watch_channel(funding_outpoint, channel_monitor).map_err(|e| {
+		let channel_id = channel_monitor.channel_id();
+		chain_monitor.watch_channel(channel_id, channel_monitor).map_err(|e| {
 			log_error!(logger, "Failed to watch channel monitor: {:?}", e);
 			BuildError::InvalidChannelMonitor
 		})?;
