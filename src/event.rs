@@ -563,13 +563,10 @@ where
 				payment_hash,
 				purpose,
 				amount_msat,
-				receiver_node_id: _,
-				via_channel_id: _,
-				via_user_channel_id: _,
 				claim_deadline,
 				onion_fields,
 				counterparty_skimmed_fee_msat,
-				payment_id: _,
+				..
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				if let Some(info) = self.payment_store.get(&payment_id) {
