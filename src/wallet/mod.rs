@@ -23,7 +23,7 @@ use lightning::chain::{BestBlock, Listen};
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
-use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
+use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
 	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
@@ -44,7 +44,7 @@ use bitcoin::key::XOnlyPublicKey;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
-use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
+use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
 	Address, Amount, FeeRate, Network, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash,
 	WitnessProgram, WitnessVersion,
@@ -852,10 +852,10 @@ where
 	L::Target: LdkLogger,
 {
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
-	fn spend_spendable_outputs<C: Signing>(
+	fn spend_spendable_outputs(
 		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
 		change_destination_script: ScriptBuf, feerate_sat_per_1000_weight: u32,
-		locktime: Option<LockTime>, secp_ctx: &Secp256k1<C>,
+		locktime: Option<LockTime>, secp_ctx: &Secp256k1<All>,
 	) -> Result<Transaction, ()> {
 		self.inner.spend_spendable_outputs(
 			descriptors,
@@ -887,20 +887,12 @@ where
 {
 	type EcdsaSigner = InMemorySigner;
 
-	fn generate_channel_keys_id(
-		&self, inbound: bool, channel_value_satoshis: u64, user_channel_id: u128,
-	) -> [u8; 32] {
-		self.inner.generate_channel_keys_id(inbound, channel_value_satoshis, user_channel_id)
+	fn generate_channel_keys_id(&self, inbound: bool, user_channel_id: u128) -> [u8; 32] {
+		self.inner.generate_channel_keys_id(inbound, user_channel_id)
 	}
 
-	fn derive_channel_signer(
-		&self, channel_value_satoshis: u64, channel_keys_id: [u8; 32],
-	) -> Self::EcdsaSigner {
-		self.inner.derive_channel_signer(channel_value_satoshis, channel_keys_id)
-	}
-
-	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::EcdsaSigner, DecodeError> {
-		self.inner.read_chan_signer(reader)
+	fn derive_channel_signer(&self, channel_keys_id: [u8; 32]) -> Self::EcdsaSigner {
+		self.inner.derive_channel_signer(channel_keys_id)
 	}
 
 	fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
