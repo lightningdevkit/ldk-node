@@ -1123,8 +1123,10 @@ where
 						if spendable_amount_sats < required_amount_sats {
 							log_error!(
 								self.logger,
-								"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves.",
+								"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves. Available: {}/{}sats",
 								counterparty_node_id,
+								spendable_amount_sats,
+								required_amount_sats,
 							);
 							self.channel_manager
 								.force_close_without_broadcasting_txn(
