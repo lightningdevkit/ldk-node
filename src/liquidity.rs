@@ -13,7 +13,7 @@ use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
-use lightning::events::HTLCDestination;
+use lightning::events::HTLCHandlingFailureType;
 use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
@@ -1255,9 +1255,9 @@ where
 		}
 	}
 
-	pub(crate) fn handle_htlc_handling_failed(&self, failed_next_destination: HTLCDestination) {
+	pub(crate) fn handle_htlc_handling_failed(&self, failure_type: HTLCHandlingFailureType) {
 		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
-			if let Err(e) = lsps2_service_handler.htlc_handling_failed(failed_next_destination) {
+			if let Err(e) = lsps2_service_handler.htlc_handling_failed(failure_type) {
 				log_error!(
 					self.logger,
 					"LSPS2 service failed to handle HTLCHandlingFailed event: {:?}",

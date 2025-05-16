@@ -1040,9 +1040,9 @@ where
 			LdkEvent::PaymentPathFailed { .. } => {},
 			LdkEvent::ProbeSuccessful { .. } => {},
 			LdkEvent::ProbeFailed { .. } => {},
-			LdkEvent::HTLCHandlingFailed { failed_next_destination, .. } => {
+			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_htlc_handling_failed(failed_next_destination);
+					liquidity_source.handle_htlc_handling_failed(failure_type);
 				}
 			},
 			LdkEvent::PendingHTLCsForwardable { time_forwardable } => {
