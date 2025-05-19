@@ -94,6 +94,7 @@ pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
+mod runtime;
 mod sweep;
 mod tx_broadcaster;
 mod types;
@@ -105,6 +106,7 @@ pub use lightning;
 pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
+pub use tokio;
 pub use vss_client;
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
@@ -141,6 +143,7 @@ use payment::{
 	UnifiedQrPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
+use runtime::Runtime;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
 	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
@@ -176,7 +179,7 @@ uniffi::include_scaffolding!("ldk_node");
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
 pub struct Node {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	runtime: Arc<Runtime>,
 	stop_sender: tokio::sync::watch::Sender<()>,
 	background_processor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 	background_tasks: Mutex<Option<tokio::task::JoinSet<()>>>,
@@ -202,6 +205,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	is_running: Arc<RwLock<bool>>,
 	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 }
@@ -210,33 +214,21 @@ impl Node {
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
+	/// This will try to auto-detect an outer pre-existing runtime, e.g., to avoid stacking Tokio
+	/// runtime contexts. Note we require the outer runtime to be of the `multithreaded` flavor.
+	///
 	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
 	/// a thread-safe manner.
 	pub fn start(&self) -> Result<(), Error> {
-		let runtime =
-			Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
-		self.start_with_runtime(runtime)
-	}
-
-	/// Starts the necessary background tasks (such as handling events coming from user input,
-	/// LDK/BDK, and the peer-to-peer network) on the the given `runtime`.
-	///
-	/// This allows to have LDK Node reuse an outer pre-existing runtime, e.g., to avoid stacking Tokio
-	/// runtime contexts.
-	///
-	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
-	/// a thread-safe manner.
-	pub fn start_with_runtime(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
-		let mut runtime_lock = self.runtime.write().unwrap();
-		if runtime_lock.is_some() {
-			// We're already running.
+		let mut is_running_lock = self.is_running.write().unwrap();
+		if *is_running_lock {
 			return Err(Error::AlreadyRunning);
 		}
 
 		let mut background_tasks = tokio::task::JoinSet::new();
 		let mut cancellable_background_tasks = tokio::task::JoinSet::new();
-		let runtime_handle = runtime.handle();
+		let runtime_handle = self.runtime.handle();
 
 		log_info!(
 			self.logger,
@@ -246,17 +238,14 @@ impl Node {
 		);
 
 		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&runtime)).map_err(|e| {
+		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
 			log_error!(self.logger, "Failed to start chain syncing: {}", e);
 			e
 		})?;
 
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
-		let runtime_ref = &runtime;
-		tokio::task::block_in_place(move || {
-			runtime_ref.block_on(async move { chain_source.update_fee_rate_estimates().await })
-		})?;
+		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -574,7 +563,7 @@ impl Node {
 			})
 		};
 
-		let handle = runtime.spawn(async move {
+		let handle = self.runtime.spawn(async move {
 			process_events_async(
 				background_persister,
 				|e| background_event_handler.handle_event(e),
@@ -621,8 +610,6 @@ impl Node {
 			);
 		}
 
-		*runtime_lock = Some(runtime);
-
 		debug_assert!(self.background_tasks.lock().unwrap().is_none());
 		*self.background_tasks.lock().unwrap() = Some(background_tasks);
 
@@ -630,6 +617,7 @@ impl Node {
 		*self.cancellable_background_tasks.lock().unwrap() = Some(cancellable_background_tasks);
 
 		log_info!(self.logger, "Startup complete.");
+		*is_running_lock = true;
 		Ok(())
 	}
 
@@ -637,9 +625,10 @@ impl Node {
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
-		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
-		#[cfg(tokio_unstable)]
-		let metrics_runtime = Arc::clone(&runtime);
+		let mut is_running_lock = self.is_running.write().unwrap();
+		if !*is_running_lock {
+			return Err(Error::NotRunning);
+		}
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
@@ -661,10 +650,10 @@ impl Node {
 
 		// Cancel cancellable background tasks
 		if let Some(mut tasks) = self.cancellable_background_tasks.lock().unwrap().take() {
-			let runtime_2 = Arc::clone(&runtime);
+			let runtime_handle = self.runtime.handle();
 			tasks.abort_all();
 			tokio::task::block_in_place(move || {
-				runtime_2.block_on(async { while let Some(_) = tasks.join_next().await {} })
+				runtime_handle.block_on(async { while let Some(_) = tasks.join_next().await {} })
 			});
 		} else {
 			debug_assert!(false, "Expected some cancellable background tasks");
@@ -679,10 +668,10 @@ impl Node {
 		log_debug!(self.logger, "Stopped chain sources.");
 
 		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
-		let runtime_3 = Arc::clone(&runtime);
+		let runtime_handle = self.runtime.handle();
 		if let Some(mut tasks) = self.background_tasks.lock().unwrap().take() {
 			tokio::task::block_in_place(move || {
-				runtime_3.block_on(async {
+				runtime_handle.block_on(async {
 					loop {
 						let timeout_fut = tokio::time::timeout(
 							Duration::from_secs(BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS),
@@ -724,7 +713,7 @@ impl Node {
 		{
 			let abort_handle = background_processor_task.abort_handle();
 			let timeout_res = tokio::task::block_in_place(move || {
-				runtime.block_on(async {
+				self.runtime.block_on(async {
 					tokio::time::timeout(
 						Duration::from_secs(LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS),
 						background_processor_task,
@@ -757,20 +746,22 @@ impl Node {
 
 		#[cfg(tokio_unstable)]
 		{
+			let runtime_handle = self.runtime.handle();
 			log_trace!(
 				self.logger,
 				"Active runtime tasks left prior to shutdown: {}",
-				metrics_runtime.metrics().active_tasks_count()
+				runtime_handle.metrics().active_tasks_count()
 			);
 		}
 
 		log_info!(self.logger, "Shutdown complete.");
+		*is_running_lock = false;
 		Ok(())
 	}
 
 	/// Returns the status of the [`Node`].
 	pub fn status(&self) -> NodeStatus {
-		let is_running = self.runtime.read().unwrap().is_some();
+		let is_running = *self.is_running.read().unwrap();
 		let is_listening = self.is_listening.load(Ordering::Acquire);
 		let current_best_block = self.channel_manager.current_best_block().into();
 		let locked_node_metrics = self.node_metrics.read().unwrap();
@@ -891,6 +882,7 @@ impl Node {
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -908,6 +900,7 @@ impl Node {
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -918,9 +911,9 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn bolt12_payment(&self) -> Bolt12Payment {
 		Bolt12Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -931,9 +924,9 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
 		Arc::new(Bolt12Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -942,11 +935,11 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn spontaneous_payment(&self) -> SpontaneousPayment {
 		SpontaneousPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -955,11 +948,11 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn spontaneous_payment(&self) -> Arc<SpontaneousPayment> {
 		Arc::new(SpontaneousPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -968,10 +961,10 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn onchain_payment(&self) -> OnchainPayment {
 		OnchainPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -980,10 +973,10 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn onchain_payment(&self) -> Arc<OnchainPayment> {
 		Arc::new(OnchainPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -1061,11 +1054,9 @@ impl Node {
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
-		let runtime = rt_lock.as_ref().unwrap();
 
 		let peer_info = PeerInfo { node_id, address };
 
@@ -1075,10 +1066,8 @@ impl Node {
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
@@ -1095,8 +1084,7 @@ impl Node {
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
 	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -1118,11 +1106,9 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool,
 	) -> Result<UserChannelId, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
-		let runtime = rt_lock.as_ref().unwrap();
 
 		let peer_info = PeerInfo { node_id, address };
 
@@ -1146,10 +1132,8 @@ impl Node {
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		// Fail if we have less than the channel value + anchor reserve available (if applicable).
@@ -1298,8 +1282,7 @@ impl Node {
 	///
 	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -1307,24 +1290,16 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		tokio::task::block_in_place(move || {
-			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
-				async move {
-					if chain_source.is_transaction_based() {
-						chain_source.update_fee_rate_estimates().await?;
-						chain_source
-							.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
-							.await?;
-						chain_source.sync_onchain_wallet().await?;
-					} else {
-						chain_source.update_fee_rate_estimates().await?;
-						chain_source
-							.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper)
-							.await?;
-					}
-					Ok(())
-				},
-			)
+		self.runtime.block_on(async move {
+			if chain_source.is_transaction_based() {
+				chain_source.update_fee_rate_estimates().await?;
+				chain_source.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper).await?;
+				chain_source.sync_onchain_wallet().await?;
+			} else {
+				chain_source.update_fee_rate_estimates().await?;
+				chain_source.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper).await?;
+			}
+			Ok(())
 		})
 	}
 

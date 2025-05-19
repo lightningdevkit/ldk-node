@@ -10,6 +10,7 @@
 use crate::chain::ChainSource;
 use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
+use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
@@ -1388,7 +1389,7 @@ pub(crate) struct LSPS2BuyResponse {
 /// [`Bolt11Payment::receive_via_jit_channel`]: crate::payment::Bolt11Payment::receive_via_jit_channel
 #[derive(Clone)]
 pub struct LSPS1Liquidity {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	runtime: Arc<Runtime>,
 	wallet: Arc<Wallet>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
@@ -1397,7 +1398,7 @@ pub struct LSPS1Liquidity {
 
 impl LSPS1Liquidity {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, wallet: Arc<Wallet>,
+		runtime: Arc<Runtime>, wallet: Arc<Wallet>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>, logger: Arc<Logger>,
 	) -> Self {
@@ -1418,19 +1419,14 @@ impl LSPS1Liquidity {
 		let (lsp_node_id, lsp_address) =
 			liquidity_source.get_lsps1_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let rt_lock = self.runtime.read().unwrap();
-		let runtime = rt_lock.as_ref().unwrap();
-
 		let con_node_id = lsp_node_id;
 		let con_addr = lsp_address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
@@ -1438,18 +1434,16 @@ impl LSPS1Liquidity {
 		let refund_address = self.wallet.get_new_address()?;
 
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let response = tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				liquidity_source
-					.lsps1_request_channel(
-						lsp_balance_sat,
-						client_balance_sat,
-						channel_expiry_blocks,
-						announce_channel,
-						refund_address,
-					)
-					.await
-			})
+		let response = self.runtime.block_on(async move {
+			liquidity_source
+				.lsps1_request_channel(
+					lsp_balance_sat,
+					client_balance_sat,
+					channel_expiry_blocks,
+					announce_channel,
+					refund_address,
+				)
+				.await
 		})?;
 
 		Ok(response)
@@ -1463,27 +1457,20 @@ impl LSPS1Liquidity {
 		let (lsp_node_id, lsp_address) =
 			liquidity_source.get_lsps1_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let rt_lock = self.runtime.read().unwrap();
-		let runtime = rt_lock.as_ref().unwrap();
-
 		let con_node_id = lsp_node_id;
 		let con_addr = lsp_address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let response = tokio::task::block_in_place(move || {
-			runtime
-				.block_on(async move { liquidity_source.lsps1_check_order_status(order_id).await })
-		})?;
-
+		let response = self
+			.runtime
+			.block_on(async move { liquidity_source.lsps1_check_order_status(order_id).await })?;
 		Ok(response)
 	}
 }

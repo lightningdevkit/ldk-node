@@ -18,6 +18,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
 
@@ -86,7 +87,7 @@ impl ElectrumChainSource {
 		}
 	}
 
-	pub(super) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
+	pub(super) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
 		self.electrum_runtime_status.write().unwrap().start(
 			self.server_url.clone(),
 			Arc::clone(&runtime),
@@ -339,7 +340,7 @@ impl ElectrumRuntimeStatus {
 	}
 
 	pub(super) fn start(
-		&mut self, server_url: String, runtime: Arc<tokio::runtime::Runtime>, config: Arc<Config>,
+		&mut self, server_url: String, runtime: Arc<Runtime>, config: Arc<Config>,
 		logger: Arc<Logger>,
 	) -> Result<(), Error> {
 		match self {
@@ -403,15 +404,14 @@ struct ElectrumRuntimeClient {
 	electrum_client: Arc<ElectrumClient>,
 	bdk_electrum_client: Arc<BdkElectrumClient<ElectrumClient>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
-	runtime: Arc<tokio::runtime::Runtime>,
+	runtime: Arc<Runtime>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 }
 
 impl ElectrumRuntimeClient {
 	fn new(
-		server_url: String, runtime: Arc<tokio::runtime::Runtime>, config: Arc<Config>,
-		logger: Arc<Logger>,
+		server_url: String, runtime: Arc<Runtime>, config: Arc<Config>, logger: Arc<Logger>,
 	) -> Result<Self, Error> {
 		let electrum_config = ElectrumConfigBuilder::new()
 			.retry(ELECTRUM_CLIENT_NUM_RETRIES)
@@ -544,7 +544,6 @@ impl ElectrumRuntimeClient {
 
 		let spawn_fut =
 			self.runtime.spawn_blocking(move || electrum_client.transaction_broadcast(&tx));
-
 		let timeout_fut =
 			tokio::time::timeout(Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS), spawn_fut);
 

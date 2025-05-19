@@ -22,6 +22,7 @@ use crate::payment::store::{
 };
 use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
+use crate::runtime::Runtime;
 use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::ln::bolt11_payment;
@@ -57,24 +58,24 @@ type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [`Node::bolt11_payment`]: crate::Node::bolt11_payment
 pub struct Bolt11Payment {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
+	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 }
 
 impl Bolt11Payment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
-		channel_manager: Arc<ChannelManager>,
+		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
-		config: Arc<Config>, logger: Arc<Logger>,
+		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
 			runtime,
@@ -84,6 +85,7 @@ impl Bolt11Payment {
 			payment_store,
 			peer_store,
 			config,
+			is_running,
 			logger,
 		}
 	}
@@ -95,11 +97,11 @@ impl Bolt11Payment {
 	pub fn send(
 		&self, invoice: &Bolt11Invoice, sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
-		let invoice = maybe_deref(invoice);
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+
+		let invoice = maybe_deref(invoice);
 
 		let (payment_hash, recipient_onion, mut route_params) = bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
 			log_error!(self.logger, "Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead.");
@@ -204,11 +206,11 @@ impl Bolt11Payment {
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 		sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
-		let invoice = maybe_deref(invoice);
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+
+		let invoice = maybe_deref(invoice);
 
 		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
 			if amount_msat < invoice_amount_msat {
@@ -619,9 +621,6 @@ impl Bolt11Payment {
 		let (node_id, address) =
 			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let rt_lock = self.runtime.read().unwrap();
-		let runtime = rt_lock.as_ref().unwrap();
-
 		let peer_info = PeerInfo { node_id, address };
 
 		let con_node_id = peer_info.node_id;
@@ -630,39 +629,35 @@ impl Bolt11Payment {
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
 
 		let liquidity_source = Arc::clone(&liquidity_source);
 		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
-			tokio::task::block_in_place(move || {
-				runtime.block_on(async move {
-					if let Some(amount_msat) = amount_msat {
-						liquidity_source
-							.lsps2_receive_to_jit_channel(
-								amount_msat,
-								description,
-								expiry_secs,
-								max_total_lsp_fee_limit_msat,
-							)
-							.await
-							.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
-					} else {
-						liquidity_source
-							.lsps2_receive_variable_amount_to_jit_channel(
-								description,
-								expiry_secs,
-								max_proportional_lsp_fee_limit_ppm_msat,
-							)
-							.await
-							.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
-					}
-				})
+			self.runtime.block_on(async move {
+				if let Some(amount_msat) = amount_msat {
+					liquidity_source
+						.lsps2_receive_to_jit_channel(
+							amount_msat,
+							description,
+							expiry_secs,
+							max_total_lsp_fee_limit_msat,
+						)
+						.await
+						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
+				} else {
+					liquidity_source
+						.lsps2_receive_variable_amount_to_jit_channel(
+							description,
+							expiry_secs,
+							max_proportional_lsp_fee_limit_ppm_msat,
+						)
+						.await
+						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
+				}
 			})?;
 
 		// Register payment in payment store.
@@ -712,11 +707,11 @@ impl Bolt11Payment {
 	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
 	/// pre-flight probes.
 	pub fn send_probes(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
-		let invoice = maybe_deref(invoice);
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+
+		let invoice = maybe_deref(invoice);
 
 		let (_payment_hash, _recipient_onion, route_params) = bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
 			log_error!(self.logger, "Failed to send probes due to the given invoice being \"zero-amount\". Please use send_probes_using_amount instead.");
@@ -745,11 +740,11 @@ impl Bolt11Payment {
 	pub fn send_probes_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 	) -> Result<(), Error> {
-		let invoice = maybe_deref(invoice);
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+
+		let invoice = maybe_deref(invoice);
 
 		let (_payment_hash, _recipient_onion, route_params) = if let Some(invoice_amount_msat) =
 			invoice.amount_milli_satoshis()

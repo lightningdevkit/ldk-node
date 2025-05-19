@@ -19,6 +19,7 @@ use crate::config::{
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
@@ -185,7 +186,7 @@ impl ChainSource {
 		Self { kind, tx_broadcaster, logger }
 	}
 
-	pub(crate) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
+	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.start(runtime)?
