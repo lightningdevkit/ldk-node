@@ -1253,39 +1253,38 @@ impl Node {
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
 		}
+		let runtime = rt_lock.as_ref().unwrap();
 
 		let chain_source = Arc::clone(&self.chain_source);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		tokio::task::block_in_place(move || {
-			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
-				async move {
-					match chain_source.as_ref() {
-						ChainSource::Esplora { .. } => {
-							chain_source.update_fee_rate_estimates().await?;
-							chain_source
-								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
-								.await?;
-							chain_source.sync_onchain_wallet().await?;
-						},
-						ChainSource::Electrum { .. } => {
-							chain_source.update_fee_rate_estimates().await?;
-							chain_source
-								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
-								.await?;
-							chain_source.sync_onchain_wallet().await?;
-						},
-						ChainSource::BitcoindRpc { .. } => {
-							chain_source.update_fee_rate_estimates().await?;
-							chain_source
-								.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper)
-								.await?;
-						},
-					}
-					Ok(())
-				},
-			)
+			runtime.block_on(async move {
+				match chain_source.as_ref() {
+					ChainSource::Esplora { .. } => {
+						chain_source.update_fee_rate_estimates().await?;
+						chain_source
+							.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
+							.await?;
+						chain_source.sync_onchain_wallet().await?;
+					},
+					ChainSource::Electrum { .. } => {
+						chain_source.update_fee_rate_estimates().await?;
+						chain_source
+							.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
+							.await?;
+						chain_source.sync_onchain_wallet().await?;
+					},
+					ChainSource::BitcoindRpc { .. } => {
+						chain_source.update_fee_rate_estimates().await?;
+						chain_source
+							.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper)
+							.await?;
+					},
+				}
+				Ok(())
+			})
 		})
 	}
 
