@@ -80,6 +80,7 @@ mod builder;
 mod chain;
 pub mod config;
 mod connection;
+mod data_store;
 mod error;
 mod event;
 mod fee_estimator;
