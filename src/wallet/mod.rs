@@ -403,6 +403,10 @@ where
 						);
 						e
 					})?;
+
+					// 'cancel' the transaction to free up any used change addresses
+					locked_wallet.cancel_tx(&tmp_tx);
+
 					let estimated_spendable_amount = Amount::from_sat(
 						spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
 					);
