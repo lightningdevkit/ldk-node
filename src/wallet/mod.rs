@@ -8,11 +8,12 @@
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
-use crate::payment::store::{ConfirmationStatus, PaymentStore};
+use crate::payment::store::ConfirmationStatus;
 use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
+use crate::types::PaymentStore;
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -73,7 +74,7 @@ where
 	persister: Mutex<KVStoreWalletPersister>,
 	broadcaster: B,
 	fee_estimator: E,
-	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
 	logger: L,
 }
@@ -87,7 +88,7 @@ where
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
 		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E,
-		payment_store: Arc<PaymentStore<Arc<Logger>>>, config: Arc<Config>, logger: L,
+		payment_store: Arc<PaymentStore>, config: Arc<Config>, logger: L,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
@@ -218,7 +219,7 @@ where
 				payment_status,
 			);
 
-			self.payment_store.insert_or_update(&payment)?;
+			self.payment_store.insert_or_update(payment)?;
 		}
 
 		Ok(())

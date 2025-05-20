@@ -11,16 +11,17 @@
 
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
+use crate::data_store::DataStoreUpdateResult;
 use crate::error::Error;
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
-	PaymentStatus, PaymentStore, PaymentStoreUpdateResult,
+	PaymentStatus,
 };
 use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
-use crate::types::ChannelManager;
+use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::ln::bolt11_payment;
 use lightning::ln::channelmanager::{
@@ -90,7 +91,7 @@ pub struct Bolt11Payment {
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
@@ -102,7 +103,7 @@ impl Bolt11Payment {
 		channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore<Arc<Logger>>>, peer_store: Arc<PeerStore<Arc<Logger>>>,
+		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
 		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
@@ -434,8 +435,8 @@ impl Bolt11Payment {
 		};
 
 		match self.payment_store.update(&update) {
-			Ok(PaymentStoreUpdateResult::Updated) | Ok(PaymentStoreUpdateResult::Unchanged) => (),
-			Ok(PaymentStoreUpdateResult::NotFound) => {
+			Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (),
+			Ok(DataStoreUpdateResult::NotFound) => {
 				log_error!(
 					self.logger,
 					"Failed to manually fail unknown payment with hash {}",

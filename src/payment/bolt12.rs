@@ -12,10 +12,8 @@
 use crate::config::LDK_PAYMENT_RETRY_TIMEOUT;
 use crate::error::Error;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
-use crate::payment::store::{
-	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PaymentStore,
-};
-use crate::types::ChannelManager;
+use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::invoice::Bolt12Invoice;
@@ -39,14 +37,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct Bolt12Payment {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
-	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	payment_store: Arc<PaymentStore>,
 	logger: Arc<Logger>,
 }
 
 impl Bolt12Payment {
 	pub(crate) fn new(
 		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
-		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore<Arc<Logger>>>,
+		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
 		logger: Arc<Logger>,
 	) -> Self {
 		Self { runtime, channel_manager, payment_store, logger }
