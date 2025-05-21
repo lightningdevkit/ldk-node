@@ -41,7 +41,7 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 pub struct VssStore {
 	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
-	runtime: Runtime,
+	runtime: Option<Runtime>,
 	storable_builder: StorableBuilder<RandEntropySource>,
 	key_obfuscator: KeyObfuscator,
 }
@@ -51,7 +51,7 @@ impl VssStore {
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> io::Result<Self> {
-		let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+		let runtime = Some(tokio::runtime::Builder::new_multi_thread().enable_all().build()?);
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
@@ -137,18 +137,19 @@ impl KVStore for VssStore {
 			key: self.build_key(primary_namespace, secondary_namespace, key)?,
 		};
 
-		let resp =
-			tokio::task::block_in_place(|| self.runtime.block_on(self.client.get_object(&request)))
-				.map_err(|e| {
-					let msg = format!(
-						"Failed to read from key {}/{}/{}: {}",
-						primary_namespace, secondary_namespace, key, e
-					);
-					match e {
-						VssError::NoSuchKeyError(..) => Error::new(ErrorKind::NotFound, msg),
-						_ => Error::new(ErrorKind::Other, msg),
-					}
-				})?;
+		let resp = tokio::task::block_in_place(|| {
+			self.runtime.as_ref().unwrap().block_on(self.client.get_object(&request))
+		})
+		.map_err(|e| {
+			let msg = format!(
+				"Failed to read from key {}/{}/{}: {}",
+				primary_namespace, secondary_namespace, key, e
+			);
+			match e {
+				VssError::NoSuchKeyError(..) => Error::new(ErrorKind::NotFound, msg),
+				_ => Error::new(ErrorKind::Other, msg),
+			}
+		})?;
 		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
 		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
 		let storable = Storable::decode(&resp.value.unwrap().value[..]).map_err(|e| {
@@ -179,14 +180,16 @@ impl KVStore for VssStore {
 			delete_items: vec![],
 		};
 
-		tokio::task::block_in_place(|| self.runtime.block_on(self.client.put_object(&request)))
-			.map_err(|e| {
-				let msg = format!(
-					"Failed to write to key {}/{}/{}: {}",
-					primary_namespace, secondary_namespace, key, e
-				);
-				Error::new(ErrorKind::Other, msg)
-			})?;
+		tokio::task::block_in_place(|| {
+			self.runtime.as_ref().unwrap().block_on(self.client.put_object(&request))
+		})
+		.map_err(|e| {
+			let msg = format!(
+				"Failed to write to key {}/{}/{}: {}",
+				primary_namespace, secondary_namespace, key, e
+			);
+			Error::new(ErrorKind::Other, msg)
+		})?;
 
 		Ok(())
 	}
@@ -204,14 +207,16 @@ impl KVStore for VssStore {
 			}),
 		};
 
-		tokio::task::block_in_place(|| self.runtime.block_on(self.client.delete_object(&request)))
-			.map_err(|e| {
-				let msg = format!(
-					"Failed to delete key {}/{}/{}: {}",
-					primary_namespace, secondary_namespace, key, e
-				);
-				Error::new(ErrorKind::Other, msg)
-			})?;
+		tokio::task::block_in_place(|| {
+			self.runtime.as_ref().unwrap().block_on(self.client.delete_object(&request))
+		})
+		.map_err(|e| {
+			let msg = format!(
+				"Failed to delete key {}/{}/{}: {}",
+				primary_namespace, secondary_namespace, key, e
+			);
+			Error::new(ErrorKind::Other, msg)
+		})?;
 		Ok(())
 	}
 
@@ -219,7 +224,10 @@ impl KVStore for VssStore {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
 
 		let keys = tokio::task::block_in_place(|| {
-			self.runtime.block_on(self.list_all_keys(primary_namespace, secondary_namespace))
+			self.runtime
+				.as_ref()
+				.unwrap()
+				.block_on(self.list_all_keys(primary_namespace, secondary_namespace))
 		})
 		.map_err(|e| {
 			let msg = format!(
@@ -230,6 +238,16 @@ impl KVStore for VssStore {
 		})?;
 
 		Ok(keys)
+	}
+}
+
+impl Drop for VssStore {
+	fn drop(&mut self) {
+		let runtime = self.runtime.take();
+		// Fixes:
+		// > Cannot drop a runtime in a context where blocking is not allowed.
+		// > This happens when a runtime is dropped from within an asynchronous context.
+		tokio::task::block_in_place(move || drop(runtime));
 	}
 }
 
