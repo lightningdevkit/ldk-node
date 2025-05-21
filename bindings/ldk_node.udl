@@ -12,7 +12,7 @@ dictionary Config {
 	sequence<PublicKey> trusted_peers_0conf;
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
-	SendingParameters? sending_parameters;
+	RouteParametersConfig? route_parameters;
 };
 
 dictionary AnchorChannelsConfig {
@@ -166,13 +166,13 @@ interface Bolt11InvoiceDescription {
 
 interface Bolt11Payment {
 	[Throws=NodeError]
-	PaymentId send([ByRef]Bolt11Invoice invoice, SendingParameters? sending_parameters);
+	PaymentId send([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, SendingParameters? sending_parameters);
+	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	void send_probes([ByRef]Bolt11Invoice invoice);
+	void send_probes([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat);
+	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
 	[Throws=NodeError]
@@ -208,9 +208,9 @@ interface Bolt12Payment {
 
 interface SpontaneousPayment {
 	[Throws=NodeError]
-	PaymentId send(u64 amount_msat, PublicKey node_id, SendingParameters? sending_parameters);
+	PaymentId send(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, SendingParameters? sending_parameters, sequence<CustomTlvRecord> custom_tlvs);
+	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters, sequence<CustomTlvRecord> custom_tlvs);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
 };
@@ -446,11 +446,11 @@ dictionary PaymentDetails {
 	u64 latest_update_timestamp;
 };
 
-dictionary SendingParameters {
-	MaxTotalRoutingFeeLimit? max_total_routing_fee_msat;
-	u32? max_total_cltv_expiry_delta;
-	u8? max_path_count;
-	u8? max_channel_saturation_power_of_half;
+dictionary RouteParametersConfig {
+	u64? max_total_routing_fee_msat;
+	u32 max_total_cltv_expiry_delta;
+	u8 max_path_count;
+	u8 max_channel_saturation_power_of_half;
 };
 
 dictionary CustomTlvRecord {
@@ -509,12 +509,6 @@ enum LSPS1PaymentState {
 	"ExpectPayment",
 	"Paid",
 	"Refunded",
-};
-
-[Enum]
-interface MaxTotalRoutingFeeLimit {
-	None ();
-	Some ( u64 amount_msat );
 };
 
 [NonExhaustive]

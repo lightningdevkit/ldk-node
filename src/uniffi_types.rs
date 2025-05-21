@@ -20,7 +20,7 @@ pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
-pub use crate::payment::{MaxTotalRoutingFeeLimit, QrPaymentResult, SendingParameters};
+pub use crate::payment::QrPaymentResult;
 
 pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
@@ -29,6 +29,7 @@ pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::{Offer, OfferId};
 pub use lightning::offers::refund::Refund;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
+pub use lightning::routing::router::RouteParametersConfig;
 pub use lightning::util::string::UntrustedString;
 
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
