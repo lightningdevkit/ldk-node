@@ -7,10 +7,12 @@
 
 use crate::chain::ChainSource;
 use crate::config::ChannelConfig;
+use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::RuntimeSpawner;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
+use crate::payment::PaymentDetails;
 
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
@@ -142,6 +144,8 @@ pub(crate) type BumpTransactionEventHandler =
 		Arc<KeysManager>,
 		Arc<Logger>,
 	>;
+
+pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///

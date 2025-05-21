@@ -80,6 +80,7 @@ mod builder;
 mod chain;
 pub mod config;
 mod connection;
+mod data_store;
 mod error;
 mod event;
 mod fee_estimator;
@@ -135,7 +136,6 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
-use payment::store::PaymentStore;
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
 	UnifiedQrPayment,
@@ -143,7 +143,7 @@ use payment::{
 use peer_store::{PeerInfo, PeerStore};
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	KeysManager, OnionMessenger, PeerManager, Router, Scorer, Sweeper, Wallet,
+	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
@@ -199,7 +199,7 @@ pub struct Node {
 	_router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
-	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	payment_store: Arc<PaymentStore>,
 	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 }

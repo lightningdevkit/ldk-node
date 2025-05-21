@@ -5,14 +5,6 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::hex_utils;
-use crate::io::{
-	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-};
-use crate::logger::{log_error, LdkLogger};
-use crate::types::DynStore;
-use crate::Error;
-
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::offers::offer::OfferId;
@@ -27,11 +19,10 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
 use bitcoin::{BlockHash, Txid};
 
-use std::collections::hash_map;
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
+use crate::hex_utils;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,8 +61,118 @@ impl PaymentDetails {
 			.as_secs();
 		Self { id, kind, amount_msat, fee_paid_msat, direction, status, latest_update_timestamp }
 	}
+}
 
-	pub(crate) fn update(&mut self, update: &PaymentDetailsUpdate) -> bool {
+impl Writeable for PaymentDetails {
+	fn write<W: lightning::util::ser::Writer>(
+		&self, writer: &mut W,
+	) -> Result<(), lightning::io::Error> {
+		write_tlv_fields!(writer, {
+			(0, self.id, required), // Used to be `hash` for v0.2.1 and prior
+			// 1 briefly used to be lsp_fee_limits, could probably be reused at some point in the future.
+			// 2 used to be `preimage` before it was moved to `kind` in v0.3.0
+			(2, None::<Option<PaymentPreimage>>, required),
+			(3, self.kind, required),
+			// 4 used to be `secret` before it was moved to `kind` in v0.3.0
+			(4, None::<Option<PaymentSecret>>, required),
+			(5, self.latest_update_timestamp, required),
+			(6, self.amount_msat, required),
+			(7, self.fee_paid_msat, option),
+			(8, self.direction, required),
+			(10, self.status, required)
+		});
+		Ok(())
+	}
+}
+
+impl Readable for PaymentDetails {
+	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<PaymentDetails, DecodeError> {
+		let unix_time_secs = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
+		_init_and_read_len_prefixed_tlv_fields!(reader, {
+			(0, id, required), // Used to be `hash`
+			(1, lsp_fee_limits, option),
+			(2, preimage, required),
+			(3, kind_opt, option),
+			(4, secret, required),
+			(5, latest_update_timestamp, (default_value, unix_time_secs)),
+			(6, amount_msat, required),
+			(7, fee_paid_msat, option),
+			(8, direction, required),
+			(10, status, required)
+		});
+
+		let id: PaymentId = id.0.ok_or(DecodeError::InvalidValue)?;
+		let preimage: Option<PaymentPreimage> = preimage.0.ok_or(DecodeError::InvalidValue)?;
+		let secret: Option<PaymentSecret> = secret.0.ok_or(DecodeError::InvalidValue)?;
+		let latest_update_timestamp: u64 =
+			latest_update_timestamp.0.ok_or(DecodeError::InvalidValue)?;
+		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
+		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
+		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
+
+		let kind = if let Some(kind) = kind_opt {
+			// If we serialized the payment kind, use it.
+			// This will always be the case for any version after v0.2.1.
+			kind
+		} else {
+			// Otherwise we persisted with v0.2.1 or before, and puzzle together the kind from the
+			// provided fields.
+
+			// We used to track everything by hash, but switched to track everything by id
+			// post-v0.2.1. As both are serialized identically, we just switched the `0`-type field above
+			// from `PaymentHash` to `PaymentId` and serialize a separate `PaymentHash` in
+			// `PaymentKind` when needed. Here, for backwards compat, we can just re-create the
+			// `PaymentHash` from the id, as 'back then' `payment_hash == payment_id` was always
+			// true.
+			let hash = PaymentHash(id.0);
+
+			if secret.is_some() {
+				if let Some(lsp_fee_limits) = lsp_fee_limits {
+					let counterparty_skimmed_fee_msat = None;
+					PaymentKind::Bolt11Jit {
+						hash,
+						preimage,
+						secret,
+						counterparty_skimmed_fee_msat,
+						lsp_fee_limits,
+					}
+				} else {
+					PaymentKind::Bolt11 { hash, preimage, secret }
+				}
+			} else {
+				PaymentKind::Spontaneous { hash, preimage }
+			}
+		};
+
+		Ok(PaymentDetails {
+			id,
+			kind,
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			status,
+			latest_update_timestamp,
+		})
+	}
+}
+
+impl StorableObjectId for PaymentId {
+	fn encode_to_hex_str(&self) -> String {
+		hex_utils::to_string(&self.0)
+	}
+}
+impl StorableObject for PaymentDetails {
+	type Id = PaymentId;
+	type Update = PaymentDetailsUpdate;
+
+	fn id(&self) -> Self::Id {
+		self.id
+	}
+
+	fn update(&mut self, update: &Self::Update) -> bool {
 		debug_assert_eq!(
 			self.id, update.id,
 			"We should only ever override payment data for the same payment id"
@@ -201,101 +302,9 @@ impl PaymentDetails {
 
 		updated
 	}
-}
 
-impl Writeable for PaymentDetails {
-	fn write<W: lightning::util::ser::Writer>(
-		&self, writer: &mut W,
-	) -> Result<(), lightning::io::Error> {
-		write_tlv_fields!(writer, {
-			(0, self.id, required), // Used to be `hash` for v0.2.1 and prior
-			// 1 briefly used to be lsp_fee_limits, could probably be reused at some point in the future.
-			// 2 used to be `preimage` before it was moved to `kind` in v0.3.0
-			(2, None::<Option<PaymentPreimage>>, required),
-			(3, self.kind, required),
-			// 4 used to be `secret` before it was moved to `kind` in v0.3.0
-			(4, None::<Option<PaymentSecret>>, required),
-			(5, self.latest_update_timestamp, required),
-			(6, self.amount_msat, required),
-			(7, self.fee_paid_msat, option),
-			(8, self.direction, required),
-			(10, self.status, required)
-		});
-		Ok(())
-	}
-}
-
-impl Readable for PaymentDetails {
-	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<PaymentDetails, DecodeError> {
-		let unix_time_secs = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or(Duration::from_secs(0))
-			.as_secs();
-		_init_and_read_len_prefixed_tlv_fields!(reader, {
-			(0, id, required), // Used to be `hash`
-			(1, lsp_fee_limits, option),
-			(2, preimage, required),
-			(3, kind_opt, option),
-			(4, secret, required),
-			(5, latest_update_timestamp, (default_value, unix_time_secs)),
-			(6, amount_msat, required),
-			(7, fee_paid_msat, option),
-			(8, direction, required),
-			(10, status, required)
-		});
-
-		let id: PaymentId = id.0.ok_or(DecodeError::InvalidValue)?;
-		let preimage: Option<PaymentPreimage> = preimage.0.ok_or(DecodeError::InvalidValue)?;
-		let secret: Option<PaymentSecret> = secret.0.ok_or(DecodeError::InvalidValue)?;
-		let latest_update_timestamp: u64 =
-			latest_update_timestamp.0.ok_or(DecodeError::InvalidValue)?;
-		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
-		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
-		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
-
-		let kind = if let Some(kind) = kind_opt {
-			// If we serialized the payment kind, use it.
-			// This will always be the case for any version after v0.2.1.
-			kind
-		} else {
-			// Otherwise we persisted with v0.2.1 or before, and puzzle together the kind from the
-			// provided fields.
-
-			// We used to track everything by hash, but switched to track everything by id
-			// post-v0.2.1. As both are serialized identically, we just switched the `0`-type field above
-			// from `PaymentHash` to `PaymentId` and serialize a separate `PaymentHash` in
-			// `PaymentKind` when needed. Here, for backwards compat, we can just re-create the
-			// `PaymentHash` from the id, as 'back then' `payment_hash == payment_id` was always
-			// true.
-			let hash = PaymentHash(id.0);
-
-			if secret.is_some() {
-				if let Some(lsp_fee_limits) = lsp_fee_limits {
-					let counterparty_skimmed_fee_msat = None;
-					PaymentKind::Bolt11Jit {
-						hash,
-						preimage,
-						secret,
-						counterparty_skimmed_fee_msat,
-						lsp_fee_limits,
-					}
-				} else {
-					PaymentKind::Bolt11 { hash, preimage, secret }
-				}
-			} else {
-				PaymentKind::Spontaneous { hash, preimage }
-			}
-		};
-
-		Ok(PaymentDetails {
-			id,
-			kind,
-			amount_msat,
-			fee_paid_msat,
-			direction,
-			status,
-			latest_update_timestamp,
-		})
+	fn to_update(&self) -> Self::Update {
+		self.into()
 	}
 }
 
@@ -590,139 +599,9 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 	}
 }
 
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub(crate) enum PaymentStoreUpdateResult {
-	Updated,
-	Unchanged,
-	NotFound,
-}
-
-pub(crate) struct PaymentStore<L: Deref>
-where
-	L::Target: LdkLogger,
-{
-	payments: Mutex<HashMap<PaymentId, PaymentDetails>>,
-	kv_store: Arc<DynStore>,
-	logger: L,
-}
-
-impl<L: Deref> PaymentStore<L>
-where
-	L::Target: LdkLogger,
-{
-	pub(crate) fn new(payments: Vec<PaymentDetails>, kv_store: Arc<DynStore>, logger: L) -> Self {
-		let payments = Mutex::new(HashMap::from_iter(
-			payments.into_iter().map(|payment| (payment.id, payment)),
-		));
-		Self { payments, kv_store, logger }
-	}
-
-	pub(crate) fn insert(&self, payment: PaymentDetails) -> Result<bool, Error> {
-		let mut locked_payments = self.payments.lock().unwrap();
-
-		let updated = locked_payments.insert(payment.id, payment.clone()).is_some();
-		self.persist_info(&payment.id, &payment)?;
-		Ok(updated)
-	}
-
-	pub(crate) fn insert_or_update(&self, payment: &PaymentDetails) -> Result<bool, Error> {
-		let mut locked_payments = self.payments.lock().unwrap();
-
-		let updated;
-		match locked_payments.entry(payment.id) {
-			hash_map::Entry::Occupied(mut e) => {
-				let update = payment.into();
-				updated = e.get_mut().update(&update);
-				if updated {
-					self.persist_info(&payment.id, e.get())?;
-				}
-			},
-			hash_map::Entry::Vacant(e) => {
-				e.insert(payment.clone());
-				self.persist_info(&payment.id, payment)?;
-				updated = true;
-			},
-		}
-
-		Ok(updated)
-	}
-
-	pub(crate) fn remove(&self, id: &PaymentId) -> Result<(), Error> {
-		let removed = self.payments.lock().unwrap().remove(id).is_some();
-		if removed {
-			let store_key = hex_utils::to_string(&id.0);
-			self.kv_store
-				.remove(
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					&store_key,
-					false,
-				)
-				.map_err(|e| {
-					log_error!(
-						self.logger,
-						"Removing payment data for key {}/{}/{} failed due to: {}",
-						PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-						PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-						store_key,
-						e
-					);
-					Error::PersistenceFailed
-				})?;
-		}
-		Ok(())
-	}
-
-	pub(crate) fn get(&self, id: &PaymentId) -> Option<PaymentDetails> {
-		self.payments.lock().unwrap().get(id).cloned()
-	}
-
-	pub(crate) fn update(
-		&self, update: &PaymentDetailsUpdate,
-	) -> Result<PaymentStoreUpdateResult, Error> {
-		let mut locked_payments = self.payments.lock().unwrap();
-
-		if let Some(payment) = locked_payments.get_mut(&update.id) {
-			let updated = payment.update(update);
-			if updated {
-				self.persist_info(&update.id, payment)?;
-				Ok(PaymentStoreUpdateResult::Updated)
-			} else {
-				Ok(PaymentStoreUpdateResult::Unchanged)
-			}
-		} else {
-			Ok(PaymentStoreUpdateResult::NotFound)
-		}
-	}
-
-	pub(crate) fn list_filter<F: FnMut(&&PaymentDetails) -> bool>(
-		&self, f: F,
-	) -> Vec<PaymentDetails> {
-		self.payments.lock().unwrap().values().filter(f).cloned().collect::<Vec<PaymentDetails>>()
-	}
-
-	fn persist_info(&self, id: &PaymentId, payment: &PaymentDetails) -> Result<(), Error> {
-		let store_key = hex_utils::to_string(&id.0);
-		let data = payment.encode();
-		self.kv_store
-			.write(
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&store_key,
-				&data,
-			)
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Write for key {}/{}/{} failed due to: {}",
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					store_key,
-					e
-				);
-				Error::PersistenceFailed
-			})?;
-		Ok(())
+impl StorableObjectUpdate<PaymentDetails> for PaymentDetailsUpdate {
+	fn id(&self) -> <PaymentDetails as StorableObject>::Id {
+		self.id
 	}
 }
 
@@ -730,11 +609,7 @@ where
 mod tests {
 	use super::*;
 	use bitcoin::io::Cursor;
-	use lightning::util::{
-		ser::Readable,
-		test_utils::{TestLogger, TestStore},
-	};
-	use std::sync::Arc;
+	use lightning::util::ser::Readable;
 
 	/// We refactored `PaymentDetails` to hold a payment id and moved some required fields into
 	/// `PaymentKind`. Here, we keep the old layout available in order test de/ser compatibility.
@@ -758,69 +633,6 @@ mod tests {
 		(8, direction, required),
 		(10, status, required)
 	});
-
-	#[test]
-	fn payment_info_is_persisted() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
-		let logger = Arc::new(TestLogger::new());
-		let payment_store = PaymentStore::new(Vec::new(), Arc::clone(&store), logger);
-
-		let hash = PaymentHash([42u8; 32]);
-		let id = PaymentId([42u8; 32]);
-		assert!(payment_store.get(&id).is_none());
-
-		let store_key = hex_utils::to_string(&hash.0);
-		assert!(store
-			.read(
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&store_key
-			)
-			.is_err());
-
-		let kind = PaymentKind::Bolt11 { hash, preimage: None, secret: None };
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			None,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-
-		assert_eq!(Ok(false), payment_store.insert(payment.clone()));
-		assert!(payment_store.get(&id).is_some());
-		assert!(store
-			.read(
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&store_key
-			)
-			.is_ok());
-
-		assert_eq!(Ok(true), payment_store.insert(payment));
-		assert!(payment_store.get(&id).is_some());
-
-		// Check update returns `Updated`
-		let mut update = PaymentDetailsUpdate::new(id);
-		update.status = Some(PaymentStatus::Succeeded);
-		assert_eq!(Ok(PaymentStoreUpdateResult::Updated), payment_store.update(&update));
-
-		// Check no-op update yields `Unchanged`
-		let mut update = PaymentDetailsUpdate::new(id);
-		update.status = Some(PaymentStatus::Succeeded);
-		assert_eq!(Ok(PaymentStoreUpdateResult::Unchanged), payment_store.update(&update));
-
-		// Check bogus update yields `NotFound`
-		let bogus_id = PaymentId([84u8; 32]);
-		let mut update = PaymentDetailsUpdate::new(bogus_id);
-		update.status = Some(PaymentStatus::Succeeded);
-		assert_eq!(Ok(PaymentStoreUpdateResult::NotFound), payment_store.update(&update));
-
-		assert!(payment_store.get(&id).is_some());
-
-		assert_eq!(PaymentStatus::Succeeded, payment_store.get(&id).unwrap().status);
-	}
 
 	#[test]
 	fn old_payment_details_deser_compat() {
