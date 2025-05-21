@@ -1187,17 +1187,6 @@ fn build_with_store_internal(
 	};
 
 	let mut user_config = default_user_config(&config);
-	if liquidity_source_config.and_then(|lsc| lsc.lsps2_client.as_ref()).is_some() {
-		// Generally allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
-		// check that they don't take too much before claiming.
-		user_config.channel_config.accept_underpaying_htlcs = true;
-
-		// FIXME: When we're an LSPS2 client, set maximum allowed inbound HTLC value in flight
-		// to 100%. We should eventually be able to set this on a per-channel basis, but for
-		// now we just bump the default for all channels.
-		user_config.channel_handshake_config.max_inbound_htlc_value_in_flight_percent_of_channel =
-			100;
-	}
 
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// If we act as an LSPS2 service, we need to to be able to intercept HTLCs and forward the
