@@ -8,12 +8,12 @@
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 
-use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
+use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::payment::store::ConfirmationStatus;
 use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
-use crate::types::PaymentStore;
+use crate::types::{Broadcaster, PaymentStore};
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -50,7 +50,8 @@ use bitcoin::{
 	WitnessProgram, WitnessVersion,
 };
 
-use std::ops::Deref;
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -63,32 +64,23 @@ pub(crate) enum OnchainSendAmount {
 pub(crate) mod persist;
 pub(crate) mod ser;
 
-pub(crate) struct Wallet<B: Deref, E: Deref, L: Deref>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
 	persister: Mutex<KVStoreWalletPersister>,
-	broadcaster: B,
-	fee_estimator: E,
+	broadcaster: Arc<Broadcaster>,
+	fee_estimator: Arc<OnchainFeeEstimator>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
-	logger: L,
+	logger: Arc<Logger>,
 }
 
-impl<B: Deref, E: Deref, L: Deref> Wallet<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl Wallet {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
-		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E,
-		payment_store: Arc<PaymentStore>, config: Arc<Config>, logger: L,
+		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
+		fee_estimator: Arc<OnchainFeeEstimator>, payment_store: Arc<PaymentStore>,
+		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
@@ -559,12 +551,7 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> Listen for Wallet<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl Listen for Wallet {
 	fn filtered_block_connected(
 		&self, _header: &bitcoin::block::Header,
 		_txdata: &lightning::chain::transaction::TransactionData, _height: u32,
@@ -624,12 +611,7 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> WalletSource for Wallet<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl WalletSource for Wallet {
 	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut utxos = Vec::new();
@@ -766,30 +748,20 @@ where
 
 /// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
 /// directly spendable by the BDK wallet.
-pub(crate) struct WalletKeysManager<B: Deref, E: Deref, L: Deref>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+pub(crate) struct WalletKeysManager {
 	inner: KeysManager,
-	wallet: Arc<Wallet<B, E, L>>,
-	logger: L,
+	wallet: Arc<Wallet>,
+	logger: Arc<Logger>,
 }
 
-impl<B: Deref, E: Deref, L: Deref> WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl WalletKeysManager {
 	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
 	///
 	/// See [`KeysManager::new`] for more information on `seed`, `starting_time_secs`, and
 	/// `starting_time_nanos`.
 	pub fn new(
-		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
-		wallet: Arc<Wallet<B, E, L>>, logger: L,
+		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32, wallet: Arc<Wallet>,
+		logger: Arc<Logger>,
 	) -> Self {
 		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
 		Self { inner, wallet, logger }
@@ -808,12 +780,7 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> NodeSigner for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl NodeSigner for WalletKeysManager {
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
 		self.inner.get_node_id(recipient)
 	}
@@ -845,12 +812,7 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> OutputSpender for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl OutputSpender for WalletKeysManager {
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
 	fn spend_spendable_outputs(
 		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
@@ -868,23 +830,13 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> EntropySource for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl EntropySource for WalletKeysManager {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
 		self.inner.get_secure_random_bytes()
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> SignerProvider for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl SignerProvider for WalletKeysManager {
 	type EcdsaSigner = InMemorySigner;
 
 	fn generate_channel_keys_id(&self, inbound: bool, user_channel_id: u128) -> [u8; 32] {
@@ -922,16 +874,20 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> ChangeDestinationSource for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
-	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.get_new_internal_address().map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
-		Ok(address.script_pubkey())
+impl ChangeDestinationSource for WalletKeysManager {
+	fn get_change_destination_script<'a>(
+		&self,
+	) -> Pin<Box<dyn Future<Output = Result<ScriptBuf, ()>> + Send + 'a>> {
+		let wallet = Arc::clone(&self.wallet);
+		let logger = Arc::clone(&self.logger);
+		Box::pin(async move {
+			wallet
+				.get_new_internal_address()
+				.map_err(|e| {
+					log_error!(logger, "Failed to retrieve new address from wallet: {}", e);
+				})
+				.map(|addr| addr.script_pubkey())
+				.map_err(|_| ())
+		})
 	}
 }
