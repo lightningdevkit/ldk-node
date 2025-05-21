@@ -671,7 +671,7 @@ where
 					return;
 				}
 
-				let mut config = *self.channel_manager.get_current_default_configuration();
+				let mut config = self.channel_manager.get_current_default_configuration().clone();
 
 				// We set these LSP-specific values during Node building, here we're making sure it's actually set.
 				debug_assert_eq!(
