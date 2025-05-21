@@ -20,6 +20,7 @@ use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::{Amount, Offer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::offers::refund::Refund;
+use lightning::routing::router::RouteParametersConfig;
 use lightning::util::string::UntrustedString;
 
 use rand::RngCore;
@@ -67,7 +68,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -88,7 +89,7 @@ impl Bolt12Payment {
 			payer_note.clone(),
 			payment_id,
 			retry_strategy,
-			max_total_routing_fee_msat,
+			route_params_config,
 		) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
@@ -169,7 +170,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -194,7 +195,7 @@ impl Bolt12Payment {
 			payer_note.clone(),
 			payment_id,
 			retry_strategy,
-			max_total_routing_fee_msat,
+			route_params_config,
 		) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
@@ -363,7 +364,7 @@ impl Bolt12Payment {
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let mut refund_builder = self
 			.channel_manager
@@ -372,7 +373,7 @@ impl Bolt12Payment {
 				absolute_expiry,
 				payment_id,
 				retry_strategy,
-				max_total_routing_fee_msat,
+				route_params_config,
 			)
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to create refund builder: {:?}", e);
