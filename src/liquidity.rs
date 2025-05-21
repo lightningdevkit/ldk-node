@@ -276,13 +276,11 @@ where
 	L::Target: LdkLogger,
 {
 	pub(crate) fn set_peer_manager(&self, peer_manager: Arc<PeerManager>) {
-		*self.peer_manager.write().unwrap() = Some(Arc::clone(&peer_manager));
-		let process_msgs_callback = move || peer_manager.process_events();
-		self.liquidity_manager.set_process_msgs_callback(process_msgs_callback);
+		*self.peer_manager.write().unwrap() = Some(peer_manager);
 	}
 
-	pub(crate) fn liquidity_manager(&self) -> &LiquidityManager {
-		self.liquidity_manager.as_ref()
+	pub(crate) fn liquidity_manager(&self) -> Arc<LiquidityManager> {
+		Arc::clone(&self.liquidity_manager)
 	}
 
 	pub(crate) fn get_lsps1_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
