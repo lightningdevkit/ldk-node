@@ -356,6 +356,7 @@ where
 			let mut locked_wallet = self.inner.lock().unwrap();
 
 			// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
+			const DUST_LIMIT_SATS: u64 = 546;
 			let tx_builder = match send_amount {
 				OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
 					let mut tx_builder = locked_wallet.build_tx();
@@ -363,7 +364,9 @@ where
 					tx_builder.add_recipient(address.script_pubkey(), amount).fee_rate(fee_rate);
 					tx_builder
 				},
-				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
+				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats }
+					if cur_anchor_reserve_sats > DUST_LIMIT_SATS =>
+				{
 					let change_address_info = locked_wallet.peek_address(KeychainKind::Internal, 0);
 					let balance = locked_wallet.balance();
 					let spendable_amount_sats = self
@@ -401,6 +404,10 @@ where
 						);
 						e
 					})?;
+
+					// 'cancel' the transaction to free up any used change addresses
+					locked_wallet.cancel_tx(&tmp_tx);
+
 					let estimated_spendable_amount = Amount::from_sat(
 						spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
 					);
@@ -420,7 +427,8 @@ where
 						.fee_absolute(estimated_tx_fee);
 					tx_builder
 				},
-				OnchainSendAmount::AllDrainingReserve => {
+				OnchainSendAmount::AllDrainingReserve
+				| OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats: _ } => {
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder.drain_wallet().drain_to(address.script_pubkey()).fee_rate(fee_rate);
 					tx_builder

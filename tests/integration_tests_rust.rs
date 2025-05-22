@@ -497,6 +497,89 @@ fn onchain_send_receive() {
 }
 
 #[test]
+fn onchain_send_all_retains_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	// Setup nodes
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 1_000_000;
+	let reserve_amount_sat = 25_000;
+	let onchain_fee_buffer_sat = 1000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b.clone()],
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	// Send all over, with 0 reserve as we don't have any channels open.
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
+
+	wait_for_tx(&electrsd.client, txid);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	// Check node a sent all and node b received it
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
+	assert!(((premine_amount_sat * 2 - onchain_fee_buffer_sat)..=(premine_amount_sat * 2))
+		.contains(&node_b.list_balances().spendable_onchain_balance_sats));
+
+	// Refill to make sure we have enough reserve for the channel open.
+	let txid = bitcoind
+		.client
+		.send_to_address(&addr_a, Amount::from_sat(reserve_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, reserve_amount_sat);
+
+	// Open a channel.
+	open_channel(&node_b, &node_a, premine_amount_sat, false, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Check node a sent all and node b received it
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
+	assert!(((premine_amount_sat - reserve_amount_sat - onchain_fee_buffer_sat)
+		..=premine_amount_sat)
+		.contains(&node_b.list_balances().spendable_onchain_balance_sats));
+
+	// Send all over again, this time ensuring the reserve is accounted for
+	let txid = node_b.onchain_payment().send_all_to_address(&addr_a, true, None).unwrap();
+
+	wait_for_tx(&electrsd.client, txid);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Check node b sent all and node a received it
+	assert_eq!(node_b.list_balances().total_onchain_balance_sats, reserve_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, 0);
+	assert!(((premine_amount_sat - reserve_amount_sat - onchain_fee_buffer_sat)
+		..=premine_amount_sat)
+		.contains(&node_a.list_balances().spendable_onchain_balance_sats));
+}
+
+#[test]
 fn onchain_wallet_recovery() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 
