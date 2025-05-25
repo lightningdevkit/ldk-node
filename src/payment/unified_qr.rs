@@ -28,6 +28,9 @@ use bitcoin::{Amount, Txid};
 use std::sync::Arc;
 use std::vec::IntoIter;
 
+use bitcoin_payment_instructions::hrn_resolution::DummyHrnResolver;
+use bitcoin_payment_instructions::{PaymentInstructions, PaymentMethod};
+
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
 
 #[derive(Debug, Clone)]
@@ -135,42 +138,72 @@ impl UnifiedQrPayment {
 	///
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	pub fn send(&self, uri_str: &str) -> Result<QrPaymentResult, Error> {
-		let uri: bip21::Uri<NetworkUnchecked, Extras> =
-			uri_str.parse().map_err(|_| Error::InvalidUri)?;
+		let rt = tokio::runtime::Runtime::new().map_err(|e| {
+			log_error!(self.logger, "Failed to create Tokio runtime: {}", e);
+			Error::InvalidInvoice
+		})?;
 
-		let uri_network_checked =
-			uri.clone().require_network(self.config.network).map_err(|_| Error::InvalidNetwork)?;
+		let instructions = rt
+			.block_on(PaymentInstructions::parse(
+				uri_str,
+				self.config.network,
+				&DummyHrnResolver,
+				false,
+			))
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
+				Error::InvalidUri
+			})?;
 
-		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
-			match self.bolt12_payment.send(&offer, None, None) {
-				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
-			}
-		}
-
-		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
-			let invoice = maybe_wrap_invoice(invoice);
-			match self.bolt11_invoice.send(&invoice, None) {
-				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
-			}
-		}
-
-		let amount = match uri_network_checked.amount {
-			Some(amount) => amount,
-			None => {
-				log_error!(self.logger, "No amount specified in the URI. Aborting the payment.");
-				return Err(Error::InvalidAmount);
+		match instructions {
+			PaymentInstructions::ConfigurableAmount(_) => {
+				log_error!(
+					self.logger,
+					"Configurable amount payments not supported in this version"
+				);
+				return Err(Error::InvalidUri);
 			},
-		};
+			PaymentInstructions::FixedAmount(instructions) => {
+				for method in instructions.methods() {
+					match method {
+						PaymentMethod::LightningBolt12(offer) => {
+							match self.bolt12_payment.send(&offer, None, None) {
+								Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
+								Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
+							}
+						},
+						PaymentMethod::LightningBolt11(invoice) => {
+							match self.bolt11_invoice.send(&invoice, None) {
+								Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
+								Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
+							}
+						},
+						PaymentMethod::OnChain(address) => {
+							let amount = match instructions.onchain_payment_amount() {
+								Some(amount) => amount,
+								None => {
+									log_error!(
+										self.logger,
+										"No amount specified in the URI. Aborting the payment."
+									);
+									return Err(Error::InvalidAmount);
+								},
+							};
 
-		let txid = self.onchain_payment.send_to_address(
-			&uri_network_checked.address,
-			amount.to_sat(),
-			None,
-		)?;
+							let txid = self.onchain_payment.send_to_address(
+								&address,
+								amount.sats().unwrap(),
+								None,
+							)?;
+							return Ok(QrPaymentResult::Onchain { txid });
+						},
+					}
+				}
 
-		Ok(QrPaymentResult::Onchain { txid })
+				log_error!(self.logger, "No payable methods found in URI");
+				Err(Error::InvalidUri)
+			},
+		}
 	}
 }
 
