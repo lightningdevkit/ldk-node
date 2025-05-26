@@ -13,7 +13,8 @@ pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace}
 pub use lightning::util::logger::Level as LogLevel;
 
 use chrono::Utc;
-use log::{debug, error, info, trace, warn};
+use log::Level as LogFacadeLevel;
+use log::Record as LogFacadeRecord;
 
 #[cfg(not(feature = "uniffi"))]
 use core::fmt;
@@ -139,20 +140,32 @@ impl LogWriter for Writer {
 					.expect("Failed to write to log file")
 			},
 			Writer::LogFacadeWriter => {
-				macro_rules! log_with_level {
-					($log_level:expr, $target: expr, $($args:tt)*) => {
-						match $log_level {
-							LogLevel::Gossip | LogLevel::Trace => trace!(target: $target, $($args)*),
-							LogLevel::Debug => debug!(target: $target, $($args)*),
-							LogLevel::Info => info!(target: $target, $($args)*),
-							LogLevel::Warn => warn!(target: $target, $($args)*),
-							LogLevel::Error => error!(target: $target, $($args)*),
-						}
-					};
-				}
+				let mut builder = LogFacadeRecord::builder();
 
-				let target = format!("[{}:{}]", record.module_path, record.line);
-				log_with_level!(record.level, &target, " {}", record.args)
+				match record.level {
+					LogLevel::Gossip | LogLevel::Trace => builder.level(LogFacadeLevel::Trace),
+					LogLevel::Debug => builder.level(LogFacadeLevel::Debug),
+					LogLevel::Info => builder.level(LogFacadeLevel::Info),
+					LogLevel::Warn => builder.level(LogFacadeLevel::Warn),
+					LogLevel::Error => builder.level(LogFacadeLevel::Error),
+				};
+
+				#[cfg(not(feature = "uniffi"))]
+				log::logger().log(
+					&builder
+						.module_path(Some(record.module_path))
+						.line(Some(record.line))
+						.args(format_args!("{}", record.args))
+						.build(),
+				);
+				#[cfg(feature = "uniffi")]
+				log::logger().log(
+					&builder
+						.module_path(Some(&record.module_path))
+						.line(Some(record.line))
+						.args(format_args!("{}", record.args))
+						.build(),
+				);
 			},
 			Writer::CustomWriter(custom_logger) => custom_logger.log(record),
 		}
