@@ -1083,6 +1083,21 @@ fn generate_bip21_uri() {
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
 
+	let expected_amount_sats = 100_000;
+	let expiry_sec = 4_000;
+
+	// Test 1: Verify URI generation (on-chain + BOLT11) works
+	// even before any channels are opened. This checks the graceful fallback behavior.
+	let initial_uqr_payment = node_b
+		.unified_qr_payment()
+		.receive(expected_amount_sats, "asdf", expiry_sec)
+		.expect("Failed to generate URI");
+	println!("Initial URI (no channels): {}", initial_uqr_payment);
+
+	assert!(initial_uqr_payment.contains("bitcoin:"));
+	assert!(initial_uqr_payment.contains("lightning="));
+	assert!(!initial_uqr_payment.contains("lno=")); // BOLT12 requires channels
+
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
@@ -1100,20 +1115,16 @@ fn generate_bip21_uri() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	let expected_amount_sats = 100_000;
-	let expiry_sec = 4_000;
+	// Test 2: Verify URI generation (on-chain + BOLT11 + BOLT12) works after channels are established.
+	let uqr_payment = node_b
+		.unified_qr_payment()
+		.receive(expected_amount_sats, "asdf", expiry_sec)
+		.expect("Failed to generate URI");
 
-	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
-
-	match uqr_payment.clone() {
-		Ok(ref uri) => {
-			println!("Generated URI: {}", uri);
-			assert!(uri.contains("bitcoin:"));
-			assert!(uri.contains("lightning="));
-			assert!(uri.contains("lno="));
-		},
-		Err(e) => panic!("Failed to generate URI: {:?}", e),
-	}
+	println!("Generated URI: {}", uqr_payment);
+	assert!(uqr_payment.contains("bitcoin:"));
+	assert!(uqr_payment.contains("lightning="));
+	assert!(uqr_payment.contains("lno="));
 }
 
 #[test]
