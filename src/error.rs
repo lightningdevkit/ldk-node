@@ -127,6 +127,14 @@ pub enum Error {
 	InvalidBlindedPaths,
 	/// Asynchronous payment services are disabled.
 	AsyncPaymentServicesDisabled,
+	/// Cannot RBF a channel funding transaction.
+	CannotRbfFundingTransaction,
+	/// The transaction was not found in the wallet.
+	TransactionNotFound,
+	/// The transaction is already confirmed and cannot be modified.
+	TransactionAlreadyConfirmed,
+	/// The transaction has no spendable outputs.
+	NoSpendableOutputs
 }
 
 impl fmt::Display for Error {
@@ -205,6 +213,10 @@ impl fmt::Display for Error {
 			Self::AsyncPaymentServicesDisabled => {
 				write!(f, "Asynchronous payment services are disabled.")
 			},
+			Self::CannotRbfFundingTransaction => write!(f, "Cannot RBF a channel funding transaction."),
+			Self::TransactionNotFound => write!(f, "The transaction was not found in the wallet."),
+			Self::TransactionAlreadyConfirmed => write!(f, "The transaction is already confirmed and cannot be modified."),
+			Self::NoSpendableOutputs => write!(f, "The transaction has no spendable outputs.")
 		}
 	}
 }
