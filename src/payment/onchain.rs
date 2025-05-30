@@ -122,4 +122,94 @@ impl OnchainPayment {
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
 	}
+
+	/// Bumps the fee of an existing transaction using Replace-By-Fee (RBF).
+	///
+	/// This allows a previously sent transaction to be replaced with a new version
+	/// that pays a higher fee. The original transaction must have been created with
+	/// RBF enabled (which is the default for transactions created by LDK).
+	///
+	/// **Note:** This cannot be used on funding transactions as doing so would invalidate the channel.
+	///
+	/// # Arguments
+	///
+	/// * `txid` - The transaction ID of the transaction to be replaced
+	/// * `fee_rate` - The new fee rate to use (must be higher than the original fee rate)
+	///
+	/// # Returns
+	///
+	/// The transaction ID of the new transaction if successful.
+	///
+	/// # Errors
+	///
+	/// * [`Error::NotRunning`] - If the node is not running
+	/// * [`Error::TransactionNotFound`] - If the transaction can't be found in the wallet
+	/// * [`Error::TransactionAlreadyConfirmed`] - If the transaction is already confirmed
+	/// * [`Error::CannotRbfFundingTransaction`] - If the transaction is a channel funding transaction
+	/// * [`Error::InvalidFeeRate`] - If the new fee rate is not higher than the original
+	/// * [`Error::OnchainTxCreationFailed`] - If the new transaction couldn't be created
+	pub fn bump_fee_by_rbf(&self, txid: &Txid, fee_rate: FeeRate) -> Result<Txid, Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		// Pass through to the wallet implementation
+		#[cfg(not(feature = "uniffi"))]
+		let fee_rate_param = fee_rate;
+		#[cfg(feature = "uniffi")]
+		let fee_rate_param = *fee_rate;
+
+		self.wallet.bump_fee_by_rbf(txid, fee_rate_param, &self.channel_manager)
+	}
+
+	/// Accelerates confirmation of a transaction using Child-Pays-For-Parent (CPFP).
+	///
+	/// This creates a new transaction (child) that spends an output from the
+	/// transaction to be accelerated (parent), with a high enough fee to pay for both.
+	///
+	/// # Arguments
+	///
+	/// * `txid` - The transaction ID of the transaction to be accelerated
+	/// * `fee_rate` - The fee rate to use for the child transaction (or None to calculate automatically)
+	/// * `destination_address` - Optional address to send the funds to (if None, funds are sent to an internal address)
+	///
+	/// # Returns
+	///
+	/// The transaction ID of the child transaction if successful.
+	///
+	/// # Errors
+	///
+	/// * [`Error::NotRunning`] - If the node is not running
+	/// * [`Error::TransactionNotFound`] - If the transaction can't be found
+	/// * [`Error::TransactionAlreadyConfirmed`] - If the transaction is already confirmed
+	/// * [`Error::NoSpendableOutputs`] - If the transaction has no spendable outputs
+	/// * [`Error::OnchainTxCreationFailed`] - If the child transaction couldn't be created
+	pub fn accelerate_by_cpfp(
+		&self,
+		txid: &Txid,
+		fee_rate: Option<FeeRate>,
+		destination_address: Option<Address>,
+	) -> Result<Txid, Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		// Calculate fee rate if not provided
+		#[cfg(not(feature = "uniffi"))]
+		let fee_rate_param = match fee_rate {
+			Some(rate) => rate,
+			None => self.wallet.calculate_cpfp_fee_rate(txid, true)?,
+		};
+
+		#[cfg(feature = "uniffi")]
+		let fee_rate_param = match fee_rate {
+			Some(rate) => *rate,
+			None => self.wallet.calculate_cpfp_fee_rate(txid, true)?,
+		};
+
+		// Pass through to the wallet implementation
+		self.wallet.accelerate_by_cpfp(txid, fee_rate_param, destination_address)
+	}
 }

@@ -13,7 +13,7 @@ use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::payment::store::ConfirmationStatus;
 use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
-use crate::types::PaymentStore;
+use crate::types::{ChannelManager, PaymentStore};
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -95,6 +95,28 @@ where
 		Self { inner, persister, broadcaster, fee_estimator, payment_store, config, logger }
 	}
 
+	pub(crate) fn is_funding_transaction(
+		&self,
+		txid: &Txid,
+		channel_manager: &ChannelManager
+	) -> bool {
+		// Check all channels (pending and confirmed) for matching funding txid
+		for channel in channel_manager.list_channels() {
+			if let Some(funding_txo) = channel.funding_txo {
+				if funding_txo.txid == *txid {
+					log_debug!(
+						self.logger,
+						"Transaction {} is a funding transaction for channel {}",
+						txid,
+						channel.channel_id
+					);
+					return true;
+				}
+			}
+		}
+		false
+	}
+
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
 		self.inner.lock().unwrap().start_full_scan().build()
 	}
@@ -149,6 +171,451 @@ where
 		})?;
 
 		Ok(())
+	}
+
+	/// Bumps the fee of an existing transaction using Replace-By-Fee (RBF).
+	///
+	/// This allows a previously sent transaction to be replaced with a new version
+	/// that pays a higher fee. The original transaction must have been created with
+	/// RBF enabled (which is the default for transactions created by LDK).
+	///
+	/// Returns the txid of the new transaction if successful.
+	pub(crate) fn bump_fee_by_rbf(
+		&self,
+		txid: &Txid,
+		fee_rate: FeeRate,
+		channel_manager: &ChannelManager,
+	) -> Result<Txid, Error> {
+		// Check if this is a funding transaction
+		if self.is_funding_transaction(txid, channel_manager) {
+			log_error!(
+				self.logger,
+				"Cannot RBF transaction {}: it is a channel funding transaction",
+				txid
+			);
+			return Err(Error::CannotRbfFundingTransaction);
+		}
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		// Find the transaction in the wallet
+		let tx_node = locked_wallet
+			.get_tx(*txid)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Transaction not found in wallet: {}", txid);
+				Error::TransactionNotFound
+			})?;
+
+		// Check if transaction is confirmed - can't replace confirmed transactions
+		if tx_node.chain_position.is_confirmed() {
+			log_error!(self.logger, "Cannot replace confirmed transaction: {}", txid);
+			return Err(Error::TransactionAlreadyConfirmed);
+		}
+
+		// Calculate original transaction fee and fee rate
+		let original_tx = &tx_node.tx_node.tx;
+		let original_fee = locked_wallet.calculate_fee(original_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to calculate original fee: {}", e);
+			Error::WalletOperationFailed
+		})?;
+
+		// Use Bitcoin crate's built-in fee rate calculation for accuracy
+		let original_fee_rate = original_fee / original_tx.weight();
+
+		// Log detailed information for debugging
+		log_info!(self.logger, "RBF Analysis for transaction {}", txid);
+		log_info!(self.logger, "  Original fee: {} sats", original_fee.to_sat());
+		log_info!(self.logger, "  Original weight: {} WU ({} vB)",
+			original_tx.weight().to_wu(), original_tx.weight().to_vbytes_ceil());
+		log_info!(self.logger, "  Original fee rate: {} sat/kwu ({} sat/vB)",
+			original_fee_rate.to_sat_per_kwu(), original_fee_rate.to_sat_per_vb_ceil());
+		log_info!(self.logger, "  Requested fee rate: {} sat/kwu ({} sat/vB)",
+			fee_rate.to_sat_per_kwu(), fee_rate.to_sat_per_vb_ceil());
+
+		// Essential validation: new fee rate must be higher than original
+		// This prevents definite rejections by the Bitcoin network
+		if fee_rate <= original_fee_rate {
+			log_error!(
+				self.logger,
+				"RBF rejected: New fee rate ({} sat/vB) must be higher than original fee rate ({} sat/vB)",
+				fee_rate.to_sat_per_vb_ceil(),
+				original_fee_rate.to_sat_per_vb_ceil()
+			);
+			return Err(Error::InvalidFeeRate);
+		}
+
+		log_info!(
+			self.logger,
+			"RBF approved: Fee rate increase from {} to {} sat/vB",
+			original_fee_rate.to_sat_per_vb_ceil(),
+			fee_rate.to_sat_per_vb_ceil()
+		);
+
+		// Build a new transaction with higher fee using BDK's fee bump functionality
+		let mut tx_builder = locked_wallet.build_fee_bump(*txid).map_err(|e| {
+			log_error!(self.logger, "Failed to create fee bump builder: {}", e);
+			Error::OnchainTxCreationFailed
+		})?;
+
+		// Set the new fee rate
+		tx_builder.fee_rate(fee_rate);
+
+		// Finalize the transaction
+		let mut psbt = match tx_builder.finish() {
+			Ok(psbt) => {
+				log_trace!(self.logger, "Created RBF PSBT: {:?}", psbt);
+				psbt
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create RBF transaction: {}", err);
+				return Err(Error::OnchainTxCreationFailed);
+			},
+		};
+
+		// Sign the transaction
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					log_error!(self.logger, "Failed to finalize RBF transaction");
+					return Err(Error::OnchainTxSigningFailed);
+				}
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to sign RBF transaction: {}", err);
+				return Err(Error::OnchainTxSigningFailed);
+			},
+		}
+
+		// Persist wallet changes
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		// Extract and broadcast the transaction
+		let tx = psbt.extract_tx().map_err(|e| {
+			log_error!(self.logger, "Failed to extract transaction: {}", e);
+			Error::OnchainTxCreationFailed
+		})?;
+
+		self.broadcaster.broadcast_transactions(&[&tx]);
+
+		let new_txid = tx.compute_txid();
+
+		// Calculate and log the actual fee increase achieved
+		let new_fee = locked_wallet.calculate_fee(&tx).unwrap_or(Amount::ZERO);
+		let actual_fee_rate = new_fee / tx.weight();
+
+		log_info!(
+			self.logger,
+			"RBF transaction created successfully!"
+		);
+		log_info!(
+			self.logger,
+			"  Original: {} ({} sat/vB, {} sats fee)",
+			txid, original_fee_rate.to_sat_per_vb_ceil(), original_fee.to_sat()
+		);
+		log_info!(
+			self.logger,
+			"  Replacement: {} ({} sat/vB, {} sats fee)",
+			new_txid, actual_fee_rate.to_sat_per_vb_ceil(), new_fee.to_sat()
+		);
+		log_info!(
+			self.logger,
+			"  Additional fee paid: {} sats",
+			new_fee.to_sat().saturating_sub(original_fee.to_sat())
+		);
+
+		Ok(new_txid)
+	}
+
+	/// Accelerates confirmation of a transaction using Child-Pays-For-Parent (CPFP).
+	///
+	/// This creates a new transaction (child) that spends an output from the
+	/// transaction to be accelerated (parent), with a high enough fee to pay for both.
+	///
+	/// Returns the txid of the child transaction if successful.
+	pub(crate) fn accelerate_by_cpfp(
+		&self,
+		txid: &Txid,
+		fee_rate: FeeRate,
+		destination_address: Option<Address>,
+	) -> Result<Txid, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		// Find the transaction in the wallet
+		let parent_tx_node = locked_wallet
+			.get_tx(*txid)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Transaction not found in wallet: {}", txid);
+				Error::TransactionNotFound
+			})?;
+
+		// Check if transaction is confirmed - can't accelerate confirmed transactions
+		if parent_tx_node.chain_position.is_confirmed() {
+			log_error!(self.logger, "Cannot accelerate confirmed transaction: {}", txid);
+			return Err(Error::TransactionAlreadyConfirmed);
+		}
+
+		// Calculate parent transaction fee and fee rate for validation
+		let parent_tx = &parent_tx_node.tx_node.tx;
+		let parent_fee = locked_wallet.calculate_fee(parent_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to calculate parent fee: {}", e);
+			Error::WalletOperationFailed
+		})?;
+
+		// Use Bitcoin crate's built-in fee rate calculation for accuracy
+		let parent_fee_rate = parent_fee / parent_tx.weight();
+
+		// Log detailed information for debugging
+		log_info!(self.logger, "CPFP Analysis for transaction {}", txid);
+		log_info!(self.logger, "  Parent fee: {} sats", parent_fee.to_sat());
+		log_info!(self.logger, "  Parent weight: {} WU ({} vB)",
+			parent_tx.weight().to_wu(), parent_tx.weight().to_vbytes_ceil());
+		log_info!(self.logger, "  Parent fee rate: {} sat/kwu ({} sat/vB)",
+			parent_fee_rate.to_sat_per_kwu(), parent_fee_rate.to_sat_per_vb_ceil());
+		log_info!(self.logger, "  Child fee rate: {} sat/kwu ({} sat/vB)",
+			fee_rate.to_sat_per_kwu(), fee_rate.to_sat_per_vb_ceil());
+
+		// Validate that child fee rate is higher than parent (for effective acceleration)
+		if fee_rate <= parent_fee_rate {
+			log_info!(
+				self.logger,
+				"CPFP warning: Child fee rate ({} sat/vB) is not higher than parent fee rate ({} sat/vB). This may not effectively accelerate confirmation.",
+				fee_rate.to_sat_per_vb_ceil(),
+				parent_fee_rate.to_sat_per_vb_ceil()
+			);
+			// Note: We warn but don't reject - CPFP can still work in some cases
+		} else {
+			let acceleration_ratio = fee_rate.to_sat_per_kwu() as f64 / parent_fee_rate.to_sat_per_kwu() as f64;
+			log_info!(
+				self.logger,
+				"CPFP acceleration: Child fee rate is {:.1}x higher than parent ({} vs {} sat/vB)",
+				acceleration_ratio,
+				fee_rate.to_sat_per_vb_ceil(),
+				parent_fee_rate.to_sat_per_vb_ceil()
+			);
+		}
+
+		// Find spendable outputs from this transaction
+		let utxos = locked_wallet
+			.list_unspent()
+			.filter(|utxo| utxo.outpoint.txid == *txid)
+			.collect::<Vec<_>>();
+
+		if utxos.is_empty() {
+			log_error!(
+				self.logger,
+				"No spendable outputs found for transaction: {}",
+				txid
+			);
+			return Err(Error::NoSpendableOutputs);
+		}
+
+		log_info!(self.logger, "Found {} spendable output(s) from parent transaction", utxos.len());
+		let total_input_value: u64 = utxos.iter().map(|utxo| utxo.txout.value.to_sat()).sum();
+		log_info!(self.logger, "  Total input value: {} sats", total_input_value);
+
+		// Determine where to send the funds
+		let script_pubkey = match destination_address {
+			Some(addr) => {
+				log_info!(self.logger, "  Destination: {} (user-specified)", addr);
+				// Validate the address
+				self.parse_and_validate_address(self.config.network, &addr)?;
+				addr.script_pubkey()
+			},
+			None => {
+				// Create a new address to send the funds to
+				let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
+				log_info!(self.logger, "  Destination: {} (wallet internal address)", address_info.address);
+				address_info.address.script_pubkey()
+			}
+		};
+
+		// Build a transaction that spends these UTXOs
+		let mut tx_builder = locked_wallet.build_tx();
+
+		// Add the UTXOs explicitly
+		for utxo in &utxos {
+			match tx_builder.add_utxo(utxo.outpoint) {
+				Ok(_) => {},
+				Err(e) => {
+					log_error!(self.logger, "Failed to add UTXO: {:?} - {}", utxo.outpoint, e);
+					return Err(Error::OnchainTxCreationFailed);
+				}
+			}
+		}
+
+		// Set the fee rate for the child transaction
+		tx_builder.fee_rate(fee_rate);
+
+		// Drain all inputs to the destination
+		tx_builder.drain_to(script_pubkey);
+
+		// Finalize the transaction
+		let mut psbt = match tx_builder.finish() {
+			Ok(psbt) => {
+				log_trace!(self.logger, "Created CPFP PSBT: {:?}", psbt);
+				psbt
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create CPFP transaction: {}", err);
+				return Err(Error::OnchainTxCreationFailed);
+			},
+		};
+
+		// Sign the transaction
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					log_error!(self.logger, "Failed to finalize CPFP transaction");
+					return Err(Error::OnchainTxSigningFailed);
+				}
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to sign CPFP transaction: {}", err);
+				return Err(Error::OnchainTxSigningFailed);
+			},
+		}
+
+		// Persist wallet changes
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		// Extract and broadcast the transaction
+		let tx = psbt.extract_tx().map_err(|e| {
+			log_error!(self.logger, "Failed to extract transaction: {}", e);
+			Error::OnchainTxCreationFailed
+		})?;
+
+		self.broadcaster.broadcast_transactions(&[&tx]);
+
+		let child_txid = tx.compute_txid();
+
+		// Calculate and log the actual results
+		let child_fee = locked_wallet.calculate_fee(&tx).unwrap_or(Amount::ZERO);
+		let actual_child_fee_rate = child_fee / tx.weight();
+
+		log_info!(
+			self.logger,
+			"CPFP transaction created successfully!"
+		);
+		log_info!(
+			self.logger,
+			"  Parent: {} ({} sat/vB, {} sats fee)",
+			txid, parent_fee_rate.to_sat_per_vb_ceil(), parent_fee.to_sat()
+		);
+		log_info!(
+			self.logger,
+			"  Child: {} ({} sat/vB, {} sats fee)",
+			child_txid, actual_child_fee_rate.to_sat_per_vb_ceil(), child_fee.to_sat()
+		);
+		log_info!(
+			self.logger,
+			"  Combined package fee rate: approximately {:.1} sat/vB",
+			((parent_fee.to_sat() + child_fee.to_sat()) as f64) / ((parent_tx.weight().to_vbytes_ceil() + tx.weight().to_vbytes_ceil()) as f64)
+		);
+
+		Ok(child_txid)
+	}
+
+	/// Calculates an appropriate fee rate for a CPFP transaction to ensure
+	/// the parent transaction gets confirmed within the target number of blocks.
+	///
+	/// Returns the fee rate that should be used for the child transaction.
+	pub(crate) fn calculate_cpfp_fee_rate(
+		&self,
+		parent_txid: &Txid,
+		urgent: bool,
+	) -> Result<FeeRate, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		// Get the parent transaction
+		let parent_tx_node = locked_wallet
+			.get_tx(*parent_txid)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Transaction not found in wallet: {}", parent_txid);
+				Error::TransactionNotFound
+			})?;
+
+		// Make sure it's not confirmed
+		if parent_tx_node.chain_position.is_confirmed() {
+			log_error!(self.logger, "Transaction is already confirmed: {}", parent_txid);
+			return Err(Error::TransactionAlreadyConfirmed);
+		}
+
+		let parent_tx = &parent_tx_node.tx_node.tx;
+
+		// Calculate parent fee and fee rate using accurate method
+		let parent_fee = locked_wallet.calculate_fee(parent_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to calculate parent fee: {}", e);
+			Error::WalletOperationFailed
+		})?;
+
+		// Use Bitcoin crate's built-in fee rate calculation for accuracy
+		let parent_fee_rate = parent_fee / parent_tx.weight();
+
+		// Get current mempool fee rates from fee estimator based on urgency
+		let target = if urgent {
+			ConfirmationTarget::Lightning(lightning::chain::chaininterface::ConfirmationTarget::UrgentOnChainSweep)
+		} else {
+			ConfirmationTarget::OnchainPayment
+		};
+
+		let target_fee_rate = self.fee_estimator.estimate_fee_rate(target);
+
+		log_info!(self.logger, "CPFP Fee Rate Calculation for transaction {}", parent_txid);
+		log_info!(self.logger, "  Parent fee: {} sats", parent_fee.to_sat());
+		log_info!(self.logger, "  Parent weight: {} WU ({} vB)",
+			parent_tx.weight().to_wu(), parent_tx.weight().to_vbytes_ceil());
+		log_info!(self.logger, "  Parent fee rate: {} sat/kwu ({} sat/vB)",
+			parent_fee_rate.to_sat_per_kwu(), parent_fee_rate.to_sat_per_vb_ceil());
+		log_info!(self.logger, "  Target fee rate: {} sat/kwu ({} sat/vB)",
+			target_fee_rate.to_sat_per_kwu(), target_fee_rate.to_sat_per_vb_ceil());
+		log_info!(self.logger, "  Urgency level: {}", if urgent { "HIGH" } else { "NORMAL" });
+
+		// If parent fee rate is already sufficient, return a slightly higher one
+		if parent_fee_rate >= target_fee_rate {
+			let recommended_rate = FeeRate::from_sat_per_kwu(parent_fee_rate.to_sat_per_kwu() + 250); // +1 sat/vB
+			log_info!(
+				self.logger,
+				"Parent fee rate is already sufficient. Recommending slightly higher rate: {} sat/vB",
+				recommended_rate.to_sat_per_vb_ceil()
+			);
+			return Ok(recommended_rate);
+		}
+
+		// Estimate child transaction size (weight units)
+		// Conservative estimate for a typical 1-input, 1-output transaction
+		let estimated_child_weight_units = 480; // ~120 vbytes * 4 = 480 wu
+		let estimated_child_vbytes = estimated_child_weight_units / 4;
+
+		// Calculate the fee deficit for the parent (in sats)
+		//let parent_weight_units = parent_tx.weight().to_wu();
+		let parent_vbytes = parent_tx.weight().to_vbytes_ceil();
+		let parent_fee_deficit = (target_fee_rate.to_sat_per_vb_ceil() - parent_fee_rate.to_sat_per_vb_ceil()) * parent_vbytes;
+
+		// Calculate what the child needs to pay to cover both transactions
+		let base_child_fee = target_fee_rate.to_sat_per_vb_ceil() * estimated_child_vbytes;
+		let total_child_fee = base_child_fee + parent_fee_deficit;
+
+		// Calculate the effective fee rate for the child
+		let child_fee_rate_sat_vb = total_child_fee / estimated_child_vbytes;
+		let child_fee_rate = FeeRate::from_sat_per_vb(child_fee_rate_sat_vb)
+			.unwrap_or(FeeRate::from_sat_per_kwu(child_fee_rate_sat_vb * 250));
+
+		log_info!(self.logger, "CPFP Calculation Results:");
+		log_info!(self.logger, "  Parent fee deficit: {} sats", parent_fee_deficit);
+		log_info!(self.logger, "  Base child fee needed: {} sats", base_child_fee);
+		log_info!(self.logger, "  Total child fee needed: {} sats", total_child_fee);
+		log_info!(self.logger, "  Recommended child fee rate: {} sat/vB", child_fee_rate.to_sat_per_vb_ceil());
+		log_info!(self.logger, "  Combined package rate: ~{} sat/vB",
+			((parent_fee.to_sat() + total_child_fee) / (parent_vbytes + estimated_child_vbytes)));
+
+		Ok(child_fee_rate)
 	}
 
 	fn update_payment_store<'a>(

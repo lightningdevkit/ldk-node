@@ -222,6 +222,10 @@ interface OnchainPayment {
 	Txid send_to_address([ByRef]Address address, u64 amount_sats, FeeRate? fee_rate);
 	[Throws=NodeError]
 	Txid send_all_to_address([ByRef]Address address, boolean retain_reserve, FeeRate? fee_rate);
+	[Throws=NodeError]
+    Txid bump_fee_by_rbf([ByRef]Txid txid, FeeRate fee_rate);
+    [Throws=NodeError]
+    Txid accelerate_by_cpfp([ByRef]Txid txid, FeeRate? fee_rate, Address? destination_address);
 };
 
 interface FeeRate {
@@ -302,6 +306,10 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+	"CannotRbfFundingTransaction",
+    "TransactionNotFound",
+    "TransactionAlreadyConfirmed",
+    "NoSpendableOutputs",
 };
 
 dictionary NodeStatus {
