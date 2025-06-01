@@ -13,6 +13,7 @@ use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::error::Error;
+use crate::ffi::{maybe_deref, maybe_try_convert_enum, maybe_wrap};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
@@ -42,43 +43,12 @@ use std::sync::{Arc, RwLock};
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
 #[cfg(feature = "uniffi")]
-type Bolt11Invoice = Arc<crate::uniffi_types::Bolt11Invoice>;
-
-#[cfg(not(feature = "uniffi"))]
-pub(crate) fn maybe_wrap_invoice(invoice: LdkBolt11Invoice) -> Bolt11Invoice {
-	invoice
-}
-#[cfg(feature = "uniffi")]
-pub(crate) fn maybe_wrap_invoice(invoice: LdkBolt11Invoice) -> Bolt11Invoice {
-	Arc::new(invoice.into())
-}
-
-#[cfg(not(feature = "uniffi"))]
-pub fn maybe_convert_invoice(invoice: &Bolt11Invoice) -> &LdkBolt11Invoice {
-	invoice
-}
-#[cfg(feature = "uniffi")]
-pub fn maybe_convert_invoice(invoice: &Bolt11Invoice) -> &LdkBolt11Invoice {
-	&invoice.inner
-}
+type Bolt11Invoice = Arc<crate::ffi::Bolt11Invoice>;
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 #[cfg(feature = "uniffi")]
-type Bolt11InvoiceDescription = crate::uniffi_types::Bolt11InvoiceDescription;
-
-macro_rules! maybe_convert_description {
-	($description: expr) => {{
-		#[cfg(not(feature = "uniffi"))]
-		{
-			$description
-		}
-		#[cfg(feature = "uniffi")]
-		{
-			&LdkBolt11InvoiceDescription::try_from($description)?
-		}
-	}};
-}
+type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
@@ -125,7 +95,7 @@ impl Bolt11Payment {
 	pub fn send(
 		&self, invoice: &Bolt11Invoice, sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
-		let invoice = maybe_convert_invoice(invoice);
+		let invoice = maybe_deref(invoice);
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -234,7 +204,7 @@ impl Bolt11Payment {
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 		sending_parameters: Option<SendingParameters>,
 	) -> Result<PaymentId, Error> {
-		let invoice = maybe_convert_invoice(invoice);
+		let invoice = maybe_deref(invoice);
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -466,9 +436,9 @@ impl Bolt11Payment {
 	pub fn receive(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		let invoice = self.receive_inner(Some(amount_msat), description, expiry_secs, None)?;
-		Ok(maybe_wrap_invoice(invoice))
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(Some(amount_msat), &description, expiry_secs, None)?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request a payment of the amount
@@ -489,10 +459,10 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
+		let description = maybe_try_convert_enum(description)?;
 		let invoice =
-			self.receive_inner(Some(amount_msat), description, expiry_secs, Some(payment_hash))?;
-		Ok(maybe_wrap_invoice(invoice))
+			self.receive_inner(Some(amount_msat), &description, expiry_secs, Some(payment_hash))?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request and receive a payment for which the
@@ -502,9 +472,9 @@ impl Bolt11Payment {
 	pub fn receive_variable_amount(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		let invoice = self.receive_inner(None, description, expiry_secs, None)?;
-		Ok(maybe_wrap_invoice(invoice))
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(None, &description, expiry_secs, None)?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request a payment for the given payment hash
@@ -524,9 +494,9 @@ impl Bolt11Payment {
 	pub fn receive_variable_amount_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		let invoice = self.receive_inner(None, description, expiry_secs, Some(payment_hash))?;
-		Ok(maybe_wrap_invoice(invoice))
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(None, &description, expiry_secs, Some(payment_hash))?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	pub(crate) fn receive_inner(
@@ -601,15 +571,15 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
+		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
-			description,
+			&description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
 		)?;
-		Ok(maybe_wrap_invoice(invoice))
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request a variable amount payment (also known
@@ -627,15 +597,15 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
+		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			None,
-			description,
+			&description,
 			expiry_secs,
 			None,
 			max_proportional_lsp_fee_limit_ppm_msat,
 		)?;
-		Ok(maybe_wrap_invoice(invoice))
+		Ok(maybe_wrap(invoice))
 	}
 
 	fn receive_via_jit_channel_inner(
@@ -742,7 +712,7 @@ impl Bolt11Payment {
 	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
 	/// pre-flight probes.
 	pub fn send_probes(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
-		let invoice = maybe_convert_invoice(invoice);
+		let invoice = maybe_deref(invoice);
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);
@@ -775,7 +745,7 @@ impl Bolt11Payment {
 	pub fn send_probes_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 	) -> Result<(), Error> {
-		let invoice = maybe_convert_invoice(invoice);
+		let invoice = maybe_deref(invoice);
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
 			return Err(Error::NotRunning);

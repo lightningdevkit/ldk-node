@@ -61,6 +61,7 @@ use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 
 use std::convert::TryInto;
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -475,11 +476,6 @@ impl Bolt11Invoice {
 		invoice_str.parse()
 	}
 
-	/// Returns the underlying invoice [`LdkBolt11Invoice`]
-	pub fn into_inner(self) -> LdkBolt11Invoice {
-		self.inner
-	}
-
 	/// The hash of the [`RawBolt11Invoice`] that was signed.
 	///
 	/// [`RawBolt11Invoice`]: lightning_invoice::RawBolt11Invoice
@@ -593,9 +589,16 @@ impl From<LdkBolt11Invoice> for Bolt11Invoice {
 	}
 }
 
-impl From<Bolt11Invoice> for LdkBolt11Invoice {
-	fn from(wrapper: Bolt11Invoice) -> Self {
-		wrapper.into_inner()
+impl Deref for Bolt11Invoice {
+	type Target = LdkBolt11Invoice;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<LdkBolt11Invoice> for Bolt11Invoice {
+	fn as_ref(&self) -> &LdkBolt11Invoice {
+		self.deref()
 	}
 }
 

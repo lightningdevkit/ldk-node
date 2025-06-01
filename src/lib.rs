@@ -84,6 +84,7 @@ mod data_store;
 mod error;
 mod event;
 mod fee_estimator;
+mod ffi;
 mod gossip;
 pub mod graph;
 mod hex_utils;
@@ -96,8 +97,6 @@ mod peer_store;
 mod sweep;
 mod tx_broadcaster;
 mod types;
-#[cfg(feature = "uniffi")]
-mod uniffi_types;
 mod wallet;
 
 pub use bip39;
@@ -117,7 +116,7 @@ pub use event::Event;
 pub use io::utils::generate_entropy_mnemonic;
 
 #[cfg(feature = "uniffi")]
-use uniffi_types::*;
+use ffi::*;
 
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;

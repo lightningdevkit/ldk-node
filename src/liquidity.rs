@@ -1308,7 +1308,7 @@ type PaymentInfo = lightning_liquidity::lsps1::msgs::PaymentInfo;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentInfo {
 	/// A Lightning payment using BOLT 11.
-	pub bolt11: Option<crate::uniffi_types::Bolt11PaymentInfo>,
+	pub bolt11: Option<crate::ffi::Bolt11PaymentInfo>,
 	/// An onchain payment.
 	pub onchain: Option<OnchainPaymentInfo>,
 }
