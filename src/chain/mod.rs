@@ -237,11 +237,18 @@ impl ChainSource {
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
+		// FIXME / TODO: We introduced this to make `bdk_esplora` work separately without updating
+		// `lightning-transaction-sync`. We should revert this as part of of the upgrade to LDK 0.2.
+		let mut client_builder_0_11 = esplora_client_0_11::Builder::new(&server_url);
+		client_builder_0_11 = client_builder_0_11.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+		let esplora_client_0_11 = client_builder_0_11.build_async().unwrap();
+		let tx_sync =
+			Arc::new(EsploraSyncClient::from_client(esplora_client_0_11, Arc::clone(&logger)));
+
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
 		let esplora_client = client_builder.build_async().unwrap();
-		let tx_sync =
-			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
+
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		Self::Esplora {

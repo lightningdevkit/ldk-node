@@ -61,14 +61,14 @@ lightning-liquidity = { version = "0.1.0", features = ["std"] }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async-https", "electrum", "time"] }
 #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity", features = ["std"] }
 
-bdk_chain = { version = "0.21.1", default-features = false, features = ["std"] }
-bdk_esplora = { version = "0.20.1", default-features = false, features = ["async-https-rustls", "tokio"]}
-bdk_electrum = { version = "0.20.1", default-features = false, features = ["use-rustls"]}
-bdk_wallet = { version = "1.0.0", default-features = false, features = ["std", "keys-bip39"]}
+bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
+bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
+bdk_electrum = { version = "0.23.0", default-features = false, features = ["use-rustls"]}
+bdk_wallet = { version = "2.0.0", default-features = false, features = ["std", "keys-bip39"]}
 
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
-bitcoin = "0.32.2"
+bitcoin = "0.32.4"
 bip39 = "2.0.0"
 bip21 = { version = "0.5", features = ["std"], default-features = false }
 
@@ -76,8 +76,13 @@ base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros" ] }
-esplora-client = { version = "0.11", default-features = false, features = ["tokio", "async-https-rustls"] }
-electrum-client = { version = "0.22.0", default-features = true }
+esplora-client = { version = "0.12", default-features = false, features = ["tokio", "async-https-rustls"] }
+
+# FIXME: This was  introduced to decouple the `bdk_esplora` and
+# `lightning-transaction-sync` APIs. We should drop it as part of the upgrade
+# to LDK 0.2.
+esplora-client_0_11 = { package = "esplora-client", version = "0.11", default-features = false, features = ["tokio", "async-https-rustls"] }
+electrum-client = { version = "0.23.1", default-features = true }
 libc = "0.2"
 uniffi = { version = "0.27.3", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
@@ -98,10 +103,10 @@ proptest = "1.0.0"
 regex = "1.5.6"
 
 [target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.33.0", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
+electrsd = { version = "0.34.0", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
 
 [target.'cfg(no_download)'.dev-dependencies]
-electrsd = { version = "0.33.0", default-features = false, features = ["legacy"] }
+electrsd = { version = "0.34.0", default-features = false, features = ["legacy"] }
 corepc-node = { version = "0.7.0", default-features = false, features = ["27_2"] }
 
 [target.'cfg(cln_test)'.dev-dependencies]
