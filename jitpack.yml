@@ -1,0 +1,3 @@
+jdk: openjdk17
+before_install:
+  - cd bindings/kotlin/ldk-node-android
