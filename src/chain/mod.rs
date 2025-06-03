@@ -1095,18 +1095,24 @@ impl ChainSource {
 				let cur_height = channel_manager.current_best_block().height;
 
 				let now = SystemTime::now();
+				let unconfirmed_txids = onchain_wallet.get_unconfirmed_txids();
 				match bitcoind_rpc_client
-					.get_mempool_transactions_and_timestamp_at_height(cur_height)
+					.get_updated_mempool_transactions(cur_height, unconfirmed_txids)
 					.await
 				{
-					Ok(unconfirmed_txs) => {
+					Ok((unconfirmed_txs, evicted_txids)) => {
 						log_trace!(
 							logger,
-							"Finished polling mempool of size {} in {}ms",
+							"Finished polling mempool of size {} and {} evicted transactions in {}ms",
 							unconfirmed_txs.len(),
+							evicted_txids.len(),
 							now.elapsed().unwrap().as_millis()
 						);
-						let _ = onchain_wallet.apply_unconfirmed_txs(unconfirmed_txs);
+						onchain_wallet
+							.apply_mempool_txs(unconfirmed_txs, evicted_txids)
+							.unwrap_or_else(|e| {
+								log_error!(logger, "Failed to apply mempool transactions: {:?}", e);
+							});
 					},
 					Err(e) => {
 						log_error!(logger, "Failed to poll for mempool transactions: {:?}", e);
