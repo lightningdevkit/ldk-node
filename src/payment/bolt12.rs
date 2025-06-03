@@ -106,6 +106,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					payment_metadata_ids: Vec::new(),
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -131,6 +132,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							payment_metadata_ids: Vec::new(),
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -212,6 +214,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					payment_metadata_ids: Vec::new(),
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -237,6 +240,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							payment_metadata_ids: Vec::new(),
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -334,6 +338,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
 			quantity: refund.quantity(),
+			payment_metadata_ids: Vec::new(),
 		};
 
 		let payment = PaymentDetails::new(
@@ -400,6 +405,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: payer_note.map(|note| UntrustedString(note)),
 			quantity,
+			payment_metadata_ids: Vec::new(),
 		};
 		let payment = PaymentDetails::new(
 			payment_id,

@@ -745,6 +745,7 @@ where
 							offer_id,
 							payer_note,
 							quantity,
+							payment_metadata_ids: Vec::new(),
 						};
 
 						let payment = PaymentDetails::new(

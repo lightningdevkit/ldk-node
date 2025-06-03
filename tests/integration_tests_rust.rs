@@ -817,6 +817,7 @@ fn simple_bolt12_send_receive() {
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
+			payment_metadata_ids: _,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
@@ -883,6 +884,7 @@ fn simple_bolt12_send_receive() {
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
+			payment_metadata_ids: _,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
@@ -950,6 +952,7 @@ fn simple_bolt12_send_receive() {
 			secret: _,
 			quantity: ref qty,
 			payer_note: ref note,
+			payment_metadata_ids: _,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());

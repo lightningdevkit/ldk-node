@@ -180,6 +180,7 @@ impl Bolt11Payment {
 					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					payment_metadata_id: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -203,6 +204,7 @@ impl Bolt11Payment {
 							hash: payment_hash,
 							preimage: None,
 							secret: payment_secret,
+							payment_metadata_id: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -315,6 +317,7 @@ impl Bolt11Payment {
 					hash: payment_hash,
 					preimage: None,
 					secret: Some(*payment_secret),
+					payment_metadata_id: None,
 				};
 
 				let payment = PaymentDetails::new(
@@ -339,6 +342,7 @@ impl Bolt11Payment {
 							hash: payment_hash,
 							preimage: None,
 							secret: Some(*payment_secret),
+							payment_metadata_id: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -573,6 +577,7 @@ impl Bolt11Payment {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
+			payment_metadata_id: None,
 		};
 		let payment = PaymentDetails::new(
 			id,
