@@ -25,7 +25,8 @@ codegen-units = 1   # Reduce number of codegen units to increase optimizations.
 panic = 'abort'     # Abort on panic
 
 [features]
-default = []
+default = ["electrum"]
+electrum = ["dep:bdk_electrum", "dep:electrum-client", "lightning-transaction-sync/electrum"]
 
 [dependencies]
 lightning = { version = "0.1.0", features = ["std"] }
@@ -36,7 +37,7 @@ lightning-persister = { version = "0.1.0" }
 lightning-background-processor = { version = "0.1.0", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.1.0" }
 lightning-block-sync = { version = "0.1.0", features = ["rpc-client", "tokio"] }
-lightning-transaction-sync = { version = "0.1.0", features = ["esplora-async-https", "time", "electrum"] }
+lightning-transaction-sync = { version = "0.1.0", features = ["esplora-async-https", "time"] }
 lightning-liquidity = { version = "0.1.0", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["std"] }
@@ -63,7 +64,7 @@ lightning-liquidity = { version = "0.1.0", features = ["std"] }
 
 bdk_chain = { version = "0.21.1", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.20.1", default-features = false, features = ["async-https-rustls", "tokio"]}
-bdk_electrum = { version = "0.20.1", default-features = false, features = ["use-rustls"]}
+bdk_electrum = { version = "0.20.1", default-features = false, features = ["use-rustls"], optional = true }
 bdk_wallet = { version = "1.0.0", default-features = false, features = ["std", "keys-bip39"]}
 
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
@@ -77,7 +78,7 @@ rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros" ] }
 esplora-client = { version = "0.11", default-features = false, features = ["tokio", "async-https-rustls"] }
-electrum-client = { version = "0.22.0", default-features = true }
+electrum-client = { version = "0.22.0", default-features = true, optional = true }
 libc = "0.2"
 uniffi = { version = "0.27.3", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }

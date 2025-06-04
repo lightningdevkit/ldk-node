@@ -6,18 +6,24 @@
 // accordance with one or both of these licenses.
 
 mod bitcoind_rpc;
+#[cfg(feature = "electrum")]
 mod electrum;
 
 use crate::chain::bitcoind_rpc::{
 	BitcoindRpcClient, BoundedHeaderCache, ChainListener, FeeRateEstimationMode,
 };
+#[cfg(feature = "electrum")]
 use crate::chain::electrum::ElectrumRuntimeClient;
 use crate::config::{
-	BackgroundSyncConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY,
+	BackgroundSyncConfig, Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY,
 	BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
 	LDK_WALLET_SYNC_TIMEOUT_SECS, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL,
 	TX_BROADCAST_TIMEOUT_SECS, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
+
+#[cfg(feature = "electrum")]
+use crate::config::ElectrumSyncConfig;
+
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	ConfirmationTarget, OnchainFeeEstimator,
@@ -110,6 +116,7 @@ impl WalletSyncStatus {
 	}
 }
 
+#[cfg(feature = "electrum")]
 pub(crate) enum ElectrumRuntimeStatus {
 	Started(Arc<ElectrumRuntimeClient>),
 	Stopped {
@@ -118,6 +125,7 @@ pub(crate) enum ElectrumRuntimeStatus {
 	},
 }
 
+#[cfg(feature = "electrum")]
 impl ElectrumRuntimeStatus {
 	pub(crate) fn new() -> Self {
 		let pending_registered_txs = Vec::new();
@@ -201,6 +209,7 @@ pub(crate) enum ChainSource {
 		logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	},
+	#[cfg(feature = "electrum")]
 	Electrum {
 		server_url: String,
 		sync_config: ElectrumSyncConfig,
@@ -260,6 +269,7 @@ impl ChainSource {
 		}
 	}
 
+	#[cfg(feature = "electrum")]
 	pub(crate) fn new_electrum(
 		server_url: String, sync_config: ElectrumSyncConfig, onchain_wallet: Arc<Wallet>,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
@@ -313,6 +323,7 @@ impl ChainSource {
 
 	pub(crate) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
 		match self {
+			#[cfg(feature = "electrum")]
 			Self::Electrum { server_url, electrum_runtime_status, config, logger, .. } => {
 				electrum_runtime_status.write().unwrap().start(
 					server_url.clone(),
@@ -330,6 +341,7 @@ impl ChainSource {
 
 	pub(crate) fn stop(&self) {
 		match self {
+			#[cfg(feature = "electrum")]
 			Self::Electrum { electrum_runtime_status, .. } => {
 				electrum_runtime_status.write().unwrap().stop();
 			},
@@ -372,6 +384,7 @@ impl ChainSource {
 					return;
 				}
 			},
+			#[cfg(feature = "electrum")]
 			Self::Electrum { sync_config, logger, .. } => {
 				if let Some(background_sync_config) = sync_config.background_sync_config.as_ref() {
 					self.start_tx_based_sync_loop(
@@ -718,6 +731,7 @@ impl ChainSource {
 
 				res
 			},
+			#[cfg(feature = "electrum")]
 			Self::Electrum {
 				electrum_runtime_status,
 				onchain_wallet,
@@ -909,6 +923,7 @@ impl ChainSource {
 
 				res
 			},
+			#[cfg(feature = "electrum")]
 			Self::Electrum {
 				electrum_runtime_status,
 				lightning_wallet_sync_status,
@@ -998,6 +1013,7 @@ impl ChainSource {
 				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
 				unreachable!("Listeners will be synced via transction-based syncing")
 			},
+			#[cfg(feature = "electrum")]
 			Self::Electrum { .. } => {
 				// In Electrum mode we sync lightning and onchain wallets via
 				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
@@ -1223,6 +1239,7 @@ impl ChainSource {
 
 				Ok(())
 			},
+			#[cfg(feature = "electrum")]
 			Self::Electrum {
 				electrum_runtime_status,
 				fee_estimator,
@@ -1478,6 +1495,7 @@ impl ChainSource {
 					}
 				}
 			},
+			#[cfg(feature = "electrum")]
 			Self::Electrum { electrum_runtime_status, tx_broadcaster, .. } => {
 				let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 					electrum_runtime_status.read().unwrap().client().as_ref()
@@ -1560,6 +1578,7 @@ impl Filter for ChainSource {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_tx(txid, script_pubkey),
+			#[cfg(feature = "electrum")]
 			Self::Electrum { electrum_runtime_status, .. } => {
 				electrum_runtime_status.write().unwrap().register_tx(txid, script_pubkey)
 			},
@@ -1569,6 +1588,7 @@ impl Filter for ChainSource {
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
 		match self {
 			Self::Esplora { tx_sync, .. } => tx_sync.register_output(output),
+			#[cfg(feature = "electrum")]
 			Self::Electrum { electrum_runtime_status, .. } => {
 				electrum_runtime_status.write().unwrap().register_output(output)
 			},

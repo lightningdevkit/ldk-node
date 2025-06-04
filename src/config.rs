@@ -380,6 +380,7 @@ impl Default for EsploraSyncConfig {
 ///
 /// Background syncing is enabled by default, using the default values specified in
 /// [`BackgroundSyncConfig`].
+#[cfg(feature = "electrum")]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ElectrumSyncConfig {
 	/// Background sync configuration.
@@ -391,6 +392,7 @@ pub struct ElectrumSyncConfig {
 	pub background_sync_config: Option<BackgroundSyncConfig>,
 }
 
+#[cfg(feature = "electrum")]
 impl Default for ElectrumSyncConfig {
 	fn default() -> Self {
 		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }

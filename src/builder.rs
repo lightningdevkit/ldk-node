@@ -7,9 +7,12 @@
 
 use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
 use crate::config::{
-	default_user_config, may_announce_channel, AnnounceError, Config, ElectrumSyncConfig,
-	EsploraSyncConfig, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
+	default_user_config, may_announce_channel, AnnounceError, Config, EsploraSyncConfig,
+	DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
+
+#[cfg(feature = "electrum")]
+use crate::config::ElectrumSyncConfig;
 
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -85,6 +88,7 @@ const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
 	Esplora { server_url: String, sync_config: Option<EsploraSyncConfig> },
+	#[cfg(feature = "electrum")]
 	Electrum { server_url: String, sync_config: Option<ElectrumSyncConfig> },
 	BitcoindRpc { rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String },
 }
@@ -291,6 +295,7 @@ impl NodeBuilder {
 	///
 	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
 	/// information.
+	#[cfg(feature = "electrum")]
 	pub fn set_chain_source_electrum(
 		&mut self, server_url: String, sync_config: Option<ElectrumSyncConfig>,
 	) -> &mut Self {
@@ -710,6 +715,7 @@ impl ArcedNodeBuilder {
 	///
 	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
 	/// information.
+	#[cfg(feature = "electrum")]
 	pub fn set_chain_source_electrum(
 		&self, server_url: String, sync_config: Option<ElectrumSyncConfig>,
 	) {
@@ -1054,6 +1060,7 @@ fn build_with_store_internal(
 				Arc::clone(&node_metrics),
 			))
 		},
+		#[cfg(feature = "electrum")]
 		Some(ChainDataSourceConfig::Electrum { server_url, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(ElectrumSyncConfig::default());
 			Arc::new(ChainSource::new_electrum(

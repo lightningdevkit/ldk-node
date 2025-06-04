@@ -12,7 +12,9 @@ pub(crate) mod logging;
 
 use logging::TestLogWriter;
 
-use ldk_node::config::{Config, ElectrumSyncConfig, EsploraSyncConfig};
+use ldk_node::config::{Config, EsploraSyncConfig};
+#[cfg(feature = "electrum")]
+use ldk_node::config::ElectrumSyncConfig;
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
@@ -36,6 +38,7 @@ use bitcoin::{Address, Amount, Network, OutPoint, Txid};
 use electrsd::corepc_node::Client as BitcoindClient;
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::{corepc_node, ElectrsD};
+#[cfg(feature = "electrum")]
 use electrum_client::ElectrumApi;
 
 use rand::distributions::Alphanumeric;
@@ -255,6 +258,7 @@ type TestNode = Node;
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
 	Esplora(&'a ElectrsD),
+	#[cfg(feature = "electrum")]
 	Electrum(&'a ElectrsD),
 	BitcoindRpc(&'a BitcoinD),
 }
@@ -312,6 +316,7 @@ pub(crate) fn setup_node(
 			let sync_config = EsploraSyncConfig { background_sync_config: None };
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		},
+		#[cfg(feature = "electrum")]
 		TestChainSource::Electrum(electrsd) => {
 			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
 			let sync_config = ElectrumSyncConfig { background_sync_config: None };
@@ -360,6 +365,7 @@ pub(crate) fn setup_node(
 	node
 }
 
+#[cfg(feature = "electrum")]
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
@@ -376,6 +382,7 @@ pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	println!("\n");
 }
 
+#[cfg(feature = "electrum")]
 pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 	let mut header = match electrs.block_headers_subscribe() {
 		Ok(header) => header,
@@ -398,6 +405,7 @@ pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 	}
 }
 
+#[cfg(feature = "electrum")]
 pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	let mut tx_res = electrs.transaction_get(&txid);
 	loop {
@@ -411,6 +419,7 @@ pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	}
 }
 
+#[cfg(feature = "electrum")]
 pub(crate) fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
@@ -448,6 +457,7 @@ where
 	}
 }
 
+#[cfg(feature = "electrum")]
 pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
@@ -496,6 +506,7 @@ pub fn open_channel(
 	wait_for_tx(&electrsd.client, funding_txo_a.txid);
 }
 
+#[cfg(feature = "electrum")]
 pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 	expect_anchor_channel: bool, force_close: bool,
