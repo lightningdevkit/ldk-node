@@ -15,6 +15,7 @@ use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, PaymentStore};
 
+use lightning::events::PaidBolt12Invoice;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::{Amount, Offer, Quantity};
@@ -107,6 +108,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					bolt12_invoice: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -132,6 +134,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							bolt12_invoice: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -213,6 +216,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					bolt12_invoice: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -238,6 +242,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							bolt12_invoice: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -335,6 +340,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
 			quantity: refund.quantity(),
+			bolt12_invoice: Some(PaidBolt12Invoice::Bolt12Invoice(invoice.clone())),
 		};
 
 		let payment = PaymentDetails::new(
@@ -401,6 +407,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: payer_note.map(|note| UntrustedString(note)),
 			quantity,
+			bolt12_invoice: None,
 		};
 		let payment = PaymentDetails::new(
 			payment_id,

@@ -745,6 +745,7 @@ where
 							offer_id,
 							payer_note,
 							quantity,
+							bolt12_invoice: None,
 						};
 
 						let payment = PaymentDetails::new(
@@ -949,6 +950,7 @@ where
 				payment_preimage,
 				payment_hash,
 				fee_paid_msat,
+				bolt12_invoice,
 				..
 			} => {
 				let payment_id = if let Some(id) = payment_id {
@@ -963,6 +965,7 @@ where
 					preimage: Some(Some(payment_preimage)),
 					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
+					bolt12_invoice: Some(bolt12_invoice),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
