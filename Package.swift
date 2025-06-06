@@ -4,8 +4,9 @@
 import PackageDescription
 
 let tag = "v0.7.0"
+// TODO: Update checksum after releasing Synonym's v0.7.0 xcframework
 let checksum = "37e909987c285ddaaabf7caede58f0695491398acd4561987914996f4623a3c3"
-let url = "https://github.com/lightningdevkit/ldk-node/releases/download/\(tag)/LDKNodeFFI.xcframework.zip"
+let url = "https://github.com/synonymdev/ldk-node/releases/download/\(tag)/LDKNodeFFI.xcframework.zip"
 
 let package = Package(
     name: "ldk-node",
