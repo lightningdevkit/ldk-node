@@ -138,7 +138,7 @@ impl Bolt12Payment {
 							Some(offer_amount_msat),
 							None,
 							PaymentDirection::Outbound,
-							PaymentStatus::Failed,
+							PaymentStatus::Failed { reason: None },
 						);
 						self.payment_store.insert(payment)?;
 						Err(Error::InvoiceRequestCreationFailed)
@@ -244,7 +244,7 @@ impl Bolt12Payment {
 							Some(amount_msat),
 							None,
 							PaymentDirection::Outbound,
-							PaymentStatus::Failed,
+							PaymentStatus::Failed { reason: None },
 						);
 						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)

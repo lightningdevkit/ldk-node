@@ -210,7 +210,7 @@ impl Bolt11Payment {
 							invoice.amount_milli_satoshis(),
 							None,
 							PaymentDirection::Outbound,
-							PaymentStatus::Failed,
+							PaymentStatus::Failed { reason: None },
 						);
 
 						self.payment_store.insert(payment)?;
@@ -346,7 +346,7 @@ impl Bolt11Payment {
 							Some(amount_msat),
 							None,
 							PaymentDirection::Outbound,
-							PaymentStatus::Failed,
+							PaymentStatus::Failed { reason: None },
 						);
 						self.payment_store.insert(payment)?;
 
@@ -430,7 +430,7 @@ impl Bolt11Payment {
 		let payment_id = PaymentId(payment_hash.0);
 
 		let update = PaymentDetailsUpdate {
-			status: Some(PaymentStatus::Failed),
+			status: Some(PaymentStatus::Failed { reason: None }),
 			..PaymentDetailsUpdate::new(payment_id)
 		};
 

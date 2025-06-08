@@ -826,7 +826,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 	node_b.bolt11_payment().fail_for_hash(manual_fail_payment_hash).unwrap();
 	expect_event!(node_a, PaymentFailed);
-	assert_eq!(node_a.payment(&manual_fail_payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(
+		node_a.payment(&manual_fail_payment_id).unwrap().status,
+		PaymentStatus::Failed { reason: None }
+	);
 	assert_eq!(
 		node_a.payment(&manual_fail_payment_id).unwrap().direction,
 		PaymentDirection::Outbound
@@ -839,7 +842,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.payment(&manual_fail_payment_id).unwrap().kind,
 		PaymentKind::Bolt11 { .. }
 	));
-	assert_eq!(node_b.payment(&manual_fail_payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(
+		node_b.payment(&manual_fail_payment_id).unwrap().status,
+		PaymentStatus::Failed { reason: None }
+	);
 	assert_eq!(
 		node_b.payment(&manual_fail_payment_id).unwrap().direction,
 		PaymentDirection::Inbound

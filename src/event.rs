@@ -582,7 +582,7 @@ where
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
 						let update = PaymentDetailsUpdate {
-							status: Some(PaymentStatus::Failed),
+							status: Some(PaymentStatus::Failed { reason: None }),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
 						match self.payment_store.update(&update) {
@@ -606,7 +606,7 @@ where
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
 
 						let update = PaymentDetailsUpdate {
-							status: Some(PaymentStatus::Failed),
+							status: Some(PaymentStatus::Failed { reason: None }),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
 						match self.payment_store.update(&update) {
@@ -647,7 +647,7 @@ where
 
 						let update = PaymentDetailsUpdate {
 							hash: Some(Some(payment_hash)),
-							status: Some(PaymentStatus::Failed),
+							status: Some(PaymentStatus::Failed { reason: None }),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
 						match self.payment_store.update(&update) {
@@ -834,7 +834,7 @@ where
 
 					let update = PaymentDetailsUpdate {
 						hash: Some(Some(payment_hash)),
-						status: Some(PaymentStatus::Failed),
+						status: Some(PaymentStatus::Failed { reason: None }),
 						..PaymentDetailsUpdate::new(payment_id)
 					};
 					match self.payment_store.update(&update) {
@@ -1014,7 +1014,7 @@ where
 
 				let update = PaymentDetailsUpdate {
 					hash: Some(payment_hash),
-					status: Some(PaymentStatus::Failed),
+					status: Some(PaymentStatus::Failed { reason }),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 				match self.payment_store.update(&update) {

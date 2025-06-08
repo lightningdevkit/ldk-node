@@ -419,10 +419,11 @@ enum PaymentDirection {
 	"Outbound",
 };
 
-enum PaymentStatus {
-	"Pending",
-	"Succeeded",
-	"Failed",
+[Enum]
+interface PaymentStatus {
+	Pending();
+	Succeeded();
+	Failed(PaymentFailureReason? reason);
 };
 
 dictionary LSPFeeLimits {

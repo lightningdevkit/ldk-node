@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use lightning::events::PaymentFailureReason;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::offers::offer::OfferId;
@@ -280,8 +281,8 @@ impl StorableObject for PaymentDetails {
 			}
 		}
 
-		if let Some(status) = update.status {
-			update_if_necessary!(self.status, status);
+		if let Some(status) = &update.status {
+			update_if_necessary!(self.status, status.clone());
 		}
 
 		if let Some(confirmation_status) = update.confirmation_status {
@@ -323,20 +324,25 @@ impl_writeable_tlv_based_enum!(PaymentDirection,
 );
 
 /// Represents the current status of a payment.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaymentStatus {
 	/// The payment is still pending.
 	Pending,
 	/// The payment succeeded.
 	Succeeded,
 	/// The payment failed.
-	Failed,
+	Failed {
+		/// The reason why the payment failed.
+		reason: Option<PaymentFailureReason>,
+	},
 }
 
 impl_writeable_tlv_based_enum!(PaymentStatus,
 	(0, Pending) => {},
 	(2, Succeeded) => {},
-	(4, Failed) => {}
+	(4, Failed) => {
+		(0, reason, upgradable_option),
+	}
 );
 
 /// Represents the kind of a payment.
@@ -593,7 +599,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			fee_paid_msat: Some(value.fee_paid_msat),
 			counterparty_skimmed_fee_msat,
 			direction: Some(value.direction),
-			status: Some(value.status),
+			status: Some(value.status.clone()),
 			confirmation_status,
 		}
 	}
