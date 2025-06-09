@@ -190,12 +190,24 @@ impl BitcoindRpcClient {
 		Ok(())
 	}
 
+	/// Returns two `Vec`s:
+	/// - mempool transactions, alongside their first-seen unix timestamps.
+	/// - transactions that have been evicted from the mempool, alongside the last time they were seen absent.
+	pub(crate) async fn get_updated_mempool_transactions(
+		&self, best_processed_height: u32, unconfirmed_txids: Vec<Txid>,
+	) -> std::io::Result<(Vec<(Transaction, u64)>, Vec<(Txid, u64)>)> {
+		let mempool_txs =
+			self.get_mempool_transactions_and_timestamp_at_height(best_processed_height).await?;
+		let evicted_txids = self.get_evicted_mempool_txids_and_timestamp(unconfirmed_txids).await?;
+		Ok((mempool_txs, evicted_txids))
+	}
+
 	/// Get mempool transactions, alongside their first-seen unix timestamps.
 	///
 	/// This method is an adapted version of `bdk_bitcoind_rpc::Emitter::mempool`. It emits each
 	/// transaction only once, unless we cannot assume the transaction's ancestors are already
 	/// emitted.
-	pub(crate) async fn get_mempool_transactions_and_timestamp_at_height(
+	async fn get_mempool_transactions_and_timestamp_at_height(
 		&self, best_processed_height: u32,
 	) -> std::io::Result<Vec<(Transaction, u64)>> {
 		let prev_mempool_time = self.latest_mempool_timestamp.load(Ordering::Relaxed);
@@ -251,6 +263,23 @@ impl BitcoindRpcClient {
 			self.latest_mempool_timestamp.store(latest_time, Ordering::Release);
 		}
 		Ok(txs_to_emit)
+	}
+
+	// Retrieve a list of Txids that have been evicted from the mempool.
+	//
+	// To this end, we first update our local mempool_entries_cache and then return all unconfirmed
+	// wallet `Txid`s that don't appear in the mempool still.
+	async fn get_evicted_mempool_txids_and_timestamp(
+		&self, unconfirmed_txids: Vec<Txid>,
+	) -> std::io::Result<Vec<(Txid, u64)>> {
+		let latest_mempool_timestamp = self.latest_mempool_timestamp.load(Ordering::Relaxed);
+		let mempool_entries_cache = self.mempool_entries_cache.lock().await;
+		let evicted_txids = unconfirmed_txids
+			.into_iter()
+			.filter(|txid| mempool_entries_cache.contains_key(txid))
+			.map(|txid| (txid, latest_mempool_timestamp))
+			.collect();
+		Ok(evicted_txids)
 	}
 }
 

@@ -107,7 +107,9 @@ impl<'a> Writeable for ChangeSetSerWrapper<'a, BdkTxGraphChangeSet<ConfirmationB
 
 		encode_tlv_stream!(writer, {
 			(0, ChangeSetSerWrapper(&self.0.txs), required),
+			(1, Some(&self.0.first_seen), option),
 			(2, self.0.txouts, required),
+			(3, Some(&self.0.last_evicted), option),
 			(4, ChangeSetSerWrapper(&self.0.anchors), required),
 			(6, self.0.last_seen, required),
 		});
@@ -129,10 +131,14 @@ impl Readable for ChangeSetDeserWrapper<BdkTxGraphChangeSet<ConfirmationBlockTim
 			ChangeSetDeserWrapper<BTreeSet<(ConfirmationBlockTime, Txid)>>,
 		> = RequiredWrapper(None);
 		let mut last_seen: RequiredWrapper<BTreeMap<Txid, u64>> = RequiredWrapper(None);
+		let mut first_seen = None;
+		let mut last_evicted = None;
 
 		decode_tlv_stream!(reader, {
 			(0, txs, required),
+			(1, first_seen, option),
 			(2, txouts, required),
+			(3, last_evicted, option),
 			(4, anchors, required),
 			(6, last_seen, required),
 		});
@@ -142,6 +148,8 @@ impl Readable for ChangeSetDeserWrapper<BdkTxGraphChangeSet<ConfirmationBlockTim
 			txouts: txouts.0.unwrap(),
 			anchors: anchors.0.unwrap().0,
 			last_seen: last_seen.0.unwrap(),
+			first_seen: first_seen.unwrap_or_default(),
+			last_evicted: last_evicted.unwrap_or_default(),
 		}))
 	}
 }
@@ -260,6 +268,7 @@ impl<'a> Writeable for ChangeSetSerWrapper<'a, BdkIndexerChangeSet> {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
 		CHANGESET_SERIALIZATION_VERSION.write(writer)?;
 
+		// Note we don't persist/use the optional spk_cache currently.
 		encode_tlv_stream!(writer, { (0, ChangeSetSerWrapper(&self.0.last_revealed), required) });
 		Ok(())
 	}
@@ -275,9 +284,13 @@ impl Readable for ChangeSetDeserWrapper<BdkIndexerChangeSet> {
 		let mut last_revealed: RequiredWrapper<ChangeSetDeserWrapper<BTreeMap<DescriptorId, u32>>> =
 			RequiredWrapper(None);
 
+		// Note we don't persist/use the optional spk_cache currently.
 		decode_tlv_stream!(reader, { (0, last_revealed, required) });
 
-		Ok(Self(BdkIndexerChangeSet { last_revealed: last_revealed.0.unwrap().0 }))
+		Ok(Self(BdkIndexerChangeSet {
+			last_revealed: last_revealed.0.unwrap().0,
+			spk_cache: Default::default(),
+		}))
 	}
 }
 

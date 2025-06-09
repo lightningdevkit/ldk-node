@@ -237,11 +237,18 @@ impl ChainSource {
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
+		// FIXME / TODO: We introduced this to make `bdk_esplora` work separately without updating
+		// `lightning-transaction-sync`. We should revert this as part of of the upgrade to LDK 0.2.
+		let mut client_builder_0_11 = esplora_client_0_11::Builder::new(&server_url);
+		client_builder_0_11 = client_builder_0_11.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+		let esplora_client_0_11 = client_builder_0_11.build_async().unwrap();
+		let tx_sync =
+			Arc::new(EsploraSyncClient::from_client(esplora_client_0_11, Arc::clone(&logger)));
+
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
 		let esplora_client = client_builder.build_async().unwrap();
-		let tx_sync =
-			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
+
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		Self::Esplora {
@@ -1088,18 +1095,24 @@ impl ChainSource {
 				let cur_height = channel_manager.current_best_block().height;
 
 				let now = SystemTime::now();
+				let unconfirmed_txids = onchain_wallet.get_unconfirmed_txids();
 				match bitcoind_rpc_client
-					.get_mempool_transactions_and_timestamp_at_height(cur_height)
+					.get_updated_mempool_transactions(cur_height, unconfirmed_txids)
 					.await
 				{
-					Ok(unconfirmed_txs) => {
+					Ok((unconfirmed_txs, evicted_txids)) => {
 						log_trace!(
 							logger,
-							"Finished polling mempool of size {} in {}ms",
+							"Finished polling mempool of size {} and {} evicted transactions in {}ms",
 							unconfirmed_txs.len(),
+							evicted_txids.len(),
 							now.elapsed().unwrap().as_millis()
 						);
-						let _ = onchain_wallet.apply_unconfirmed_txs(unconfirmed_txs);
+						onchain_wallet
+							.apply_mempool_txs(unconfirmed_txs, evicted_txids)
+							.unwrap_or_else(|e| {
+								log_error!(logger, "Failed to apply mempool transactions: {:?}", e);
+							});
 					},
 					Err(e) => {
 						log_error!(logger, "Failed to poll for mempool transactions: {:?}", e);

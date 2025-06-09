@@ -107,6 +107,16 @@ where
 		self.inner.lock().unwrap().tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
 	}
 
+	pub(crate) fn get_unconfirmed_txids(&self) -> Vec<Txid> {
+		self.inner
+			.lock()
+			.unwrap()
+			.transactions()
+			.filter(|t| t.chain_position.is_unconfirmed())
+			.map(|t| t.tx_node.txid)
+			.collect()
+	}
+
 	pub(crate) fn current_best_block(&self) -> BestBlock {
 		let checkpoint = self.inner.lock().unwrap().latest_checkpoint();
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
@@ -136,11 +146,12 @@ where
 		}
 	}
 
-	pub(crate) fn apply_unconfirmed_txs(
-		&self, unconfirmed_txs: Vec<(Transaction, u64)>,
+	pub(crate) fn apply_mempool_txs(
+		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
+		locked_wallet.apply_evicted_txs(evicted_txids);
 
 		let mut locked_persister = self.persister.lock().unwrap();
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
