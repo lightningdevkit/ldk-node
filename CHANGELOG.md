@@ -1,3 +1,31 @@
+# 0.6.0 - Jun. 9, 2025
+This sixth minor release mainly fixes an issue that could have left the
+on-chain wallet unable to spend funds if transactions that had previously been
+accepted to the mempool ended up being evicted.
+
+## Feature and API updates
+- Onchain addresses are now validated against the expected network before use (#519).
+- The API methods on the `Bolt11Invoice` type are now exposed in bindings (#522).
+- The `UnifiedQrPayment::receive` flow no longer aborts if we're unable to generate a BOLT12 offer (#548).
+
+## Bug Fixes and Improvements
+- Previously, the node could potentially enter a state that would have left the
+  onchain wallet unable spend any funds if previously-generated transactions
+  had been first accepted, and then evicted from the mempool. This has been
+  fixed in BDK 2.0.0, to which we upgrade as part of this release. (#551)
+- A bug that had us fail `OnchainPayment::send_all` in the `retrain_reserves`
+  mode when requiring sub-dust-limit anchor reserves has been fixed (#540).
+- The output of the `log` facade logger has been corrected (#547).
+
+## Compatibility Notes
+- The BDK dependency has been bumped to `bdk_wallet` v2.0 (#551).
+
+In total, this release features 20 files changed, 1188 insertions, 447 deletions, in 18 commits from 3 authors in alphabetical order:
+
+- alexanderwiederin
+- Camillarhi
+- Elias Rohrer
+
 # 0.5.0 - Apr. 29, 2025
 Besides numerous API improvements and bugfixes this fifth minor release notably adds support for sourcing chain and fee rate data from an Electrum backend, requesting channels via the [bLIP-51 / LSPS1](https://github.com/lightning/blips/blob/master/blip-0051.md) protocol, as well as experimental support for operating as a [bLIP-52 / LSPS2](https://github.com/lightning/blips/blob/master/blip-0052.md) service.
 
