@@ -12,8 +12,9 @@
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use crate::error::Error;
+use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
-use crate::payment::{bolt11::maybe_wrap_invoice, Bolt11Payment, Bolt12Payment, OnchainPayment};
+use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
 use crate::Config;
 
 use lightning::ln::channelmanager::PaymentId;
@@ -94,14 +95,14 @@ impl UnifiedQrPayment {
 
 		let amount_msats = amount_sats * 1_000;
 
-		let bolt12_offer = match self.bolt12_payment.receive(amount_msats, description, None, None)
-		{
-			Ok(offer) => Some(offer),
-			Err(e) => {
-				log_error!(self.logger, "Failed to create offer: {}", e);
-				None
-			},
-		};
+		let bolt12_offer =
+			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
+				Ok(offer) => Some(offer),
+				Err(e) => {
+					log_error!(self.logger, "Failed to create offer: {}", e);
+					None
+				},
+			};
 
 		let invoice_description = Bolt11InvoiceDescription::Direct(
 			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
@@ -146,6 +147,7 @@ impl UnifiedQrPayment {
 			uri.clone().require_network(self.config.network).map_err(|_| Error::InvalidNetwork)?;
 
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
+			let offer = maybe_wrap(offer);
 			match self.bolt12_payment.send(&offer, None, None) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
@@ -153,7 +155,7 @@ impl UnifiedQrPayment {
 		}
 
 		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
-			let invoice = maybe_wrap_invoice(invoice);
+			let invoice = maybe_wrap(invoice);
 			match self.bolt11_invoice.send(&invoice, None) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
