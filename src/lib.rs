@@ -110,6 +110,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount};
+pub use wallet::CoinSelectionAlgorithm;
+
+#[cfg(feature = "uniffi")]
+use uniffi_types::*;
+
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;

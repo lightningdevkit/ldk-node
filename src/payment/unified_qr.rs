@@ -179,6 +179,7 @@ impl UnifiedQrPayment {
 			&uri_network_checked.address,
 			amount.to_sat(),
 			None,
+			None,
 		)?;
 
 		Ok(QrPaymentResult::Onchain { txid })

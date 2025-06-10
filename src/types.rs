@@ -471,3 +471,18 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 		CustomTlvRecord { type_num: tlv.0, value: tlv.1.clone() }
 	}
 }
+
+/// A spendable on-chain UTXO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendableUtxo {
+	/// The outpoint of the UTXO.
+	pub outpoint: OutPoint,
+	/// The value of the UTXO in satoshis.
+	pub value_sats: u64,
+}
+
+impl From<bdk_wallet::LocalOutput> for SpendableUtxo {
+	fn from(output: bdk_wallet::LocalOutput) -> Self {
+		SpendableUtxo { outpoint: output.outpoint, value_sats: output.txout.value.to_sat() }
+	}
+}

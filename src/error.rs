@@ -134,7 +134,9 @@ pub enum Error {
 	/// The transaction is already confirmed and cannot be modified.
 	TransactionAlreadyConfirmed,
 	/// The transaction has no spendable outputs.
-	NoSpendableOutputs
+	NoSpendableOutputs,
+	/// Coin selection failed to find suitable UTXOs.
+	CoinSelectionFailed,
 }
 
 impl fmt::Display for Error {
@@ -213,10 +215,15 @@ impl fmt::Display for Error {
 			Self::AsyncPaymentServicesDisabled => {
 				write!(f, "Asynchronous payment services are disabled.")
 			},
-			Self::CannotRbfFundingTransaction => write!(f, "Cannot RBF a channel funding transaction."),
+			Self::CannotRbfFundingTransaction => {
+				write!(f, "Cannot RBF a channel funding transaction.")
+			},
 			Self::TransactionNotFound => write!(f, "The transaction was not found in the wallet."),
-			Self::TransactionAlreadyConfirmed => write!(f, "The transaction is already confirmed and cannot be modified."),
-			Self::NoSpendableOutputs => write!(f, "The transaction has no spendable outputs.")
+			Self::TransactionAlreadyConfirmed => {
+				write!(f, "The transaction is already confirmed and cannot be modified.")
+			},
+			Self::NoSpendableOutputs => write!(f, "The transaction has no spendable outputs."),
+			Self::CoinSelectionFailed => write!(f, "Coin selection failed to find suitable UTXOs."),
 		}
 	}
 }

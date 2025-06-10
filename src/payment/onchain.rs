@@ -14,8 +14,9 @@ use bitcoin::{Address, Txid};
 use crate::config::Config;
 use crate::error::Error;
 use crate::logger::{log_info, LdkLogger, Logger};
-use crate::types::{ChannelManager, Wallet};
-use crate::wallet::OnchainSendAmount;
+use crate::fee_estimator::ConfirmationTarget;
+use crate::types::{ChannelManager, SpendableUtxo, Wallet};
+use crate::wallet::{CoinSelectionAlgorithm, OnchainSendAmount};
 
 #[cfg(not(feature = "uniffi"))]
 type FeeRate = bitcoin::FeeRate;
@@ -63,6 +64,90 @@ impl OnchainPayment {
 		Ok(funding_address)
 	}
 
+	/// Returns a list of all UTXOs that are safe to spend.
+	///
+	/// This excludes any outputs that are currently being used to fund Lightning channels.
+	///
+	/// **Note:** This does not account for anchor channel reserves. When using these UTXOs
+	/// for transactions, ensure you maintain sufficient balance for any required reserves.
+	pub fn list_spendable_outputs(&self) -> Result<Vec<SpendableUtxo>, Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		self.wallet
+			.get_spendable_utxos(&self.channel_manager)
+			.map(|outputs| outputs.into_iter().map(SpendableUtxo::from).collect())
+	}
+
+	/// Select UTXOs using a specific coin selection algorithm.
+	///
+	/// This method allows you to choose which algorithm to use for selecting UTXOs
+	/// to meet a target amount. The selected UTXOs will be safe to spend (not funding channels).
+	///
+	/// # Arguments
+	///
+	/// * `target_amount_sats` - The target amount in satoshis
+	/// * `fee_rate` - The fee rate to use (or None to estimate)
+	/// * `algorithm` - The coin selection algorithm to use
+	/// * `utxos` - Optional list of UTXO outpoints to select from (or None to use all spendable UTXOs)
+	pub fn select_utxos_with_algorithm(
+		&self, target_amount_sats: u64, fee_rate: Option<FeeRate>,
+		algorithm: CoinSelectionAlgorithm, utxos: Option<Vec<SpendableUtxo>>,
+	) -> Result<Vec<SpendableUtxo>, Error> {
+		let rt_lock = self.runtime.read().unwrap();
+		if rt_lock.is_none() {
+			return Err(Error::NotRunning);
+		}
+
+		// Get available UTXOs, optionally filtering by provided UTXOs
+		let available_utxos = match utxos {
+			Some(spendable_utxos) => {
+				// Get all spendable UTXOs and filter by the provided UTXOs
+				let wallet_outputs = self.wallet.get_spendable_utxos(&self.channel_manager)?;
+				let outpoint_set: std::collections::HashSet<_> =
+					spendable_utxos.iter().map(|u| u.outpoint).collect();
+				wallet_outputs
+					.into_iter()
+					.filter(|output| outpoint_set.contains(&output.outpoint))
+					.collect()
+			},
+			None => self.wallet.get_spendable_utxos(&self.channel_manager)?,
+		};
+
+		if available_utxos.is_empty() {
+			return Err(Error::InsufficientFunds);
+		}
+
+		// Use the set fee_rate or default to fee estimation
+		let confirmation_target = ConfirmationTarget::OnchainPayment;
+		let fee_rate = maybe_map_fee_rate_opt!(fee_rate)
+			.unwrap_or_else(|| self.wallet.estimate_fee_rate(confirmation_target));
+
+		// Get a drain script (change address)
+		let drain_script = self.wallet.get_drain_script()?;
+
+		// Apply coin selection
+		let selected_outpoints = self.wallet.select_utxos_with_algorithm(
+			target_amount_sats,
+			available_utxos.clone(),
+			fee_rate,
+			algorithm,
+			&drain_script,
+			&self.channel_manager,
+		)?;
+
+		// Convert selected outpoints back to SpendableUtxo by direct filtering
+		let selected_utxos: Vec<SpendableUtxo> = available_utxos
+			.into_iter()
+			.filter(|utxo| selected_outpoints.contains(&utxo.outpoint))
+			.map(SpendableUtxo::from)
+			.collect();
+
+		Ok(selected_utxos)
+	}
+
 	/// Send an on-chain payment to the given address.
 	///
 	/// This will respect any on-chain reserve we need to keep, i.e., won't allow to cut into
@@ -74,6 +159,7 @@ impl OnchainPayment {
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
 	pub fn send_to_address(
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
+		utxos_to_spend: Option<Vec<SpendableUtxo>>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -83,8 +169,15 @@ impl OnchainPayment {
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let send_amount =
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
+		let outpoints = utxos_to_spend.map(|utxos| utxos.into_iter().map(|u| u.outpoint).collect());
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+		self.wallet.send_to_address(
+			address,
+			send_amount,
+			fee_rate_opt,
+			outpoints,
+			&self.channel_manager,
+		)
 	}
 
 	/// Send an on-chain payment to the given address, draining the available funds.
@@ -118,7 +211,7 @@ impl OnchainPayment {
 		};
 
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt, None, &self.channel_manager)
 	}
 
 	/// Bumps the fee of an existing transaction using Replace-By-Fee (RBF).
@@ -184,10 +277,7 @@ impl OnchainPayment {
 	/// * [`Error::NoSpendableOutputs`] - If the transaction has no spendable outputs
 	/// * [`Error::OnchainTxCreationFailed`] - If the child transaction couldn't be created
 	pub fn accelerate_by_cpfp(
-		&self,
-		txid: &Txid,
-		fee_rate: Option<FeeRate>,
-		destination_address: Option<Address>,
+		&self, txid: &Txid, fee_rate: Option<FeeRate>, destination_address: Option<Address>,
 	) -> Result<Txid, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
