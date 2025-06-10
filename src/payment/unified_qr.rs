@@ -186,6 +186,7 @@ impl UnifiedQrPayment {
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 /// [`PaymentId`]: lightning::ln::channelmanager::PaymentId
 /// [`Txid`]: bitcoin::hash_types::Txid
+#[derive(Debug)]
 pub enum QrPaymentResult {
 	/// An on-chain payment.
 	Onchain {
