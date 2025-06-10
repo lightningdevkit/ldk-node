@@ -15,11 +15,13 @@ use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, PaymentStore};
 
+use lightning::events::PaidBolt12Invoice;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::{Amount, Offer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::offers::refund::Refund;
+use lightning::routing::router::RouteParametersConfig;
 use lightning::util::string::UntrustedString;
 
 use rand::RngCore;
@@ -67,7 +69,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -88,7 +90,7 @@ impl Bolt12Payment {
 			payer_note.clone(),
 			payment_id,
 			retry_strategy,
-			max_total_routing_fee_msat,
+			route_params_config,
 		) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
@@ -106,6 +108,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					bolt12_invoice: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -131,6 +134,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							bolt12_invoice: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -169,7 +173,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -194,7 +198,7 @@ impl Bolt12Payment {
 			payer_note.clone(),
 			payment_id,
 			retry_strategy,
-			max_total_routing_fee_msat,
+			route_params_config,
 		) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
@@ -212,6 +216,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					bolt12_invoice: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -237,6 +242,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							bolt12_invoice: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -334,6 +340,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
 			quantity: refund.quantity(),
+			bolt12_invoice: Some(PaidBolt12Invoice::Bolt12Invoice(invoice.clone())),
 		};
 
 		let payment = PaymentDetails::new(
@@ -363,7 +370,7 @@ impl Bolt12Payment {
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let mut refund_builder = self
 			.channel_manager
@@ -372,7 +379,7 @@ impl Bolt12Payment {
 				absolute_expiry,
 				payment_id,
 				retry_strategy,
-				max_total_routing_fee_msat,
+				route_params_config,
 			)
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to create refund builder: {:?}", e);
@@ -400,6 +407,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: payer_note.map(|note| UntrustedString(note)),
 			quantity,
+			bolt12_invoice: None,
 		};
 		let payment = PaymentDetails::new(
 			payment_id,

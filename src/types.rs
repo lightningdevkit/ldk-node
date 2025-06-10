@@ -76,11 +76,8 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 
 pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<Logger>>;
 
-pub(crate) type Wallet =
-	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
-
-pub(crate) type KeysManager =
-	crate::wallet::WalletKeysManager<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
+pub(crate) type Wallet = crate::wallet::Wallet;
+pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<Graph>,

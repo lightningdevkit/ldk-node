@@ -20,12 +20,12 @@ use ldk_node::config::EsploraSyncConfig;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDirection, PaymentKind, PaymentStatus, QrPaymentResult,
-	SendingParameters,
 };
 use ldk_node::{Builder, Event, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
+use lightning::routing::router::RouteParametersConfig;
 use lightning::util::persist::KVStore;
 
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
@@ -200,11 +200,11 @@ fn multi_hop_sending() {
 	// Sleep a bit for gossip to propagate.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
-	let sending_params = SendingParameters {
-		max_total_routing_fee_msat: Some(Some(75_000).into()),
-		max_total_cltv_expiry_delta: Some(1000),
-		max_path_count: Some(10),
-		max_channel_saturation_power_of_half: Some(2),
+	let route_params = RouteParametersConfig {
+		max_total_routing_fee_msat: Some(75_000),
+		max_total_cltv_expiry_delta: 1000,
+		max_path_count: 10,
+		max_channel_saturation_power_of_half: 2,
 	};
 
 	let invoice_description =
@@ -213,7 +213,7 @@ fn multi_hop_sending() {
 		.bolt11_payment()
 		.receive(2_500_000, &invoice_description.clone().into(), 9217)
 		.unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
 
@@ -817,12 +817,14 @@ fn simple_bolt12_send_receive() {
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
+			bolt12_invoice: ref invoice,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+			assert!(invoice.is_some());
 			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
 			//API currently doesn't allow to do that.
 		},
@@ -883,12 +885,14 @@ fn simple_bolt12_send_receive() {
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
+			bolt12_invoice: ref invoice,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+			assert!(invoice.is_some());
 			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
 			//API currently doesn't allow to do that.
 			hash.unwrap()
@@ -950,11 +954,13 @@ fn simple_bolt12_send_receive() {
 			secret: _,
 			quantity: ref qty,
 			payer_note: ref note,
+			bolt12_invoice: ref invoice,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert_eq!(&expected_quantity, qty);
-			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0)
+			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+			assert!(invoice.is_some());
 			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
 			//API currently doesn't allow to do that.
 		},

@@ -551,6 +551,9 @@ impl Node {
 		let background_chan_man = Arc::clone(&self.channel_manager);
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
+		let background_liquidity_man_opt =
+			self.liquidity_source.as_ref().map(|ls| Arc::clone(&ls.liquidity_manager()));
+		let background_sweeper = Arc::clone(&self.output_sweeper);
 		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
@@ -587,6 +590,8 @@ impl Node {
 				Some(background_onion_messenger),
 				background_gossip_sync,
 				background_peer_man,
+				background_liquidity_man_opt,
+				Some(background_sweeper),
 				background_logger,
 				Some(background_scorer),
 				sleeper,
@@ -1426,12 +1431,10 @@ impl Node {
 
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
-		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
-			match self.chain_monitor.get_monitor(funding_txo) {
+		for channel_id in self.chain_monitor.list_monitors() {
+			match self.chain_monitor.get_monitor(channel_id) {
 				Ok(monitor) => {
-					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
-					// LDK Node 0.1 depended on 0.0.115 already.
-					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
+					let counterparty_node_id = monitor.get_counterparty_node_id();
 					for ldk_balance in monitor.get_claimable_balances() {
 						total_lightning_balance_sats += ldk_balance.claimable_amount_satoshis();
 						lightning_balances.push(LightningBalance::from_ldk_balance(

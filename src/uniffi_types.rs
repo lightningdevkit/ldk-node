@@ -15,12 +15,12 @@ pub use crate::config::{
 	EsploraSyncConfig, MaxDustHTLCExposure,
 };
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
-pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig, OnchainPaymentInfo, PaymentInfo};
+pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
-pub use crate::payment::{MaxTotalRoutingFeeLimit, QrPaymentResult, SendingParameters};
+pub use crate::payment::QrPaymentResult;
 
 pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
@@ -29,22 +29,23 @@ pub use lightning::offers::invoice::Bolt12Invoice;
 pub use lightning::offers::offer::{Offer, OfferId};
 pub use lightning::offers::refund::Refund;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
+pub use lightning::routing::router::RouteParametersConfig;
 pub use lightning::util::string::UntrustedString;
 
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
 pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
 
-pub use lightning_liquidity::lsps1::msgs::ChannelInfo as ChannelOrderInfo;
-pub use lightning_liquidity::lsps1::msgs::{OrderId, OrderParameters, PaymentState};
+pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
+pub use lightning_liquidity::lsps1::msgs::{
+	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
+};
 
 pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Txid};
 
 pub use bip39::Mnemonic;
 
 pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
-
-pub type DateTime = chrono::DateTime<chrono::Utc>;
 
 use crate::UniffiCustomTypeConverter;
 
@@ -605,13 +606,31 @@ impl std::fmt::Display for Bolt11Invoice {
 	}
 }
 
+/// Details regarding how to pay for an order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LSPS1PaymentInfo {
+	/// A Lightning payment using BOLT 11.
+	pub bolt11: Option<crate::uniffi_types::LSPS1Bolt11PaymentInfo>,
+	/// An onchain payment.
+	pub onchain: Option<LSPS1OnchainPaymentInfo>,
+}
+
+impl From<lightning_liquidity::lsps1::msgs::LSPS1PaymentInfo> for LSPS1PaymentInfo {
+	fn from(value: lightning_liquidity::lsps1::msgs::LSPS1PaymentInfo) -> Self {
+		LSPS1PaymentInfo {
+			bolt11: value.bolt11.map(|b| b.into()),
+			onchain: value.onchain.map(|o| o.into()),
+		}
+	}
+}
+
 /// A Lightning payment using BOLT 11.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bolt11PaymentInfo {
+pub struct LSPS1Bolt11PaymentInfo {
 	/// Indicates the current state of the payment.
-	pub state: PaymentState,
+	pub state: LSPS1PaymentState,
 	/// The datetime when the payment option expires.
-	pub expires_at: chrono::DateTime<chrono::Utc>,
+	pub expires_at: LSPSDateTime,
 	/// The total fee the LSP will charge to open this channel in satoshi.
 	pub fee_total_sat: u64,
 	/// The amount the client needs to pay to have the requested channel openend.
@@ -620,8 +639,8 @@ pub struct Bolt11PaymentInfo {
 	pub invoice: Arc<Bolt11Invoice>,
 }
 
-impl From<lightning_liquidity::lsps1::msgs::Bolt11PaymentInfo> for Bolt11PaymentInfo {
-	fn from(info: lightning_liquidity::lsps1::msgs::Bolt11PaymentInfo) -> Self {
+impl From<lightning_liquidity::lsps1::msgs::LSPS1Bolt11PaymentInfo> for LSPS1Bolt11PaymentInfo {
+	fn from(info: lightning_liquidity::lsps1::msgs::LSPS1Bolt11PaymentInfo) -> Self {
 		Self {
 			state: info.state,
 			expires_at: info.expires_at,
@@ -632,7 +651,46 @@ impl From<lightning_liquidity::lsps1::msgs::Bolt11PaymentInfo> for Bolt11Payment
 	}
 }
 
-impl UniffiCustomTypeConverter for OrderId {
+/// An onchain payment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LSPS1OnchainPaymentInfo {
+	/// Indicates the current state of the payment.
+	pub state: lightning_liquidity::lsps1::msgs::LSPS1PaymentState,
+	/// The datetime when the payment option expires.
+	pub expires_at: LSPSDateTime,
+	/// The total fee the LSP will charge to open this channel in satoshi.
+	pub fee_total_sat: u64,
+	/// The amount the client needs to pay to have the requested channel openend.
+	pub order_total_sat: u64,
+	/// An on-chain address the client can send [`Self::order_total_sat`] to to have the channel
+	/// opened.
+	pub address: bitcoin::Address,
+	/// The minimum number of block confirmations that are required for the on-chain payment to be
+	/// considered confirmed.
+	pub min_onchain_payment_confirmations: Option<u16>,
+	/// The minimum fee rate for the on-chain payment in case the client wants the payment to be
+	/// confirmed without a confirmation.
+	pub min_fee_for_0conf: Arc<bitcoin::FeeRate>,
+	/// The address where the LSP will send the funds if the order fails.
+	pub refund_onchain_address: Option<bitcoin::Address>,
+}
+
+impl From<lightning_liquidity::lsps1::msgs::LSPS1OnchainPaymentInfo> for LSPS1OnchainPaymentInfo {
+	fn from(value: lightning_liquidity::lsps1::msgs::LSPS1OnchainPaymentInfo) -> Self {
+		Self {
+			state: value.state,
+			expires_at: value.expires_at,
+			fee_total_sat: value.fee_total_sat,
+			order_total_sat: value.order_total_sat,
+			address: value.address,
+			min_onchain_payment_confirmations: value.min_onchain_payment_confirmations,
+			min_fee_for_0conf: Arc::new(value.min_fee_for_0conf),
+			refund_onchain_address: value.refund_onchain_address,
+		}
+	}
+}
+
+impl UniffiCustomTypeConverter for LSPS1OrderId {
 	type Builtin = String;
 
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
@@ -644,11 +702,11 @@ impl UniffiCustomTypeConverter for OrderId {
 	}
 }
 
-impl UniffiCustomTypeConverter for DateTime {
+impl UniffiCustomTypeConverter for LSPSDateTime {
 	type Builtin = String;
 
 	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-		Ok(DateTime::from_str(&val).map_err(|_| Error::InvalidDateTime)?)
+		Ok(LSPSDateTime::from_str(&val).map_err(|_| Error::InvalidDateTime)?)
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
