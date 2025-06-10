@@ -715,6 +715,7 @@ dictionary RouteHintHop {
 	RoutingFees fees;
 };
 
+[Traits=(Debug, Display, Eq)]
 interface Bolt11Invoice {
 	[Throws=NodeError, Name=from_str]
 	constructor([ByRef] string invoice_str);
