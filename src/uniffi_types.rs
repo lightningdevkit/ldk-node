@@ -467,7 +467,7 @@ impl From<lightning::routing::router::RouteHintHop> for RouteHintHop {
 /// Represents a syntactically and semantically correct lightning BOLT11 invoice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bolt11Invoice {
-	pub inner: LdkBolt11Invoice,
+	pub(crate) inner: LdkBolt11Invoice,
 }
 
 impl Bolt11Invoice {
