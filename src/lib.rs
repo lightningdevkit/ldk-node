@@ -923,6 +923,7 @@ impl Node {
 	pub fn prober(&self) -> Prober {
 		Prober::new(
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.chain_monitor),
 			Arc::clone(&self.router),
 			Arc::clone(&self.scorer),
 			Arc::clone(&self.network_graph),

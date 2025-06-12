@@ -14,9 +14,11 @@ use crate::{
 	error::Error,
 	logger::Logger,
 	types::{ChannelManager, Graph, Router, Scorer},
+	ChainMonitor,
 };
 use bitcoin::secp256k1::PublicKey;
 use lightning::{
+	chain::transaction::OutPoint,
 	io::Cursor,
 	ln::{channel_state::ChannelDetails, channelmanager::PaymentId},
 	log_error,
@@ -46,6 +48,7 @@ pub struct ProbabilisticScoringParameters {
 /// The Prober can be used to send probes to a destination node outside of regular payment flows.
 pub struct Prober {
 	channel_manager: Arc<ChannelManager>,
+	chain_monitor: Arc<ChainMonitor>,
 	router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
 	network_graph: Arc<Graph>,
@@ -55,10 +58,11 @@ pub struct Prober {
 
 impl Prober {
 	pub(crate) fn new(
-		channel_manager: Arc<ChannelManager>, router: Arc<Router>, scorer: Arc<Mutex<Scorer>>,
-		network_graph: Arc<Graph>, logger: Arc<Logger>, node_id: PublicKey,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		router: Arc<Router>, scorer: Arc<Mutex<Scorer>>, network_graph: Arc<Graph>,
+		logger: Arc<Logger>, node_id: PublicKey,
 	) -> Self {
-		Self { channel_manager, router, scorer, network_graph, logger, node_id }
+		Self { channel_manager, chain_monitor, router, scorer, network_graph, logger, node_id }
 	}
 
 	/// Find a route from the node to a given destination on the network.
@@ -85,6 +89,20 @@ impl Prober {
 			log_error!(self.logger, "Failed to send probe: {e:?}");
 			Error::ProbeSendingFailed
 		})
+	}
+
+	/// Returns the latest update ids of the channel monitors. At some point after many updates the probes will start to get slow.
+	pub fn channel_monitor_update_ids(&self) -> Vec<(OutPoint, u64)> {
+		self.chain_monitor
+			.list_monitors()
+			.iter()
+			.filter_map(|(outpoint, _)| {
+				self.chain_monitor
+					.get_monitor(*outpoint)
+					.map(|monitor| (*outpoint, monitor.get_latest_update_id()))
+					.ok()
+			})
+			.collect()
 	}
 
 	/// Updates the scoring decay parameters while retaining channel liquidity information..

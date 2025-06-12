@@ -8,7 +8,7 @@
 #![cfg(any(test, cln_test, vss_test))]
 #![allow(dead_code)]
 
-use ldk_node::config::{Config, EsploraSyncConfig, LoggingConfig};
+use ldk_node::config::{Config, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::logger::LogLevel;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
