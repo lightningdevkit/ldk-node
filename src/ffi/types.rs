@@ -985,7 +985,7 @@ impl Bolt11Invoice {
 	}
 
 	/// Return the description or a hash of it for longer ones
-	pub fn description(&self) -> Bolt11InvoiceDescription {
+	pub fn invoice_description(&self) -> Bolt11InvoiceDescription {
 		self.inner.description().into()
 	}
 
