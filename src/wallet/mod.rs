@@ -613,7 +613,7 @@ impl Wallet {
 		// Get current mempool fee rates from fee estimator based on urgency
 		let target = if urgent {
 			ConfirmationTarget::Lightning(
-				lightning::chain::chaininterface::ConfirmationTarget::UrgentOnChainSweep,
+				lightning::chain::chaininterface::ConfirmationTarget::MaximumFeeEstimate,
 			)
 		} else {
 			ConfirmationTarget::OnchainPayment
