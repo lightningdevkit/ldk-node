@@ -728,7 +728,7 @@ interface Bolt11Invoice {
 	u64 seconds_until_expiry();
 	boolean is_expired();
 	boolean would_expire(u64 at_time_seconds);
-	Bolt11InvoiceDescription description();
+	Bolt11InvoiceDescription invoice_description();
 	u64 min_final_cltv_expiry_delta();
 	Network network();
 	Currency currency();
