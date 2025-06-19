@@ -517,11 +517,11 @@ public protocol Bolt11InvoiceProtocol : AnyObject {
     
     func currency()  -> Currency
     
-    func description()  -> Bolt11InvoiceDescription
-    
     func expiryTimeSeconds()  -> UInt64
     
     func fallbackAddresses()  -> [Address]
+    
+    func invoiceDescription()  -> Bolt11InvoiceDescription
     
     func isExpired()  -> Bool
     
@@ -548,6 +548,9 @@ public protocol Bolt11InvoiceProtocol : AnyObject {
 }
 
 open class Bolt11Invoice:
+    CustomDebugStringConvertible,
+    CustomStringConvertible,
+    Equatable,
     Bolt11InvoiceProtocol {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
@@ -610,13 +613,6 @@ open func currency() -> Currency {
 })
 }
     
-open func description() -> Bolt11InvoiceDescription {
-    return try!  FfiConverterTypeBolt11InvoiceDescription.lift(try! rustCall() {
-    uniffi_ldk_node_fn_method_bolt11invoice_description(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
 open func expiryTimeSeconds() -> UInt64 {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_expiry_time_seconds(self.uniffiClonePointer(),$0
@@ -627,6 +623,13 @@ open func expiryTimeSeconds() -> UInt64 {
 open func fallbackAddresses() -> [Address] {
     return try!  FfiConverterSequenceTypeAddress.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_fallback_addresses(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func invoiceDescription() -> Bolt11InvoiceDescription {
+    return try!  FfiConverterTypeBolt11InvoiceDescription.lift(try! rustCall() {
+    uniffi_ldk_node_fn_method_bolt11invoice_invoice_description(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -709,6 +712,31 @@ open func wouldExpire(atTimeSeconds: UInt64) -> Bool {
 })
 }
     
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_bolt11invoice_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_bolt11invoice_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    public static func == (self: Bolt11Invoice, other: Bolt11Invoice) -> Bool {
+        return try!  FfiConverterBool.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_bolt11invoice_uniffi_trait_eq_eq(self.uniffiClonePointer(),
+        FfiConverterTypeBolt11Invoice.lower(other),$0
+    )
+}
+        )
+    }
 
 }
 
@@ -9451,13 +9479,13 @@ private var initializationResult: InitializationResult {
     if (uniffi_ldk_node_checksum_method_bolt11invoice_currency() != 32179) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_description() != 9887) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_ldk_node_checksum_method_bolt11invoice_expiry_time_seconds() != 23625) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_bolt11invoice_fallback_addresses() != 55276) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_invoice_description() != 395) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_bolt11invoice_is_expired() != 15932) {
