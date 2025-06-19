@@ -1,3 +1,21 @@
+# 0.6.1 - Jun. 19, 2025
+This patch release fixes minor issues with the recently-exposed `Bolt11Invoice`
+type in bindings.
+
+## Feature and API updates
+- The `Bolt11Invoice::description` method is now exposed as
+  `Bolt11Invoice::invoice_description` in bindings, to avoid collisions with a
+  Swift standard method of same name (#576)
+
+## Bug Fixes and Improvements
+- The `Display` implementation of `Bolt11Invoice` is now exposed in bindings,
+  (re-)allowing to render the invoice as a string. (#574)
+
+In total, this release features 9 files changed, 549 insertions, 83 deletions,
+in 8 commits from 1 author in alphabetical order:
+
+- Elias Rohrer
+
 # 0.6.0 - Jun. 9, 2025
 This sixth minor release mainly fixes an issue that could have left the
 on-chain wallet unable to spend funds if transactions that had previously been

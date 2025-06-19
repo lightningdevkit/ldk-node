@@ -727,7 +727,7 @@ mod tests {
 		let (ldk_invoice, wrapped_invoice) = create_test_invoice();
 
 		let ldk_description = ldk_invoice.description();
-		let wrapped_description = wrapped_invoice.description();
+		let wrapped_description = wrapped_invoice.invoice_description();
 
 		match (ldk_description, &wrapped_description) {
 			(
