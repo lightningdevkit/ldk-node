@@ -5,10 +5,10 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-mod bitcoind_rpc;
+mod bitcoind;
 mod electrum;
 
-use crate::chain::bitcoind_rpc::{
+use crate::chain::bitcoind::{
 	BitcoindRpcClient, BoundedHeaderCache, ChainListener, FeeRateEstimationMode,
 };
 use crate::chain::electrum::ElectrumRuntimeClient;
