@@ -383,9 +383,19 @@ fn onchain_send_receive() {
 	);
 
 	let amount_to_send_sats = 54321;
+	let fee_estimate = node_a
+		.onchain_payment()
+		.estimate_send_to_address(&addr_a, amount_to_send_sats, None)
+		.unwrap();
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
 	wait_for_tx(&electrsd.client, txid);
+
+	// verify we estimated the fee correctly
+	let entry = bitcoind.client.get_mempool_entry(txid).unwrap();
+	let actual_fee = Amount::from_btc(entry.0.fees.base).unwrap();
+	assert_eq!(fee_estimate, actual_fee);
+
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -449,9 +459,18 @@ fn onchain_send_receive() {
 	}
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let fee_estimate =
+		node_a.onchain_payment().estimate_send_all_to_address(&addr_b, true, None).unwrap();
 	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
 	wait_for_tx(&electrsd.client, txid);
+
+	// verify we estimated the fee correctly
+	let entry = bitcoind.client.get_mempool_entry(txid).unwrap();
+	let actual_fee = Amount::from_btc(entry.0.fees.base).unwrap();
+	assert_eq!(fee_estimate, actual_fee);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
@@ -522,9 +541,17 @@ fn onchain_send_all_retains_reserve() {
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	// Send all over, with 0 reserve as we don't have any channels open.
+	let fee_estimate =
+		node_a.onchain_payment().estimate_send_all_to_address(&addr_b, true, None).unwrap();
 	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
 
 	wait_for_tx(&electrsd.client, txid);
+
+	// verify we estimated the fee correctly
+	let entry = bitcoind.client.get_mempool_entry(txid).unwrap();
+	let actual_fee = Amount::from_btc(entry.0.fees.base).unwrap();
+	assert_eq!(fee_estimate, actual_fee);
+
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
 	node_a.sync_wallets().unwrap();
@@ -563,9 +590,17 @@ fn onchain_send_all_retains_reserve() {
 		.contains(&node_b.list_balances().spendable_onchain_balance_sats));
 
 	// Send all over again, this time ensuring the reserve is accounted for
+	let fee_estimate =
+		node_b.onchain_payment().estimate_send_all_to_address(&addr_a, true, None).unwrap();
 	let txid = node_b.onchain_payment().send_all_to_address(&addr_a, true, None).unwrap();
 
 	wait_for_tx(&electrsd.client, txid);
+
+	// verify we estimated the fee correctly
+	let entry = bitcoind.client.get_mempool_entry(txid).unwrap();
+	let actual_fee = Amount::from_btc(entry.0.fees.base).unwrap();
+	assert_eq!(fee_estimate, actual_fee);
+
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
 	node_a.sync_wallets().unwrap();
