@@ -146,7 +146,9 @@ use types::{
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
-use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+#[cfg(tokio_unstable)]
+use logger::log_trace;
+use logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
@@ -285,7 +287,7 @@ impl Node {
 							let now = Instant::now();
 							match gossip_source.update_rgs_snapshot().await {
 								Ok(updated_timestamp) => {
-									log_trace!(
+									log_info!(
 										gossip_sync_logger,
 										"Background sync of RGS gossip data finished in {}ms.",
 										now.elapsed().as_millis()
