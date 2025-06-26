@@ -6,8 +6,8 @@ use ldk_server_client::error::LdkServerErrorCode::{
 };
 use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
-	GetBalancesRequest, GetNodeInfoRequest, ListChannelsRequest, ListPaymentsRequest,
-	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
+	CloseChannelRequest, GetBalancesRequest, GetNodeInfoRequest, ListChannelsRequest,
+	ListPaymentsRequest, OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_protos::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, PageToken, Payment,
@@ -74,6 +74,12 @@ enum Commands {
 		quantity: Option<u64>,
 		#[arg(short, long)]
 		payer_note: Option<String>,
+	},
+	CloseChannel {
+		#[arg(short, long)]
+		user_channel_id: String,
+		#[arg(short, long)]
+		counterparty_node_id: String,
 	},
 	OpenChannel {
 		#[arg(short, long)]
@@ -167,6 +173,13 @@ async fn main() {
 			handle_response_result(
 				client
 					.bolt12_send(Bolt12SendRequest { offer, amount_msat, quantity, payer_note })
+					.await,
+			);
+		},
+		Commands::CloseChannel { user_channel_id, counterparty_node_id } => {
+			handle_response_result(
+				client
+					.close_channel(CloseChannelRequest { user_channel_id, counterparty_node_id })
 					.await,
 			);
 		},
