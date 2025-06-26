@@ -286,6 +286,26 @@ pub struct CloseChannelRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CloseChannelResponse {}
+/// Force closes the channel specified by given request.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.force_close_channel>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ForceCloseChannelRequest {
+	/// The local `user_channel_id` of this channel.
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
+	/// The hex-encoded public key of the node to close a channel with.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The reason for force-closing.
+	#[prost(string, optional, tag = "3")]
+	pub force_close_reason: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// The response `content` for the `ForceCloseChannel` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ForceCloseChannelResponse {}
 /// Returns a list of known channels.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_channels>
 #[allow(clippy::derive_partial_eq_without_eq)]

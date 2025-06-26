@@ -275,6 +275,21 @@ message CloseChannelRequest {
 // When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
 message CloseChannelResponse {}
 
+// Force closes the channel specified by given request.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.force_close_channel
+message ForceCloseChannelRequest {
+  // The local `user_channel_id` of this channel.
+  string user_channel_id = 1;
+  // The hex-encoded public key of the node to close a channel with.
+  string counterparty_node_id = 2;
+  // The reason for force-closing.
+  optional string force_close_reason = 3;
+}
+
+// The response `content` for the `ForceCloseChannel` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ForceCloseChannelResponse {}
+
 // Returns a list of known channels.
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_channels
 message ListChannelsRequest {}
