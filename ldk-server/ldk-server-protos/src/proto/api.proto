@@ -261,9 +261,7 @@ message UpdateChannelConfigResponse {
 }
 
 // Closes the channel specified by given request.
-// See more:
-// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.close_channel
-// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.force_close_channel
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.close_channel
 message CloseChannelRequest {
 
   // The local `user_channel_id` of this channel.
@@ -271,19 +269,11 @@ message CloseChannelRequest {
 
   // The hex-encoded public key of the node to close a channel with.
   string counterparty_node_id = 2;
-
-  // Whether to force close the specified channel.
-  optional bool force_close = 3;
-
-  // The reason for force-closing, can only be set while force closing a channel.
-  optional string force_close_reason = 4;
 }
 
 // The response `content` for the `CloseChannel` API, when HttpStatusCode is OK (200).
 // When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
-message CloseChannelResponse {
-
-}
+message CloseChannelResponse {}
 
 // Returns a list of known channels.
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_channels

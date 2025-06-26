@@ -270,9 +270,7 @@ pub struct UpdateChannelConfigRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateChannelConfigResponse {}
 /// Closes the channel specified by given request.
-/// See more:
-/// - <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.close_channel>
-/// - <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.force_close_channel>
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.close_channel>
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CloseChannelRequest {
@@ -282,12 +280,6 @@ pub struct CloseChannelRequest {
 	/// The hex-encoded public key of the node to close a channel with.
 	#[prost(string, tag = "2")]
 	pub counterparty_node_id: ::prost::alloc::string::String,
-	/// Whether to force close the specified channel.
-	#[prost(bool, optional, tag = "3")]
-	pub force_close: ::core::option::Option<bool>,
-	/// The reason for force-closing, can only be set while force closing a channel.
-	#[prost(string, optional, tag = "4")]
-	pub force_close_reason: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// The response `content` for the `CloseChannel` API, when HttpStatusCode is OK (200).
 /// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.

@@ -21,15 +21,7 @@ pub(crate) fn handle_close_channel_request(
 			format!("Invalid counterparty node ID, error: {}", e),
 		)
 	})?;
-
-	match request.force_close {
-		Some(true) => context.node.force_close_channel(
-			&user_channel_id,
-			counterparty_node_id,
-			request.force_close_reason,
-		)?,
-		_ => context.node.close_channel(&user_channel_id, counterparty_node_id)?,
-	};
+	context.node.close_channel(&user_channel_id, counterparty_node_id)?;
 
 	let response = CloseChannelResponse {};
 	Ok(response)
