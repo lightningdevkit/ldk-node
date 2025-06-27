@@ -153,6 +153,7 @@ impl LogWriter for Writer {
 				#[cfg(not(feature = "uniffi"))]
 				log::logger().log(
 					&builder
+						.target(record.module_path)
 						.module_path(Some(record.module_path))
 						.line(Some(record.line))
 						.args(format_args!("{}", record.args))
@@ -161,6 +162,7 @@ impl LogWriter for Writer {
 				#[cfg(feature = "uniffi")]
 				log::logger().log(
 					&builder
+						.target(&record.module_path)
 						.module_path(Some(&record.module_path))
 						.line(Some(record.line))
 						.args(format_args!("{}", record.args))
