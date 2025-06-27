@@ -46,7 +46,7 @@ cargo build
 
 ### Running
 ```
-cargo run --bin ldk-server ./ldk-server/ldk-server.config
+cargo run --bin ldk-server ./ldk-server/ldk-server-config.toml
 ```
 
 Interact with the node using CLI:
