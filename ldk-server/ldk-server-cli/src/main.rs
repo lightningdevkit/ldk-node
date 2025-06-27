@@ -6,8 +6,9 @@ use ldk_server_client::error::LdkServerErrorCode::{
 };
 use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
-	CloseChannelRequest, GetBalancesRequest, GetNodeInfoRequest, ListChannelsRequest,
-	ListPaymentsRequest, OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
+	CloseChannelRequest, ForceCloseChannelRequest, GetBalancesRequest, GetNodeInfoRequest,
+	ListChannelsRequest, ListPaymentsRequest, OnchainReceiveRequest, OnchainSendRequest,
+	OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_protos::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, PageToken, Payment,
@@ -80,6 +81,14 @@ enum Commands {
 		user_channel_id: String,
 		#[arg(short, long)]
 		counterparty_node_id: String,
+	},
+	ForceCloseChannel {
+		#[arg(short, long)]
+		user_channel_id: String,
+		#[arg(short, long)]
+		counterparty_node_id: String,
+		#[arg(long)]
+		force_close_reason: Option<String>,
 	},
 	OpenChannel {
 		#[arg(short, long)]
@@ -180,6 +189,21 @@ async fn main() {
 			handle_response_result(
 				client
 					.close_channel(CloseChannelRequest { user_channel_id, counterparty_node_id })
+					.await,
+			);
+		},
+		Commands::ForceCloseChannel {
+			user_channel_id,
+			counterparty_node_id,
+			force_close_reason,
+		} => {
+			handle_response_result(
+				client
+					.force_close_channel(ForceCloseChannelRequest {
+						user_channel_id,
+						counterparty_node_id,
+						force_close_reason,
+					})
 					.await,
 			);
 		},

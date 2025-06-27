@@ -7,10 +7,11 @@ use crate::error::LdkServerErrorCode::{
 use ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11SendRequest, Bolt11SendResponse,
 	Bolt12ReceiveRequest, Bolt12ReceiveResponse, Bolt12SendRequest, Bolt12SendResponse,
-	CloseChannelRequest, CloseChannelResponse, GetBalancesRequest, GetBalancesResponse,
-	GetNodeInfoRequest, GetNodeInfoResponse, ListChannelsRequest, ListChannelsResponse,
-	ListPaymentsRequest, ListPaymentsResponse, OnchainReceiveRequest, OnchainReceiveResponse,
-	OnchainSendRequest, OnchainSendResponse, OpenChannelRequest, OpenChannelResponse,
+	CloseChannelRequest, CloseChannelResponse, ForceCloseChannelRequest, ForceCloseChannelResponse,
+	GetBalancesRequest, GetBalancesResponse, GetNodeInfoRequest, GetNodeInfoResponse,
+	ListChannelsRequest, ListChannelsResponse, ListPaymentsRequest, ListPaymentsResponse,
+	OnchainReceiveRequest, OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse,
+	OpenChannelRequest, OpenChannelResponse,
 };
 use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use reqwest::header::CONTENT_TYPE;
@@ -28,6 +29,7 @@ const BOLT12_RECEIVE_PATH: &str = "Bolt12Receive";
 const BOLT12_SEND_PATH: &str = "Bolt12Send";
 const OPEN_CHANNEL_PATH: &str = "OpenChannel";
 const CLOSE_CHANNEL_PATH: &str = "CloseChannel";
+const FORCE_CLOSE_CHANNEL_PATH: &str = "ForceCloseChannel";
 const LIST_CHANNELS_PATH: &str = "ListChannels";
 const LIST_PAYMENTS_PATH: &str = "ListPayments";
 
@@ -131,6 +133,15 @@ impl LdkServerClient {
 		&self, request: CloseChannelRequest,
 	) -> Result<CloseChannelResponse, LdkServerError> {
 		let url = format!("http://{}/{CLOSE_CHANNEL_PATH}", self.base_url);
+		self.post_request(&request, &url).await
+	}
+
+	/// Force closes the channel specified by given request.
+	/// For API contract/usage, refer to docs for [`ForceCloseChannelRequest`] and [`ForceCloseChannelResponse`].
+	pub async fn force_close_channel(
+		&self, request: ForceCloseChannelRequest,
+	) -> Result<ForceCloseChannelResponse, LdkServerError> {
+		let url = format!("http://{}/{FORCE_CLOSE_CHANNEL_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
