@@ -54,17 +54,31 @@ impl BitcoindRpcClient {
 	}
 
 	pub(crate) async fn broadcast_transaction(&self, tx: &Transaction) -> std::io::Result<Txid> {
+		Self::broadcast_transaction_inner(self.rpc_client(), tx).await
+	}
+
+	async fn broadcast_transaction_inner(
+		rpc_client: Arc<RpcClient>, tx: &Transaction,
+	) -> std::io::Result<Txid> {
 		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
 		let tx_json = serde_json::json!(tx_serialized);
-		self.rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
+		rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
 	}
 
 	pub(crate) async fn get_fee_estimate_for_target(
 		&self, num_blocks: usize, estimation_mode: FeeRateEstimationMode,
 	) -> std::io::Result<FeeRate> {
+		Self::get_fee_estimate_for_target_inner(self.rpc_client(), num_blocks, estimation_mode)
+			.await
+	}
+
+	/// Estimate the fee rate for the provided target number of blocks.
+	async fn get_fee_estimate_for_target_inner(
+		rpc_client: Arc<RpcClient>, num_blocks: usize, estimation_mode: FeeRateEstimationMode,
+	) -> std::io::Result<FeeRate> {
 		let num_blocks_json = serde_json::json!(num_blocks);
 		let estimation_mode_json = serde_json::json!(estimation_mode);
-		self.rpc_client
+		rpc_client
 			.call_method::<FeeResponse>(
 				"estimatesmartfee",
 				&[num_blocks_json, estimation_mode_json],
@@ -74,7 +88,14 @@ impl BitcoindRpcClient {
 	}
 
 	pub(crate) async fn get_mempool_minimum_fee_rate(&self) -> std::io::Result<FeeRate> {
-		self.rpc_client
+		Self::get_mempool_minimum_fee_rate_rpc(self.rpc_client()).await
+	}
+
+	/// Get the minimum mempool fee rate via RPC interface.
+	async fn get_mempool_minimum_fee_rate_rpc(
+		rpc_client: Arc<RpcClient>,
+	) -> std::io::Result<FeeRate> {
+		rpc_client
 			.call_method::<MempoolMinFeeResponse>("getmempoolinfo", &[])
 			.await
 			.map(|resp| resp.0)
@@ -83,10 +104,16 @@ impl BitcoindRpcClient {
 	pub(crate) async fn get_raw_transaction(
 		&self, txid: &Txid,
 	) -> std::io::Result<Option<Transaction>> {
+		Self::get_raw_transaction_rpc(self.rpc_client(), txid).await
+	}
+
+	/// Retrieve raw transaction for provided transaction ID via the RPC interface.
+	async fn get_raw_transaction_rpc(
+		rpc_client: Arc<RpcClient>, txid: &Txid,
+	) -> std::io::Result<Option<Transaction>> {
 		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
 		let txid_json = serde_json::json!(txid_hex);
-		match self
-			.rpc_client
+		match rpc_client
 			.call_method::<GetRawTransactionResponse>("getrawtransaction", &[txid_json])
 			.await
 		{
@@ -119,8 +146,13 @@ impl BitcoindRpcClient {
 	}
 
 	pub(crate) async fn get_raw_mempool(&self) -> std::io::Result<Vec<Txid>> {
+		Self::get_raw_mempool_rpc(self.rpc_client()).await
+	}
+
+	/// Retrieves the raw mempool via the RPC interface.
+	async fn get_raw_mempool_rpc(rpc_client: Arc<RpcClient>) -> std::io::Result<Vec<Txid>> {
 		let verbose_flag_json = serde_json::json!(false);
-		self.rpc_client
+		rpc_client
 			.call_method::<GetRawMempoolResponse>("getrawmempool", &[verbose_flag_json])
 			.await
 			.map(|resp| resp.0)
@@ -129,14 +161,18 @@ impl BitcoindRpcClient {
 	pub(crate) async fn get_mempool_entry(
 		&self, txid: Txid,
 	) -> std::io::Result<Option<MempoolEntry>> {
+		Self::get_mempool_entry_inner(self.rpc_client(), txid).await
+	}
+
+	/// Retrieves the mempool entry of the provided transaction ID.
+	async fn get_mempool_entry_inner(
+		client: Arc<RpcClient>, txid: Txid,
+	) -> std::io::Result<Option<MempoolEntry>> {
 		let txid_hex = bitcoin::consensus::encode::serialize_hex(&txid);
 		let txid_json = serde_json::json!(txid_hex);
-		match self
-			.rpc_client
-			.call_method::<GetMempoolEntryResponse>("getmempoolentry", &[txid_json])
-			.await
-		{
-			Ok(resp) => Ok(Some(MempoolEntry { txid, height: resp.height, time: resp.time })),
+
+		match client.call_method::<GetMempoolEntryResponse>("getmempoolentry", &[txid_json]).await {
+			Ok(resp) => Ok(Some(MempoolEntry { txid, time: resp.time, height: resp.height })),
 			Err(e) => match e.into_inner() {
 				Some(inner) => {
 					let rpc_error_res: Result<Box<RpcError>, _> = inner.downcast();
@@ -165,9 +201,15 @@ impl BitcoindRpcClient {
 	}
 
 	pub(crate) async fn update_mempool_entries_cache(&self) -> std::io::Result<()> {
+		self.update_mempool_entries_cache_inner(&self.mempool_entries_cache).await
+	}
+
+	async fn update_mempool_entries_cache_inner(
+		&self, mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+	) -> std::io::Result<()> {
 		let mempool_txids = self.get_raw_mempool().await?;
 
-		let mut mempool_entries_cache = self.mempool_entries_cache.lock().await;
+		let mut mempool_entries_cache = mempool_entries_cache.lock().await;
 		mempool_entries_cache.retain(|txid, _| mempool_txids.contains(txid));
 
 		if let Some(difference) = mempool_txids.len().checked_sub(mempool_entries_cache.capacity())
@@ -210,13 +252,28 @@ impl BitcoindRpcClient {
 	async fn get_mempool_transactions_and_timestamp_at_height(
 		&self, best_processed_height: u32,
 	) -> std::io::Result<Vec<(Transaction, u64)>> {
-		let prev_mempool_time = self.latest_mempool_timestamp.load(Ordering::Relaxed);
+		self.get_mempool_transactions_and_timestamp_at_height_inner(
+			&self.latest_mempool_timestamp,
+			&self.mempool_entries_cache,
+			&self.mempool_txs_cache,
+			best_processed_height,
+		)
+		.await
+	}
+
+	async fn get_mempool_transactions_and_timestamp_at_height_inner(
+		&self, latest_mempool_timestamp: &AtomicU64,
+		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		mempool_txs_cache: &tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
+		best_processed_height: u32,
+	) -> std::io::Result<Vec<(Transaction, u64)>> {
+		let prev_mempool_time = latest_mempool_timestamp.load(Ordering::Relaxed);
 		let mut latest_time = prev_mempool_time;
 
 		self.update_mempool_entries_cache().await?;
 
-		let mempool_entries_cache = self.mempool_entries_cache.lock().await;
-		let mut mempool_txs_cache = self.mempool_txs_cache.lock().await;
+		let mempool_entries_cache = mempool_entries_cache.lock().await;
+		let mut mempool_txs_cache = mempool_txs_cache.lock().await;
 		mempool_txs_cache.retain(|txid, _| mempool_entries_cache.contains_key(txid));
 
 		if let Some(difference) =
@@ -260,7 +317,7 @@ impl BitcoindRpcClient {
 		}
 
 		if !txs_to_emit.is_empty() {
-			self.latest_mempool_timestamp.store(latest_time, Ordering::Release);
+			latest_mempool_timestamp.store(latest_time, Ordering::Release);
 		}
 		Ok(txs_to_emit)
 	}
@@ -272,8 +329,21 @@ impl BitcoindRpcClient {
 	async fn get_evicted_mempool_txids_and_timestamp(
 		&self, unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<Vec<(Txid, u64)>> {
-		let latest_mempool_timestamp = self.latest_mempool_timestamp.load(Ordering::Relaxed);
-		let mempool_entries_cache = self.mempool_entries_cache.lock().await;
+		self.get_evicted_mempool_txids_and_timestamp_inner(
+			&self.latest_mempool_timestamp,
+			&self.mempool_entries_cache,
+			unconfirmed_txids,
+		)
+		.await
+	}
+
+	async fn get_evicted_mempool_txids_and_timestamp_inner(
+		&self, latest_mempool_timestamp: &AtomicU64,
+		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		unconfirmed_txids: Vec<Txid>,
+	) -> std::io::Result<Vec<(Txid, u64)>> {
+		let latest_mempool_timestamp = latest_mempool_timestamp.load(Ordering::Relaxed);
+		let mempool_entries_cache = mempool_entries_cache.lock().await;
 		let evicted_txids = unconfirmed_txids
 			.into_iter()
 			.filter(|txid| mempool_entries_cache.contains_key(txid))
