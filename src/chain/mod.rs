@@ -36,7 +36,7 @@ use lightning_transaction_sync::EsploraSyncClient;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
 use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
-use lightning_block_sync::SpvClient;
+use lightning_block_sync::{BlockSourceErrorKind, SpvClient};
 
 use bdk_esplora::EsploraAsyncExt;
 use bdk_wallet::Update as BdkUpdate;
@@ -425,6 +425,9 @@ impl ChainSource {
 					"Starting initial synchronization of chain listeners. This might take a while..",
 				);
 
+				let mut backoff = CHAIN_POLLING_INTERVAL_SECS;
+				const MAX_BACKOFF_SECS: u64 = 300;
+
 				loop {
 					let channel_manager_best_block_hash =
 						channel_manager.current_best_block().block_hash;
@@ -504,8 +507,24 @@ impl ChainSource {
 
 						Err(e) => {
 							log_error!(logger, "Failed to synchronize chain listeners: {:?}", e);
-							tokio::time::sleep(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS))
-								.await;
+							if e.kind() == BlockSourceErrorKind::Transient {
+								log_info!(
+									logger,
+									"Transient error syncing chain listeners: {:?}. Retrying in {} seconds.",
+									e,
+									backoff
+								);
+								tokio::time::sleep(Duration::from_secs(backoff)).await;
+								backoff = std::cmp::min(backoff * 2, MAX_BACKOFF_SECS);
+							} else {
+								log_error!(
+									logger,
+									"Persistent error syncing chain listeners: {:?}. Retrying in {} seconds.",
+									e,
+									MAX_BACKOFF_SECS
+								);
+								tokio::time::sleep(Duration::from_secs(MAX_BACKOFF_SECS)).await;
+							}
 						},
 					}
 				}
