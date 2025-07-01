@@ -397,6 +397,15 @@ impl Default for ElectrumSyncConfig {
 	}
 }
 
+/// Configuration for syncing with Bitcoin Core backend via REST.
+#[derive(Debug, Clone)]
+pub struct BitcoindRestClientConfig {
+	/// Host URL.
+	pub rest_host: String,
+	/// Host port.
+	pub rest_port: u16,
+}
+
 /// Options which apply on a per-channel basis and may change at runtime or based on negotiation
 /// with our counterparty.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
