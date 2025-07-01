@@ -7,11 +7,14 @@
 
 use crate::types::{ChainMonitor, ChannelManager, Sweeper, Wallet};
 
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use bitcoin::{BlockHash, FeeRate, Transaction, Txid};
 use lightning::chain::Listen;
-
-use lightning_block_sync::http::HttpEndpoint;
-use lightning_block_sync::http::JsonResponse;
+use lightning_block_sync::gossip::UtxoSource;
+use lightning_block_sync::http::{HttpEndpoint, JsonResponse};
 use lightning_block_sync::poll::ValidatedBlockHeader;
+use lightning_block_sync::rest::RestClient;
 use lightning_block_sync::rpc::{RpcClient, RpcError};
 use lightning_block_sync::{
 	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, Cache,
@@ -19,26 +22,31 @@ use lightning_block_sync::{
 
 use serde::Serialize;
 
-use bitcoin::{BlockHash, FeeRate, Transaction, Txid};
-
-use base64::prelude::{Engine, BASE64_STANDARD};
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct BitcoindRpcClient {
-	rpc_client: Arc<RpcClient>,
-	latest_mempool_timestamp: AtomicU64,
-	mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
-	mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
+pub enum BitcoindClient {
+	Rpc {
+		rpc_client: Arc<RpcClient>,
+		latest_mempool_timestamp: AtomicU64,
+		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
+	},
+	Rest {
+		rest_client: Arc<RestClient>,
+		rpc_client: Arc<RpcClient>,
+		latest_mempool_timestamp: AtomicU64,
+		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
+	},
 }
 
-impl BitcoindRpcClient {
-	pub(crate) fn new(host: String, port: u16, rpc_user: String, rpc_password: String) -> Self {
-		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
-		let rpc_credentials =
-			BASE64_STANDARD.encode(format!("{}:{}", rpc_user.clone(), rpc_password.clone()));
+impl BitcoindClient {
+	/// Creates a new RPC API client for the chain interactions with Bitcoin Core.
+	pub(crate) fn new_rpc(host: String, port: u16, rpc_user: String, rpc_password: String) -> Self {
+		let http_endpoint = endpoint(host, port);
+		let rpc_credentials = rpc_credentials(rpc_user, rpc_password);
 
 		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, http_endpoint));
 
@@ -46,15 +54,60 @@ impl BitcoindRpcClient {
 
 		let mempool_entries_cache = tokio::sync::Mutex::new(HashMap::new());
 		let mempool_txs_cache = tokio::sync::Mutex::new(HashMap::new());
-		Self { rpc_client, latest_mempool_timestamp, mempool_entries_cache, mempool_txs_cache }
+		Self::Rpc { rpc_client, latest_mempool_timestamp, mempool_entries_cache, mempool_txs_cache }
 	}
 
-	pub(crate) fn rpc_client(&self) -> Arc<RpcClient> {
-		Arc::clone(&self.rpc_client)
+	/// Creates a new, primarily REST API client for the chain interactions
+	/// with Bitcoin Core.
+	///
+	/// Aside the required REST host and port, we provide RPC configuration
+	/// options for necessary calls not supported by the REST interface.
+	pub(crate) fn new_rest(
+		rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16, rpc_user: String,
+		rpc_password: String,
+	) -> Self {
+		let rest_endpoint = endpoint(rest_host, rest_port).with_path("/rest".to_string());
+		let rest_client = Arc::new(RestClient::new(rest_endpoint));
+
+		let rpc_endpoint = endpoint(rpc_host, rpc_port);
+		let rpc_credentials = rpc_credentials(rpc_user, rpc_password);
+		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, rpc_endpoint));
+
+		let latest_mempool_timestamp = AtomicU64::new(0);
+
+		let mempool_entries_cache = tokio::sync::Mutex::new(HashMap::new());
+		let mempool_txs_cache = tokio::sync::Mutex::new(HashMap::new());
+
+		Self::Rest {
+			rest_client,
+			rpc_client,
+			latest_mempool_timestamp,
+			mempool_entries_cache,
+			mempool_txs_cache,
+		}
 	}
 
+	pub(crate) fn utxo_source(&self) -> Arc<dyn UtxoSource> {
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => Arc::clone(rpc_client) as Arc<dyn UtxoSource>,
+			BitcoindClient::Rest { rest_client, .. } => {
+				Arc::clone(rest_client) as Arc<dyn UtxoSource>
+			},
+		}
+	}
+
+	/// Broadcasts the provided transaction.
 	pub(crate) async fn broadcast_transaction(&self, tx: &Transaction) -> std::io::Result<Txid> {
-		Self::broadcast_transaction_inner(self.rpc_client(), tx).await
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::broadcast_transaction_inner(Arc::clone(rpc_client), tx).await
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				// Bitcoin Core's REST interface does not support broadcasting transactions
+				// so we use the RPC client.
+				Self::broadcast_transaction_inner(Arc::clone(rpc_client), tx).await
+			},
+		}
 	}
 
 	async fn broadcast_transaction_inner(
@@ -65,11 +118,31 @@ impl BitcoindRpcClient {
 		rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
 	}
 
+	/// Retrieve the fee estimate needed for a transaction to begin
+	/// confirmation within the provided `num_blocks`.
 	pub(crate) async fn get_fee_estimate_for_target(
 		&self, num_blocks: usize, estimation_mode: FeeRateEstimationMode,
 	) -> std::io::Result<FeeRate> {
-		Self::get_fee_estimate_for_target_inner(self.rpc_client(), num_blocks, estimation_mode)
-			.await
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::get_fee_estimate_for_target_inner(
+					Arc::clone(rpc_client),
+					num_blocks,
+					estimation_mode,
+				)
+				.await
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				// We rely on the internal RPC client to make this call, as this
+				// operation is not supported by Bitcoin Core's REST interface.
+				Self::get_fee_estimate_for_target_inner(
+					Arc::clone(rpc_client),
+					num_blocks,
+					estimation_mode,
+				)
+				.await
+			},
+		}
 	}
 
 	/// Estimate the fee rate for the provided target number of blocks.
@@ -87,11 +160,19 @@ impl BitcoindRpcClient {
 			.map(|resp| resp.0)
 	}
 
+	/// Gets the mempool minimum fee rate.
 	pub(crate) async fn get_mempool_minimum_fee_rate(&self) -> std::io::Result<FeeRate> {
-		Self::get_mempool_minimum_fee_rate_rpc(self.rpc_client()).await
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::get_mempool_minimum_fee_rate_rpc(Arc::clone(rpc_client)).await
+			},
+			BitcoindClient::Rest { rest_client, .. } => {
+				Self::get_mempool_minimum_fee_rate_rest(Arc::clone(rest_client)).await
+			},
+		}
 	}
 
-	/// Get the minimum mempool fee rate via RPC interface.
+	/// Get the mempool minimum fee rate via RPC interface.
 	async fn get_mempool_minimum_fee_rate_rpc(
 		rpc_client: Arc<RpcClient>,
 	) -> std::io::Result<FeeRate> {
@@ -101,10 +182,28 @@ impl BitcoindRpcClient {
 			.map(|resp| resp.0)
 	}
 
+	/// Get the mempool minimum fee rate via REST interface.
+	async fn get_mempool_minimum_fee_rate_rest(
+		rest_client: Arc<RestClient>,
+	) -> std::io::Result<FeeRate> {
+		rest_client
+			.request_resource::<JsonResponse, MempoolMinFeeResponse>("mempool/info.json")
+			.await
+			.map(|resp| resp.0)
+	}
+
+	/// Gets the raw transaction for the provided transaction ID. Returns `None` if not found.
 	pub(crate) async fn get_raw_transaction(
 		&self, txid: &Txid,
 	) -> std::io::Result<Option<Transaction>> {
-		Self::get_raw_transaction_rpc(self.rpc_client(), txid).await
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::get_raw_transaction_rpc(Arc::clone(rpc_client), txid).await
+			},
+			BitcoindClient::Rest { rest_client, .. } => {
+				Self::get_raw_transaction_rest(Arc::clone(rest_client), txid).await
+			},
+		}
 	}
 
 	/// Retrieve raw transaction for provided transaction ID via the RPC interface.
@@ -145,8 +244,68 @@ impl BitcoindRpcClient {
 		}
 	}
 
+	/// Retrieve raw transaction for provided transaction ID via the REST interface.
+	async fn get_raw_transaction_rest(
+		rest_client: Arc<RestClient>, txid: &Txid,
+	) -> std::io::Result<Option<Transaction>> {
+		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
+		let tx_path = format!("tx/{}.json", txid_hex);
+		match rest_client
+			.request_resource::<JsonResponse, GetRawTransactionResponse>(&tx_path)
+			.await
+		{
+			Ok(resp) => Ok(Some(resp.0)),
+			Err(e) => match e.kind() {
+				std::io::ErrorKind::Other => {
+					match e.into_inner() {
+						Some(inner) => {
+							let http_error_res: Result<Box<HttpError>, _> = inner.downcast();
+							match http_error_res {
+								Ok(http_error) => {
+									// Check if it's the HTTP NOT_FOUND error code.
+									if &http_error.status_code == "404" {
+										Ok(None)
+									} else {
+										Err(std::io::Error::new(
+											std::io::ErrorKind::Other,
+											http_error,
+										))
+									}
+								},
+								Err(_) => {
+									let error_msg =
+										format!("Failed to process {} response.", tx_path);
+									Err(std::io::Error::new(
+										std::io::ErrorKind::Other,
+										error_msg.as_str(),
+									))
+								},
+							}
+						},
+						None => {
+							let error_msg = format!("Failed to process {} response.", tx_path);
+							Err(std::io::Error::new(std::io::ErrorKind::Other, error_msg.as_str()))
+						},
+					}
+				},
+				_ => {
+					let error_msg = format!("Failed to process {} response.", tx_path);
+					Err(std::io::Error::new(std::io::ErrorKind::Other, error_msg.as_str()))
+				},
+			},
+		}
+	}
+
+	/// Retrieves the raw mempool.
 	pub(crate) async fn get_raw_mempool(&self) -> std::io::Result<Vec<Txid>> {
-		Self::get_raw_mempool_rpc(self.rpc_client()).await
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::get_raw_mempool_rpc(Arc::clone(rpc_client)).await
+			},
+			BitcoindClient::Rest { rest_client, .. } => {
+				Self::get_raw_mempool_rest(Arc::clone(rest_client)).await
+			},
+		}
 	}
 
 	/// Retrieves the raw mempool via the RPC interface.
@@ -158,10 +317,28 @@ impl BitcoindRpcClient {
 			.map(|resp| resp.0)
 	}
 
+	/// Retrieves the raw mempool via the REST interface.
+	async fn get_raw_mempool_rest(rest_client: Arc<RestClient>) -> std::io::Result<Vec<Txid>> {
+		rest_client
+			.request_resource::<JsonResponse, GetRawMempoolResponse>(
+				"mempool/contents.json?verbose=false",
+			)
+			.await
+			.map(|resp| resp.0)
+	}
+
+	/// Retrieves an entry from the mempool if it exists, else return `None`.
 	pub(crate) async fn get_mempool_entry(
 		&self, txid: Txid,
 	) -> std::io::Result<Option<MempoolEntry>> {
-		Self::get_mempool_entry_inner(self.rpc_client(), txid).await
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::get_mempool_entry_inner(Arc::clone(rpc_client), txid).await
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				Self::get_mempool_entry_inner(Arc::clone(rpc_client), txid).await
+			},
+		}
 	}
 
 	/// Retrieves the mempool entry of the provided transaction ID.
@@ -201,7 +378,14 @@ impl BitcoindRpcClient {
 	}
 
 	pub(crate) async fn update_mempool_entries_cache(&self) -> std::io::Result<()> {
-		self.update_mempool_entries_cache_inner(&self.mempool_entries_cache).await
+		match self {
+			BitcoindClient::Rpc { mempool_entries_cache, .. } => {
+				self.update_mempool_entries_cache_inner(mempool_entries_cache).await
+			},
+			BitcoindClient::Rest { mempool_entries_cache, .. } => {
+				self.update_mempool_entries_cache_inner(mempool_entries_cache).await
+			},
+		}
 	}
 
 	async fn update_mempool_entries_cache_inner(
@@ -249,16 +433,39 @@ impl BitcoindRpcClient {
 	/// This method is an adapted version of `bdk_bitcoind_rpc::Emitter::mempool`. It emits each
 	/// transaction only once, unless we cannot assume the transaction's ancestors are already
 	/// emitted.
-	async fn get_mempool_transactions_and_timestamp_at_height(
+	pub(crate) async fn get_mempool_transactions_and_timestamp_at_height(
 		&self, best_processed_height: u32,
 	) -> std::io::Result<Vec<(Transaction, u64)>> {
-		self.get_mempool_transactions_and_timestamp_at_height_inner(
-			&self.latest_mempool_timestamp,
-			&self.mempool_entries_cache,
-			&self.mempool_txs_cache,
-			best_processed_height,
-		)
-		.await
+		match self {
+			BitcoindClient::Rpc {
+				latest_mempool_timestamp,
+				mempool_entries_cache,
+				mempool_txs_cache,
+				..
+			} => {
+				self.get_mempool_transactions_and_timestamp_at_height_inner(
+					latest_mempool_timestamp,
+					mempool_entries_cache,
+					mempool_txs_cache,
+					best_processed_height,
+				)
+				.await
+			},
+			BitcoindClient::Rest {
+				latest_mempool_timestamp,
+				mempool_entries_cache,
+				mempool_txs_cache,
+				..
+			} => {
+				self.get_mempool_transactions_and_timestamp_at_height_inner(
+					latest_mempool_timestamp,
+					mempool_entries_cache,
+					mempool_txs_cache,
+					best_processed_height,
+				)
+				.await
+			},
+		}
 	}
 
 	async fn get_mempool_transactions_and_timestamp_at_height_inner(
@@ -329,16 +536,28 @@ impl BitcoindRpcClient {
 	async fn get_evicted_mempool_txids_and_timestamp(
 		&self, unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<Vec<(Txid, u64)>> {
-		self.get_evicted_mempool_txids_and_timestamp_inner(
-			&self.latest_mempool_timestamp,
-			&self.mempool_entries_cache,
-			unconfirmed_txids,
-		)
-		.await
+		match self {
+			BitcoindClient::Rpc { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+				Self::get_evicted_mempool_txids_and_timestamp_inner(
+					latest_mempool_timestamp,
+					mempool_entries_cache,
+					unconfirmed_txids,
+				)
+				.await
+			},
+			BitcoindClient::Rest { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+				Self::get_evicted_mempool_txids_and_timestamp_inner(
+					latest_mempool_timestamp,
+					mempool_entries_cache,
+					unconfirmed_txids,
+				)
+				.await
+			},
+		}
 	}
 
 	async fn get_evicted_mempool_txids_and_timestamp_inner(
-		&self, latest_mempool_timestamp: &AtomicU64,
+		latest_mempool_timestamp: &AtomicU64,
 		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
 		unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<Vec<(Txid, u64)>> {
@@ -353,21 +572,42 @@ impl BitcoindRpcClient {
 	}
 }
 
-impl BlockSource for BitcoindRpcClient {
+impl BlockSource for BitcoindClient {
 	fn get_header<'a>(
-		&'a self, header_hash: &'a BlockHash, height_hint: Option<u32>,
+		&'a self, header_hash: &'a bitcoin::BlockHash, height_hint: Option<u32>,
 	) -> AsyncBlockSourceResult<'a, BlockHeaderData> {
-		Box::pin(async move { self.rpc_client.get_header(header_hash, height_hint).await })
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Box::pin(async move { rpc_client.get_header(header_hash, height_hint).await })
+			},
+			BitcoindClient::Rest { rest_client, .. } => {
+				Box::pin(async move { rest_client.get_header(header_hash, height_hint).await })
+			},
+		}
 	}
 
 	fn get_block<'a>(
-		&'a self, header_hash: &'a BlockHash,
+		&'a self, header_hash: &'a bitcoin::BlockHash,
 	) -> AsyncBlockSourceResult<'a, BlockData> {
-		Box::pin(async move { self.rpc_client.get_block(header_hash).await })
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Box::pin(async move { rpc_client.get_block(header_hash).await })
+			},
+			BitcoindClient::Rest { rest_client, .. } => {
+				Box::pin(async move { rest_client.get_block(header_hash).await })
+			},
+		}
 	}
 
-	fn get_best_block(&self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
-		Box::pin(async move { self.rpc_client.get_best_block().await })
+	fn get_best_block(&self) -> AsyncBlockSourceResult<(bitcoin::BlockHash, Option<u32>)> {
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Box::pin(async move { rpc_client.get_best_block().await })
+			},
+			BitcoindClient::Rest { rest_client, .. } => {
+				Box::pin(async move { rest_client.get_best_block().await })
+			},
+		}
 	}
 }
 
@@ -395,7 +635,7 @@ impl TryInto<FeeResponse> for JsonResponse {
 	}
 }
 
-pub struct MempoolMinFeeResponse(pub FeeRate);
+pub(crate) struct MempoolMinFeeResponse(pub FeeRate);
 
 impl TryInto<MempoolMinFeeResponse> for JsonResponse {
 	type Error = std::io::Error;
@@ -413,7 +653,7 @@ impl TryInto<MempoolMinFeeResponse> for JsonResponse {
 	}
 }
 
-pub struct GetRawTransactionResponse(pub Transaction);
+pub(crate) struct GetRawTransactionResponse(pub Transaction);
 
 impl TryInto<GetRawTransactionResponse> for JsonResponse {
 	type Error = std::io::Error;
@@ -598,5 +838,28 @@ impl Listen for ChainListener {
 		self.channel_manager.block_disconnected(header, height);
 		self.chain_monitor.block_disconnected(header, height);
 		self.output_sweeper.block_disconnected(header, height);
+	}
+}
+
+pub(crate) fn rpc_credentials(rpc_user: String, rpc_password: String) -> String {
+	BASE64_STANDARD.encode(format!("{}:{}", rpc_user, rpc_password))
+}
+
+pub(crate) fn endpoint(host: String, port: u16) -> HttpEndpoint {
+	HttpEndpoint::for_host(host).with_port(port)
+}
+
+#[derive(Debug)]
+pub struct HttpError {
+	pub(crate) status_code: String,
+	pub(crate) contents: Vec<u8>,
+}
+
+impl std::error::Error for HttpError {}
+
+impl std::fmt::Display for HttpError {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		let contents = String::from_utf8_lossy(&self.contents);
+		write!(f, "status_code: {}, contents: {}", self.status_code, contents)
 	}
 }
