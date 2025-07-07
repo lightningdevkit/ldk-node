@@ -179,7 +179,7 @@ uniffi::include_scaffolding!("ldk_node");
 pub struct Node {
 	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
-	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
+	background_processor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
@@ -578,8 +578,7 @@ impl Node {
 		};
 
 		let background_stop_logger = Arc::clone(&self.logger);
-		let event_handling_stopped_sender = self.event_handling_stopped_sender.clone();
-		runtime.spawn(async move {
+		let handle = runtime.spawn(async move {
 			process_events_async(
 				background_persister,
 				|e| background_event_handler.handle_event(e),
@@ -600,19 +599,9 @@ impl Node {
 				panic!("Failed to process events");
 			});
 			log_debug!(background_stop_logger, "Events processing stopped.",);
-
-			match event_handling_stopped_sender.send(()) {
-				Ok(_) => (),
-				Err(e) => {
-					log_error!(
-						background_stop_logger,
-						"Failed to send 'events handling stopped' signal. This should never happen: {}",
-						e
-						);
-					debug_assert!(false);
-				},
-			}
 		});
+		debug_assert!(self.background_processor_task.lock().unwrap().is_none());
+		*self.background_processor_task.lock().unwrap() = Some(handle);
 
 		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 			let mut stop_liquidity_handler = self.stop_sender.subscribe();
@@ -669,39 +658,42 @@ impl Node {
 		// Disconnect all peers.
 		self.peer_manager.disconnect_all_peers();
 
-		// Wait until event handling stopped, at least until a timeout is reached.
-		let event_handling_stopped_logger = Arc::clone(&self.logger);
-		let mut event_handling_stopped_receiver = self.event_handling_stopped_sender.subscribe();
+		// Stop any runtime-dependant chain sources.
+		self.chain_source.stop();
 
-		let timeout_res = tokio::task::block_in_place(move || {
-			runtime.block_on(async {
-				tokio::time::timeout(
-					Duration::from_secs(LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS),
-					event_handling_stopped_receiver.changed(),
-				)
-				.await
-			})
-		});
+		// Wait until background processing stopped, at least until a timeout is reached.
+		if let Some(background_processor_task) =
+			self.background_processor_task.lock().unwrap().take()
+		{
+			let abort_handle = background_processor_task.abort_handle();
+			let timeout_res = tokio::task::block_in_place(move || {
+				runtime.block_on(async {
+					tokio::time::timeout(
+						Duration::from_secs(LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS),
+						background_processor_task,
+					)
+					.await
+				})
+			});
 
-		match timeout_res {
-			Ok(stop_res) => match stop_res {
-				Ok(()) => {},
-				Err(e) => {
-					log_error!(
-						event_handling_stopped_logger,
-						"Stopping event handling failed. This should never happen: {}",
-						e
-					);
-					panic!("Stopping event handling failed. This should never happen.");
+			match timeout_res {
+				Ok(stop_res) => match stop_res {
+					Ok(()) => {},
+					Err(e) => {
+						abort_handle.abort();
+						log_error!(
+							self.logger,
+							"Stopping event handling failed. This should never happen: {}",
+							e
+						);
+						panic!("Stopping event handling failed. This should never happen.");
+					},
 				},
-			},
-			Err(e) => {
-				log_error!(
-					event_handling_stopped_logger,
-					"Stopping event handling timed out: {}",
-					e
-				);
-			},
+				Err(e) => {
+					abort_handle.abort();
+					log_error!(self.logger, "Stopping event handling timed out: {}", e);
+				},
+			}
 		}
 
 		#[cfg(tokio_unstable)]
