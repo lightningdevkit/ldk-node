@@ -577,7 +577,6 @@ impl Node {
 			})
 		};
 
-		let background_stop_logger = Arc::clone(&self.logger);
 		let handle = runtime.spawn(async move {
 			process_events_async(
 				background_persister,
@@ -598,7 +597,6 @@ impl Node {
 				log_error!(background_error_logger, "Failed to process events: {}", e);
 				panic!("Failed to process events");
 			});
-			log_debug!(background_stop_logger, "Events processing stopped.",);
 		});
 		debug_assert!(self.background_processor_task.lock().unwrap().is_none());
 		*self.background_processor_task.lock().unwrap() = Some(handle);
@@ -644,7 +642,7 @@ impl Node {
 
 		// Stop the runtime.
 		match self.stop_sender.send(()) {
-			Ok(_) => (),
+			Ok(_) => log_trace!(self.logger, "Sent shutdown signal to background tasks."),
 			Err(e) => {
 				log_error!(
 					self.logger,
@@ -657,9 +655,11 @@ impl Node {
 
 		// Disconnect all peers.
 		self.peer_manager.disconnect_all_peers();
+		log_debug!(self.logger, "Disconnected all network peers.");
 
 		// Stop any runtime-dependant chain sources.
 		self.chain_source.stop();
+		log_debug!(self.logger, "Stopped chain sources.");
 
 		// Wait until background processing stopped, at least until a timeout is reached.
 		if let Some(background_processor_task) =
@@ -678,7 +678,7 @@ impl Node {
 
 			match timeout_res {
 				Ok(stop_res) => match stop_res {
-					Ok(()) => {},
+					Ok(()) => log_debug!(self.logger, "Stopped background processing of events."),
 					Err(e) => {
 						abort_handle.abort();
 						log_error!(
