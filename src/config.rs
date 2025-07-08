@@ -101,11 +101,12 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `trusted_peers_0conf`                  | []                 |
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
-/// | `anchor_channels_config`               | Some(..)           |
+/// | `anchor_channels_config`                | Some(..)           |
 /// | `sending_parameters`                   | None               |
+/// | `inbound_channels_config` .             | ::Default          |
 ///
-/// See [`AnchorChannelsConfig`] and [`SendingParameters`] for more information regarding their
-/// respective default values.
+/// See [`AnchorChannelsConfig`], [`InboundChannelsConfig`] and [`SendingParameters`]
+/// for more information regarding their respective default values.
 ///
 /// [`Node`]: crate::Node
 pub struct Config {
@@ -167,6 +168,11 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub sending_parameters: Option<SendingParameters>,
+	/// Configuration options for inbound channels requests.
+	///
+	/// These options can be used to customize the behavior whenever a channel is requested by a
+	/// remote peer.
+	pub inbound_channels_config: InboundChannelsConfig,
 }
 
 impl Default for Config {
@@ -181,7 +187,41 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
 			node_alias: None,
+			inbound_channels_config: InboundChannelsConfig::default(),
 		}
+	}
+}
+
+/// Configuration options for inbound channels requests.
+///
+/// These options can be used to customize the behavior whenever a channel is requested by a
+/// remote peer.
+///
+/// ### Defaults
+///
+/// | Parameter                           | Value  |
+/// |-------------------------------------|--------|
+/// | `reject_announced_channel_requests` | false  |
+/// | `minimum_channel_size` 			  | None   |
+///
+
+#[derive(Debug, Clone)]
+pub struct InboundChannelsConfig {
+	/// Boolean flag indicating whether to reject announced channel requests.
+	///
+	/// If `true`, the node will reject any inbound channel requests with announced channel
+	/// requests.
+	pub reject_announced_channel_requests: bool,
+	/// Optional minimum channel size in satoshis.
+	///
+	/// If set, the node will reject any inbound channel requests with a channel size smaller than
+	/// the specified value.
+	pub minimum_channel_size: Option<u64>,
+}
+
+impl Default for InboundChannelsConfig {
+	fn default() -> Self {
+		Self { reject_announced_channel_requests: false, minimum_channel_size: None }
 	}
 }
 

@@ -139,6 +139,92 @@ fn channel_open_fails_when_funds_insufficient() {
 }
 
 #[test]
+fn channel_open_fails_when_inbound_channels_config_rejects_announced_channels() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let config_a = random_config(true);
+	let node_a = setup_node(&chain_source, config_a, None);
+	let mut config_b = random_config(true);
+	config_b.node_config.inbound_channels_config.reject_announced_channel_requests = true;
+
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 100_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	println!("\nA -- open_channel -> B");
+	node_a
+		.open_announced_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			20_000,
+			None,
+			None,
+		)
+		.unwrap();
+
+	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
+	assert!(node_a.list_peers().first().unwrap().is_persisted);
+	expect_event!(node_a, ChannelClosed);
+}
+
+#[test]
+fn channel_open_fails_when_inbound_channels_config_has_min_channel_size() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let config_a = random_config(true);
+	let node_a = setup_node(&chain_source, config_a, None);
+	let mut config_b = random_config(true);
+	config_b.node_config.inbound_channels_config.minimum_channel_size = Some(100_000);
+
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 100_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	println!("\nA -- open_channel -> B");
+	node_a
+		.open_announced_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			20_000,
+			None,
+			None,
+		)
+		.unwrap();
+
+	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
+	assert!(node_a.list_peers().first().unwrap().is_persisted);
+	expect_event!(node_a, ChannelClosed);
+}
+
+#[test]
 fn multi_hop_sending() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());

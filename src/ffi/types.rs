@@ -12,7 +12,7 @@
 
 pub use crate::config::{
 	default_config, AnchorChannelsConfig, BackgroundSyncConfig, ElectrumSyncConfig,
-	EsploraSyncConfig, MaxDustHTLCExposure,
+	EsploraSyncConfig, InboundChannelsConfig, MaxDustHTLCExposure,
 };
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig, OnchainPaymentInfo, PaymentInfo};

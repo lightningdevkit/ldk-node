@@ -13,11 +13,17 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	SendingParameters? sending_parameters;
+	InboundChannelsConfig inbound_channels_config;
 };
 
 dictionary AnchorChannelsConfig {
 	sequence<PublicKey> trusted_peers_no_reserve;
 	u64 per_channel_reserve_sats;
+};
+
+dictionary InboundChannelsConfig {
+	boolean reject_announced_channel_requests;
+	u64? minimum_channel_size;
 };
 
 dictionary BackgroundSyncConfig {

@@ -1079,6 +1079,27 @@ where
 				is_announced,
 				params: _,
 			} => {
+				if is_announced
+					&& self.config.inbound_channels_config.reject_announced_channel_requests
+				{
+					log_error!(
+						self.logger,
+						"Rejecting inbound announced channel from peer {} due to reject_announced_channel_requests configuration",
+						counterparty_node_id
+					);
+
+					self.channel_manager
+						.force_close_without_broadcasting_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+							"Channel request rejected".to_string(),
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to reject channel: {:?}", e)
+						});
+					return Ok(());
+				}
+
 				if is_announced {
 					if let Err(err) = may_announce_channel(&*self.config) {
 						log_error!(self.logger, "Rejecting inbound announced channel from peer {} due to missing configuration: {}", counterparty_node_id, err);
@@ -1094,6 +1115,29 @@ where
 							});
 						return Ok(());
 					}
+				}
+
+				if funding_satoshis
+					< self.config.inbound_channels_config.minimum_channel_size.unwrap_or(0)
+				{
+					log_error!(
+						self.logger,
+						"Rejecting inbound announced channel from peer {} due to minimum channel size of {}sats",
+						counterparty_node_id,
+						self.config.inbound_channels_config.minimum_channel_size.unwrap_or(0),
+					);
+
+					self.channel_manager
+						.force_close_without_broadcasting_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+							"Channel request rejected".to_string(),
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to reject channel: {:?}", e)
+						});
+
+					return Ok(());
 				}
 
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
