@@ -62,9 +62,16 @@ jobs:
           # Print Info
           java -version
           gradle --version
+          
+          GRADLE_VERSION=$(gradle --version | awk '/^Gradle/ {print $2}' | head -1)
+          if [ -z "$GRADLE_VERSION" ]; then
+            echo "Error: Failed to extract Gradle version." >&2
+            exit 1
+          fi
+          echo "Extracted Gradle Version: $GRADLE_VERSION"
 
           cd vss-server/java
-          gradle wrapper --gradle-version 8.1.1
+          gradle wrapper --gradle-version $GRADLE_VERSION
           ./gradlew --version
           ./gradlew build
 
