@@ -11,7 +11,10 @@ use crate::api::bolt11_receive::{handle_bolt11_receive_request, BOLT11_RECEIVE_P
 use crate::api::bolt11_send::{handle_bolt11_send_request, BOLT11_SEND_PATH};
 use crate::api::bolt12_receive::{handle_bolt12_receive_request, BOLT12_RECEIVE_PATH};
 use crate::api::bolt12_send::{handle_bolt12_send_request, BOLT12_SEND_PATH};
-use crate::api::close_channel::{handle_close_channel_request, CLOSE_CHANNEL_PATH};
+use crate::api::close_channel::{
+	handle_close_channel_request, handle_force_close_channel_request, CLOSE_CHANNEL_PATH,
+	FORCE_CLOSE_CHANNEL_PATH,
+};
 use crate::api::error::LdkServerError;
 use crate::api::error::LdkServerErrorCode::InvalidRequestError;
 use crate::api::get_balances::{handle_get_balances_request, GET_BALANCES};
@@ -84,6 +87,9 @@ impl Service<Request<Incoming>> for NodeService {
 			OPEN_CHANNEL_PATH => Box::pin(handle_request(context, req, handle_open_channel)),
 			CLOSE_CHANNEL_PATH => {
 				Box::pin(handle_request(context, req, handle_close_channel_request))
+			},
+			FORCE_CLOSE_CHANNEL_PATH => {
+				Box::pin(handle_request(context, req, handle_force_close_channel_request))
 			},
 			LIST_CHANNELS_PATH => {
 				Box::pin(handle_request(context, req, handle_list_channels_request))
