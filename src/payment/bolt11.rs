@@ -128,10 +128,19 @@ impl Bolt11Payment {
 				let amt_msat = invoice.amount_milli_satoshis().unwrap();
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
 
+				// Extract description from the invoice
+				let description = match invoice.description() {
+					lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(desc) => Some(desc.to_string()),
+					lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+						Some(crate::hex_utils::to_string(hash.0.as_ref()))
+					},
+				};
+
 				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					description,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -157,10 +166,19 @@ impl Bolt11Payment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
+						// Extract description from the invoice
+						let description = match invoice.description() {
+							lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(desc) => Some(desc.to_string()),
+							lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+								Some(crate::hex_utils::to_string(hash.0.as_ref()))
+							},
+						};
+						
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
 							preimage: None,
 							secret: payment_secret,
+							description,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -238,10 +256,19 @@ impl Bolt11Payment {
 					payee_pubkey
 				);
 
+				// Extract description from the invoice
+				let description = match invoice.description() {
+					lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(desc) => Some(desc.to_string()),
+					lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+						Some(crate::hex_utils::to_string(hash.0.as_ref()))
+					},
+				};
+
 				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					description,
 				};
 
 				let payment = PaymentDetails::new(
@@ -268,10 +295,19 @@ impl Bolt11Payment {
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
+						// Extract description from the invoice
+						let description = match invoice.description() {
+							lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(desc) => Some(desc.to_string()),
+							lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+								Some(crate::hex_utils::to_string(hash.0.as_ref()))
+							},
+						};
+						
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
 							preimage: None,
 							secret: payment_secret,
+							description,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -511,10 +547,20 @@ impl Bolt11Payment {
 		} else {
 			None
 		};
+		
+		// Extract description from the invoice
+		let description = match invoice.description() {
+			lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(desc) => Some(desc.to_string()),
+			lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+				Some(crate::hex_utils::to_string(hash.0.as_ref()))
+			},
+		};
+		
 		let kind = PaymentKind::Bolt11 {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
+			description,
 		};
 		let payment = PaymentDetails::new(
 			id,
@@ -723,12 +769,22 @@ impl Bolt11Payment {
 		let id = PaymentId(payment_hash.0);
 		let preimage =
 			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
+		
+		// Extract description from the invoice
+		let description = match invoice.description() {
+			lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(desc) => Some(desc.to_string()),
+			lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+				Some(crate::hex_utils::to_string(hash.0.as_ref()))
+			},
+		};
+		
 		let kind = PaymentKind::Bolt11Jit {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
 			counterparty_skimmed_fee_msat: None,
 			lsp_fee_limits,
+			description,
 		};
 		let payment = PaymentDetails::new(
 			id,
