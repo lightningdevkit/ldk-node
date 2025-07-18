@@ -87,6 +87,7 @@ const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 enum ChainDataSourceConfig {
 	Esplora {
 		server_url: String,
+		headers: HashMap<String, String>,
 		sync_config: Option<EsploraSyncConfig>,
 	},
 	Electrum {
@@ -295,8 +296,27 @@ impl NodeBuilder {
 	pub fn set_chain_source_esplora(
 		&mut self, server_url: String, sync_config: Option<EsploraSyncConfig>,
 	) -> &mut Self {
+		self.chain_data_source_config = Some(ChainDataSourceConfig::Esplora {
+			server_url,
+			headers: Default::default(),
+			sync_config,
+		});
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
+	///
+	/// The given `headers` will be included in all requests to the Esplora server, typically used for
+	/// authentication purposes.
+	///
+	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_esplora_with_headers(
+		&mut self, server_url: String, headers: HashMap<String, String>,
+		sync_config: Option<EsploraSyncConfig>,
+	) -> &mut Self {
 		self.chain_data_source_config =
-			Some(ChainDataSourceConfig::Esplora { server_url, sync_config });
+			Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config });
 		self
 	}
 
@@ -754,6 +774,24 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_chain_source_esplora(server_url, sync_config);
 	}
 
+	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
+	///
+	/// The given `headers` will be included in all requests to the Esplora server, typically used for
+	/// authentication purposes.
+	///
+	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_esplora_with_headers(
+		&self, server_url: String, headers: HashMap<String, String>,
+		sync_config: Option<EsploraSyncConfig>,
+	) {
+		self.inner.write().unwrap().set_chain_source_esplora_with_headers(
+			server_url,
+			headers,
+			sync_config,
+		);
+	}
+
 	/// Configures the [`Node`] instance to source its chain data from the given Electrum server.
 	///
 	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
@@ -1117,10 +1155,11 @@ fn build_with_store_internal(
 	));
 
 	let chain_source = match chain_data_source_config {
-		Some(ChainDataSourceConfig::Esplora { server_url, sync_config }) => {
+		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
 			Arc::new(ChainSource::new_esplora(
 				server_url.clone(),
+				headers.clone(),
 				sync_config,
 				Arc::clone(&wallet),
 				Arc::clone(&fee_estimator),
@@ -1187,6 +1226,7 @@ fn build_with_store_internal(
 			let sync_config = EsploraSyncConfig::default();
 			Arc::new(ChainSource::new_esplora(
 				server_url.clone(),
+				HashMap::new(),
 				sync_config,
 				Arc::clone(&wallet),
 				Arc::clone(&fee_estimator),
