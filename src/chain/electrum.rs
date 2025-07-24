@@ -32,7 +32,7 @@ use electrum_client::Client as ElectrumClient;
 use electrum_client::ConfigBuilder as ElectrumConfigBuilder;
 use electrum_client::{Batch, ElectrumApi};
 
-use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
+use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,7 +42,83 @@ const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
 const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 10;
 
-pub(crate) struct ElectrumRuntimeClient {
+pub(super) enum ElectrumRuntimeStatus {
+	Started(Arc<ElectrumRuntimeClient>),
+	Stopped {
+		pending_registered_txs: Vec<(Txid, ScriptBuf)>,
+		pending_registered_outputs: Vec<WatchedOutput>,
+	},
+}
+
+impl ElectrumRuntimeStatus {
+	pub(super) fn new() -> Self {
+		let pending_registered_txs = Vec::new();
+		let pending_registered_outputs = Vec::new();
+		Self::Stopped { pending_registered_txs, pending_registered_outputs }
+	}
+
+	pub(super) fn start(
+		&mut self, server_url: String, runtime: Arc<tokio::runtime::Runtime>, config: Arc<Config>,
+		logger: Arc<Logger>,
+	) -> Result<(), Error> {
+		match self {
+			Self::Stopped { pending_registered_txs, pending_registered_outputs } => {
+				let client = Arc::new(ElectrumRuntimeClient::new(
+					server_url.clone(),
+					runtime,
+					config,
+					logger,
+				)?);
+
+				// Apply any pending `Filter` entries
+				for (txid, script_pubkey) in pending_registered_txs.drain(..) {
+					client.register_tx(&txid, &script_pubkey);
+				}
+
+				for output in pending_registered_outputs.drain(..) {
+					client.register_output(output)
+				}
+
+				*self = Self::Started(client);
+			},
+			Self::Started(_) => {
+				debug_assert!(false, "We shouldn't call start if we're already started")
+			},
+		}
+		Ok(())
+	}
+
+	pub(super) fn stop(&mut self) {
+		*self = Self::new()
+	}
+
+	pub(super) fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
+		match self {
+			Self::Started(client) => Some(Arc::clone(&client)),
+			Self::Stopped { .. } => None,
+		}
+	}
+
+	pub(super) fn register_tx(&mut self, txid: &Txid, script_pubkey: &Script) {
+		match self {
+			Self::Started(client) => client.register_tx(txid, script_pubkey),
+			Self::Stopped { pending_registered_txs, .. } => {
+				pending_registered_txs.push((*txid, script_pubkey.to_owned()))
+			},
+		}
+	}
+
+	pub(super) fn register_output(&mut self, output: WatchedOutput) {
+		match self {
+			Self::Started(client) => client.register_output(output),
+			Self::Stopped { pending_registered_outputs, .. } => {
+				pending_registered_outputs.push(output)
+			},
+		}
+	}
+}
+
+pub(super) struct ElectrumRuntimeClient {
 	electrum_client: Arc<ElectrumClient>,
 	bdk_electrum_client: Arc<BdkElectrumClient<ElectrumClient>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
@@ -52,7 +128,7 @@ pub(crate) struct ElectrumRuntimeClient {
 }
 
 impl ElectrumRuntimeClient {
-	pub(crate) fn new(
+	pub(super) fn new(
 		server_url: String, runtime: Arc<tokio::runtime::Runtime>, config: Arc<Config>,
 		logger: Arc<Logger>,
 	) -> Result<Self, Error> {
@@ -82,7 +158,7 @@ impl ElectrumRuntimeClient {
 		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, config, logger })
 	}
 
-	pub(crate) async fn sync_confirmables(
+	pub(super) async fn sync_confirmables(
 		&self, confirmables: Vec<Arc<dyn Confirm + Sync + Send>>,
 	) -> Result<(), Error> {
 		let now = Instant::now();
@@ -116,7 +192,7 @@ impl ElectrumRuntimeClient {
 		Ok(res)
 	}
 
-	pub(crate) async fn get_full_scan_wallet_update(
+	pub(super) async fn get_full_scan_wallet_update(
 		&self, request: BdkFullScanRequest<BdkKeyChainKind>,
 		cached_txs: impl IntoIterator<Item = impl Into<Arc<Transaction>>>,
 	) -> Result<BdkFullScanResponse<BdkKeyChainKind>, Error> {
@@ -150,7 +226,7 @@ impl ElectrumRuntimeClient {
 			})
 	}
 
-	pub(crate) async fn get_incremental_sync_wallet_update(
+	pub(super) async fn get_incremental_sync_wallet_update(
 		&self, request: BdkSyncRequest<(BdkKeyChainKind, u32)>,
 		cached_txs: impl IntoIterator<Item = impl Into<Arc<Transaction>>>,
 	) -> Result<BdkSyncResponse, Error> {
@@ -179,7 +255,7 @@ impl ElectrumRuntimeClient {
 			})
 	}
 
-	pub(crate) async fn broadcast(&self, tx: Transaction) {
+	pub(super) async fn broadcast(&self, tx: Transaction) {
 		let electrum_client = Arc::clone(&self.electrum_client);
 
 		let txid = tx.compute_txid();
@@ -221,7 +297,7 @@ impl ElectrumRuntimeClient {
 		}
 	}
 
-	pub(crate) async fn get_fee_rate_cache_update(
+	pub(super) async fn get_fee_rate_cache_update(
 		&self,
 	) -> Result<HashMap<ConfirmationTarget, FeeRate>, Error> {
 		let electrum_client = Arc::clone(&self.electrum_client);
