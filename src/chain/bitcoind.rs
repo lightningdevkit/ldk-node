@@ -7,10 +7,8 @@
 
 use crate::types::{ChainMonitor, ChannelManager, Sweeper, Wallet};
 
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
-use bitcoin::{BlockHash, FeeRate, Transaction, Txid};
 use lightning::chain::Listen;
+
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpEndpoint, JsonResponse};
 use lightning_block_sync::poll::ValidatedBlockHeader;
@@ -19,8 +17,11 @@ use lightning_block_sync::rpc::{RpcClient, RpcError};
 use lightning_block_sync::{
 	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, Cache,
 };
-
 use serde::Serialize;
+
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use bitcoin::{BlockHash, FeeRate, Transaction, Txid};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
