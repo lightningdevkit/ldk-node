@@ -5,11 +5,11 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::chain::{ChainSource, DEFAULT_ESPLORA_SERVER_URL};
+use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, BitcoindRestClientConfig, Config,
-	ElectrumSyncConfig, EsploraSyncConfig, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	WALLET_KEYS_SEED_LEN,
+	ElectrumSyncConfig, EsploraSyncConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME,
+	DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
