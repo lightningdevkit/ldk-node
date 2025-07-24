@@ -187,7 +187,11 @@ impl ElectrumRuntimeStatus {
 	}
 }
 
-pub(crate) enum ChainSource {
+pub(crate) struct ChainSource {
+	kind: ChainSourceKind,
+}
+
+enum ChainSourceKind {
 	Esplora {
 		sync_config: EsploraSyncConfig,
 		esplora_client: EsploraAsyncClient,
@@ -262,7 +266,7 @@ impl ChainSource {
 
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
-		Self::Esplora {
+		let kind = ChainSourceKind::Esplora {
 			sync_config,
 			esplora_client,
 			onchain_wallet,
@@ -275,7 +279,9 @@ impl ChainSource {
 			config,
 			logger,
 			node_metrics,
-		}
+		};
+
+		Self { kind }
 	}
 
 	pub(crate) fn new_electrum(
@@ -287,7 +293,7 @@ impl ChainSource {
 		let electrum_runtime_status = RwLock::new(ElectrumRuntimeStatus::new());
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
-		Self::Electrum {
+		let kind = ChainSourceKind::Electrum {
 			server_url,
 			sync_config,
 			electrum_runtime_status,
@@ -300,7 +306,8 @@ impl ChainSource {
 			config,
 			logger,
 			node_metrics,
-		}
+		};
+		Self { kind }
 	}
 
 	pub(crate) fn new_bitcoind_rpc(
@@ -319,7 +326,7 @@ impl ChainSource {
 		let header_cache = tokio::sync::Mutex::new(BoundedHeaderCache::new());
 		let latest_chain_tip = RwLock::new(None);
 		let wallet_polling_status = Mutex::new(WalletSyncStatus::Completed);
-		Self::Bitcoind {
+		let kind = ChainSourceKind::Bitcoind {
 			api_client,
 			header_cache,
 			latest_chain_tip,
@@ -331,7 +338,8 @@ impl ChainSource {
 			config,
 			logger,
 			node_metrics,
-		}
+		};
+		Self { kind }
 	}
 
 	pub(crate) fn new_bitcoind_rest(
@@ -354,7 +362,7 @@ impl ChainSource {
 		let latest_chain_tip = RwLock::new(None);
 		let wallet_polling_status = Mutex::new(WalletSyncStatus::Completed);
 
-		Self::Bitcoind {
+		let kind = ChainSourceKind::Bitcoind {
 			api_client,
 			header_cache,
 			latest_chain_tip,
@@ -366,12 +374,19 @@ impl ChainSource {
 			config,
 			logger,
 			node_metrics,
-		}
+		};
+		Self { kind }
 	}
 
 	pub(crate) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
-		match self {
-			Self::Electrum { server_url, electrum_runtime_status, config, logger, .. } => {
+		match &self.kind {
+			ChainSourceKind::Electrum {
+				server_url,
+				electrum_runtime_status,
+				config,
+				logger,
+				..
+			} => {
 				electrum_runtime_status.write().unwrap().start(
 					server_url.clone(),
 					Arc::clone(&runtime),
@@ -387,8 +402,8 @@ impl ChainSource {
 	}
 
 	pub(crate) fn stop(&self) {
-		match self {
-			Self::Electrum { electrum_runtime_status, .. } => {
+		match &self.kind {
+			ChainSourceKind::Electrum { electrum_runtime_status, .. } => {
 				electrum_runtime_status.write().unwrap().stop();
 			},
 			_ => {
@@ -398,9 +413,17 @@ impl ChainSource {
 	}
 
 	pub(crate) fn as_utxo_source(&self) -> Option<Arc<dyn UtxoSource>> {
-		match self {
-			Self::Bitcoind { api_client, .. } => Some(api_client.utxo_source()),
+		match &self.kind {
+			ChainSourceKind::Bitcoind { api_client, .. } => Some(api_client.utxo_source()),
 			_ => None,
+		}
+	}
+
+	pub(crate) fn is_transaction_based(&self) -> bool {
+		match &self.kind {
+			ChainSourceKind::Esplora { .. } => true,
+			ChainSourceKind::Electrum { .. } => true,
+			ChainSourceKind::Bitcoind { .. } => false,
 		}
 	}
 
@@ -409,8 +432,8 @@ impl ChainSource {
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) {
-		match self {
-			Self::Esplora { sync_config, logger, .. } => {
+		match &self.kind {
+			ChainSourceKind::Esplora { sync_config, logger, .. } => {
 				if let Some(background_sync_config) = sync_config.background_sync_config.as_ref() {
 					self.start_tx_based_sync_loop(
 						stop_sync_receiver,
@@ -430,7 +453,7 @@ impl ChainSource {
 					return;
 				}
 			},
-			Self::Electrum { sync_config, logger, .. } => {
+			ChainSourceKind::Electrum { sync_config, logger, .. } => {
 				if let Some(background_sync_config) = sync_config.background_sync_config.as_ref() {
 					self.start_tx_based_sync_loop(
 						stop_sync_receiver,
@@ -450,7 +473,7 @@ impl ChainSource {
 					return;
 				}
 			},
-			Self::Bitcoind {
+			ChainSourceKind::Bitcoind {
 				api_client,
 				header_cache,
 				latest_chain_tip,
@@ -681,8 +704,8 @@ impl ChainSource {
 	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum,
 	// etc.)
 	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
-		match self {
-			Self::Esplora {
+		match &self.kind {
+			ChainSourceKind::Esplora {
 				esplora_client,
 				onchain_wallet,
 				onchain_wallet_sync_status,
@@ -795,7 +818,7 @@ impl ChainSource {
 
 				res
 			},
-			Self::Electrum {
+			ChainSourceKind::Electrum {
 				electrum_runtime_status,
 				onchain_wallet,
 				onchain_wallet_sync_status,
@@ -887,7 +910,7 @@ impl ChainSource {
 
 				res
 			},
-			Self::Bitcoind { .. } => {
+			ChainSourceKind::Bitcoind { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
 				// `ChainPoller`. So nothing to do here.
 				unreachable!("Onchain wallet will be synced via chain polling")
@@ -901,8 +924,8 @@ impl ChainSource {
 		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		match self {
-			Self::Esplora {
+		match &self.kind {
+			ChainSourceKind::Esplora {
 				tx_sync,
 				lightning_wallet_sync_status,
 				kv_store,
@@ -986,7 +1009,7 @@ impl ChainSource {
 
 				res
 			},
-			Self::Electrum {
+			ChainSourceKind::Electrum {
 				electrum_runtime_status,
 				lightning_wallet_sync_status,
 				kv_store,
@@ -1057,7 +1080,7 @@ impl ChainSource {
 
 				res
 			},
-			Self::Bitcoind { .. } => {
+			ChainSourceKind::Bitcoind { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
 				// `ChainPoller`. So nothing to do here.
 				unreachable!("Lightning wallet will be synced via chain polling")
@@ -1069,18 +1092,18 @@ impl ChainSource {
 		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		match self {
-			Self::Esplora { .. } => {
+		match &self.kind {
+			ChainSourceKind::Esplora { .. } => {
 				// In Esplora mode we sync lightning and onchain wallets via
 				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
 				unreachable!("Listeners will be synced via transction-based syncing")
 			},
-			Self::Electrum { .. } => {
+			ChainSourceKind::Electrum { .. } => {
 				// In Electrum mode we sync lightning and onchain wallets via
 				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
 				unreachable!("Listeners will be synced via transction-based syncing")
 			},
-			Self::Bitcoind {
+			ChainSourceKind::Bitcoind {
 				api_client,
 				header_cache,
 				latest_chain_tip,
@@ -1220,8 +1243,8 @@ impl ChainSource {
 	}
 
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
-		match self {
-			Self::Esplora {
+		match &self.kind {
+			ChainSourceKind::Esplora {
 				esplora_client,
 				fee_estimator,
 				config,
@@ -1305,7 +1328,7 @@ impl ChainSource {
 
 				Ok(())
 			},
-			Self::Electrum {
+			ChainSourceKind::Electrum {
 				electrum_runtime_status,
 				fee_estimator,
 				kv_store,
@@ -1350,7 +1373,7 @@ impl ChainSource {
 
 				Ok(())
 			},
-			Self::Bitcoind {
+			ChainSourceKind::Bitcoind {
 				api_client,
 				fee_estimator,
 				config,
@@ -1483,8 +1506,8 @@ impl ChainSource {
 	}
 
 	pub(crate) async fn process_broadcast_queue(&self) {
-		match self {
-			Self::Esplora { esplora_client, tx_broadcaster, logger, .. } => {
+		match &self.kind {
+			ChainSourceKind::Esplora { esplora_client, tx_broadcaster, logger, .. } => {
 				let mut receiver = tx_broadcaster.get_broadcast_queue().await;
 				while let Some(next_package) = receiver.recv().await {
 					for tx in &next_package {
@@ -1560,7 +1583,7 @@ impl ChainSource {
 					}
 				}
 			},
-			Self::Electrum { electrum_runtime_status, tx_broadcaster, .. } => {
+			ChainSourceKind::Electrum { electrum_runtime_status, tx_broadcaster, .. } => {
 				let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 					electrum_runtime_status.read().unwrap().client().as_ref()
 				{
@@ -1580,7 +1603,7 @@ impl ChainSource {
 					}
 				}
 			},
-			Self::Bitcoind { api_client, tx_broadcaster, logger, .. } => {
+			ChainSourceKind::Bitcoind { api_client, tx_broadcaster, logger, .. } => {
 				// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
 				// features, we should eventually switch to use `submitpackage` via the
 				// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
@@ -1640,21 +1663,21 @@ impl ChainSource {
 
 impl Filter for ChainSource {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
-		match self {
-			Self::Esplora { tx_sync, .. } => tx_sync.register_tx(txid, script_pubkey),
-			Self::Electrum { electrum_runtime_status, .. } => {
+		match &self.kind {
+			ChainSourceKind::Esplora { tx_sync, .. } => tx_sync.register_tx(txid, script_pubkey),
+			ChainSourceKind::Electrum { electrum_runtime_status, .. } => {
 				electrum_runtime_status.write().unwrap().register_tx(txid, script_pubkey)
 			},
-			Self::Bitcoind { .. } => (),
+			ChainSourceKind::Bitcoind { .. } => (),
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
-		match self {
-			Self::Esplora { tx_sync, .. } => tx_sync.register_output(output),
-			Self::Electrum { electrum_runtime_status, .. } => {
+		match &self.kind {
+			ChainSourceKind::Esplora { tx_sync, .. } => tx_sync.register_output(output),
+			ChainSourceKind::Electrum { electrum_runtime_status, .. } => {
 				electrum_runtime_status.write().unwrap().register_output(output)
 			},
-			Self::Bitcoind { .. } => (),
+			ChainSourceKind::Bitcoind { .. } => (),
 		}
 	}
 }
