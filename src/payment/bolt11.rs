@@ -141,6 +141,7 @@ impl Bolt11Payment {
 					preimage: None,
 					secret: payment_secret,
 					description,
+					bolt11: Some(invoice.to_string()),
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -179,6 +180,7 @@ impl Bolt11Payment {
 							preimage: None,
 							secret: payment_secret,
 							description,
+							bolt11: Some(invoice.to_string()),
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -269,6 +271,7 @@ impl Bolt11Payment {
 					preimage: None,
 					secret: payment_secret,
 					description,
+					bolt11: Some(invoice.to_string()),
 				};
 
 				let payment = PaymentDetails::new(
@@ -308,6 +311,7 @@ impl Bolt11Payment {
 							preimage: None,
 							secret: payment_secret,
 							description,
+							bolt11: Some(invoice.to_string()),
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -561,6 +565,7 @@ impl Bolt11Payment {
 			preimage,
 			secret: Some(payment_secret.clone()),
 			description,
+			bolt11: Some(invoice.to_string()),
 		};
 		let payment = PaymentDetails::new(
 			id,
@@ -785,6 +790,7 @@ impl Bolt11Payment {
 			counterparty_skimmed_fee_msat: None,
 			lsp_fee_limits,
 			description,
+			bolt11: Some(invoice.to_string()),
 		};
 		let payment = PaymentDetails::new(
 			id,
