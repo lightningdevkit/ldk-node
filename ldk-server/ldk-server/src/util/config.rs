@@ -1,5 +1,6 @@
 use ldk_node::bitcoin::Network;
 use ldk_node::lightning::ln::msgs::SocketAddress;
+use ldk_node::lightning::routing::gossip::NodeAlias;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -11,6 +12,7 @@ use std::{fs, io};
 #[derive(Debug)]
 pub struct Config {
 	pub listening_addr: SocketAddress,
+	pub alias: Option<NodeAlias>,
 	pub network: Network,
 	pub rest_service_addr: SocketAddr,
 	pub storage_dir_path: String,
@@ -48,6 +50,21 @@ impl TryFrom<TomlConfig> for Config {
 				)
 			})?;
 
+		let alias = if let Some(alias_str) = toml_config.node.alias {
+			let mut bytes = [0u8; 32];
+			let alias_bytes = alias_str.trim().as_bytes();
+			if alias_bytes.len() > 32 {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"node.alias must be at most 32 bytes long.".to_string(),
+				));
+			}
+			bytes[..alias_bytes.len()].copy_from_slice(alias_bytes);
+			Some(NodeAlias(bytes))
+		} else {
+			None
+		};
+
 		let (rabbitmq_connection_string, rabbitmq_exchange_name) = {
 			let rabbitmq = toml_config.rabbitmq.unwrap_or(RabbitmqConfig {
 				connection_string: String::new(),
@@ -77,6 +94,7 @@ impl TryFrom<TomlConfig> for Config {
 		Ok(Config {
 			listening_addr,
 			network: toml_config.node.network,
+			alias,
 			rest_service_addr,
 			storage_dir_path: toml_config.storage.disk.dir_path,
 			bitcoind_rpc_addr,
@@ -104,6 +122,7 @@ struct NodeConfig {
 	network: Network,
 	listening_address: String,
 	rest_service_address: String,
+	alias: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -209,6 +228,7 @@ mod tests {
 			network = "regtest"
 			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
+			alias = "LDK Server"
 			
 			[storage.disk]
 			dir_path = "/tmp"
@@ -235,9 +255,14 @@ mod tests {
 
 		fs::write(storage_path.join(config_file_name), toml_config).unwrap();
 
+		let mut bytes = [0u8; 32];
+		let alias = "LDK Server";
+		bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+
 		let config = load_config(storage_path.join(config_file_name)).unwrap();
 		let expected = Config {
 			listening_addr: SocketAddress::from_str("localhost:3001").unwrap(),
+			alias: Some(NodeAlias(bytes)),
 			network: Network::Regtest,
 			rest_service_addr: SocketAddr::from_str("127.0.0.1:3002").unwrap(),
 			storage_dir_path: "/tmp".to_string(),
