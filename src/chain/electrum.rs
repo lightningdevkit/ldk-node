@@ -5,16 +5,21 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
+
 use crate::config::{
-	Config, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
-	LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
+	Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
+	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::error::Error;
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
-	ConfirmationTarget,
+	ConfirmationTarget, OnchainFeeEstimator,
 };
+use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::NodeMetrics;
 
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
@@ -25,6 +30,7 @@ use bdk_chain::bdk_core::spk_client::FullScanResponse as BdkFullScanResponse;
 use bdk_chain::bdk_core::spk_client::SyncRequest as BdkSyncRequest;
 use bdk_chain::bdk_core::spk_client::SyncResponse as BdkSyncResponse;
 use bdk_wallet::KeychainKind as BdkKeyChainKind;
+use bdk_wallet::Update as BdkUpdate;
 
 use bdk_electrum::BdkElectrumClient;
 
@@ -35,14 +41,279 @@ use electrum_client::{Batch, ElectrumApi};
 use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
 const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 10;
 
-pub(super) enum ElectrumRuntimeStatus {
+pub(super) struct ElectrumChainSource {
+	server_url: String,
+	pub(super) sync_config: ElectrumSyncConfig,
+	electrum_runtime_status: RwLock<ElectrumRuntimeStatus>,
+	onchain_wallet: Arc<Wallet>,
+	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
+	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
+	fee_estimator: Arc<OnchainFeeEstimator>,
+	tx_broadcaster: Arc<Broadcaster>,
+	kv_store: Arc<DynStore>,
+	config: Arc<Config>,
+	logger: Arc<Logger>,
+	node_metrics: Arc<RwLock<NodeMetrics>>,
+}
+
+impl ElectrumChainSource {
+	pub(super) fn new(
+		server_url: String, sync_config: ElectrumSyncConfig, onchain_wallet: Arc<Wallet>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
+	) -> Self {
+		let electrum_runtime_status = RwLock::new(ElectrumRuntimeStatus::new());
+		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		Self {
+			server_url,
+			sync_config,
+			electrum_runtime_status,
+			onchain_wallet,
+			onchain_wallet_sync_status,
+			lightning_wallet_sync_status,
+			fee_estimator,
+			tx_broadcaster,
+			kv_store,
+			config,
+			logger: Arc::clone(&logger),
+			node_metrics,
+		}
+	}
+
+	pub(super) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
+		self.electrum_runtime_status.write().unwrap().start(
+			self.server_url.clone(),
+			Arc::clone(&runtime),
+			Arc::clone(&self.config),
+			Arc::clone(&self.logger),
+		)
+	}
+
+	pub(super) fn stop(&self) {
+		self.electrum_runtime_status.write().unwrap().stop();
+	}
+
+	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(
+					false,
+					"We should have started the chain source before syncing the onchain wallet"
+				);
+				return Err(Error::FeerateEstimationUpdateFailed);
+			};
+		let receiver_res = {
+			let mut status_lock = self.onchain_wallet_sync_status.lock().unwrap();
+			status_lock.register_or_subscribe_pending_sync()
+		};
+		if let Some(mut sync_receiver) = receiver_res {
+			log_info!(self.logger, "Sync in progress, skipping.");
+			return sync_receiver.recv().await.map_err(|e| {
+				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
+				Error::WalletOperationFailed
+			})?;
+		}
+
+		// If this is our first sync, do a full scan with the configured gap limit.
+		// Otherwise just do an incremental sync.
+		let incremental_sync =
+			self.node_metrics.read().unwrap().latest_onchain_wallet_sync_timestamp.is_some();
+
+		let apply_wallet_update =
+			|update_res: Result<BdkUpdate, Error>, now: Instant| match update_res {
+				Ok(update) => match self.onchain_wallet.apply_update(update) {
+					Ok(()) => {
+						log_info!(
+							self.logger,
+							"{} of on-chain wallet finished in {}ms.",
+							if incremental_sync { "Incremental sync" } else { "Sync" },
+							now.elapsed().as_millis()
+						);
+						let unix_time_secs_opt =
+							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+						{
+							let mut locked_node_metrics = self.node_metrics.write().unwrap();
+							locked_node_metrics.latest_onchain_wallet_sync_timestamp =
+								unix_time_secs_opt;
+							write_node_metrics(
+								&*locked_node_metrics,
+								Arc::clone(&self.kv_store),
+								Arc::clone(&self.logger),
+							)?;
+						}
+						Ok(())
+					},
+					Err(e) => Err(e),
+				},
+				Err(e) => Err(e),
+			};
+
+		let cached_txs = self.onchain_wallet.get_cached_txs();
+
+		let res = if incremental_sync {
+			let incremental_sync_request = self.onchain_wallet.get_incremental_sync_request();
+			let incremental_sync_fut = electrum_client
+				.get_incremental_sync_wallet_update(incremental_sync_request, cached_txs);
+
+			let now = Instant::now();
+			let update_res = incremental_sync_fut.await.map(|u| u.into());
+			apply_wallet_update(update_res, now)
+		} else {
+			let full_scan_request = self.onchain_wallet.get_full_scan_request();
+			let full_scan_fut =
+				electrum_client.get_full_scan_wallet_update(full_scan_request, cached_txs);
+			let now = Instant::now();
+			let update_res = full_scan_fut.await.map(|u| u.into());
+			apply_wallet_update(update_res, now)
+		};
+
+		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+		res
+	}
+
+	pub(crate) async fn sync_lightning_wallet(
+		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) -> Result<(), Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(
+					false,
+					"We should have started the chain source before syncing the lightning wallet"
+				);
+				return Err(Error::TxSyncFailed);
+			};
+
+		let sync_cman = Arc::clone(&channel_manager);
+		let sync_cmon = Arc::clone(&chain_monitor);
+		let sync_sweeper = Arc::clone(&output_sweeper);
+		let confirmables = vec![
+			sync_cman as Arc<dyn Confirm + Sync + Send>,
+			sync_cmon as Arc<dyn Confirm + Sync + Send>,
+			sync_sweeper as Arc<dyn Confirm + Sync + Send>,
+		];
+
+		let receiver_res = {
+			let mut status_lock = self.lightning_wallet_sync_status.lock().unwrap();
+			status_lock.register_or_subscribe_pending_sync()
+		};
+		if let Some(mut sync_receiver) = receiver_res {
+			log_info!(self.logger, "Sync in progress, skipping.");
+			return sync_receiver.recv().await.map_err(|e| {
+				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
+				Error::TxSyncFailed
+			})?;
+		}
+
+		let res = electrum_client.sync_confirmables(confirmables).await;
+
+		if let Ok(_) = res {
+			let unix_time_secs_opt =
+				SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+			{
+				let mut locked_node_metrics = self.node_metrics.write().unwrap();
+				locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+				write_node_metrics(
+					&*locked_node_metrics,
+					Arc::clone(&self.kv_store),
+					Arc::clone(&self.logger),
+				)?;
+			}
+
+			periodically_archive_fully_resolved_monitors(
+				Arc::clone(&channel_manager),
+				Arc::clone(&chain_monitor),
+				Arc::clone(&self.kv_store),
+				Arc::clone(&self.logger),
+				Arc::clone(&self.node_metrics),
+			)?;
+		}
+
+		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+		res
+	}
+
+	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+			self.electrum_runtime_status.read().unwrap().client().as_ref()
+		{
+			Arc::clone(client)
+		} else {
+			debug_assert!(false, "We should have started the chain source before updating fees");
+			return Err(Error::FeerateEstimationUpdateFailed);
+		};
+
+		let now = Instant::now();
+
+		let new_fee_rate_cache = electrum_client.get_fee_rate_cache_update().await?;
+		self.fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
+
+		log_info!(
+			self.logger,
+			"Fee rate cache update finished in {}ms.",
+			now.elapsed().as_millis()
+		);
+
+		let unix_time_secs_opt =
+			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+		{
+			let mut locked_node_metrics = self.node_metrics.write().unwrap();
+			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
+			write_node_metrics(
+				&*locked_node_metrics,
+				Arc::clone(&self.kv_store),
+				Arc::clone(&self.logger),
+			)?;
+		}
+
+		Ok(())
+	}
+
+	pub(crate) async fn process_broadcast_queue(&self) {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(false, "We should have started the chain source before broadcasting");
+				return;
+			};
+
+		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
+		while let Some(next_package) = receiver.recv().await {
+			for tx in next_package {
+				electrum_client.broadcast(tx).await;
+			}
+		}
+	}
+}
+
+impl Filter for ElectrumChainSource {
+	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
+		self.electrum_runtime_status.write().unwrap().register_tx(txid, script_pubkey)
+	}
+	fn register_output(&self, output: lightning::chain::WatchedOutput) {
+		self.electrum_runtime_status.write().unwrap().register_output(output)
+	}
+}
+
+enum ElectrumRuntimeStatus {
 	Started(Arc<ElectrumRuntimeClient>),
 	Stopped {
 		pending_registered_txs: Vec<(Txid, ScriptBuf)>,
@@ -51,7 +322,7 @@ pub(super) enum ElectrumRuntimeStatus {
 }
 
 impl ElectrumRuntimeStatus {
-	pub(super) fn new() -> Self {
+	fn new() -> Self {
 		let pending_registered_txs = Vec::new();
 		let pending_registered_outputs = Vec::new();
 		Self::Stopped { pending_registered_txs, pending_registered_outputs }
@@ -92,14 +363,14 @@ impl ElectrumRuntimeStatus {
 		*self = Self::new()
 	}
 
-	pub(super) fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
+	fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
 		match self {
 			Self::Started(client) => Some(Arc::clone(&client)),
 			Self::Stopped { .. } => None,
 		}
 	}
 
-	pub(super) fn register_tx(&mut self, txid: &Txid, script_pubkey: &Script) {
+	fn register_tx(&mut self, txid: &Txid, script_pubkey: &Script) {
 		match self {
 			Self::Started(client) => client.register_tx(txid, script_pubkey),
 			Self::Stopped { pending_registered_txs, .. } => {
@@ -108,7 +379,7 @@ impl ElectrumRuntimeStatus {
 		}
 	}
 
-	pub(super) fn register_output(&mut self, output: WatchedOutput) {
+	fn register_output(&mut self, output: lightning::chain::WatchedOutput) {
 		match self {
 			Self::Started(client) => client.register_output(output),
 			Self::Stopped { pending_registered_outputs, .. } => {
@@ -118,7 +389,7 @@ impl ElectrumRuntimeStatus {
 	}
 }
 
-pub(super) struct ElectrumRuntimeClient {
+struct ElectrumRuntimeClient {
 	electrum_client: Arc<ElectrumClient>,
 	bdk_electrum_client: Arc<BdkElectrumClient<ElectrumClient>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
@@ -128,7 +399,7 @@ pub(super) struct ElectrumRuntimeClient {
 }
 
 impl ElectrumRuntimeClient {
-	pub(super) fn new(
+	fn new(
 		server_url: String, runtime: Arc<tokio::runtime::Runtime>, config: Arc<Config>,
 		logger: Arc<Logger>,
 	) -> Result<Self, Error> {
@@ -158,7 +429,7 @@ impl ElectrumRuntimeClient {
 		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, config, logger })
 	}
 
-	pub(super) async fn sync_confirmables(
+	async fn sync_confirmables(
 		&self, confirmables: Vec<Arc<dyn Confirm + Sync + Send>>,
 	) -> Result<(), Error> {
 		let now = Instant::now();
@@ -192,7 +463,7 @@ impl ElectrumRuntimeClient {
 		Ok(res)
 	}
 
-	pub(super) async fn get_full_scan_wallet_update(
+	async fn get_full_scan_wallet_update(
 		&self, request: BdkFullScanRequest<BdkKeyChainKind>,
 		cached_txs: impl IntoIterator<Item = impl Into<Arc<Transaction>>>,
 	) -> Result<BdkFullScanResponse<BdkKeyChainKind>, Error> {
@@ -226,7 +497,7 @@ impl ElectrumRuntimeClient {
 			})
 	}
 
-	pub(super) async fn get_incremental_sync_wallet_update(
+	async fn get_incremental_sync_wallet_update(
 		&self, request: BdkSyncRequest<(BdkKeyChainKind, u32)>,
 		cached_txs: impl IntoIterator<Item = impl Into<Arc<Transaction>>>,
 	) -> Result<BdkSyncResponse, Error> {
@@ -255,7 +526,7 @@ impl ElectrumRuntimeClient {
 			})
 	}
 
-	pub(super) async fn broadcast(&self, tx: Transaction) {
+	async fn broadcast(&self, tx: Transaction) {
 		let electrum_client = Arc::clone(&self.electrum_client);
 
 		let txid = tx.compute_txid();
@@ -297,7 +568,7 @@ impl ElectrumRuntimeClient {
 		}
 	}
 
-	pub(super) async fn get_fee_rate_cache_update(
+	async fn get_fee_rate_cache_update(
 		&self,
 	) -> Result<HashMap<ConfirmationTarget, FeeRate>, Error> {
 		let electrum_client = Arc::clone(&self.electrum_client);
