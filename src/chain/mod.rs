@@ -700,7 +700,9 @@ impl ChainSource {
 			}
 		}
 	}
+}
 
+impl ChainSource {
 	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum,
 	// etc.)
 	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
@@ -917,7 +919,9 @@ impl ChainSource {
 			},
 		}
 	}
+}
 
+impl ChainSource {
 	// Synchronize the Lightning wallet via transaction-based protocols (i.e., Esplora, Electrum,
 	// etc.)
 	pub(crate) async fn sync_lightning_wallet(
@@ -1087,7 +1091,9 @@ impl ChainSource {
 			},
 		}
 	}
+}
 
+impl ChainSource {
 	pub(crate) async fn poll_and_update_listeners(
 		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
@@ -1241,7 +1247,9 @@ impl ChainSource {
 			},
 		}
 	}
+}
 
+impl ChainSource {
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Esplora {
@@ -1504,7 +1512,9 @@ impl ChainSource {
 			},
 		}
 	}
+}
 
+impl ChainSource {
 	pub(crate) async fn process_broadcast_queue(&self) {
 		match &self.kind {
 			ChainSourceKind::Esplora { esplora_client, tx_broadcaster, logger, .. } => {
