@@ -25,7 +25,7 @@ use crate::io::{
 use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
 };
-use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
+use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::peer_store::PeerStore;
 use crate::runtime::Runtime;
@@ -1626,20 +1626,6 @@ fn build_with_store_internal(
 			}
 		},
 	};
-
-	match io::utils::migrate_deprecated_spendable_outputs(
-		Arc::clone(&output_sweeper),
-		Arc::clone(&kv_store),
-		Arc::clone(&logger),
-	) {
-		Ok(()) => {
-			log_info!(logger, "Successfully migrated OutputSweeper data.");
-		},
-		Err(e) => {
-			log_error!(logger, "Failed to migrate OutputSweeper data: {}", e);
-			return Err(BuildError::ReadFailed);
-		},
-	}
 
 	let event_queue = match io::utils::read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger))
 	{
