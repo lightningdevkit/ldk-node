@@ -212,15 +212,6 @@ impl EsploraChainSource {
 		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		let sync_cman = Arc::clone(&channel_manager);
-		let sync_cmon = Arc::clone(&chain_monitor);
-		let sync_sweeper = Arc::clone(&output_sweeper);
-		let confirmables = vec![
-			&*sync_cman as &(dyn Confirm + Sync + Send),
-			&*sync_cmon as &(dyn Confirm + Sync + Send),
-			&*sync_sweeper as &(dyn Confirm + Sync + Send),
-		];
-
 		let receiver_res = {
 			let mut status_lock = self.lightning_wallet_sync_status.lock().unwrap();
 			status_lock.register_or_subscribe_pending_sync()
@@ -233,58 +224,74 @@ impl EsploraChainSource {
 				Error::WalletOperationFailed
 			})?;
 		}
-		let res = {
-			let timeout_fut = tokio::time::timeout(
-				Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
-				self.tx_sync.sync(confirmables),
-			);
-			let now = Instant::now();
-			match timeout_fut.await {
-				Ok(res) => match res {
-					Ok(()) => {
-						log_info!(
-							self.logger,
-							"Sync of Lightning wallet finished in {}ms.",
-							now.elapsed().as_millis()
-						);
 
-						let unix_time_secs_opt =
-							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-						{
-							let mut locked_node_metrics = self.node_metrics.write().unwrap();
-							locked_node_metrics.latest_lightning_wallet_sync_timestamp =
-								unix_time_secs_opt;
-							write_node_metrics(
-								&*locked_node_metrics,
-								Arc::clone(&self.kv_store),
-								Arc::clone(&self.logger),
-							)?;
-						}
-
-						periodically_archive_fully_resolved_monitors(
-							Arc::clone(&channel_manager),
-							Arc::clone(&chain_monitor),
-							Arc::clone(&self.kv_store),
-							Arc::clone(&self.logger),
-							Arc::clone(&self.node_metrics),
-						)?;
-						Ok(())
-					},
-					Err(e) => {
-						log_error!(self.logger, "Sync of Lightning wallet failed: {}", e);
-						Err(e.into())
-					},
-				},
-				Err(e) => {
-					log_error!(self.logger, "Lightning wallet sync timed out: {}", e);
-					Err(Error::TxSyncTimeout)
-				},
-			}
-		};
+		let res =
+			self.sync_lightning_wallet_inner(channel_manager, chain_monitor, output_sweeper).await;
 
 		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
 		res
+	}
+
+	async fn sync_lightning_wallet_inner(
+		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) -> Result<(), Error> {
+		let sync_cman = Arc::clone(&channel_manager);
+		let sync_cmon = Arc::clone(&chain_monitor);
+		let sync_sweeper = Arc::clone(&output_sweeper);
+		let confirmables = vec![
+			&*sync_cman as &(dyn Confirm + Sync + Send),
+			&*sync_cmon as &(dyn Confirm + Sync + Send),
+			&*sync_sweeper as &(dyn Confirm + Sync + Send),
+		];
+
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
+			self.tx_sync.sync(confirmables),
+		);
+		let now = Instant::now();
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(()) => {
+					log_info!(
+						self.logger,
+						"Sync of Lightning wallet finished in {}ms.",
+						now.elapsed().as_millis()
+					);
+
+					let unix_time_secs_opt =
+						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+					{
+						let mut locked_node_metrics = self.node_metrics.write().unwrap();
+						locked_node_metrics.latest_lightning_wallet_sync_timestamp =
+							unix_time_secs_opt;
+						write_node_metrics(
+							&*locked_node_metrics,
+							Arc::clone(&self.kv_store),
+							Arc::clone(&self.logger),
+						)?;
+					}
+
+					periodically_archive_fully_resolved_monitors(
+						Arc::clone(&channel_manager),
+						Arc::clone(&chain_monitor),
+						Arc::clone(&self.kv_store),
+						Arc::clone(&self.logger),
+						Arc::clone(&self.node_metrics),
+					)?;
+					Ok(())
+				},
+				Err(e) => {
+					log_error!(self.logger, "Sync of Lightning wallet failed: {}", e);
+					Err(e.into())
+				},
+			},
+			Err(e) => {
+				log_error!(self.logger, "Lightning wallet sync timed out: {}", e);
+				Err(Error::TxSyncTimeout)
+			},
+		}
 	}
 
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
