@@ -188,26 +188,6 @@ impl ElectrumChainSource {
 		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		let electrum_client: Arc<ElectrumRuntimeClient> =
-			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
-				Arc::clone(client)
-			} else {
-				debug_assert!(
-					false,
-					"We should have started the chain source before syncing the lightning wallet"
-				);
-				return Err(Error::TxSyncFailed);
-			};
-
-		let sync_cman = Arc::clone(&channel_manager);
-		let sync_cmon = Arc::clone(&chain_monitor);
-		let sync_sweeper = Arc::clone(&output_sweeper);
-		let confirmables = vec![
-			sync_cman as Arc<dyn Confirm + Sync + Send>,
-			sync_cmon as Arc<dyn Confirm + Sync + Send>,
-			sync_sweeper as Arc<dyn Confirm + Sync + Send>,
-		];
-
 		let receiver_res = {
 			let mut status_lock = self.lightning_wallet_sync_status.lock().unwrap();
 			status_lock.register_or_subscribe_pending_sync()
@@ -220,6 +200,38 @@ impl ElectrumChainSource {
 				Error::TxSyncFailed
 			})?;
 		}
+
+		let res =
+			self.sync_lightning_wallet_inner(channel_manager, chain_monitor, output_sweeper).await;
+
+		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+		res
+	}
+
+	async fn sync_lightning_wallet_inner(
+		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) -> Result<(), Error> {
+		let sync_cman = Arc::clone(&channel_manager);
+		let sync_cmon = Arc::clone(&chain_monitor);
+		let sync_sweeper = Arc::clone(&output_sweeper);
+		let confirmables = vec![
+			sync_cman as Arc<dyn Confirm + Sync + Send>,
+			sync_cmon as Arc<dyn Confirm + Sync + Send>,
+			sync_sweeper as Arc<dyn Confirm + Sync + Send>,
+		];
+
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(
+					false,
+					"We should have started the chain source before syncing the lightning wallet"
+				);
+				return Err(Error::TxSyncFailed);
+			};
 
 		let res = electrum_client.sync_confirmables(confirmables).await;
 
@@ -244,8 +256,6 @@ impl ElectrumChainSource {
 				Arc::clone(&self.node_metrics),
 			)?;
 		}
-
-		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
 		res
 	}
