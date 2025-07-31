@@ -112,100 +112,102 @@ impl EsploraChainSource {
 			})?;
 		}
 
-		let res = {
-			// If this is our first sync, do a full scan with the configured gap limit.
-			// Otherwise just do an incremental sync.
-			let incremental_sync =
-				self.node_metrics.read().unwrap().latest_onchain_wallet_sync_timestamp.is_some();
-
-			macro_rules! get_and_apply_wallet_update {
-						($sync_future: expr) => {{
-							let now = Instant::now();
-							match $sync_future.await {
-								Ok(res) => match res {
-									Ok(update) => match self.onchain_wallet.apply_update(update) {
-										Ok(()) => {
-											log_info!(
-												self.logger,
-												"{} of on-chain wallet finished in {}ms.",
-												if incremental_sync { "Incremental sync" } else { "Sync" },
-												now.elapsed().as_millis()
-												);
-											let unix_time_secs_opt = SystemTime::now()
-												.duration_since(UNIX_EPOCH)
-												.ok()
-												.map(|d| d.as_secs());
-											{
-												let mut locked_node_metrics = self.node_metrics.write().unwrap();
-												locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
-												write_node_metrics(
-													&*locked_node_metrics,
-													Arc::clone(&self.kv_store),
-													Arc::clone(&self.logger)
-												)?;
-											}
-											Ok(())
-										},
-										Err(e) => Err(e),
-									},
-									Err(e) => match *e {
-										esplora_client::Error::Reqwest(he) => {
-											log_error!(
-												self.logger,
-												"{} of on-chain wallet failed due to HTTP connection error: {}",
-												if incremental_sync { "Incremental sync" } else { "Sync" },
-												he
-												);
-											Err(Error::WalletOperationFailed)
-										},
-										_ => {
-											log_error!(
-												self.logger,
-												"{} of on-chain wallet failed due to Esplora error: {}",
-												if incremental_sync { "Incremental sync" } else { "Sync" },
-												e
-											);
-											Err(Error::WalletOperationFailed)
-										},
-									},
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"{} of on-chain wallet timed out: {}",
-										if incremental_sync { "Incremental sync" } else { "Sync" },
-										e
-									);
-									Err(Error::WalletOperationTimeout)
-								},
-							}
-						}}
-					}
-
-			if incremental_sync {
-				let sync_request = self.onchain_wallet.get_incremental_sync_request();
-				let wallet_sync_timeout_fut = tokio::time::timeout(
-					Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
-					self.esplora_client.sync(sync_request, BDK_CLIENT_CONCURRENCY),
-				);
-				get_and_apply_wallet_update!(wallet_sync_timeout_fut)
-			} else {
-				let full_scan_request = self.onchain_wallet.get_full_scan_request();
-				let wallet_sync_timeout_fut = tokio::time::timeout(
-					Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
-					self.esplora_client.full_scan(
-						full_scan_request,
-						BDK_CLIENT_STOP_GAP,
-						BDK_CLIENT_CONCURRENCY,
-					),
-				);
-				get_and_apply_wallet_update!(wallet_sync_timeout_fut)
-			}
-		};
+		let res = self.sync_onchain_wallet_inner().await;
 
 		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
 		res
+	}
+
+	async fn sync_onchain_wallet_inner(&self) -> Result<(), Error> {
+		// If this is our first sync, do a full scan with the configured gap limit.
+		// Otherwise just do an incremental sync.
+		let incremental_sync =
+			self.node_metrics.read().unwrap().latest_onchain_wallet_sync_timestamp.is_some();
+
+		macro_rules! get_and_apply_wallet_update {
+			($sync_future: expr) => {{
+				let now = Instant::now();
+				match $sync_future.await {
+					Ok(res) => match res {
+						Ok(update) => match self.onchain_wallet.apply_update(update) {
+							Ok(()) => {
+								log_info!(
+									self.logger,
+									"{} of on-chain wallet finished in {}ms.",
+									if incremental_sync { "Incremental sync" } else { "Sync" },
+									now.elapsed().as_millis()
+								);
+								let unix_time_secs_opt = SystemTime::now()
+									.duration_since(UNIX_EPOCH)
+									.ok()
+									.map(|d| d.as_secs());
+									{
+										let mut locked_node_metrics = self.node_metrics.write().unwrap();
+										locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+										write_node_metrics(
+											&*locked_node_metrics,
+											Arc::clone(&self.kv_store),
+											Arc::clone(&self.logger)
+										)?;
+									}
+									Ok(())
+							},
+							Err(e) => Err(e),
+						},
+						Err(e) => match *e {
+							esplora_client::Error::Reqwest(he) => {
+								log_error!(
+									self.logger,
+									"{} of on-chain wallet failed due to HTTP connection error: {}",
+									if incremental_sync { "Incremental sync" } else { "Sync" },
+									he
+								);
+								Err(Error::WalletOperationFailed)
+							},
+							_ => {
+								log_error!(
+									self.logger,
+									"{} of on-chain wallet failed due to Esplora error: {}",
+									if incremental_sync { "Incremental sync" } else { "Sync" },
+									e
+								);
+								Err(Error::WalletOperationFailed)
+							},
+						},
+					},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"{} of on-chain wallet timed out: {}",
+							if incremental_sync { "Incremental sync" } else { "Sync" },
+							e
+						);
+						Err(Error::WalletOperationTimeout)
+					},
+				}
+			}}
+		}
+
+		if incremental_sync {
+			let sync_request = self.onchain_wallet.get_incremental_sync_request();
+			let wallet_sync_timeout_fut = tokio::time::timeout(
+				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+				self.esplora_client.sync(sync_request, BDK_CLIENT_CONCURRENCY),
+			);
+			get_and_apply_wallet_update!(wallet_sync_timeout_fut)
+		} else {
+			let full_scan_request = self.onchain_wallet.get_full_scan_request();
+			let wallet_sync_timeout_fut = tokio::time::timeout(
+				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+				self.esplora_client.full_scan(
+					full_scan_request,
+					BDK_CLIENT_STOP_GAP,
+					BDK_CLIENT_CONCURRENCY,
+				),
+			);
+			get_and_apply_wallet_update!(wallet_sync_timeout_fut)
+		}
 	}
 
 	pub(super) async fn sync_lightning_wallet(
