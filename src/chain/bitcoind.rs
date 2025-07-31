@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use super::WalletSyncStatus;
+use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 
 use crate::config::{
 	BitcoindRestClientConfig, Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
@@ -340,7 +340,7 @@ impl BitcoindChainSource {
 		let chain_listener = ChainListener {
 			onchain_wallet: Arc::clone(&self.onchain_wallet),
 			channel_manager: Arc::clone(&channel_manager),
-			chain_monitor,
+			chain_monitor: Arc::clone(&chain_monitor),
 			output_sweeper,
 		};
 		let mut spv_client =
@@ -355,6 +355,14 @@ impl BitcoindChainSource {
 					now.elapsed().unwrap().as_millis()
 				);
 				*self.latest_chain_tip.write().unwrap() = Some(tip);
+
+				periodically_archive_fully_resolved_monitors(
+					Arc::clone(&channel_manager),
+					chain_monitor,
+					Arc::clone(&self.kv_store),
+					Arc::clone(&self.logger),
+					Arc::clone(&self.node_metrics),
+				)?;
 			},
 			Ok(_) => {},
 			Err(e) => {
