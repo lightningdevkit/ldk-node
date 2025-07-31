@@ -306,6 +306,19 @@ impl BitcoindChainSource {
 			})?;
 		}
 
+		let res = self
+			.poll_and_update_listeners_inner(channel_manager, chain_monitor, output_sweeper)
+			.await;
+
+		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+		res
+	}
+
+	async fn poll_and_update_listeners_inner(
+		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) -> Result<(), Error> {
 		let latest_chain_tip_opt = self.latest_chain_tip.read().unwrap().clone();
 		let chain_tip = if let Some(tip) = latest_chain_tip_opt {
 			tip
@@ -317,9 +330,7 @@ impl BitcoindChainSource {
 				},
 				Err(e) => {
 					log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
-					let res = Err(Error::TxSyncFailed);
-					self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
-					return res;
+					return Err(Error::TxSyncFailed);
 				},
 			}
 		};
@@ -348,9 +359,7 @@ impl BitcoindChainSource {
 			Ok(_) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
-				let res = Err(Error::TxSyncFailed);
-				self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
-				return res;
+				return Err(Error::TxSyncFailed);
 			},
 		}
 
@@ -376,9 +385,7 @@ impl BitcoindChainSource {
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to poll for mempool transactions: {:?}", e);
-				let res = Err(Error::TxSyncFailed);
-				self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
-				return res;
+				return Err(Error::TxSyncFailed);
 			},
 		}
 
@@ -388,24 +395,13 @@ impl BitcoindChainSource {
 		locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
 		locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
 
-		let write_res = write_node_metrics(
+		write_node_metrics(
 			&*locked_node_metrics,
 			Arc::clone(&self.kv_store),
 			Arc::clone(&self.logger),
-		);
-		match write_res {
-			Ok(()) => (),
-			Err(e) => {
-				log_error!(self.logger, "Failed to persist node metrics: {}", e);
-				let res = Err(Error::PersistenceFailed);
-				self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
-				return res;
-			},
-		}
+		)?;
 
-		let res = Ok(());
-		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
-		res
+		Ok(())
 	}
 
 	pub(super) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
