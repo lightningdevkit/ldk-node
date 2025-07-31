@@ -157,10 +157,16 @@ impl OnchainPayment {
 	/// The calculation respects any on-chain reserve requirements and validates that sufficient
 	/// funds are available, just like [`send_to_address`].
 	///
+	/// **Special handling for maximum amounts:** If the specified amount would result in
+	/// insufficient funds due to fees, but is within the spendable balance, this method will
+	/// automatically calculate the fee for sending all available funds while retaining the
+	/// anchor channel reserve. This allows users to calculate fees when trying to send
+	/// their maximum spendable balance.
+	///
 	/// # Arguments
 	///
 	/// * `address` - The Bitcoin address to send to
-	/// * `amount_sats` - The amount to send in satoshis
+	/// * `amount_sats` - The amount to send in satoshis (or total balance for max send)
 	/// * `fee_rate` - Optional fee rate to use (if None, will estimate based on current network conditions)
 	/// * `utxos_to_spend` - Optional list of specific UTXOs to use for the transaction
 	///
@@ -176,6 +182,7 @@ impl OnchainPayment {
 	/// * [`Error::WalletOperationFailed`] - If fee calculation fails
 	///
 	/// [`send_to_address`]: Self::send_to_address
+	/// [`BalanceDetails::total_onchain_balance_sats`]: crate::balance::BalanceDetails::total_onchain_balance_sats
 	pub fn calculate_total_fee(
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
 		utxos_to_spend: Option<Vec<SpendableUtxo>>,
@@ -187,18 +194,43 @@ impl OnchainPayment {
 
 		let cur_anchor_reserve_sats =
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-		let send_amount =
-			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
+		
+		// Get current balances
+		let (_total_balance, spendable_balance) = self.wallet.get_balances(cur_anchor_reserve_sats)
+			.unwrap_or((0, 0));
+		
+		// First try with the exact amount
 		let outpoints = utxos_to_spend.map(|utxos| utxos.into_iter().map(|u| u.outpoint).collect());
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-
-		self.wallet.calculate_transaction_fee(
+		
+		// Try calculating with exact amount first
+		let send_amount = OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
+		let result = self.wallet.calculate_transaction_fee(
 			address,
 			send_amount,
 			fee_rate_opt,
-			outpoints,
+			outpoints.clone(),
 			&self.channel_manager,
-		)
+		);
+		
+		// If we get InsufficientFunds and the amount is within the spendable balance,
+		// try calculating as if sending all available funds
+		if matches!(result, Err(Error::InsufficientFunds)) && amount_sats <= spendable_balance {
+			// Try with AllRetainingReserve to calculate the fee for sending all
+			let all_retaining = OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats };
+			if let Ok(fee) = self.wallet.calculate_transaction_fee(
+				address,
+				all_retaining,
+				fee_rate_opt,
+				outpoints.clone(),
+				&self.channel_manager,
+			) {
+				// Return the fee for sending all available funds
+				return Ok(fee);
+			}
+		}
+		
+		result
 	}
 
 	/// Send an on-chain payment to the given address.
