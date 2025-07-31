@@ -103,16 +103,6 @@ impl ElectrumChainSource {
 	}
 
 	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
-		let electrum_client: Arc<ElectrumRuntimeClient> =
-			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
-				Arc::clone(client)
-			} else {
-				debug_assert!(
-					false,
-					"We should have started the chain source before syncing the onchain wallet"
-				);
-				return Err(Error::FeerateEstimationUpdateFailed);
-			};
 		let receiver_res = {
 			let mut status_lock = self.onchain_wallet_sync_status.lock().unwrap();
 			status_lock.register_or_subscribe_pending_sync()
@@ -126,6 +116,24 @@ impl ElectrumChainSource {
 			})?;
 		}
 
+		let res = self.sync_onchain_wallet_inner().await;
+
+		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+		res
+	}
+
+	async fn sync_onchain_wallet_inner(&self) -> Result<(), Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(
+					false,
+					"We should have started the chain source before syncing the onchain wallet"
+				);
+				return Err(Error::FeerateEstimationUpdateFailed);
+			};
 		// If this is our first sync, do a full scan with the configured gap limit.
 		// Otherwise just do an incremental sync.
 		let incremental_sync =
@@ -178,8 +186,6 @@ impl ElectrumChainSource {
 			let update_res = full_scan_fut.await.map(|u| u.into());
 			apply_wallet_update(update_res, now)
 		};
-
-		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
 		res
 	}
