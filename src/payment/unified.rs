@@ -308,12 +308,10 @@ impl DeserializationError for Extras {
 
 #[cfg(test)]
 mod tests {
-	use std::str::FromStr;
-
-	use bitcoin::{Address, Network};
-
 	use super::*;
-	use crate::payment::unified_qr::Extras;
+	use crate::payment::unified::Extras;
+	use bitcoin::{Address, Network};
+	use std::str::FromStr;
 
 	#[test]
 	fn parse_uri() {
