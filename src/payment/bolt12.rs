@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
-use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
+use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
 #[cfg(feature = "uniffi")]
@@ -44,6 +44,11 @@ type Offer = Arc<crate::ffi::Offer>;
 type Refund = lightning::offers::refund::Refund;
 #[cfg(feature = "uniffi")]
 type Refund = Arc<crate::ffi::Refund>;
+
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
@@ -194,6 +199,37 @@ impl Bolt12Payment {
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
+		let payment_id = self.send_using_amount_inner(
+			offer,
+			amount_msat,
+			quantity,
+			payer_note,
+			route_parameters,
+			None,
+		)?;
+		Ok(payment_id)
+	}
+
+	/// Internal helper to send a BOLT12 offer payment given an offer
+	/// and an amount in millisatoshi.
+	///
+	/// This function contains the core payment logic and is called by
+	/// [`Self::send_using_amount`] and other internal logic that resolves
+	/// payment parameters (e.g. [`crate::UnifiedPayment::send`]).
+	///
+	/// It wraps the core LDK `pay_for_offer` logic and handles necessary pre-checks,
+	/// payment ID generation, and payment details storage.
+	///
+	/// The amount validation logic ensures the provided `amount_msat` is sufficient
+	/// based on the offer's required amount.
+	///
+	/// If `hrn` is `Some`, the payment is initiated using [`ChannelManager::pay_for_offer_from_hrn`]
+	/// for offers resolved from a Human-Readable Name ([`HumanReadableName`]).
+	/// Otherwise, it falls back to the standard offer payment methods.
+	pub(crate) fn send_using_amount_inner(
+		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
+		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,
+	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
@@ -228,7 +264,11 @@ impl Bolt12Payment {
 			retry_strategy,
 			route_params_config: route_parameters,
 		};
-		let res = if let Some(quantity) = quantity {
+		let res = if let Some(hrn) = hrn {
+			let hrn = maybe_deref(&hrn);
+			let offer = OfferFromHrn { offer: offer.clone(), hrn: *hrn };
+			self.channel_manager.pay_for_offer_from_hrn(&offer, amount_msat, payment_id, params)
+		} else if let Some(quantity) = quantity {
 			self.channel_manager.pay_for_offer_with_quantity(
 				&offer,
 				Some(amount_msat),

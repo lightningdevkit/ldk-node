@@ -13,7 +13,7 @@ mod bolt12;
 mod onchain;
 mod spontaneous;
 pub(crate) mod store;
-mod unified_qr;
+mod unified;
 
 pub use bolt11::Bolt11Payment;
 pub use bolt12::Bolt12Payment;
@@ -22,4 +22,4 @@ pub use spontaneous::SpontaneousPayment;
 pub use store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 };
-pub use unified_qr::{QrPaymentResult, UnifiedQrPayment};
+pub use unified::{UnifiedPayment, UnifiedPaymentResult};

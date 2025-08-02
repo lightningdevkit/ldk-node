@@ -149,7 +149,7 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
-	UnifiedQrPayment unified_qr_payment();
+	UnifiedPayment unified_payment();
 	LSPS1Liquidity lsps1_liquidity();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
@@ -275,11 +275,11 @@ interface FeeRate {
 	u64 to_sat_per_vb_ceil();
 };
 
-interface UnifiedQrPayment {
+interface UnifiedPayment {
 	[Throws=NodeError]
 	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
-	[Throws=NodeError]
-	QrPaymentResult send([ByRef]string uri_str, RouteParametersConfig? route_parameters);
+	[Throws=NodeError, Async]
+	UnifiedPaymentResult send([ByRef]string uri_str, u64? amount_msat, RouteParametersConfig? route_parameters);
 };
 
 interface LSPS1Liquidity {
@@ -347,6 +347,7 @@ enum NodeError {
 	"LiquidityFeeTooHigh",
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
+	"HrnParsingFailed",
 };
 
 dictionary NodeStatus {
@@ -456,7 +457,7 @@ interface PaymentKind {
 };
 
 [Enum]
-interface QrPaymentResult {
+interface UnifiedPaymentResult {
 	Onchain(Txid txid);
 	Bolt11(PaymentId payment_id);
 	Bolt12(PaymentId payment_id);
@@ -807,6 +808,13 @@ interface Offer {
 	sequence<u8>? metadata();
 	u64? absolute_expiry_seconds();
 	PublicKey? issuer_signing_pubkey();
+};
+
+interface HumanReadableName {
+	[Throws=NodeError, Name=from_encoded]
+	constructor([ByRef] string encoded);
+	string user();
+	string domain();
 };
 
 [Traits=(Debug, Display, Eq)]

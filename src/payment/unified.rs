@@ -5,10 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Holds a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
+//! Holds a payment handler allowing to create [BIP 21] URIs with on-chain, [BOLT 11], and [BOLT 12] payment
 //! options.
 //!
+//! It also supports sending payments to these URIs as well as to [BIP 353] Human-Readable Names.
+//!
 //! [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+//! [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use std::sync::Arc;
@@ -16,17 +19,23 @@ use std::vec::IntoIter;
 
 use bip21::de::ParamKind;
 use bip21::{DeserializationError, DeserializeParams, Param, SerializeParams};
-use bitcoin::address::{NetworkChecked, NetworkUnchecked};
+use bitcoin::address::NetworkChecked;
 use bitcoin::{Amount, Txid};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
+use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
+
+use bitcoin_payment_instructions::{
+	amount::Amount as BPIAmount, PaymentInstructions, PaymentMethod,
+};
 
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
+use crate::types::HRNResolver;
 use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
@@ -40,26 +49,31 @@ struct Extras {
 /// A payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
 /// option.
 ///
-/// Should be retrieved by calling [`Node::unified_qr_payment`]
+/// Should be retrieved by calling [`Node::unified_payment`]
+///
+/// It also supports sending payments to these URIs as well as to [BIP 353] Human-Readable Names.
 ///
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
-/// [`Node::unified_qr_payment`]: crate::Node::unified_qr_payment
-pub struct UnifiedQrPayment {
+/// [`Node::unified_payment`]: crate::Node::unified_payment
+pub struct UnifiedPayment {
 	onchain_payment: Arc<OnchainPayment>,
 	bolt11_invoice: Arc<Bolt11Payment>,
 	bolt12_payment: Arc<Bolt12Payment>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
+	hrn_resolver: Arc<HRNResolver>,
 }
 
-impl UnifiedQrPayment {
+impl UnifiedPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
+		hrn_resolver: Arc<HRNResolver>,
 	) -> Self {
-		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger }
+		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger, hrn_resolver }
 	}
 
 	/// Generates a URI with an on-chain address, [BOLT 11] invoice and [BOLT 12] offer.
@@ -129,72 +143,141 @@ impl UnifiedQrPayment {
 		Ok(format_uri(uri))
 	}
 
-	/// Sends a payment given a [BIP 21] URI.
+	/// Sends a payment given a [BIP 21] URI or [BIP 353] Human-Readable Name.
 	///
 	/// This method parses the provided URI string and attempts to send the payment. If the URI
 	/// has an offer and or invoice, it will try to pay the offer first followed by the invoice.
 	/// If they both fail, the on-chain payment will be paid.
 	///
-	/// Returns a `QrPaymentResult` indicating the outcome of the payment. If an error
+	/// Returns a `UnifiedPaymentResult` indicating the outcome of the payment. If an error
 	/// occurs, an `Error` is returned detailing the issue encountered.
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	///
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
-	pub fn send(
-		&self, uri_str: &str, route_parameters: Option<RouteParametersConfig>,
-	) -> Result<QrPaymentResult, Error> {
-		let uri: bip21::Uri<NetworkUnchecked, Extras> =
-			uri_str.parse().map_err(|_| Error::InvalidUri)?;
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	pub async fn send(
+		&self, uri_str: &str, amount_msat: Option<u64>,
+		route_parameters: Option<RouteParametersConfig>,
+	) -> Result<UnifiedPaymentResult, Error> {
+		let instructions = PaymentInstructions::parse(
+			uri_str,
+			self.config.network,
+			self.hrn_resolver.as_ref(),
+			false,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
+			Error::UriParameterParsingFailed
+		})?;
 
-		let uri_network_checked =
-			uri.clone().require_network(self.config.network).map_err(|_| Error::InvalidNetwork)?;
+		let resolved = match instructions {
+			PaymentInstructions::ConfigurableAmount(instr) => {
+				let amount = amount_msat.ok_or_else(|| {
+					log_error!(self.logger, "No amount specified. Aborting the payment.");
+					Error::InvalidAmount
+				})?;
 
-		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
-			let offer = maybe_wrap(offer);
-			match self.bolt12_payment.send(&offer, None, None, route_parameters) {
-				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
-			}
-		}
+				let amt = BPIAmount::from_milli_sats(amount).map_err(|e| {
+					log_error!(self.logger, "Error while converting amount : {:?}", e);
+					Error::InvalidAmount
+				})?;
 
-		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
-			let invoice = maybe_wrap(invoice);
-			match self.bolt11_invoice.send(&invoice, route_parameters) {
-				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
-			}
-		}
-
-		let amount = match uri_network_checked.amount {
-			Some(amount) => amount,
-			None => {
-				log_error!(self.logger, "No amount specified in the URI. Aborting the payment.");
-				return Err(Error::InvalidAmount);
+				instr.set_amount(amt, self.hrn_resolver.as_ref()).await.map_err(|e| {
+					log_error!(self.logger, "Failed to set amount: {:?}", e);
+					Error::InvalidAmount
+				})?
+			},
+			PaymentInstructions::FixedAmount(instr) => {
+				if let Some(user_amount) = amount_msat {
+					if instr.max_amount().map_or(false, |amt| user_amount < amt.milli_sats()) {
+						log_error!(self.logger, "Amount specified is less than the amount in the parsed URI. Aborting the payment.");
+						return Err(Error::InvalidAmount);
+					}
+				}
+				instr
 			},
 		};
 
-		let txid = self.onchain_payment.send_to_address(
-			&uri_network_checked.address,
-			amount.to_sat(),
-			None,
-		)?;
+		let mut sorted_payment_methods = resolved.methods().to_vec();
+		sorted_payment_methods.sort_by_key(|method| match method {
+			PaymentMethod::LightningBolt12(_) => 0,
+			PaymentMethod::LightningBolt11(_) => 1,
+			PaymentMethod::OnChain(_) => 2,
+		});
 
-		Ok(QrPaymentResult::Onchain { txid })
+		for method in sorted_payment_methods {
+			match method {
+				PaymentMethod::LightningBolt12(offer) => {
+					let offer = maybe_wrap(offer.clone());
+
+					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+						let hrn = maybe_wrap(hrn.clone());
+						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
+					} else if let Some(amount_msat) = amount_msat {
+						self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
+					} else {
+						self.bolt12_payment.send(&offer, None, None, route_parameters)
+					}
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
+						e
+					});
+
+					if let Ok(payment_id) = payment_result {
+						return Ok(UnifiedPaymentResult::Bolt12 { payment_id });
+					}
+				},
+				PaymentMethod::LightningBolt11(invoice) => {
+					let invoice = maybe_wrap(invoice.clone());
+					let payment_result = self.bolt11_invoice.send(&invoice, route_parameters)
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
+							e
+						});
+
+					if let Ok(payment_id) = payment_result {
+						return Ok(UnifiedPaymentResult::Bolt11 { payment_id });
+					}
+				},
+				PaymentMethod::OnChain(address) => {
+					let amount = resolved.onchain_payment_amount().ok_or_else(|| {
+						log_error!(self.logger, "No amount specified. Aborting the payment.");
+						Error::InvalidAmount
+					})?;
+
+					let amt_sats = amount.sats().map_err(|_| {
+						log_error!(
+							self.logger,
+							"Amount in sats returned an error. Aborting the payment."
+						);
+						Error::InvalidAmount
+					})?;
+
+					let txid = self.onchain_payment.send_to_address(&address, amt_sats, None)?;
+					return Ok(UnifiedPaymentResult::Onchain { txid });
+				},
+			}
+		}
+
+		log_error!(self.logger, "Payable methods not found in URI");
+		Err(Error::PaymentSendingFailed)
 	}
 }
 
-/// Represents the result of a payment made using a [BIP 21] QR code.
+/// Represents the result of a payment made using a [BIP 21] URI or a [BIP 353] Human-Readable Name.
 ///
 /// After a successful on-chain transaction, the transaction ID ([`Txid`]) is returned.
 /// For BOLT11 and BOLT12 payments, the corresponding [`PaymentId`] is returned.
 ///
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 /// [`PaymentId`]: lightning::ln::channelmanager::PaymentId
 /// [`Txid`]: bitcoin::hash_types::Txid
 #[derive(Debug)]
-pub enum QrPaymentResult {
+pub enum UnifiedPaymentResult {
 	/// An on-chain payment.
 	Onchain {
 		/// The transaction ID (txid) of the on-chain payment.
@@ -310,10 +393,9 @@ impl DeserializationError for Extras {
 mod tests {
 	use std::str::FromStr;
 
-	use bitcoin::{Address, Network};
+	use bitcoin::{address::NetworkUnchecked, Address, Network};
 
-	use super::*;
-	use crate::payment::unified_qr::Extras;
+	use super::{Amount, Bolt11Invoice, Extras, Offer};
 
 	#[test]
 	fn parse_uri() {
