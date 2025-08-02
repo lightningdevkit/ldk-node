@@ -55,7 +55,10 @@ pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
-pub use crate::payment::QrPaymentResult;
+pub use crate::payment::UnifiedPaymentResult;
+
+pub use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
+
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
 
 impl UniffiCustomTypeConverter for PublicKey {
