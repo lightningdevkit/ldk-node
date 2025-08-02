@@ -22,4 +22,4 @@ pub use spontaneous::SpontaneousPayment;
 pub use store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 };
-pub use unified::{QrPaymentResult, UnifiedQrPayment};
+pub use unified::{UnifiedPayment, UnifiedPaymentResult};

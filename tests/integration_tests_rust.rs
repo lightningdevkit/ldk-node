@@ -23,7 +23,7 @@ use ldk_node::config::EsploraSyncConfig;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
-	QrPaymentResult,
+	UnifiedPaymentResult,
 };
 use ldk_node::{Builder, Event, NodeError};
 
@@ -1353,15 +1353,15 @@ fn generate_bip21_uri() {
 
 	// Test 1: Verify URI generation (on-chain + BOLT11) works
 	// even before any channels are opened. This checks the graceful fallback behavior.
-	let initial_uqr_payment = node_b
-		.unified_qr_payment()
+	let initial_uni_payment = node_b
+		.unified_payment()
 		.receive(expected_amount_sats, "asdf", expiry_sec)
 		.expect("Failed to generate URI");
-	println!("Initial URI (no channels): {}", initial_uqr_payment);
+	println!("Initial URI (no channels): {}", initial_uni_payment);
 
-	assert!(initial_uqr_payment.contains("bitcoin:"));
-	assert!(initial_uqr_payment.contains("lightning="));
-	assert!(!initial_uqr_payment.contains("lno=")); // BOLT12 requires channels
+	assert!(initial_uni_payment.contains("bitcoin:"));
+	assert!(initial_uni_payment.contains("lightning="));
+	assert!(!initial_uni_payment.contains("lno=")); // BOLT12 requires channels
 
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -1381,15 +1381,15 @@ fn generate_bip21_uri() {
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// Test 2: Verify URI generation (on-chain + BOLT11 + BOLT12) works after channels are established.
-	let uqr_payment = node_b
-		.unified_qr_payment()
+	let uni_payment = node_b
+		.unified_payment()
 		.receive(expected_amount_sats, "asdf", expiry_sec)
 		.expect("Failed to generate URI");
 
-	println!("Generated URI: {}", uqr_payment);
-	assert!(uqr_payment.contains("bitcoin:"));
-	assert!(uqr_payment.contains("lightning="));
-	assert!(uqr_payment.contains("lno="));
+	println!("Generated URI: {}", uni_payment);
+	assert!(uni_payment.contains("bitcoin:"));
+	assert!(uni_payment.contains("lightning="));
+	assert!(uni_payment.contains("lno="));
 }
 
 #[test]
@@ -1430,17 +1430,17 @@ fn unified_qr_send_receive() {
 	let expected_amount_sats = 100_000;
 	let expiry_sec = 4_000;
 
-	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
-	let uri_str = uqr_payment.clone().unwrap();
-	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str) {
-		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
+	let uni_payment = node_b.unified_payment().receive(expected_amount_sats, "asdf", expiry_sec);
+	let uri_str = uni_payment.clone().unwrap();
+	let offer_payment_id: PaymentId = match node_a.unified_payment().send(&uri_str) {
+		Ok(UnifiedPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 			payment_id
 		},
-		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
+		Ok(UnifiedPaymentResult::Bolt11 { payment_id: _ }) => {
 			panic!("Expected Bolt12 payment but got Bolt11");
 		},
-		Ok(QrPaymentResult::Onchain { txid: _ }) => {
+		Ok(UnifiedPaymentResult::Onchain { txid: _ }) => {
 			panic!("Expected Bolt12 payment but get On-chain transaction");
 		},
 		Err(e) => {
@@ -1453,15 +1453,15 @@ fn unified_qr_send_receive() {
 	// Cut off the BOLT12 part to fallback to BOLT11.
 	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_without_offer) {
-			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
+		match node_a.unified_payment().send(uri_str_without_offer) {
+			Ok(UnifiedPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
-			Ok(QrPaymentResult::Bolt11 { payment_id }) => {
+			Ok(UnifiedPaymentResult::Bolt11 { payment_id }) => {
 				println!("\nBolt11 payment sent successfully with PaymentID: {:?}", payment_id);
 				payment_id
 			},
-			Ok(QrPaymentResult::Onchain { txid: _ }) => {
+			Ok(UnifiedPaymentResult::Onchain { txid: _ }) => {
 				panic!("Expected Bolt11 payment but got on-chain transaction");
 			},
 			Err(e) => {
@@ -1471,19 +1471,19 @@ fn unified_qr_send_receive() {
 	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
 
 	let expect_onchain_amount_sats = 800_000;
-	let onchain_uqr_payment =
-		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
+	let onchain_uni_payment =
+		node_b.unified_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
 
 	// Cut off any lightning part to fallback to on-chain only.
-	let uri_str_without_lightning = onchain_uqr_payment.split("&lightning=").next().unwrap();
-	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning) {
-		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
+	let uri_str_without_lightning = onchain_uni_payment.split("&lightning=").next().unwrap();
+	let txid = match node_a.unified_payment().send(&uri_str_without_lightning) {
+		Ok(UnifiedPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},
-		Ok(QrPaymentResult::Bolt11 { payment_id: _ }) => {
+		Ok(UnifiedPaymentResult::Bolt11 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt11");
 		},
-		Ok(QrPaymentResult::Onchain { txid }) => {
+		Ok(UnifiedPaymentResult::Onchain { txid }) => {
 			println!("\nOn-chain transaction successful with Txid: {}", txid);
 			txid
 		},

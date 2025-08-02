@@ -128,7 +128,7 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
-	UnifiedQrPayment unified_qr_payment();
+	UnifiedPayment unified_payment();
 	LSPS1Liquidity lsps1_liquidity();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
@@ -250,11 +250,11 @@ interface FeeRate {
 	u64 to_sat_per_vb_ceil();
 };
 
-interface UnifiedQrPayment {
+interface UnifiedPayment {
 	[Throws=NodeError]
 	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
 	[Throws=NodeError]
-	QrPaymentResult send([ByRef]string uri_str);
+	UnifiedPaymentResult send([ByRef]string uri_str);
 };
 
 interface LSPS1Liquidity {
@@ -428,7 +428,7 @@ interface PaymentKind {
 };
 
 [Enum]
-interface QrPaymentResult {
+interface UnifiedPaymentResult {
 	Onchain(Txid txid);
 	Bolt11(PaymentId payment_id);
 	Bolt12(PaymentId payment_id);

@@ -139,7 +139,7 @@ use liquidity::{LSPS1Liquidity, LiquiditySource};
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedQrPayment,
+	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
@@ -899,12 +899,15 @@ impl Node {
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
+	/// This handler allows you to send payments to these URIs as well as [BIP 353] HRNs.
+	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	#[cfg(not(feature = "uniffi"))]
-	pub fn unified_qr_payment(&self) -> UnifiedQrPayment {
-		UnifiedQrPayment::new(
+	pub fn unified_payment(&self) -> UnifiedPayment {
+		UnifiedPayment::new(
 			self.onchain_payment().into(),
 			self.bolt11_payment().into(),
 			self.bolt12_payment().into(),
@@ -916,12 +919,15 @@ impl Node {
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
+	/// This handler allows you to send payments to these URIs as well as [BIP 353] HRNs.
+	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	#[cfg(feature = "uniffi")]
-	pub fn unified_qr_payment(&self) -> Arc<UnifiedQrPayment> {
-		Arc::new(UnifiedQrPayment::new(
+	pub fn unified_payment(&self) -> Arc<UnifiedPayment> {
+		Arc::new(UnifiedPayment::new(
 			self.onchain_payment(),
 			self.bolt11_payment(),
 			self.bolt12_payment(),

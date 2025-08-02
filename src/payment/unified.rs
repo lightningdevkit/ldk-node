@@ -46,7 +46,7 @@ struct Extras {
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 /// [`Node::unified_qr_payment`]: crate::Node::unified_qr_payment
-pub struct UnifiedQrPayment {
+pub struct UnifiedPayment {
 	onchain_payment: Arc<OnchainPayment>,
 	bolt11_invoice: Arc<Bolt11Payment>,
 	bolt12_payment: Arc<Bolt12Payment>,
@@ -54,7 +54,7 @@ pub struct UnifiedQrPayment {
 	logger: Arc<Logger>,
 }
 
-impl UnifiedQrPayment {
+impl UnifiedPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
@@ -139,7 +139,7 @@ impl UnifiedQrPayment {
 	/// occurs, an `Error` is returned detailing the issue encountered.
 	///
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
-	pub fn send(&self, uri_str: &str) -> Result<QrPaymentResult, Error> {
+	pub fn send(&self, uri_str: &str) -> Result<UnifiedPaymentResult, Error> {
 		let uri: bip21::Uri<NetworkUnchecked, Extras> =
 			uri_str.parse().map_err(|_| Error::InvalidUri)?;
 
@@ -149,7 +149,7 @@ impl UnifiedQrPayment {
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
 			let offer = maybe_wrap(offer);
 			match self.bolt12_payment.send(&offer, None, None) {
-				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
+				Ok(payment_id) => return Ok(UnifiedPaymentResult::Bolt12 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
 			}
 		}
@@ -157,7 +157,7 @@ impl UnifiedQrPayment {
 		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
 			let invoice = maybe_wrap(invoice);
 			match self.bolt11_invoice.send(&invoice, None) {
-				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
+				Ok(payment_id) => return Ok(UnifiedPaymentResult::Bolt11 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
 			}
 		}
@@ -176,7 +176,7 @@ impl UnifiedQrPayment {
 			None,
 		)?;
 
-		Ok(QrPaymentResult::Onchain { txid })
+		Ok(UnifiedPaymentResult::Onchain { txid })
 	}
 }
 
@@ -189,7 +189,7 @@ impl UnifiedQrPayment {
 /// [`PaymentId`]: lightning::ln::channelmanager::PaymentId
 /// [`Txid`]: bitcoin::hash_types::Txid
 #[derive(Debug)]
-pub enum QrPaymentResult {
+pub enum UnifiedPaymentResult {
 	/// An on-chain payment.
 	Onchain {
 		/// The transaction ID (txid) of the on-chain payment.
