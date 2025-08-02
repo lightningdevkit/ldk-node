@@ -304,7 +304,7 @@ impl DeserializationError for Extras {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::payment::unified_qr::Extras;
+	use crate::payment::unified::Extras;
 	use bitcoin::{Address, Network};
 	use std::str::FromStr;
 
