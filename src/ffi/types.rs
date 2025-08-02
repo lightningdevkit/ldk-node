@@ -54,8 +54,50 @@ pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
-pub use crate::payment::QrPaymentResult;
+pub use crate::payment::UnifiedPaymentResult;
+
+pub use lightning::chain::channelmonitor::BalanceSource;
+pub use lightning::events::{ClosureReason, PaymentFailureReason};
+pub use lightning::ln::types::ChannelId;
+pub use lightning::offers::offer::OfferId;
+pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
+pub use lightning::routing::router::RouteParametersConfig;
+pub use lightning_types::string::UntrustedString;
+
+pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
+
+pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
+
+pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
+pub use lightning_liquidity::lsps1::msgs::{
+	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
+};
+
+pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Txid};
+
+pub use bip39::Mnemonic;
+
+pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
+
+use crate::builder::sanitize_alias;
+use crate::error::Error;
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
+
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::PublicKey;
+use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
+use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
+use lightning::offers::refund::Refund as LdkRefund;
+use lightning::util::ser::Writeable;
+use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
+
+use std::convert::TryInto;
+use std::ops::Deref;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;
