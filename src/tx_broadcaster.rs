@@ -36,7 +36,9 @@ where
 		Self { queue_sender, queue_receiver: Mutex::new(queue_receiver), logger }
 	}
 
-	pub(crate) async fn get_broadcast_queue(&self) -> MutexGuard<mpsc::Receiver<Vec<Transaction>>> {
+	pub(crate) async fn get_broadcast_queue(
+		&self,
+	) -> MutexGuard<'_, mpsc::Receiver<Vec<Transaction>>> {
 		self.queue_receiver.lock().await
 	}
 }
