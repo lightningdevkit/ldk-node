@@ -82,7 +82,7 @@ esplora-client = { version = "0.12", default-features = false, features = ["toki
 # `lightning-transaction-sync` APIs. We should drop it as part of the upgrade
 # to LDK 0.2.
 esplora-client_0_11 = { package = "esplora-client", version = "0.11", default-features = false, features = ["tokio", "async-https-rustls"] }
-electrum-client = { version = "0.23.1", default-features = true }
+electrum-client = { version = "0.24.0", default-features = true }
 libc = "0.2"
 uniffi = { version = "0.28.3", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
@@ -103,11 +103,11 @@ proptest = "1.0.0"
 regex = "1.5.6"
 
 [target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.34.0", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
+electrsd = { version = "0.35.0", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
 
 [target.'cfg(no_download)'.dev-dependencies]
-electrsd = { version = "0.34.0", default-features = false, features = ["legacy"] }
-corepc-node = { version = "0.7.0", default-features = false, features = ["27_2"] }
+electrsd = { version = "0.35.0", default-features = false, features = ["legacy"] }
+corepc-node = { version = "0.8.0", default-features = false, features = ["27_2"] }
 
 [target.'cfg(cln_test)'.dev-dependencies]
 clightningrpc = { version = "0.3.0-beta.8", default-features = false }
