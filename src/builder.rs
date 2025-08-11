@@ -80,6 +80,8 @@ use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
+
 const VSS_HARDENED_CHILD_INDEX: u32 = 877;
 const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
@@ -1451,6 +1453,8 @@ fn build_with_store_internal(
 		})?;
 	}
 
+	let hrn_resolver = Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph)));
+
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
 		Arc::clone(&keys_manager),
@@ -1460,7 +1464,7 @@ fn build_with_store_internal(
 		message_router,
 		Arc::clone(&channel_manager),
 		Arc::clone(&channel_manager),
-		IgnoringMessageHandler {},
+		Arc::clone(&hrn_resolver),
 		IgnoringMessageHandler {},
 	));
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
@@ -1588,6 +1592,12 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
+	let peer_manager_clone = Arc::clone(&peer_manager);
+
+	hrn_resolver.register_post_queue_action(Box::new(move || {
+		peer_manager_clone.process_events();
+	}));
+
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
 	gossip_source.set_gossip_verifier(
@@ -1681,6 +1691,7 @@ fn build_with_store_internal(
 		is_running,
 		is_listening,
 		node_metrics,
+		hrn_resolver,
 	})
 }
 

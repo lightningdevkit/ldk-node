@@ -145,7 +145,8 @@ use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
+	Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 
@@ -205,6 +206,7 @@ pub struct Node {
 	is_running: Arc<RwLock<bool>>,
 	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
+	hrn_resolver: Arc<HRNResolver>,
 }
 
 impl Node {
@@ -913,6 +915,7 @@ impl Node {
 			self.bolt12_payment().into(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
+			Arc::clone(&self.hrn_resolver),
 		)
 	}
 
@@ -933,6 +936,7 @@ impl Node {
 			self.bolt12_payment(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
+			Arc::clone(&self.hrn_resolver),
 		))
 	}
 

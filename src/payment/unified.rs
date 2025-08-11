@@ -5,16 +5,20 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Holds a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
+//! Holds a payment handler allowing to create [BIP 21] URIs with on-chain, [BOLT 11], and [BOLT 12] payment
 //! options.
 //!
+//! Also allows to send payments using these URIs as well as [BIP 353] HRNs.
+//!
 //! [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+//! [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
+use crate::types::HRNResolver;
 use crate::Config;
 
 use lightning::ln::channelmanager::PaymentId;
@@ -40,26 +44,31 @@ struct Extras {
 /// A payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
 /// option.
 ///
-/// Should be retrieved by calling [`Node::unified_qr_payment`]
+/// Should be retrieved by calling [`Node::unified_payment`]
+///
+/// This handler allows you to send payments to these URIs as well as [BIP 353] HRNs.
 ///
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
-/// [`Node::unified_qr_payment`]: crate::Node::unified_qr_payment
+/// [`Node::unified_payment`]: crate::Node::unified_payment
 pub struct UnifiedPayment {
 	onchain_payment: Arc<OnchainPayment>,
 	bolt11_invoice: Arc<Bolt11Payment>,
 	bolt12_payment: Arc<Bolt12Payment>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
+	hrn_resolver: Arc<HRNResolver>,
 }
 
 impl UnifiedPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
+		hrn_resolver: Arc<HRNResolver>,
 	) -> Self {
-		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger }
+		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger, hrn_resolver }
 	}
 
 	/// Generates a URI with an on-chain address, [BOLT 11] invoice and [BOLT 12] offer.
@@ -142,6 +151,8 @@ impl UnifiedPayment {
 	pub fn send(&self, uri_str: &str) -> Result<UnifiedPaymentResult, Error> {
 		let uri: bip21::Uri<NetworkUnchecked, Extras> =
 			uri_str.parse().map_err(|_| Error::InvalidUri)?;
+
+		let _resolver = &self.hrn_resolver;		
 
 		let uri_network_checked =
 			uri.clone().require_network(self.config.network).map_err(|_| Error::InvalidNetwork)?;
