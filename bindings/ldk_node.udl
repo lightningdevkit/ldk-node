@@ -278,8 +278,8 @@ interface FeeRate {
 interface UnifiedPayment {
 	[Throws=NodeError]
 	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
-	[Throws=NodeError]
-	UnifiedPaymentResult send([ByRef]string uri_str, RouteParametersConfig? route_parameters);
+	[Throws=NodeError, Async]
+	UnifiedPaymentResult send([ByRef]string uri_str, u64? amount_msat, RouteParametersConfig? route_parameters);
 };
 
 interface LSPS1Liquidity {
