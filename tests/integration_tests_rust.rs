@@ -1392,8 +1392,8 @@ fn generate_bip21_uri() {
 	assert!(uni_payment.contains("lno="));
 }
 
-#[test]
-fn unified_qr_send_receive() {
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
@@ -1432,7 +1432,7 @@ fn unified_qr_send_receive() {
 
 	let uni_payment = node_b.unified_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 	let uri_str = uni_payment.clone().unwrap();
-	let offer_payment_id: PaymentId = match node_a.unified_payment().send(&uri_str) {
+	let offer_payment_id: PaymentId = match node_a.unified_payment().send(&uri_str, None).await {
 		Ok(UnifiedPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 			payment_id
@@ -1453,7 +1453,7 @@ fn unified_qr_send_receive() {
 	// Cut off the BOLT12 part to fallback to BOLT11.
 	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_payment().send(uri_str_without_offer) {
+		match node_a.unified_payment().send(uri_str_without_offer, None).await {
 			Ok(UnifiedPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -1476,7 +1476,7 @@ fn unified_qr_send_receive() {
 
 	// Cut off any lightning part to fallback to on-chain only.
 	let uri_str_without_lightning = onchain_uni_payment.split("&lightning=").next().unwrap();
-	let txid = match node_a.unified_payment().send(&uri_str_without_lightning) {
+	let txid = match node_a.unified_payment().send(&uri_str_without_lightning, None).await {
 		Ok(UnifiedPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},
