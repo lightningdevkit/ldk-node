@@ -36,6 +36,8 @@ use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::PaymentDetails;
 
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
+
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
 /// same time.
 pub trait SyncAndAsyncKVStore: KVStore + KVStoreSync {}
@@ -142,9 +144,11 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
 	Arc<ChannelManager>,
-	IgnoringMessageHandler,
+	Arc<HRNResolver>,
 	IgnoringMessageHandler,
 >;
+
+pub(crate) type HRNResolver = LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
