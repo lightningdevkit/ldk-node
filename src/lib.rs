@@ -158,8 +158,8 @@ use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
 use runtime::Runtime;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, KeysManager,
-	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, HRNResolver,
+	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
 	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
@@ -208,6 +208,7 @@ pub struct Node {
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	hrn_resolver: Arc<HRNResolver>,
 }
 
 impl Node {
@@ -961,6 +962,7 @@ impl Node {
 			self.bolt12_payment().into(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
+			Arc::clone(&self.hrn_resolver),
 		)
 	}
 
@@ -981,6 +983,7 @@ impl Node {
 			self.bolt12_payment(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
+			Arc::clone(&self.hrn_resolver),
 		))
 	}
 
