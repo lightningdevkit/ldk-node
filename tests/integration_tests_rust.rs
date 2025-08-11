@@ -1433,7 +1433,7 @@ async fn generate_bip21_uri() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn unified_qr_send_receive() {
+async fn unified_send_receive_qr_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
@@ -1482,7 +1482,7 @@ async fn unified_qr_send_receive() {
 			panic!("Expected Bolt12 payment but got Bolt11");
 		},
 		Ok(UnifiedPaymentResult::Onchain { txid: _ }) => {
-			panic!("Expected Bolt12 payment but get On-chain transaction");
+			panic!("Expected Bolt12 payment but got On-chain transaction");
 		},
 		Err(e) => {
 			panic!("Expected Bolt12 payment but got error: {:?}", e);
