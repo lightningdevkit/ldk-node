@@ -18,7 +18,7 @@ use crate::config::{
 };
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::utils::write_node_metrics;
-use crate::logger::{log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
@@ -425,19 +425,33 @@ impl ChainSource {
 		}
 	}
 
-	pub(crate) async fn process_broadcast_queue(&self) {
+	pub(crate) async fn continuously_process_broadcast_queue(
+		&self, mut stop_tx_bcast_receiver: tokio::sync::watch::Receiver<()>,
+	) {
 		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
-		while let Some(next_package) = receiver.recv().await {
-			match &self.kind {
-				ChainSourceKind::Esplora(esplora_chain_source) => {
-					esplora_chain_source.process_broadcast_package(next_package).await
-				},
-				ChainSourceKind::Electrum(electrum_chain_source) => {
-					electrum_chain_source.process_broadcast_package(next_package).await
-				},
-				ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-					bitcoind_chain_source.process_broadcast_package(next_package).await
-				},
+		loop {
+			let tx_bcast_logger = Arc::clone(&self.logger);
+			tokio::select! {
+				_ = stop_tx_bcast_receiver.changed() => {
+					log_debug!(
+						tx_bcast_logger,
+						"Stopping broadcasting transactions.",
+					);
+					return;
+				}
+				Some(next_package) = receiver.recv() => {
+					match &self.kind {
+						ChainSourceKind::Esplora(esplora_chain_source) => {
+							esplora_chain_source.process_broadcast_package(next_package).await
+						},
+						ChainSourceKind::Electrum(electrum_chain_source) => {
+							electrum_chain_source.process_broadcast_package(next_package).await
+						},
+						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+							bitcoind_chain_source.process_broadcast_package(next_package).await
+						},
+					}
+				}
 			}
 		}
 	}

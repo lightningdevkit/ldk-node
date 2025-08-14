@@ -498,27 +498,10 @@ impl Node {
 			});
 		}
 
-		let mut stop_tx_bcast = self.stop_sender.subscribe();
+		let stop_tx_bcast = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
-		let tx_bcast_logger = Arc::clone(&self.logger);
 		runtime.spawn(async move {
-			// Every second we try to clear our broadcasting queue.
-			let mut interval = tokio::time::interval(Duration::from_secs(1));
-			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-						_ = stop_tx_bcast.changed() => {
-							log_debug!(
-								tx_bcast_logger,
-								"Stopping broadcasting transactions.",
-							);
-							return;
-						}
-						_ = interval.tick() => {
-							chain_source.process_broadcast_queue().await;
-						}
-				}
-			}
+			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
 		});
 
 		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
