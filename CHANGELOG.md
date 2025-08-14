@@ -1,3 +1,24 @@
+# 0.6.2 - Aug. 14, 2025
+This patch release fixes a panic that could have been hit when syncing to a
+TLS-enabled Electrum server, as well as some minor issues when shutting down
+the node.
+
+## Bug Fixes and Improvements
+- If not set by the user, we now install a default `CryptoProvider` for the
+  `rustls` TLS library. This fixes an issue that would have the node panic
+  whenever they first try to access an Electrum server behind an `ssl://`
+  address. (#600)
+- We improved robustness of the shutdown procedure. In particular, we now
+  wait for more background tasks to finish processing before shutting down
+  LDK background processing. Previously some tasks were kept running which
+  could have lead to race conditions. (#613)
+
+In total, this release features 12 files changed, 198 insertions, 92
+deletions in 13 commits from 2 authors in alphabetical order:
+
+- Elias Rohrer
+- moisesPomilio
+
 # 0.6.1 - Jun. 19, 2025
 This patch release fixes minor issues with the recently-exposed `Bolt11Invoice`
 type in bindings.
