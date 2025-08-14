@@ -87,6 +87,7 @@ impl WalletSyncStatus {
 
 pub(crate) struct ChainSource {
 	kind: ChainSourceKind,
+	tx_broadcaster: Arc<Broadcaster>,
 	logger: Arc<Logger>,
 }
 
@@ -109,14 +110,13 @@ impl ChainSource {
 			sync_config,
 			onchain_wallet,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			Arc::clone(&logger),
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Esplora(esplora_chain_source);
-		Self { kind, logger }
+		Self { kind, tx_broadcaster, logger }
 	}
 
 	pub(crate) fn new_electrum(
@@ -130,14 +130,13 @@ impl ChainSource {
 			sync_config,
 			onchain_wallet,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			Arc::clone(&logger),
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Electrum(electrum_chain_source);
-		Self { kind, logger }
+		Self { kind, tx_broadcaster, logger }
 	}
 
 	pub(crate) fn new_bitcoind_rpc(
@@ -153,14 +152,13 @@ impl ChainSource {
 			rpc_password,
 			onchain_wallet,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			Arc::clone(&logger),
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		Self { kind, logger }
+		Self { kind, tx_broadcaster, logger }
 	}
 
 	pub(crate) fn new_bitcoind_rest(
@@ -177,7 +175,6 @@ impl ChainSource {
 			rpc_password,
 			onchain_wallet,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			rest_client_config,
@@ -185,7 +182,7 @@ impl ChainSource {
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		Self { kind, logger }
+		Self { kind, tx_broadcaster, logger }
 	}
 
 	pub(crate) fn start(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
@@ -429,16 +426,19 @@ impl ChainSource {
 	}
 
 	pub(crate) async fn process_broadcast_queue(&self) {
-		match &self.kind {
-			ChainSourceKind::Esplora(esplora_chain_source) => {
-				esplora_chain_source.process_broadcast_queue().await
-			},
-			ChainSourceKind::Electrum(electrum_chain_source) => {
-				electrum_chain_source.process_broadcast_queue().await
-			},
-			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-				bitcoind_chain_source.process_broadcast_queue().await
-			},
+		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
+		while let Some(next_package) = receiver.recv().await {
+			match &self.kind {
+				ChainSourceKind::Esplora(esplora_chain_source) => {
+					esplora_chain_source.process_broadcast_package(next_package).await
+				},
+				ChainSourceKind::Electrum(electrum_chain_source) => {
+					electrum_chain_source.process_broadcast_package(next_package).await
+				},
+				ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+					bitcoind_chain_source.process_broadcast_package(next_package).await
+				},
+			}
 		}
 	}
 }

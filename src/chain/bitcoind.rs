@@ -16,7 +16,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
@@ -54,7 +54,6 @@ pub(super) struct BitcoindChainSource {
 	onchain_wallet: Arc<Wallet>,
 	wallet_polling_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
-	tx_broadcaster: Arc<Broadcaster>,
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
@@ -65,8 +64,8 @@ impl BitcoindChainSource {
 	pub(crate) fn new_rpc(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rpc(
 			rpc_host.clone(),
@@ -85,7 +84,6 @@ impl BitcoindChainSource {
 			onchain_wallet,
 			wallet_polling_status,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			logger: Arc::clone(&logger),
@@ -96,9 +94,8 @@ impl BitcoindChainSource {
 	pub(crate) fn new_rest(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		rest_client_config: BitcoindRestClientConfig, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, rest_client_config: BitcoindRestClientConfig,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rest(
 			rest_client_config.rest_host,
@@ -120,7 +117,6 @@ impl BitcoindChainSource {
 			wallet_polling_status,
 			onchain_wallet,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			logger: Arc::clone(&logger),
@@ -530,53 +526,45 @@ impl BitcoindChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_queue(&self) {
+	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
 		// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
 		// features, we should eventually switch to use `submitpackage` via the
 		// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
 		// transactions.
-		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
-		while let Some(next_package) = receiver.recv().await {
-			for tx in &next_package {
-				let txid = tx.compute_txid();
-				let timeout_fut = tokio::time::timeout(
-					Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
-					self.api_client.broadcast_transaction(tx),
-				);
-				match timeout_fut.await {
-					Ok(res) => match res {
-						Ok(id) => {
-							debug_assert_eq!(id, txid);
-							log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
-						},
-						Err(e) => {
-							log_error!(
-								self.logger,
-								"Failed to broadcast transaction {}: {}",
-								txid,
-								e
-							);
-							log_trace!(
-								self.logger,
-								"Failed broadcast transaction bytes: {}",
-								log_bytes!(tx.encode())
-							);
-						},
+		for tx in &package {
+			let txid = tx.compute_txid();
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
+				self.api_client.broadcast_transaction(tx),
+			);
+			match timeout_fut.await {
+				Ok(res) => match res {
+					Ok(id) => {
+						debug_assert_eq!(id, txid);
+						log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
 					},
 					Err(e) => {
-						log_error!(
-							self.logger,
-							"Failed to broadcast transaction due to timeout {}: {}",
-							txid,
-							e
-						);
+						log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
 						log_trace!(
 							self.logger,
 							"Failed broadcast transaction bytes: {}",
 							log_bytes!(tx.encode())
 						);
 					},
-				}
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to broadcast transaction due to timeout {}: {}",
+						txid,
+						e
+					);
+					log_trace!(
+						self.logger,
+						"Failed broadcast transaction bytes: {}",
+						log_bytes!(tx.encode())
+					);
+				},
 			}
 		}
 	}

@@ -18,7 +18,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
 use lightning::chain::{Confirm, Filter, WatchedOutput};
@@ -30,7 +30,7 @@ use bdk_esplora::EsploraAsyncExt;
 
 use esplora_client::AsyncClient as EsploraAsyncClient;
 
-use bitcoin::{FeeRate, Network, Script, Txid};
+use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -44,7 +44,6 @@ pub(super) struct EsploraChainSource {
 	tx_sync: Arc<EsploraSyncClient<Arc<Logger>>>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
-	tx_broadcaster: Arc<Broadcaster>,
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
@@ -55,8 +54,8 @@ impl EsploraChainSource {
 	pub(crate) fn new(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		// FIXME / TODO: We introduced this to make `bdk_esplora` work separately without updating
 		// `lightning-transaction-sync`. We should revert this as part of of the upgrade to LDK 0.2.
@@ -90,7 +89,6 @@ impl EsploraChainSource {
 			tx_sync,
 			lightning_wallet_sync_status,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			logger,
@@ -372,76 +370,73 @@ impl EsploraChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_queue(&self) {
-		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
-		while let Some(next_package) = receiver.recv().await {
-			for tx in &next_package {
-				let txid = tx.compute_txid();
-				let timeout_fut = tokio::time::timeout(
-					Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
-					self.esplora_client.broadcast(tx),
-				);
-				match timeout_fut.await {
-					Ok(res) => match res {
-						Ok(()) => {
-							log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
-						},
-						Err(e) => match e {
-							esplora_client::Error::HttpResponse { status, message } => {
-								if status == 400 {
-									// Log 400 at lesser level, as this often just means bitcoind already knows the
-									// transaction.
-									// FIXME: We can further differentiate here based on the error
-									// message which will be available with rust-esplora-client 0.7 and
-									// later.
-									log_trace!(
-										self.logger,
-										"Failed to broadcast due to HTTP connection error: {}",
-										message
-									);
-								} else {
-									log_error!(
-										self.logger,
-										"Failed to broadcast due to HTTP connection error: {} - {}",
-										status,
-										message
-									);
-								}
+	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+		for tx in &package {
+			let txid = tx.compute_txid();
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
+				self.esplora_client.broadcast(tx),
+			);
+			match timeout_fut.await {
+				Ok(res) => match res {
+					Ok(()) => {
+						log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
+					},
+					Err(e) => match e {
+						esplora_client::Error::HttpResponse { status, message } => {
+							if status == 400 {
+								// Log 400 at lesser level, as this often just means bitcoind already knows the
+								// transaction.
+								// FIXME: We can further differentiate here based on the error
+								// message which will be available with rust-esplora-client 0.7 and
+								// later.
 								log_trace!(
 									self.logger,
-									"Failed broadcast transaction bytes: {}",
-									log_bytes!(tx.encode())
+									"Failed to broadcast due to HTTP connection error: {}",
+									message
 								);
-							},
-							_ => {
+							} else {
 								log_error!(
 									self.logger,
-									"Failed to broadcast transaction {}: {}",
-									txid,
-									e
+									"Failed to broadcast due to HTTP connection error: {} - {}",
+									status,
+									message
 								);
-								log_trace!(
-									self.logger,
-									"Failed broadcast transaction bytes: {}",
-									log_bytes!(tx.encode())
-								);
-							},
+							}
+							log_trace!(
+								self.logger,
+								"Failed broadcast transaction bytes: {}",
+								log_bytes!(tx.encode())
+							);
+						},
+						_ => {
+							log_error!(
+								self.logger,
+								"Failed to broadcast transaction {}: {}",
+								txid,
+								e
+							);
+							log_trace!(
+								self.logger,
+								"Failed broadcast transaction bytes: {}",
+								log_bytes!(tx.encode())
+							);
 						},
 					},
-					Err(e) => {
-						log_error!(
-							self.logger,
-							"Failed to broadcast transaction due to timeout {}: {}",
-							txid,
-							e
-						);
-						log_trace!(
-							self.logger,
-							"Failed broadcast transaction bytes: {}",
-							log_bytes!(tx.encode())
-						);
-					},
-				}
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to broadcast transaction due to timeout {}: {}",
+						txid,
+						e
+					);
+					log_trace!(
+						self.logger,
+						"Failed broadcast transaction bytes: {}",
+						log_bytes!(tx.encode())
+					);
+				},
 			}
 		}
 	}

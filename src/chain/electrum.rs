@@ -18,7 +18,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
 
 use lightning::chain::{Confirm, Filter, WatchedOutput};
@@ -56,7 +56,6 @@ pub(super) struct ElectrumChainSource {
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
-	tx_broadcaster: Arc<Broadcaster>,
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
@@ -66,9 +65,8 @@ pub(super) struct ElectrumChainSource {
 impl ElectrumChainSource {
 	pub(super) fn new(
 		server_url: String, sync_config: ElectrumSyncConfig, onchain_wallet: Arc<Wallet>,
-		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let electrum_runtime_status = RwLock::new(ElectrumRuntimeStatus::new());
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
@@ -81,7 +79,6 @@ impl ElectrumChainSource {
 			onchain_wallet_sync_status,
 			lightning_wallet_sync_status,
 			fee_estimator,
-			tx_broadcaster,
 			kv_store,
 			config,
 			logger: Arc::clone(&logger),
@@ -302,7 +299,7 @@ impl ElectrumChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_queue(&self) {
+	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
 		let electrum_client: Arc<ElectrumRuntimeClient> =
 			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
 				Arc::clone(client)
@@ -311,11 +308,8 @@ impl ElectrumChainSource {
 				return;
 			};
 
-		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
-		while let Some(next_package) = receiver.recv().await {
-			for tx in next_package {
-				electrum_client.broadcast(tx).await;
-			}
+		for tx in package {
+			electrum_client.broadcast(tx).await;
 		}
 	}
 }
