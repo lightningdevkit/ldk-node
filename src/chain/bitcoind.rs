@@ -1411,3 +1411,164 @@ impl std::fmt::Display for HttpError {
 		write!(f, "status_code: {}, contents: {}", self.status_code, contents)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::hashes::Hash;
+	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
+	use lightning_block_sync::http::JsonResponse;
+	use proptest::{arbitrary::any, collection::vec, prop_assert_eq, prop_compose, proptest};
+	use serde_json::json;
+
+	use crate::chain::bitcoind::{
+		FeeResponse, GetMempoolEntryResponse, GetRawMempoolResponse, GetRawTransactionResponse,
+		MempoolMinFeeResponse,
+	};
+
+	prop_compose! {
+		fn arbitrary_witness()(
+			witness_elements in vec(vec(any::<u8>(), 0..100), 0..20)
+		) -> Witness {
+			let mut witness = Witness::new();
+			for element in witness_elements {
+				witness.push(element);
+			}
+			witness
+		}
+	}
+
+	prop_compose! {
+		fn arbitrary_txin()(
+			outpoint_hash in any::<[u8; 32]>(),
+			outpoint_vout in any::<u32>(),
+			script_bytes in vec(any::<u8>(), 0..100),
+			witness in arbitrary_witness(),
+			sequence in any::<u32>()
+		) -> TxIn {
+			TxIn {
+				previous_output: OutPoint {
+					txid: Txid::from_byte_array(outpoint_hash),
+					vout: outpoint_vout,
+				},
+				script_sig: ScriptBuf::from_bytes(script_bytes),
+				sequence: bitcoin::Sequence::from_consensus(sequence),
+				witness,
+			}
+		}
+	}
+
+	prop_compose! {
+		fn arbitrary_txout()(
+			value in 0u64..21_000_000_00_000_000u64,
+			script_bytes in vec(any::<u8>(), 0..100)
+		) -> TxOut {
+			TxOut {
+				value: bitcoin::Amount::from_sat(value),
+				script_pubkey: ScriptBuf::from_bytes(script_bytes),
+			}
+		}
+	}
+
+	prop_compose! {
+		fn arbitrary_transaction()(
+			version in any::<i32>(),
+			inputs in vec(arbitrary_txin(), 1..20),
+			outputs in vec(arbitrary_txout(), 1..20),
+			lock_time in any::<u32>()
+		) -> Transaction {
+			Transaction {
+				version: bitcoin::transaction::Version(version),
+				input: inputs,
+				output: outputs,
+				lock_time: bitcoin::absolute::LockTime::from_consensus(lock_time),
+			}
+		}
+	}
+
+	proptest! {
+		#![proptest_config(proptest::test_runner::Config::with_cases(20))]
+
+		#[test]
+		fn prop_get_raw_mempool_response_roundtrip(txids in vec(any::<[u8;32]>(), 0..10)) {
+			let txid_vec: Vec<Txid> = txids.into_iter().map(Txid::from_byte_array).collect();
+			let original = GetRawMempoolResponse(txid_vec.clone());
+
+			let json_vec: Vec<String> = txid_vec.iter().map(|t| t.to_string()).collect();
+			let json_val = serde_json::Value::Array(json_vec.iter().map(|s| json!(s)).collect());
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetRawMempoolResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(original.0.len(), decoded.0.len());
+
+			prop_assert_eq!(original.0, decoded.0);
+		}
+
+		#[test]
+		fn prop_get_mempool_entry_response_roundtrip(
+			time in any::<u64>(),
+			height in any::<u32>()
+		) {
+			let json_val = json!({
+				"time": time,
+				"height": height
+			});
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetMempoolEntryResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(decoded.time, time);
+			prop_assert_eq!(decoded.height, height);
+		}
+
+		#[test]
+		fn prop_get_raw_transaction_response_roundtrip(tx in arbitrary_transaction()) {
+			let hex = bitcoin::consensus::encode::serialize_hex(&tx);
+			let json_val = serde_json::Value::String(hex.clone());
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetRawTransactionResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(decoded.0.compute_txid(), tx.compute_txid());
+			prop_assert_eq!(decoded.0.compute_wtxid(), tx.compute_wtxid());
+
+			prop_assert_eq!(decoded.0, tx);
+		}
+
+		#[test]
+		fn prop_fee_response_roundtrip(fee_rate in any::<f64>()) {
+			let fee_rate = fee_rate.abs();
+			let json_val = json!({
+				"feerate": fee_rate,
+				"errors": serde_json::Value::Null
+			});
+
+			let resp = JsonResponse(json_val);
+			let decoded: FeeResponse = resp.try_into().unwrap();
+
+			let expected = {
+				let fee_rate_sat_per_kwu = (fee_rate * 25_000_000.0).round() as u64;
+				FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
+			};
+			prop_assert_eq!(decoded.0, expected);
+		}
+
+		#[test]
+		fn prop_mempool_min_fee_response_roundtrip(fee_rate in any::<f64>()) {
+			let fee_rate = fee_rate.abs();
+			let json_val = json!({
+				"mempoolminfee": fee_rate
+			});
+
+			let resp = JsonResponse(json_val);
+			let decoded: MempoolMinFeeResponse = resp.try_into().unwrap();
+
+			let expected = {
+				let fee_rate_sat_per_kwu = (fee_rate * 25_000_000.0).round() as u64;
+				FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
+			};
+			prop_assert_eq!(decoded.0, expected);
+		}
+
+	}
+}
