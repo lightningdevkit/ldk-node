@@ -370,8 +370,11 @@ impl BitcoindChainSource {
 		let cur_height = channel_manager.current_best_block().height;
 
 		let now = SystemTime::now();
-		let unconfirmed_txids = self.onchain_wallet.get_unconfirmed_txids();
-		match self.api_client.get_updated_mempool_transactions(cur_height, unconfirmed_txids).await
+		let bdk_unconfirmed_txids = self.onchain_wallet.get_unconfirmed_txids();
+		match self
+			.api_client
+			.get_updated_mempool_transactions(cur_height, bdk_unconfirmed_txids)
+			.await
 		{
 			Ok((unconfirmed_txs, evicted_txids)) => {
 				log_trace!(
@@ -754,7 +757,7 @@ impl BitcoindClient {
 	async fn get_raw_transaction_rpc(
 		rpc_client: Arc<RpcClient>, txid: &Txid,
 	) -> std::io::Result<Option<Transaction>> {
-		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
+		let txid_hex = txid.to_string();
 		let txid_json = serde_json::json!(txid_hex);
 		match rpc_client
 			.call_method::<GetRawTransactionResponse>("getrawtransaction", &[txid_json])
@@ -792,7 +795,7 @@ impl BitcoindClient {
 	async fn get_raw_transaction_rest(
 		rest_client: Arc<RestClient>, txid: &Txid,
 	) -> std::io::Result<Option<Transaction>> {
-		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
+		let txid_hex = txid.to_string();
 		let tx_path = format!("tx/{}.json", txid_hex);
 		match rest_client
 			.request_resource::<JsonResponse, GetRawTransactionResponse>(&tx_path)
@@ -889,7 +892,7 @@ impl BitcoindClient {
 	async fn get_mempool_entry_inner(
 		client: Arc<RpcClient>, txid: Txid,
 	) -> std::io::Result<Option<MempoolEntry>> {
-		let txid_hex = bitcoin::consensus::encode::serialize_hex(&txid);
+		let txid_hex = txid.to_string();
 		let txid_json = serde_json::json!(txid_hex);
 
 		match client.call_method::<GetMempoolEntryResponse>("getmempoolentry", &[txid_json]).await {
@@ -964,11 +967,12 @@ impl BitcoindClient {
 	/// - mempool transactions, alongside their first-seen unix timestamps.
 	/// - transactions that have been evicted from the mempool, alongside the last time they were seen absent.
 	pub(crate) async fn get_updated_mempool_transactions(
-		&self, best_processed_height: u32, unconfirmed_txids: Vec<Txid>,
+		&self, best_processed_height: u32, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<(Vec<(Transaction, u64)>, Vec<(Txid, u64)>)> {
 		let mempool_txs =
 			self.get_mempool_transactions_and_timestamp_at_height(best_processed_height).await?;
-		let evicted_txids = self.get_evicted_mempool_txids_and_timestamp(unconfirmed_txids).await?;
+		let evicted_txids =
+			self.get_evicted_mempool_txids_and_timestamp(bdk_unconfirmed_txids).await?;
 		Ok((mempool_txs, evicted_txids))
 	}
 
@@ -1078,14 +1082,14 @@ impl BitcoindClient {
 	// To this end, we first update our local mempool_entries_cache and then return all unconfirmed
 	// wallet `Txid`s that don't appear in the mempool still.
 	async fn get_evicted_mempool_txids_and_timestamp(
-		&self, unconfirmed_txids: Vec<Txid>,
+		&self, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<Vec<(Txid, u64)>> {
 		match self {
 			BitcoindClient::Rpc { latest_mempool_timestamp, mempool_entries_cache, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
 					latest_mempool_timestamp,
 					mempool_entries_cache,
-					unconfirmed_txids,
+					bdk_unconfirmed_txids,
 				)
 				.await
 			},
@@ -1093,7 +1097,7 @@ impl BitcoindClient {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
 					latest_mempool_timestamp,
 					mempool_entries_cache,
-					unconfirmed_txids,
+					bdk_unconfirmed_txids,
 				)
 				.await
 			},
@@ -1103,13 +1107,13 @@ impl BitcoindClient {
 	async fn get_evicted_mempool_txids_and_timestamp_inner(
 		latest_mempool_timestamp: &AtomicU64,
 		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
-		unconfirmed_txids: Vec<Txid>,
+		bdk_unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<Vec<(Txid, u64)>> {
 		let latest_mempool_timestamp = latest_mempool_timestamp.load(Ordering::Relaxed);
 		let mempool_entries_cache = mempool_entries_cache.lock().await;
-		let evicted_txids = unconfirmed_txids
+		let evicted_txids = bdk_unconfirmed_txids
 			.into_iter()
-			.filter(|txid| mempool_entries_cache.contains_key(txid))
+			.filter(|txid| !mempool_entries_cache.contains_key(txid))
 			.map(|txid| (txid, latest_mempool_timestamp))
 			.collect();
 		Ok(evicted_txids)
@@ -1236,7 +1240,7 @@ impl TryInto<GetRawMempoolResponse> for JsonResponse {
 
 		for hex in res {
 			let txid = if let Some(hex_str) = hex.as_str() {
-				match bitcoin::consensus::encode::deserialize_hex(hex_str) {
+				match hex_str.parse::<Txid>() {
 					Ok(txid) => txid,
 					Err(_) => {
 						return Err(std::io::Error::new(
