@@ -1381,3 +1381,14 @@ fn facade_logging() {
 		validate_log_entry(entry);
 	}
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn drop_in_async_context() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let seed_bytes = vec![42u8; 64];
+
+	let config = random_config(true);
+	let node = setup_node(&chain_source, config, Some(seed_bytes));
+	node.stop().unwrap();
+}

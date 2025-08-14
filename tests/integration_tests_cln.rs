@@ -64,7 +64,17 @@ fn test_cln() {
 	// Setup CLN
 	let sock = "/tmp/lightning-rpc";
 	let cln_client = LightningRPC::new(&sock);
-	let cln_info = cln_client.getinfo().unwrap();
+	let cln_info = {
+		loop {
+			let info = cln_client.getinfo().unwrap();
+			// Wait for CLN to sync block height before channel open.
+			// Prevents crash due to unset blockheight (see LDK Node issue #527).
+			if info.blockheight > 0 {
+				break info;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(250));
+		}
+	};
 	let cln_node_id = PublicKey::from_str(&cln_info.id).unwrap();
 	let cln_address: SocketAddress = match cln_info.binding.first().unwrap() {
 		NetworkAddress::Ipv4 { address, port } => {

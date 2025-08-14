@@ -1495,12 +1495,16 @@ fn build_with_store_internal(
 	};
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
-	let (event_handling_stopped_sender, _) = tokio::sync::watch::channel(());
+	let background_processor_task = Mutex::new(None);
+	let background_tasks = Mutex::new(None);
+	let cancellable_background_tasks = Mutex::new(None);
 
 	Ok(Node {
 		runtime,
 		stop_sender,
-		event_handling_stopped_sender,
+		background_processor_task,
+		background_tasks,
+		cancellable_background_tasks,
 		config,
 		wallet,
 		chain_source,
