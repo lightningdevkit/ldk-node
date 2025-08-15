@@ -1688,7 +1688,7 @@ fn optionally_install_rustls_cryptoprovider() {
 	INIT_CRYPTO.call_once(|| {
 		// Ensure we always install a `CryptoProvider` for `rustls` if it was somehow not previously installed by now.
 		if rustls::crypto::CryptoProvider::get_default().is_none() {
-			let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+			let _ = rustls::crypto::ring::default_provider().install_default();
 		}
 
 		// Refuse to startup without TLS support. Better to catch it now than even later at runtime.

@@ -36,7 +36,7 @@ default = []
 #lightning-background-processor = { version = "0.1.0" }
 #lightning-rapid-gossip-sync = { version = "0.1.0" }
 #lightning-block-sync = { version = "0.1.0", features = ["rest-client", "rpc-client", "tokio"] }
-#lightning-transaction-sync = { version = "0.1.0", features = ["esplora-async-https", "time", "electrum"] }
+#lightning-transaction-sync = { version = "0.1.0", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
 #lightning-liquidity = { version = "0.1.0", features = ["std"] }
 #lightning-macros = { version = "0.1.0" }
 
@@ -48,7 +48,7 @@ default = []
 #lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["rest-client", "rpc-client", "tokio"] }
-#lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["esplora-async-https", "electrum", "time"] }
+#lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 
@@ -60,7 +60,7 @@ lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning
 lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "4e32d85249359d8ef8ece97d89848e40154363ab" }
 lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "4e32d85249359d8ef8ece97d89848e40154363ab" }
 lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "4e32d85249359d8ef8ece97d89848e40154363ab", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "4e32d85249359d8ef8ece97d89848e40154363ab", features = ["esplora-async-https", "electrum", "time"] }
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "4e32d85249359d8ef8ece97d89848e40154363ab", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
 lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "4e32d85249359d8ef8ece97d89848e40154363ab" }
 lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "4e32d85249359d8ef8ece97d89848e40154363ab" }
 
@@ -72,13 +72,13 @@ lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", 
 #lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-block-sync = { path = "../rust-lightning/lightning-block-sync", features = ["rest-client", "rpc-client", "tokio"] }
-#lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async-https", "electrum", "time"] }
+#lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
 #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity", features = ["std"] }
 #lightning-macros = { path = "../rust-lightning/lightning-macros" }
 
 bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
-bdk_electrum = { version = "0.23.0", default-features = false, features = ["use-rustls"]}
+bdk_electrum = { version = "0.23.0", default-features = false, features = ["use-rustls-ring"]}
 bdk_wallet = { version = "2.0.0", default-features = false, features = ["std", "keys-bip39"]}
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -93,7 +93,7 @@ rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros" ] }
 esplora-client = { version = "0.12", default-features = false, features = ["tokio", "async-https-rustls"] }
-electrum-client = { version = "0.24.0", default-features = true }
+electrum-client = { version = "0.24.0", default-features = false, features = ["proxy", "use-rustls-ring"] }
 libc = "0.2"
 uniffi = { version = "0.28.3", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
