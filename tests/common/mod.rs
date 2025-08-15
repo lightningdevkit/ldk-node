@@ -40,7 +40,9 @@ use electrum_client::ElectrumApi;
 
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use serde_json::{json, Value};
 
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -395,6 +397,21 @@ pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	println!("\n");
 }
 
+pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let cur_height = blockchain_info.blocks as usize;
+	let target_height = cur_height - num_blocks + 1;
+	let block_hash = bitcoind
+		.get_block_hash(target_height as u64)
+		.expect("failed to get block hash")
+		.block_hash()
+		.expect("block hash should be present");
+	bitcoind.invalidate_block(block_hash).expect("failed to invalidate block");
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let new_cur_height = blockchain_info.blocks as usize;
+	assert!(new_cur_height + num_blocks == cur_height);
+}
+
 pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 	let mut header = match electrs.block_headers_subscribe() {
 		Ok(header) => header,
@@ -474,18 +491,27 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	generate_blocks_and_wait(bitcoind, electrs, 101);
 
-	for addr in addrs {
-		let txid = bitcoind.send_to_address(&addr, amount).unwrap().0.parse().unwrap();
-		wait_for_tx(electrs, txid);
-	}
+	let amounts: HashMap<String, f64> =
+		addrs.iter().map(|addr| (addr.to_string(), amount.to_btc())).collect();
 
+	let empty_account = json!("");
+	let amounts_json = json!(amounts);
+	let txid = bitcoind
+		.call::<Value>("sendmany", &[empty_account, amounts_json])
+		.unwrap()
+		.as_str()
+		.unwrap()
+		.parse()
+		.unwrap();
+
+	wait_for_tx(electrs, txid);
 	generate_blocks_and_wait(bitcoind, electrs, 1);
 }
 
 pub fn open_channel(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
-) {
+) -> OutPoint {
 	if should_announce {
 		node_a
 			.open_announced_channel(
@@ -513,6 +539,8 @@ pub fn open_channel(
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
 	wait_for_tx(&electrsd.client, funding_txo_a.txid);
+
+	funding_txo_a
 }
 
 pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
