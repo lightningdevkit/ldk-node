@@ -668,9 +668,9 @@ impl NodeBuilder {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
 		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
-			Arc::new(Runtime::with_handle(handle.clone()))
+			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(&logger)))
 		} else {
-			Arc::new(Runtime::new().map_err(|e| {
+			Arc::new(Runtime::new(Arc::clone(&logger)).map_err(|e| {
 				log_error!(logger, "Failed to setup tokio runtime: {}", e);
 				BuildError::RuntimeSetupFailed
 			})?)
@@ -715,9 +715,9 @@ impl NodeBuilder {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
 		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
-			Arc::new(Runtime::with_handle(handle.clone()))
+			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(&logger)))
 		} else {
-			Arc::new(Runtime::new().map_err(|e| {
+			Arc::new(Runtime::new(Arc::clone(&logger)).map_err(|e| {
 				log_error!(logger, "Failed to setup tokio runtime: {}", e);
 				BuildError::RuntimeSetupFailed
 			})?)
@@ -1668,18 +1668,11 @@ fn build_with_store_internal(
 	};
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
-	let background_processor_task = Mutex::new(None);
-	let background_tasks = Mutex::new(None);
-	let cancellable_background_tasks = Mutex::new(None);
-
 	let is_running = Arc::new(RwLock::new(false));
 
 	Ok(Node {
 		runtime,
 		stop_sender,
-		background_processor_task,
-		background_tasks,
-		cancellable_background_tasks,
 		config,
 		wallet,
 		chain_source,
