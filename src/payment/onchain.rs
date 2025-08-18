@@ -41,19 +41,19 @@ macro_rules! maybe_map_fee_rate_opt {
 ///
 /// [`Node::onchain_payment`]: crate::Node::onchain_payment
 pub struct OnchainPayment {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	config: Arc<Config>,
+	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 }
 
 impl OnchainPayment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, wallet: Arc<Wallet>,
-		channel_manager: Arc<ChannelManager>, config: Arc<Config>, logger: Arc<Logger>,
+		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, config: Arc<Config>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
-		Self { runtime, wallet, channel_manager, config, logger }
+		Self { wallet, channel_manager, config, is_running, logger }
 	}
 
 	/// Retrieve a new on-chain/funding address.
@@ -75,8 +75,7 @@ impl OnchainPayment {
 	pub fn send_to_address(
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -106,8 +105,7 @@ impl OnchainPayment {
 	pub fn send_all_to_address(
 		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 

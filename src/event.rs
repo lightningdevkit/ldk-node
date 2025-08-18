@@ -29,6 +29,8 @@ use crate::io::{
 };
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 
+use crate::runtime::Runtime;
+
 use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{ClosureReason, PaymentPurpose, ReplayEvent};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
@@ -53,7 +55,7 @@ use core::future::Future;
 use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// An event emitted by [`Node`], which should be handled by the user.
@@ -451,7 +453,7 @@ where
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
 }
@@ -466,8 +468,8 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, logger: L, config: Arc<Config>,
+		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>, runtime: Arc<Runtime>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -1049,17 +1051,14 @@ where
 				let forwarding_channel_manager = self.channel_manager.clone();
 				let min = time_forwardable.as_millis() as u64;
 
-				let runtime_lock = self.runtime.read().unwrap();
-				debug_assert!(runtime_lock.is_some());
+				let future = async move {
+					let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
+					tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
 
-				if let Some(runtime) = runtime_lock.as_ref() {
-					runtime.spawn(async move {
-						let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
-						tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
+					forwarding_channel_manager.process_pending_htlc_forwards();
+				};
 
-						forwarding_channel_manager.process_pending_htlc_forwards();
-					});
-				}
+				self.runtime.spawn(future);
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
 				match self.output_sweeper.track_spendable_outputs(outputs, channel_id, true, None) {
@@ -1421,31 +1420,27 @@ where
 				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
 			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
-				let runtime_lock = self.runtime.read().unwrap();
-				debug_assert!(runtime_lock.is_some());
-
-				if let Some(runtime) = runtime_lock.as_ref() {
-					let spawn_logger = self.logger.clone();
-					let spawn_cm = Arc::clone(&self.connection_manager);
-					runtime.spawn(async move {
-						for addr in &addresses {
-							match spawn_cm.connect_peer_if_necessary(node_id, addr.clone()).await {
-								Ok(()) => {
-									return;
-								},
-								Err(e) => {
-									log_error!(
-										spawn_logger,
-										"Failed to establish connection to peer {}@{}: {}",
-										node_id,
-										addr,
-										e
-									);
-								},
-							}
+				let spawn_logger = self.logger.clone();
+				let spawn_cm = Arc::clone(&self.connection_manager);
+				let future = async move {
+					for addr in &addresses {
+						match spawn_cm.connect_peer_if_necessary(node_id, addr.clone()).await {
+							Ok(()) => {
+								return;
+							},
+							Err(e) => {
+								log_error!(
+									spawn_logger,
+									"Failed to establish connection to peer {}@{}: {}",
+									node_id,
+									addr,
+									e
+								);
+							},
 						}
-					});
-				}
+					}
+				};
+				self.runtime.spawn(future);
 			},
 			LdkEvent::BumpTransaction(bte) => {
 				match bte {

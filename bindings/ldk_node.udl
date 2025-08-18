@@ -64,7 +64,7 @@ dictionary LogRecord {
 
 [Trait, WithForeign]
 interface LogWriter {
-    void log(LogRecord record);
+	void log(LogRecord record);
 };
 
 interface Builder {
@@ -161,8 +161,8 @@ interface Node {
 
 [Enum]
 interface Bolt11InvoiceDescription {
-  Hash(string hash);
-  Direct(string description);
+	Hash(string hash);
+	Direct(string description);
 };
 
 interface Bolt11Payment {
@@ -335,6 +335,7 @@ enum BuildError {
 	"InvalidListeningAddresses",
 	"InvalidAnnouncementAddresses",
 	"InvalidNodeAlias",
+	"RuntimeSetupFailed",
 	"ReadFailed",
 	"WriteFailed",
 	"StoragePathAccessFailed",

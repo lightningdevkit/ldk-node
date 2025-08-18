@@ -28,6 +28,7 @@ use crate::liquidity::{
 use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::peer_store::PeerStore;
+use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	ChainMonitor, ChannelManager, DynStore, GossipSync, Graph, KeysManager, MessageRouter,
@@ -168,6 +169,8 @@ pub enum BuildError {
 	InvalidAnnouncementAddresses,
 	/// The provided alias is invalid.
 	InvalidNodeAlias,
+	/// An attempt to setup a runtime has failed.
+	RuntimeSetupFailed,
 	/// We failed to read data from the [`KVStore`].
 	///
 	/// [`KVStore`]: lightning::util::persist::KVStore
@@ -205,6 +208,7 @@ impl fmt::Display for BuildError {
 			Self::InvalidAnnouncementAddresses => {
 				write!(f, "Given announcement addresses are invalid.")
 			},
+			Self::RuntimeSetupFailed => write!(f, "Failed to setup a runtime."),
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
@@ -236,6 +240,7 @@ pub struct NodeBuilder {
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
+	runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 impl NodeBuilder {
@@ -252,6 +257,7 @@ impl NodeBuilder {
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
+		let runtime_handle = None;
 		Self {
 			config,
 			entropy_source_config,
@@ -259,7 +265,18 @@ impl NodeBuilder {
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
+			runtime_handle,
 		}
+	}
+
+	/// Configures the [`Node`] instance to (re-)use a specific `tokio` runtime.
+	///
+	/// If not provided, the node will spawn its own runtime or reuse any outer runtime context it
+	/// can detect.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
+	pub fn set_runtime(&mut self, runtime_handle: tokio::runtime::Handle) -> &mut Self {
+		self.runtime_handle = Some(runtime_handle);
+		self
 	}
 
 	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
@@ -650,6 +667,15 @@ impl NodeBuilder {
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
+		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
+			Arc::new(Runtime::with_handle(handle.clone()))
+		} else {
+			Arc::new(Runtime::new().map_err(|e| {
+				log_error!(logger, "Failed to setup tokio runtime: {}", e);
+				BuildError::RuntimeSetupFailed
+			})?)
+		};
+
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
 			self.entropy_source_config.as_ref(),
@@ -678,6 +704,7 @@ impl NodeBuilder {
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
 			seed_bytes,
+			runtime,
 			logger,
 			Arc::new(vss_store),
 		)
@@ -686,6 +713,15 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+
+		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
+			Arc::new(Runtime::with_handle(handle.clone()))
+		} else {
+			Arc::new(Runtime::new().map_err(|e| {
+				log_error!(logger, "Failed to setup tokio runtime: {}", e);
+				BuildError::RuntimeSetupFailed
+			})?)
+		};
 
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
@@ -700,6 +736,7 @@ impl NodeBuilder {
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
 			seed_bytes,
+			runtime,
 			logger,
 			kv_store,
 		)
@@ -1049,7 +1086,7 @@ fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1240,8 +1277,6 @@ fn build_with_store_internal(
 			))
 		},
 	};
-
-	let runtime = Arc::new(RwLock::new(None));
 
 	// Initialize the ChainMonitor
 	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
@@ -1637,6 +1672,8 @@ fn build_with_store_internal(
 	let background_tasks = Mutex::new(None);
 	let cancellable_background_tasks = Mutex::new(None);
 
+	let is_running = Arc::new(RwLock::new(false));
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1664,6 +1701,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		is_running,
 		is_listening,
 		node_metrics,
 	})

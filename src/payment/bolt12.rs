@@ -49,19 +49,18 @@ type Refund = Arc<crate::ffi::Refund>;
 /// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 /// [`Node::bolt12_payment`]: crate::Node::bolt12_payment
 pub struct Bolt12Payment {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 	channel_manager: Arc<ChannelManager>,
 	payment_store: Arc<PaymentStore>,
+	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 }
 
 impl Bolt12Payment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
-		logger: Arc<Logger>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
-		Self { runtime, channel_manager, payment_store, logger }
+		Self { channel_manager, payment_store, is_running, logger }
 	}
 
 	/// Send a payment given an offer.
@@ -73,11 +72,12 @@ impl Bolt12Payment {
 	pub fn send(
 		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
 	) -> Result<PaymentId, Error> {
-		let offer = maybe_deref(offer);
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+
+		let offer = maybe_deref(offer);
+
 		let mut random_bytes = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
@@ -175,11 +175,11 @@ impl Bolt12Payment {
 	pub fn send_using_amount(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 	) -> Result<PaymentId, Error> {
-		let offer = maybe_deref(offer);
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+
+		let offer = maybe_deref(offer);
 
 		let mut random_bytes = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut random_bytes);
@@ -346,6 +346,10 @@ impl Bolt12Payment {
 	/// [`Refund`]: lightning::offers::refund::Refund
 	/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
 	pub fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
 		let refund = maybe_deref(refund);
 		let invoice = self.channel_manager.request_refund_payment(&refund).map_err(|e| {
 			log_error!(self.logger, "Failed to request refund payment: {:?}", e);
