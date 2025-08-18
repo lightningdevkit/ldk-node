@@ -685,7 +685,8 @@ where
 					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
 					// user interaction.
 					match info.kind {
-						PaymentKind::Bolt11 { preimage, .. } => {
+						PaymentKind::Bolt11 { preimage, .. }
+						| PaymentKind::Bolt11Jit { preimage, .. } => {
 							if purpose.preimage().is_none() {
 								debug_assert!(
 									preimage.is_none(),

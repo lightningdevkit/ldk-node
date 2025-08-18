@@ -362,8 +362,17 @@ impl Bolt11Payment {
 		}
 
 		if let Some(details) = self.payment_store.get(&payment_id) {
-			if let Some(expected_amount_msat) = details.amount_msat {
-				if claimable_amount_msat < expected_amount_msat {
+			// For payments requested via `receive*_via_jit_channel_for_hash()`
+			// `skimmed_fee_msat` held by LSP must be taken into account.
+			let skimmed_fee_msat = match details.kind {
+				PaymentKind::Bolt11Jit {
+					counterparty_skimmed_fee_msat: Some(skimmed_fee_msat),
+					..
+				} => skimmed_fee_msat,
+				_ => 0,
+			};
+			if let Some(invoice_amount_msat) = details.amount_msat {
+				if claimable_amount_msat < invoice_amount_msat - skimmed_fee_msat {
 					log_error!(
 						self.logger,
 						"Failed to manually claim payment {} as the claimable amount is less than expected",
@@ -580,6 +589,46 @@ impl Bolt11Payment {
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
+			None,
+		)?;
+		Ok(maybe_wrap(invoice))
+	}
+
+	/// Returns a payable invoice that can be used to request a payment of the amount given and
+	/// receive it via a newly created just-in-time (JIT) channel.
+	///
+	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+	/// to us, supplying just-in-time inbound liquidity.
+	///
+	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
+	/// channel to us. We'll use its cheapest offer otherwise.
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
+	/// the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+	/// is performed *before* emitting the event.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
+	pub fn receive_via_jit_channel_for_hash(
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_via_jit_channel_inner(
+			Some(amount_msat),
+			&description,
+			expiry_secs,
+			max_total_lsp_fee_limit_msat,
+			None,
+			Some(payment_hash),
 		)?;
 		Ok(maybe_wrap(invoice))
 	}
@@ -606,6 +655,47 @@ impl Bolt11Payment {
 			expiry_secs,
 			None,
 			max_proportional_lsp_fee_limit_ppm_msat,
+			None,
+		)?;
+		Ok(maybe_wrap(invoice))
+	}
+
+	/// Returns a payable invoice that can be used to request a variable amount payment (also known
+	/// as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+	///
+	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+	/// to us, supplying just-in-time inbound liquidity.
+	///
+	/// If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
+	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
+	/// We'll use its cheapest offer otherwise.
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
+	/// the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+	/// is performed *before* emitting the event.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
+	pub fn receive_variable_amount_via_jit_channel_for_hash(
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_via_jit_channel_inner(
+			None,
+			&description,
+			expiry_secs,
+			None,
+			max_proportional_lsp_fee_limit_ppm_msat,
+			Some(payment_hash),
 		)?;
 		Ok(maybe_wrap(invoice))
 	}
@@ -613,7 +703,7 @@ impl Bolt11Payment {
 	fn receive_via_jit_channel_inner(
 		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	) -> Result<LdkBolt11Invoice, Error> {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
@@ -645,6 +735,7 @@ impl Bolt11Payment {
 							description,
 							expiry_secs,
 							max_total_lsp_fee_limit_msat,
+							payment_hash,
 						)
 						.await
 						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
@@ -654,6 +745,7 @@ impl Bolt11Payment {
 							description,
 							expiry_secs,
 							max_proportional_lsp_fee_limit_ppm_msat,
+							payment_hash,
 						)
 						.await
 						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
