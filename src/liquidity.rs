@@ -988,7 +988,7 @@ where
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_total_lsp_fee_limit_msat: Option<u64>,
+		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	) -> Result<(Bolt11Invoice, u64), Error> {
 		let fee_response = self.lsps2_request_opening_fee_params().await?;
 
@@ -1040,6 +1040,7 @@ where
 			Some(amount_msat),
 			description,
 			expiry_secs,
+			payment_hash,
 		)?;
 
 		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -1048,7 +1049,7 @@ where
 
 	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	) -> Result<(Bolt11Invoice, u64), Error> {
 		let fee_response = self.lsps2_request_opening_fee_params().await?;
 
@@ -1082,8 +1083,13 @@ where
 		);
 
 		let buy_response = self.lsps2_send_buy_request(None, min_opening_params).await?;
-		let invoice =
-			self.lsps2_create_jit_invoice(buy_response, None, description, expiry_secs)?;
+		let invoice = self.lsps2_create_jit_invoice(
+			buy_response,
+			None,
+			description,
+			expiry_secs,
+			payment_hash,
+		)?;
 
 		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
 		Ok((invoice, min_prop_fee_ppm_msat))
@@ -1166,18 +1172,36 @@ where
 	fn lsps2_create_jit_invoice(
 		&self, buy_response: LSPS2BuyResponse, amount_msat: Option<u64>,
 		description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: Option<PaymentHash>,
 	) -> Result<Bolt11Invoice, Error> {
 		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
 		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
-		let (payment_hash, payment_secret) = self
-			.channel_manager
-			.create_inbound_payment(None, expiry_secs, Some(min_final_cltv_expiry_delta))
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
-				Error::InvoiceCreationFailed
-			})?;
+		let (payment_hash, payment_secret) = match payment_hash {
+			Some(payment_hash) => {
+				let payment_secret = self
+					.channel_manager
+					.create_inbound_payment_for_hash(
+						payment_hash,
+						None,
+						expiry_secs,
+						Some(min_final_cltv_expiry_delta),
+					)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
+						Error::InvoiceCreationFailed
+					})?;
+				(payment_hash, payment_secret)
+			},
+			None => self
+				.channel_manager
+				.create_inbound_payment(None, expiry_secs, Some(min_final_cltv_expiry_delta))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
+					Error::InvoiceCreationFailed
+				})?,
+		};
 
 		let route_hint = RouteHint(vec![RouteHintHop {
 			src_node_id: lsps2_client.lsp_node_id,

@@ -9,7 +9,8 @@ mod common;
 
 use common::{
 	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event, expect_event,
-	expect_payment_received_event, expect_payment_successful_event, generate_blocks_and_wait,
+	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
+	generate_blocks_and_wait,
 	logging::{init_log_logger, validate_log_entry, TestLogWriter},
 	open_channel, premine_and_distribute_funds, random_config, random_listening_addresses,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, wait_for_tx,
@@ -29,7 +30,7 @@ use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::util::persist::KVStore;
 
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
-use lightning_types::payment::PaymentPreimage;
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
@@ -1334,6 +1335,7 @@ fn lsps2_client_service_integration() {
 	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
 	expect_channel_pending_event!(client_node, service_node.node_id());
 	expect_channel_ready_event!(client_node, service_node.node_id());
 
@@ -1359,19 +1361,112 @@ fn lsps2_client_service_integration() {
 
 	println!("Generating regular invoice!");
 	let invoice_description =
-		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap()).into();
 	let amount_msat = 5_000_000;
-	let invoice = client_node
-		.bolt11_payment()
-		.receive(amount_msat, &invoice_description.into(), 1024)
-		.unwrap();
+	let invoice =
+		client_node.bolt11_payment().receive(amount_msat, &invoice_description, 1024).unwrap();
 
 	// Have the payer_node pay the invoice, to check regular forwards service_node -> client_node
 	// are working as expected.
 	println!("Paying regular invoice!");
 	let payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
+
+	////////////////////////////////////////////////////////////////////////////
+	// receive_via_jit_channel_for_hash and claim_for_hash
+	////////////////////////////////////////////////////////////////////////////
+	println!("Generating JIT invoice!");
+	// Increase the amount to make sure it does not fit into the existing channels.
+	let jit_amount_msat = 200_000_000;
+	let manual_preimage = PaymentPreimage([42u8; 32]);
+	let manual_payment_hash: PaymentHash = manual_preimage.into();
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel_for_hash(
+			jit_amount_msat,
+			&invoice_description,
+			1024,
+			None,
+			manual_payment_hash,
+		)
+		.unwrap();
+
+	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
+	println!("Paying JIT invoice!");
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
+	let claimable_amount_msat = expect_payment_claimable_event!(
+		client_node,
+		payment_id,
+		manual_payment_hash,
+		expected_received_amount_msat
+	);
+	println!("Claiming payment!");
+	client_node
+		.bolt11_payment()
+		.claim_for_hash(manual_payment_hash, claimable_amount_msat, manual_preimage)
+		.unwrap();
+
+	expect_event!(service_node, PaymentForwarded);
+	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	let client_payment_id =
+		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
+	let client_payment = client_node.payment(&client_payment_id).unwrap();
+	match client_payment.kind {
+		PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	////////////////////////////////////////////////////////////////////////////
+	// receive_via_jit_channel_for_hash and fail_for_hash
+	////////////////////////////////////////////////////////////////////////////
+	println!("Generating JIT invoice!");
+	// Increase the amount to make sure it does not fit into the existing channels.
+	let jit_amount_msat = 400_000_000;
+	let manual_preimage = PaymentPreimage([43u8; 32]);
+	let manual_payment_hash: PaymentHash = manual_preimage.into();
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel_for_hash(
+			jit_amount_msat,
+			&invoice_description,
+			1024,
+			None,
+			manual_payment_hash,
+		)
+		.unwrap();
+
+	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
+	println!("Paying JIT invoice!");
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
+	expect_payment_claimable_event!(
+		client_node,
+		payment_id,
+		manual_payment_hash,
+		expected_received_amount_msat
+	);
+	println!("Failing payment!");
+	client_node.bolt11_payment().fail_for_hash(manual_payment_hash).unwrap();
+
+	expect_event!(payer_node, PaymentFailed);
+	assert_eq!(client_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
 }
 
 #[test]
