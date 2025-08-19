@@ -61,15 +61,6 @@ impl Runtime {
 		}
 	}
 
-	pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
-	where
-		F: Future + Send + 'static,
-		F::Output: Send + 'static,
-	{
-		let handle = self.handle();
-		handle.spawn(future)
-	}
-
 	pub fn spawn_background_task<F>(&self, future: F)
 	where
 		F: Future<Output = ()> + Send + 'static,

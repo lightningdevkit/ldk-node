@@ -1059,7 +1059,7 @@ where
 					forwarding_channel_manager.process_pending_htlc_forwards();
 				};
 
-				self.runtime.spawn(future);
+				self.runtime.spawn_cancellable_background_task(future);
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
 				match self.output_sweeper.track_spendable_outputs(outputs, channel_id, true, None) {
@@ -1441,7 +1441,7 @@ where
 						}
 					}
 				};
-				self.runtime.spawn(future);
+				self.runtime.spawn_cancellable_background_task(future);
 			},
 			LdkEvent::BumpTransaction(bte) => {
 				match bte {
