@@ -1455,7 +1455,7 @@ fn build_with_store_internal(
 		Arc::clone(&channel_manager),
 		message_router,
 		Arc::clone(&channel_manager),
-		IgnoringMessageHandler {},
+		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
 		IgnoringMessageHandler {},
 	));

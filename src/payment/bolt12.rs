@@ -9,18 +9,21 @@
 //!
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 
-use crate::config::LDK_PAYMENT_RETRY_TIMEOUT;
+use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, PaymentStore};
 
+use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
 
+#[cfg(feature = "uniffi")]
+use lightning::util::ser::{Readable, Writeable};
 use lightning_types::string::UntrustedString;
 
 use rand::RngCore;
@@ -54,15 +57,16 @@ pub struct Bolt12Payment {
 	channel_manager: Arc<ChannelManager>,
 	payment_store: Arc<PaymentStore>,
 	is_running: Arc<RwLock<bool>>,
+	config: Arc<Config>,
 	logger: Arc<Logger>,
 }
 
 impl Bolt12Payment {
 	pub(crate) fn new(
 		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
-		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
-		Self { channel_manager, payment_store, is_running, logger }
+		Self { channel_manager, payment_store, config, is_running, logger }
 	}
 
 	/// Send a payment given an offer.
@@ -449,5 +453,100 @@ impl Bolt12Payment {
 		self.payment_store.insert(payment)?;
 
 		Ok(maybe_wrap(refund))
+	}
+
+	/// Retrieve an [`Offer`] for receiving async payments as an often-offline recipient.
+	///
+	/// Will only return an offer if [`Bolt12Payment::set_paths_to_static_invoice_server`] was called and we succeeded
+	/// in interactively building a [`StaticInvoice`] with the static invoice server.
+	///
+	/// Useful for posting offers to receive payments later, such as posting an offer on a website.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	/// [`Offer`]: lightning::offers::offer::Offer
+	pub fn receive_async(&self) -> Result<Offer, Error> {
+		self.channel_manager
+			.get_async_receive_offer()
+			.map(maybe_wrap)
+			.or(Err(Error::OfferCreationFailed))
+	}
+
+	/// Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
+	/// static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(not(feature = "uniffi"))]
+	pub fn set_paths_to_static_invoice_server(
+		&self, paths: Vec<BlindedMessagePath>,
+	) -> Result<(), Error> {
+		self.channel_manager
+			.set_paths_to_static_invoice_server(paths)
+			.or(Err(Error::InvalidBlindedPaths))
+	}
+
+	/// Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
+	/// static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(feature = "uniffi")]
+	pub fn set_paths_to_static_invoice_server(&self, paths: Vec<u8>) -> Result<(), Error> {
+		let decoded_paths = <Vec<BlindedMessagePath> as Readable>::read(&mut &paths[..])
+			.or(Err(Error::InvalidBlindedPaths))?;
+
+		self.channel_manager
+			.set_paths_to_static_invoice_server(decoded_paths)
+			.or(Err(Error::InvalidBlindedPaths))
+	}
+
+	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
+	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(not(feature = "uniffi"))]
+	pub fn blinded_paths_for_async_recipient(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<BlindedMessagePath>, Error> {
+		self.blinded_paths_for_async_recipient_internal(recipient_id)
+	}
+
+	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
+	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(feature = "uniffi")]
+	pub fn blinded_paths_for_async_recipient(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<u8>, Error> {
+		let paths = self.blinded_paths_for_async_recipient_internal(recipient_id)?;
+
+		let mut bytes = Vec::new();
+		paths.write(&mut bytes).or(Err(Error::InvalidBlindedPaths))?;
+		Ok(bytes)
+	}
+
+	fn blinded_paths_for_async_recipient_internal(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<BlindedMessagePath>, Error> {
+		if !self.config.async_payment_services_enabled {
+			return Err(Error::AsyncPaymentServicesDisabled);
+		}
+
+		self.channel_manager
+			.blinded_paths_for_async_recipient(recipient_id, None)
+			.or(Err(Error::InvalidBlindedPaths))
 	}
 }

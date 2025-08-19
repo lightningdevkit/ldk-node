@@ -73,3 +73,8 @@ pub(crate) const BDK_WALLET_TX_GRAPH_KEY: &str = "tx_graph";
 pub(crate) const BDK_WALLET_INDEXER_PRIMARY_NAMESPACE: &str = "bdk_wallet";
 pub(crate) const BDK_WALLET_INDEXER_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
+
+/// [`StaticInvoice`]s will be persisted under this key.
+///
+/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+pub(crate) const STATIC_INVOICE_STORE_PRIMARY_NAMESPACE: &str = "static_invoices";

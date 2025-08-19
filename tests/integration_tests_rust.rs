@@ -1131,6 +1131,101 @@ fn simple_bolt12_send_receive() {
 }
 
 #[test]
+fn static_invoice_server() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let config_sender = random_config(true);
+	let node_sender = setup_node(&chain_source, config_sender, None);
+
+	let config_sender_lsp = random_config(true);
+	let node_sender_lsp = setup_node(&chain_source, config_sender_lsp, None);
+
+	let mut config_receiver_lsp = random_config(true);
+	config_receiver_lsp.node_config.async_payment_services_enabled = true;
+	let node_receiver_lsp = setup_node(&chain_source, config_receiver_lsp, None);
+
+	let config_receiver = random_config(true);
+	let node_receiver = setup_node(&chain_source, config_receiver, None);
+
+	let address_sender = node_sender.onchain_payment().new_address().unwrap();
+	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().unwrap();
+	let address_receiver_lsp = node_receiver_lsp.onchain_payment().new_address().unwrap();
+	let address_receiver = node_receiver.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 4_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_sender, address_sender_lsp, address_receiver_lsp, address_receiver],
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	node_sender.sync_wallets().unwrap();
+	node_sender_lsp.sync_wallets().unwrap();
+	node_receiver_lsp.sync_wallets().unwrap();
+	node_receiver.sync_wallets().unwrap();
+
+	open_channel(&node_sender, &node_sender_lsp, 400_000, true, &electrsd);
+	open_channel(&node_sender_lsp, &node_receiver_lsp, 400_000, true, &electrsd);
+	open_channel(&node_receiver_lsp, &node_receiver, 400_000, true, &electrsd);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_sender.sync_wallets().unwrap();
+	node_sender_lsp.sync_wallets().unwrap();
+	node_receiver_lsp.sync_wallets().unwrap();
+	node_receiver.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_sender, node_sender_lsp.node_id());
+	expect_channel_ready_event!(node_sender_lsp, node_sender.node_id());
+	expect_channel_ready_event!(node_sender_lsp, node_receiver_lsp.node_id());
+	expect_channel_ready_event!(node_receiver_lsp, node_sender_lsp.node_id());
+	expect_channel_ready_event!(node_receiver_lsp, node_receiver.node_id());
+	expect_channel_ready_event!(node_receiver, node_receiver_lsp.node_id());
+
+	let has_node_announcements = |node: &ldk_node::Node| {
+		node.network_graph()
+			.list_nodes()
+			.iter()
+			.filter(|n| {
+				node.network_graph().node(n).map_or(false, |info| info.announcement_info.is_some())
+			})
+			.count() >= 4
+	};
+
+	// Wait for everyone to see all channels and node announcements.
+	while node_sender.network_graph().list_channels().len() < 3
+		|| node_sender_lsp.network_graph().list_channels().len() < 3
+		|| node_receiver_lsp.network_graph().list_channels().len() < 3
+		|| node_receiver.network_graph().list_channels().len() < 3
+		|| !has_node_announcements(&node_sender)
+		|| !has_node_announcements(&node_sender_lsp)
+		|| !has_node_announcements(&node_receiver_lsp)
+		|| !has_node_announcements(&node_receiver)
+	{
+		std::thread::sleep(std::time::Duration::from_millis(100));
+	}
+
+	let recipient_id = vec![1, 2, 3];
+	let blinded_paths =
+		node_receiver_lsp.bolt12_payment().blinded_paths_for_async_recipient(recipient_id).unwrap();
+	node_receiver.bolt12_payment().set_paths_to_static_invoice_server(blinded_paths).unwrap();
+
+	let offer = loop {
+		if let Ok(offer) = node_receiver.bolt12_payment().receive_async() {
+			break offer;
+		}
+
+		std::thread::sleep(std::time::Duration::from_millis(100));
+	};
+
+	let payment_id =
+		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None).unwrap();
+
+	expect_payment_successful_event!(node_sender, Some(payment_id), None);
+}
+
+#[test]
 fn test_node_announcement_propagation() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
