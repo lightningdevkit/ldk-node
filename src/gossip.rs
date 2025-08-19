@@ -144,6 +144,6 @@ impl RuntimeSpawner {
 
 impl FutureSpawner for RuntimeSpawner {
 	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
-		self.runtime.spawn(future);
+		self.runtime.spawn_cancellable_background_task(future);
 	}
 }
