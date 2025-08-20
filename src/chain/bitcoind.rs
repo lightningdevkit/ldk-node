@@ -370,8 +370,11 @@ impl BitcoindChainSource {
 		let cur_height = channel_manager.current_best_block().height;
 
 		let now = SystemTime::now();
-		let unconfirmed_txids = self.onchain_wallet.get_unconfirmed_txids();
-		match self.api_client.get_updated_mempool_transactions(cur_height, unconfirmed_txids).await
+		let bdk_unconfirmed_txids = self.onchain_wallet.get_unconfirmed_txids();
+		match self
+			.api_client
+			.get_updated_mempool_transactions(cur_height, bdk_unconfirmed_txids)
+			.await
 		{
 			Ok((unconfirmed_txs, evicted_txids)) => {
 				log_trace!(
@@ -754,7 +757,7 @@ impl BitcoindClient {
 	async fn get_raw_transaction_rpc(
 		rpc_client: Arc<RpcClient>, txid: &Txid,
 	) -> std::io::Result<Option<Transaction>> {
-		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
+		let txid_hex = txid.to_string();
 		let txid_json = serde_json::json!(txid_hex);
 		match rpc_client
 			.call_method::<GetRawTransactionResponse>("getrawtransaction", &[txid_json])
@@ -792,7 +795,7 @@ impl BitcoindClient {
 	async fn get_raw_transaction_rest(
 		rest_client: Arc<RestClient>, txid: &Txid,
 	) -> std::io::Result<Option<Transaction>> {
-		let txid_hex = bitcoin::consensus::encode::serialize_hex(txid);
+		let txid_hex = txid.to_string();
 		let tx_path = format!("tx/{}.json", txid_hex);
 		match rest_client
 			.request_resource::<JsonResponse, GetRawTransactionResponse>(&tx_path)
@@ -889,7 +892,7 @@ impl BitcoindClient {
 	async fn get_mempool_entry_inner(
 		client: Arc<RpcClient>, txid: Txid,
 	) -> std::io::Result<Option<MempoolEntry>> {
-		let txid_hex = bitcoin::consensus::encode::serialize_hex(&txid);
+		let txid_hex = txid.to_string();
 		let txid_json = serde_json::json!(txid_hex);
 
 		match client.call_method::<GetMempoolEntryResponse>("getmempoolentry", &[txid_json]).await {
@@ -964,11 +967,12 @@ impl BitcoindClient {
 	/// - mempool transactions, alongside their first-seen unix timestamps.
 	/// - transactions that have been evicted from the mempool, alongside the last time they were seen absent.
 	pub(crate) async fn get_updated_mempool_transactions(
-		&self, best_processed_height: u32, unconfirmed_txids: Vec<Txid>,
+		&self, best_processed_height: u32, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<(Vec<(Transaction, u64)>, Vec<(Txid, u64)>)> {
 		let mempool_txs =
 			self.get_mempool_transactions_and_timestamp_at_height(best_processed_height).await?;
-		let evicted_txids = self.get_evicted_mempool_txids_and_timestamp(unconfirmed_txids).await?;
+		let evicted_txids =
+			self.get_evicted_mempool_txids_and_timestamp(bdk_unconfirmed_txids).await?;
 		Ok((mempool_txs, evicted_txids))
 	}
 
@@ -1078,14 +1082,14 @@ impl BitcoindClient {
 	// To this end, we first update our local mempool_entries_cache and then return all unconfirmed
 	// wallet `Txid`s that don't appear in the mempool still.
 	async fn get_evicted_mempool_txids_and_timestamp(
-		&self, unconfirmed_txids: Vec<Txid>,
+		&self, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<Vec<(Txid, u64)>> {
 		match self {
 			BitcoindClient::Rpc { latest_mempool_timestamp, mempool_entries_cache, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
 					latest_mempool_timestamp,
 					mempool_entries_cache,
-					unconfirmed_txids,
+					bdk_unconfirmed_txids,
 				)
 				.await
 			},
@@ -1093,7 +1097,7 @@ impl BitcoindClient {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
 					latest_mempool_timestamp,
 					mempool_entries_cache,
-					unconfirmed_txids,
+					bdk_unconfirmed_txids,
 				)
 				.await
 			},
@@ -1103,13 +1107,13 @@ impl BitcoindClient {
 	async fn get_evicted_mempool_txids_and_timestamp_inner(
 		latest_mempool_timestamp: &AtomicU64,
 		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
-		unconfirmed_txids: Vec<Txid>,
+		bdk_unconfirmed_txids: Vec<Txid>,
 	) -> std::io::Result<Vec<(Txid, u64)>> {
 		let latest_mempool_timestamp = latest_mempool_timestamp.load(Ordering::Relaxed);
 		let mempool_entries_cache = mempool_entries_cache.lock().await;
-		let evicted_txids = unconfirmed_txids
+		let evicted_txids = bdk_unconfirmed_txids
 			.into_iter()
-			.filter(|txid| mempool_entries_cache.contains_key(txid))
+			.filter(|txid| !mempool_entries_cache.contains_key(txid))
 			.map(|txid| (txid, latest_mempool_timestamp))
 			.collect();
 		Ok(evicted_txids)
@@ -1236,7 +1240,7 @@ impl TryInto<GetRawMempoolResponse> for JsonResponse {
 
 		for hex in res {
 			let txid = if let Some(hex_str) = hex.as_str() {
-				match bitcoin::consensus::encode::deserialize_hex(hex_str) {
+				match hex_str.parse::<Txid>() {
 					Ok(txid) => txid,
 					Err(_) => {
 						return Err(std::io::Error::new(
@@ -1405,5 +1409,166 @@ impl std::fmt::Display for HttpError {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		let contents = String::from_utf8_lossy(&self.contents);
 		write!(f, "status_code: {}, contents: {}", self.status_code, contents)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::hashes::Hash;
+	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
+	use lightning_block_sync::http::JsonResponse;
+	use proptest::{arbitrary::any, collection::vec, prop_assert_eq, prop_compose, proptest};
+	use serde_json::json;
+
+	use crate::chain::bitcoind::{
+		FeeResponse, GetMempoolEntryResponse, GetRawMempoolResponse, GetRawTransactionResponse,
+		MempoolMinFeeResponse,
+	};
+
+	prop_compose! {
+		fn arbitrary_witness()(
+			witness_elements in vec(vec(any::<u8>(), 0..100), 0..20)
+		) -> Witness {
+			let mut witness = Witness::new();
+			for element in witness_elements {
+				witness.push(element);
+			}
+			witness
+		}
+	}
+
+	prop_compose! {
+		fn arbitrary_txin()(
+			outpoint_hash in any::<[u8; 32]>(),
+			outpoint_vout in any::<u32>(),
+			script_bytes in vec(any::<u8>(), 0..100),
+			witness in arbitrary_witness(),
+			sequence in any::<u32>()
+		) -> TxIn {
+			TxIn {
+				previous_output: OutPoint {
+					txid: Txid::from_byte_array(outpoint_hash),
+					vout: outpoint_vout,
+				},
+				script_sig: ScriptBuf::from_bytes(script_bytes),
+				sequence: bitcoin::Sequence::from_consensus(sequence),
+				witness,
+			}
+		}
+	}
+
+	prop_compose! {
+		fn arbitrary_txout()(
+			value in 0u64..21_000_000_00_000_000u64,
+			script_bytes in vec(any::<u8>(), 0..100)
+		) -> TxOut {
+			TxOut {
+				value: bitcoin::Amount::from_sat(value),
+				script_pubkey: ScriptBuf::from_bytes(script_bytes),
+			}
+		}
+	}
+
+	prop_compose! {
+		fn arbitrary_transaction()(
+			version in any::<i32>(),
+			inputs in vec(arbitrary_txin(), 1..20),
+			outputs in vec(arbitrary_txout(), 1..20),
+			lock_time in any::<u32>()
+		) -> Transaction {
+			Transaction {
+				version: bitcoin::transaction::Version(version),
+				input: inputs,
+				output: outputs,
+				lock_time: bitcoin::absolute::LockTime::from_consensus(lock_time),
+			}
+		}
+	}
+
+	proptest! {
+		#![proptest_config(proptest::test_runner::Config::with_cases(20))]
+
+		#[test]
+		fn prop_get_raw_mempool_response_roundtrip(txids in vec(any::<[u8;32]>(), 0..10)) {
+			let txid_vec: Vec<Txid> = txids.into_iter().map(Txid::from_byte_array).collect();
+			let original = GetRawMempoolResponse(txid_vec.clone());
+
+			let json_vec: Vec<String> = txid_vec.iter().map(|t| t.to_string()).collect();
+			let json_val = serde_json::Value::Array(json_vec.iter().map(|s| json!(s)).collect());
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetRawMempoolResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(original.0.len(), decoded.0.len());
+
+			prop_assert_eq!(original.0, decoded.0);
+		}
+
+		#[test]
+		fn prop_get_mempool_entry_response_roundtrip(
+			time in any::<u64>(),
+			height in any::<u32>()
+		) {
+			let json_val = json!({
+				"time": time,
+				"height": height
+			});
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetMempoolEntryResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(decoded.time, time);
+			prop_assert_eq!(decoded.height, height);
+		}
+
+		#[test]
+		fn prop_get_raw_transaction_response_roundtrip(tx in arbitrary_transaction()) {
+			let hex = bitcoin::consensus::encode::serialize_hex(&tx);
+			let json_val = serde_json::Value::String(hex.clone());
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetRawTransactionResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(decoded.0.compute_txid(), tx.compute_txid());
+			prop_assert_eq!(decoded.0.compute_wtxid(), tx.compute_wtxid());
+
+			prop_assert_eq!(decoded.0, tx);
+		}
+
+		#[test]
+		fn prop_fee_response_roundtrip(fee_rate in any::<f64>()) {
+			let fee_rate = fee_rate.abs();
+			let json_val = json!({
+				"feerate": fee_rate,
+				"errors": serde_json::Value::Null
+			});
+
+			let resp = JsonResponse(json_val);
+			let decoded: FeeResponse = resp.try_into().unwrap();
+
+			let expected = {
+				let fee_rate_sat_per_kwu = (fee_rate * 25_000_000.0).round() as u64;
+				FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
+			};
+			prop_assert_eq!(decoded.0, expected);
+		}
+
+		#[test]
+		fn prop_mempool_min_fee_response_roundtrip(fee_rate in any::<f64>()) {
+			let fee_rate = fee_rate.abs();
+			let json_val = json!({
+				"mempoolminfee": fee_rate
+			});
+
+			let resp = JsonResponse(json_val);
+			let decoded: MempoolMinFeeResponse = resp.try_into().unwrap();
+
+			let expected = {
+				let fee_rate_sat_per_kwu = (fee_rate * 25_000_000.0).round() as u64;
+				FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
+			};
+			prop_assert_eq!(decoded.0, expected);
+		}
+
 	}
 }

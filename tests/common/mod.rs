@@ -30,8 +30,10 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use lightning_persister::fs_store::FilesystemStore;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, Network, OutPoint, Txid};
+use bitcoin::hashes::{hex::FromHex, Hash};
+use bitcoin::{
+	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
+};
 
 use electrsd::corepc_node::Client as BitcoindClient;
 use electrsd::corepc_node::Node as BitcoinD;
@@ -42,7 +44,7 @@ use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use serde_json::{json, Value};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -487,12 +489,25 @@ where
 pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
+	premine_blocks(bitcoind, electrs);
+
+	distribute_funds_unconfirmed(bitcoind, electrs, addrs, amount);
+	generate_blocks_and_wait(bitcoind, electrs, 1);
+}
+
+pub(crate) fn premine_blocks<E: ElectrumApi>(bitcoind: &BitcoindClient, electrs: &E) {
 	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	generate_blocks_and_wait(bitcoind, electrs, 101);
+}
 
-	let amounts: HashMap<String, f64> =
-		addrs.iter().map(|addr| (addr.to_string(), amount.to_btc())).collect();
+pub(crate) fn distribute_funds_unconfirmed<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
+) -> Txid {
+	let mut amounts = HashMap::<String, f64>::new();
+	for addr in &addrs {
+		amounts.insert(addr.to_string(), amount.to_btc());
+	}
 
 	let empty_account = json!("");
 	let amounts_json = json!(amounts);
@@ -505,7 +520,70 @@ pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 		.unwrap();
 
 	wait_for_tx(electrs, txid);
-	generate_blocks_and_wait(bitcoind, electrs, 1);
+
+	txid
+}
+
+pub(crate) fn prepare_rbf<E: ElectrumApi>(
+	electrs: &E, txid: Txid, scripts_buf: &HashSet<ScriptBuf>,
+) -> (Transaction, usize) {
+	let tx = electrs.transaction_get(&txid).unwrap();
+
+	let fee_output_index = tx
+		.output
+		.iter()
+		.position(|output| !scripts_buf.contains(&output.script_pubkey))
+		.expect("No output available for fee bumping");
+
+	(tx, fee_output_index)
+}
+
+pub(crate) fn bump_fee_and_broadcast<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, mut tx: Transaction, fee_output_index: usize,
+	is_insert_block: bool,
+) -> Transaction {
+	let mut bump_fee_amount_sat = tx.vsize() as u64;
+	let attempts = 5;
+
+	for _ in 0..attempts {
+		let fee_output = &mut tx.output[fee_output_index];
+		let new_fee_value = fee_output.value.to_sat().saturating_sub(bump_fee_amount_sat);
+		if new_fee_value < 546 {
+			panic!("Warning: Fee output approaching dust limit ({} sats)", new_fee_value);
+		}
+		fee_output.value = Amount::from_sat(new_fee_value);
+
+		for input in &mut tx.input {
+			input.sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+			input.script_sig = ScriptBuf::new();
+			input.witness = Witness::new();
+		}
+
+		let signed_result = bitcoind.sign_raw_transaction_with_wallet(&tx).unwrap();
+		assert!(signed_result.complete, "Failed to sign RBF transaction");
+
+		let tx_bytes = Vec::<u8>::from_hex(&signed_result.hex).unwrap();
+		tx = bitcoin::consensus::encode::deserialize::<Transaction>(&tx_bytes).unwrap();
+
+		match bitcoind.send_raw_transaction(&tx) {
+			Ok(res) => {
+				if is_insert_block {
+					generate_blocks_and_wait(bitcoind, electrs, 1);
+				}
+				let new_txid: Txid = res.0.parse().unwrap();
+				wait_for_tx(electrs, new_txid);
+				return tx;
+			},
+			Err(_) => {
+				bump_fee_amount_sat += bump_fee_amount_sat * 5;
+				if tx.output[fee_output_index].value.to_sat() < bump_fee_amount_sat {
+					panic!("Insufficient funds to increase fee");
+				}
+			},
+		}
+	}
+
+	panic!("Failed to bump fee after {} attempts", attempts);
 }
 
 pub fn open_channel(
