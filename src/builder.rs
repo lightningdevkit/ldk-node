@@ -1668,11 +1668,13 @@ fn build_with_store_internal(
 	};
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
+	let (background_processor_stop_sender, _) = tokio::sync::watch::channel(());
 	let is_running = Arc::new(RwLock::new(false));
 
 	Ok(Node {
 		runtime,
 		stop_sender,
+		background_processor_stop_sender,
 		config,
 		wallet,
 		chain_source,
