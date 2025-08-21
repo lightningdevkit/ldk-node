@@ -23,6 +23,7 @@ use bitcoin::address::NetworkChecked;
 use bitcoin::{Amount, Txid};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
+use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
@@ -212,7 +213,10 @@ impl UnifiedPayment {
 				PaymentMethod::LightningBolt12(offer) => {
 					let offer = maybe_wrap(offer.clone());
 
-					let payment_result = if let Some(amount_msat) = amount_msat {
+					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+						let hrn = maybe_wrap(hrn.clone());
+						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
+					} else if let Some(amount_msat) = amount_msat {
 						self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
 					} else {
 						self.bolt12_payment.send(&offer, None, None, route_parameters)
@@ -229,10 +233,10 @@ impl UnifiedPayment {
 				PaymentMethod::LightningBolt11(invoice) => {
 					let invoice = maybe_wrap(invoice.clone());
 					let payment_result = self.bolt11_invoice.send(&invoice, route_parameters)
-							.map_err(|e| {
-								log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
-								e
-							});
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
+							e
+						});
 
 					if let Ok(payment_id) = payment_result {
 						return Ok(UnifiedPaymentResult::Bolt11 { payment_id });
@@ -262,9 +266,6 @@ impl UnifiedPayment {
 		Err(Error::PaymentSendingFailed)
 	}
 }
-
-/// Represents the result of a payment made using a [BIP 21] QR code.
-///
 /// After a successful on-chain transaction, the transaction ID ([`Txid`]) is returned.
 /// For BOLT11 and BOLT12 payments, the corresponding [`PaymentId`] is returned.
 ///
@@ -386,8 +387,7 @@ impl DeserializationError for Extras {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::payment::unified::Extras;
+	use super::{Amount, Bolt11Invoice, Extras, Offer};
 	use bitcoin::{address::NetworkUnchecked, Address, Network};
 	use std::str::FromStr;
 

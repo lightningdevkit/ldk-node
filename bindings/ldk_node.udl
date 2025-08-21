@@ -347,6 +347,7 @@ enum NodeError {
 	"LiquidityFeeTooHigh",
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
+	"HrnParsingFailed",
 };
 
 dictionary NodeStatus {
@@ -807,6 +808,13 @@ interface Offer {
 	sequence<u8>? metadata();
 	u64? absolute_expiry_seconds();
 	PublicKey? issuer_signing_pubkey();
+};
+
+interface HumanReadableName {
+	[Throws=NodeError, Name=from_encoded]
+	constructor([ByRef] string encoded);
+	string user();
+	string domain();
 };
 
 [Traits=(Debug, Display, Eq)]
