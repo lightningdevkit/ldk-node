@@ -180,6 +180,7 @@ uniffi::include_scaffolding!("ldk_node");
 pub struct Node {
 	runtime: Arc<Runtime>,
 	stop_sender: tokio::sync::watch::Sender<()>,
+	background_processor_stop_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
@@ -525,7 +526,7 @@ impl Node {
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
-		let stop_bp = self.stop_sender.subscribe();
+		let stop_bp = self.background_processor_stop_sender.subscribe();
 		let sleeper_logger = Arc::clone(&self.logger);
 		let sleeper = move |d| {
 			let mut stop = stop_bp.clone();
@@ -604,21 +605,20 @@ impl Node {
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
-		// Stop any runtime-dependant chain sources.
-		self.chain_source.stop();
-
-		// Stop the runtime.
-		match self.stop_sender.send(()) {
-			Ok(_) => log_trace!(self.logger, "Sent shutdown signal to background tasks."),
-			Err(e) => {
+		// Stop background tasks.
+		self.stop_sender
+			.send(())
+			.map(|_| {
+				log_trace!(self.logger, "Sent shutdown signal to background tasks.");
+			})
+			.unwrap_or_else(|e| {
 				log_error!(
 					self.logger,
 					"Failed to send shutdown signal. This should never happen: {}",
 					e
 				);
 				debug_assert!(false);
-			},
-		}
+			});
 
 		// Cancel cancellable background tasks
 		self.runtime.abort_cancellable_background_tasks();
@@ -627,12 +627,27 @@ impl Node {
 		self.peer_manager.disconnect_all_peers();
 		log_debug!(self.logger, "Disconnected all network peers.");
 
+		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
+		self.runtime.wait_on_background_tasks();
+
 		// Stop any runtime-dependant chain sources.
 		self.chain_source.stop();
 		log_debug!(self.logger, "Stopped chain sources.");
 
-		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
-		self.runtime.wait_on_background_tasks();
+		// Stop the background processor.
+		self.background_processor_stop_sender
+			.send(())
+			.map(|_| {
+				log_trace!(self.logger, "Sent shutdown signal to background processor.");
+			})
+			.unwrap_or_else(|e| {
+				log_error!(
+					self.logger,
+					"Failed to send shutdown signal. This should never happen: {}",
+					e
+				);
+				debug_assert!(false);
+			});
 
 		// Finally, wait until background processing stopped, at least until a timeout is reached.
 		self.runtime.wait_on_background_processor_task();
