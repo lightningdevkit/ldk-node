@@ -45,11 +45,15 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
+#[derive(Debug, PartialEq)]
 enum VssSchemaVersion {
 	// The initial schema version.
 	// This used an empty `aad` and unobfuscated `primary_namespace`/`secondary_namespace`s in the
 	// stored key.
 	V0,
+	// The second deployed schema version.
+	// Here we started to obfuscate the primary and secondary namespaces and the obfuscated `store_key` (`obfuscate(primary_namespace#secondary_namespace)#obfuscate(key)`) is now used as `aad` for encryption, ensuring that the encrypted blobs commit to the key they're stored under.
+	V1,
 }
 
 // We set this to a small number of threads that would still allow to make some progress if one
@@ -324,9 +328,10 @@ impl Drop for VssStore {
 }
 
 struct VssStoreInner {
+	schema_version: VssSchemaVersion,
 	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
-	storable_builder: StorableBuilder<RandEntropySource>,
+	data_encryption_key: [u8; 32],
 	key_obfuscator: KeyObfuscator,
 	// Per-key locks that ensures that we don't have concurrent writes to the same namespace/key.
 	// The lock also encapsulates the latest written version per key.
@@ -339,10 +344,10 @@ impl VssStoreInner {
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Self {
+		let schema_version = VssSchemaVersion::V0;
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
-		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
 		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
 			.with_max_attempts(10)
 			.with_max_total_delay(Duration::from_secs(15))
@@ -359,7 +364,15 @@ impl VssStoreInner {
 		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
 		let locks = Mutex::new(HashMap::new());
 		let pending_lazy_deletes = Mutex::new(Vec::new());
-		Self { client, store_id, storable_builder, key_obfuscator, locks, pending_lazy_deletes }
+		Self {
+			schema_version,
+			client,
+			store_id,
+			data_encryption_key,
+			key_obfuscator,
+			locks,
+			pending_lazy_deletes,
+		}
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
@@ -370,17 +383,45 @@ impl VssStoreInner {
 	fn build_obfuscated_key(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> String {
-		let obfuscated_key = self.key_obfuscator.obfuscate(key);
-		if primary_namespace.is_empty() {
-			obfuscated_key
+		if self.schema_version == VssSchemaVersion::V1 {
+			let obfuscated_prefix =
+				self.build_obfuscated_prefix(primary_namespace, secondary_namespace);
+			let obfuscated_key = self.key_obfuscator.obfuscate(key);
+			format!("{}#{}", obfuscated_prefix, obfuscated_key)
 		} else {
-			format!("{}#{}#{}", primary_namespace, secondary_namespace, obfuscated_key)
+			// Default to V0 schema
+			let obfuscated_key = self.key_obfuscator.obfuscate(key);
+			if primary_namespace.is_empty() {
+				obfuscated_key
+			} else {
+				format!("{}#{}#{}", primary_namespace, secondary_namespace, obfuscated_key)
+			}
+		}
+	}
+
+	fn build_obfuscated_prefix(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> String {
+		if self.schema_version == VssSchemaVersion::V1 {
+			let prefix = format!("{}#{}", primary_namespace, secondary_namespace);
+			self.key_obfuscator.obfuscate(&prefix)
+		} else {
+			// Default to V0 schema
+			format!("{}#{}", primary_namespace, secondary_namespace)
 		}
 	}
 
 	fn extract_key(&self, unified_key: &str) -> io::Result<String> {
-		let mut parts = unified_key.splitn(3, '#');
-		let (_primary_namespace, _secondary_namespace) = (parts.next(), parts.next());
+		let mut parts = if self.schema_version == VssSchemaVersion::V1 {
+			let mut parts = unified_key.splitn(2, '#');
+			let _obfuscated_namespace = parts.next();
+			parts
+		} else {
+			// Default to V0 schema
+			let mut parts = unified_key.splitn(3, '#');
+			let (_primary_namespace, _secondary_namespace) = (parts.next(), parts.next());
+			parts
+		};
 		match parts.next() {
 			Some(obfuscated_key) => {
 				let actual_key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
@@ -395,7 +436,7 @@ impl VssStoreInner {
 	) -> io::Result<Vec<String>> {
 		let mut page_token = None;
 		let mut keys = vec![];
-		let key_prefix = format!("{}#{}", primary_namespace, secondary_namespace);
+		let key_prefix = self.build_obfuscated_prefix(primary_namespace, secondary_namespace);
 		while page_token != Some("".to_string()) {
 			let request = ListKeyVersionsRequest {
 				store_id: self.store_id.clone(),
@@ -425,9 +466,8 @@ impl VssStoreInner {
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, Some(&key), "read")?;
 
-		let obfuscated_key =
-			self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
-		let request = GetObjectRequest { store_id: self.store_id.clone(), key: obfuscated_key };
+		let store_key = self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
+		let request = GetObjectRequest { store_id: self.store_id.clone(), key: store_key.clone() };
 		let resp = self.client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
 				"Failed to read from key {}/{}/{}: {}",
@@ -449,7 +489,11 @@ impl VssStoreInner {
 			Error::new(ErrorKind::Other, msg)
 		})?;
 
-		Ok(self.storable_builder.deconstruct(storable)?.0)
+		let storable_builder = StorableBuilder::new(RandEntropySource);
+		let aad =
+			if self.schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
+		let decrypted = storable_builder.deconstruct(storable, &self.data_encryption_key, aad)?.0;
+		Ok(decrypted)
 	}
 
 	async fn write_internal(
@@ -469,22 +513,25 @@ impl VssStoreInner {
 			.ok()
 			.and_then(|mut guard| guard.take())
 			.unwrap_or_default();
-		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
-			let obfuscated_key =
-				self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
-			let vss_version = -1;
-			let storable = self.storable_builder.build(buf, vss_version);
-			let request = PutObjectRequest {
-				store_id: self.store_id.clone(),
-				global_version: None,
-				transaction_items: vec![KeyValue {
-					key: obfuscated_key,
-					version: vss_version,
-					value: storable.encode_to_vec(),
-				}],
-				delete_items: delete_items.clone(),
-			};
+		let store_key = self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
+		let vss_version = -1;
+		let storable_builder = StorableBuilder::new(RandEntropySource);
+		let aad =
+			if self.schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
+		let storable =
+			storable_builder.build(buf.to_vec(), vss_version, &self.data_encryption_key, aad);
+		let request = PutObjectRequest {
+			store_id: self.store_id.clone(),
+			global_version: None,
+			transaction_items: vec![KeyValue {
+				key: store_key,
+				version: vss_version,
+				value: storable.encode_to_vec(),
+			}],
+			delete_items: delete_items.clone(),
+		};
 
+		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
 			self.client.put_object(&request).await.map_err(|e| {
 				// Restore delete items so they'll be retried on next write.
 				if !delete_items.is_empty() {

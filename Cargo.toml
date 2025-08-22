@@ -65,7 +65,7 @@ serde = { version = "1.0.210", default-features = false, features = ["std", "der
 serde_json = { version = "1.0.128", default-features = false, features = ["std"] }
 log = { version = "0.4.22", default-features = false, features = ["std"]}
 
-vss-client = "0.3"
+vss-client = { package = "vss-client-ng", version = "0.4" }
 prost = { version = "0.11.6", default-features = false}
 
 [target.'cfg(windows)'.dependencies]
@@ -151,3 +151,6 @@ harness = false
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
+
+#vss-client-ng = { path = "../vss-client" }
+#vss-client-ng = { git = "https://github.com/lightningdevkit/vss-client", branch = "main" }
