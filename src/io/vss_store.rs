@@ -38,12 +38,14 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
+const KEY_LENGTH: usize = 32;
+
 /// A [`KVStore`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
 	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
 	runtime: Arc<Runtime>,
-	data_encryption_key: [u8; 32],
+	data_encryption_key: [u8; KEY_LENGTH],
 	key_obfuscator: KeyObfuscator,
 }
 
@@ -234,6 +236,12 @@ impl KVStore for VssStore {
 			})?;
 
 		Ok(keys)
+	}
+}
+
+impl Drop for VssStore {
+	fn drop(&mut self) {
+		self.data_encryption_key.copy_from_slice(&[0u8; KEY_LENGTH]);
 	}
 }
 
