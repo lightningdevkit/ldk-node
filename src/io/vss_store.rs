@@ -43,7 +43,7 @@ pub struct VssStore {
 	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
 	runtime: Arc<Runtime>,
-	storable_builder: StorableBuilder<RandEntropySource>,
+	data_encryption_key: [u8; 32],
 	key_obfuscator: KeyObfuscator,
 }
 
@@ -55,7 +55,6 @@ impl VssStore {
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
-		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
 		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
 			.with_max_attempts(10)
 			.with_max_total_delay(Duration::from_secs(15))
@@ -70,7 +69,7 @@ impl VssStore {
 			}) as _);
 
 		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
-		Self { client, store_id, runtime, storable_builder, key_obfuscator }
+		Self { client, store_id, runtime, data_encryption_key, key_obfuscator }
 	}
 
 	fn build_key(
@@ -132,10 +131,9 @@ impl KVStore for VssStore {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
-		let request = GetObjectRequest {
-			store_id: self.store_id.clone(),
-			key: self.build_key(primary_namespace, secondary_namespace, key)?,
-		};
+
+		let store_key = self.build_key(primary_namespace, secondary_namespace, key)?;
+		let request = GetObjectRequest { store_id: self.store_id.clone(), key: store_key.clone() };
 		let resp = self.runtime.block_on(self.client.get_object(&request)).map_err(|e| {
 			let msg = format!(
 				"Failed to read from key {}/{}/{}: {}",
@@ -156,20 +154,31 @@ impl KVStore for VssStore {
 			Error::new(ErrorKind::Other, msg)
 		})?;
 
-		Ok(self.storable_builder.deconstruct(storable)?.0)
+		let storable_builder = StorableBuilder::new(RandEntropySource);
+		let decrypted = storable_builder
+			.deconstruct(storable, &self.data_encryption_key, store_key.as_bytes())?
+			.0;
+		Ok(decrypted)
 	}
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
+		let store_key = self.build_key(primary_namespace, secondary_namespace, key)?;
 		let version = -1;
-		let storable = self.storable_builder.build(buf.to_vec(), version);
+		let storable_builder = StorableBuilder::new(RandEntropySource);
+		let storable = storable_builder.build(
+			buf.to_vec(),
+			version,
+			&&self.data_encryption_key,
+			store_key.as_bytes(),
+		);
 		let request = PutObjectRequest {
 			store_id: self.store_id.clone(),
 			global_version: None,
 			transaction_items: vec![KeyValue {
-				key: self.build_key(primary_namespace, secondary_namespace, key)?,
+				key: store_key,
 				version,
 				value: storable.encode_to_vec(),
 			}],
