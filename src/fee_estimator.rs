@@ -150,6 +150,17 @@ pub(crate) fn apply_post_estimation_adjustments(
 				.max(FEERATE_FLOOR_SATS_PER_KW as u64);
 			FeeRate::from_sat_per_kwu(slightly_less_than_background)
 		},
+		ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate) => {
+			// MaximumFeeEstimate is mostly used for protection against fee-inflation attacks. As
+			// users were previously impacted by this limit being too restrictive (read: too low),
+			// we bump it here a bit to give them some leeway.
+			let slightly_bump = estimated_rate
+				.to_sat_per_kwu()
+				.saturating_mul(11)
+				.saturating_div(10)
+				.saturating_add(2500);
+			FeeRate::from_sat_per_kwu(slightly_bump)
+		},
 		_ => estimated_rate,
 	}
 }
