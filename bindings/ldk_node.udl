@@ -13,6 +13,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
+	boolean is_hrn_resolver;
 };
 
 dictionary AnchorChannelsConfig {

@@ -113,7 +113,8 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `route_parameters`                   | None               |
+/// | `route_parameters`                     | None               |
+/// | `is_hrn_resolver`                      | false              |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -178,6 +179,8 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// This allows us to use our node as a DNS resolver for 3rd party HRN resolutions.
+	pub is_hrn_resolver: bool,
 }
 
 impl Default for Config {
@@ -192,6 +195,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			is_hrn_resolver: false,
 		}
 	}
 }
