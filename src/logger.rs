@@ -124,7 +124,7 @@ impl LogWriter for Writer {
 
 				let log = format!(
 					"{} {:<5} [{}:{}] {}\n",
-					Utc::now().format("%Y-%m-%d %H:%M:%S"),
+					Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
 					record.level.to_string(),
 					record.module_path,
 					record.line,
