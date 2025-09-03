@@ -16,7 +16,7 @@ use bitcoin::hashes::Hash;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
 };
-use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig, Router as LdkRouter};
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
 };
@@ -35,8 +35,7 @@ use crate::payment::store::{
 };
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, PaymentStore};
-
+use crate::types::{ChannelManager, PaymentStore, Router};
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
 #[cfg(feature = "uniffi")]
@@ -63,6 +62,7 @@ pub struct Bolt11Payment {
 	config: Arc<Config>,
 	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
+	router: Arc<Router>,
 }
 
 impl Bolt11Payment {
@@ -72,6 +72,7 @@ impl Bolt11Payment {
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
 		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		router: Arc<Router>,
 	) -> Self {
 		Self {
 			runtime,
@@ -83,6 +84,7 @@ impl Bolt11Payment {
 			config,
 			is_running,
 			logger,
+			router,
 		}
 	}
 
@@ -864,5 +866,93 @@ impl Bolt11Payment {
 			})?;
 
 		Ok(())
+	}
+
+	/// Estimates the routing fees for a given invoice.
+	///
+	/// This method calculates the routing fees that would be charged for paying the given invoice
+	/// without actually sending the payment. It uses the same routing logic as the actual payment
+	/// to provide an accurate estimation.
+	///
+	/// Returns the estimated total routing fees in millisatoshis.
+	pub fn estimate_routing_fees(&self, invoice: &Bolt11Invoice) -> Result<u64, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let invoice = maybe_deref(invoice);
+		let payment_params = PaymentParameters::from_bolt11_invoice(invoice);
+		let amount_msat = invoice.amount_milli_satoshis().ok_or_else(|| {
+			log_error!(self.logger, "Failed to estimate routing fees due to the given invoice being \"zero-amount\". Please use estimate_routing_fees_using_amount instead.");
+			Error::InvalidInvoice
+		})?;
+
+		let route_params = RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		let first_hops = self.channel_manager.list_usable_channels();
+		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
+
+		let route = (&*self.router).find_route(
+			&self.channel_manager.get_our_node_id(),
+			&route_params,
+			Some(&first_hops.iter().collect::<Vec<_>>()),
+			inflight_htlcs,
+		).map_err(|e| {
+			log_error!(self.logger, "Failed to find route for fee estimation: {:?}", e);
+			Error::RouteNotFound
+		})?;
+
+		let total_fees = route.paths.iter()
+			.map(|path| path.fee_msat())
+			.sum::<u64>();
+
+		Ok(total_fees)
+	}
+
+	/// Estimates the routing fees for a given zero-amount invoice with a specific amount.
+	///
+	/// This method calculates the routing fees that would be charged for paying the given
+	/// zero-amount invoice with the specified amount without actually sending the payment.
+	///
+	/// Returns the estimated total routing fees in millisatoshis.
+	pub fn estimate_routing_fees_using_amount(
+		&self, invoice: &Bolt11Invoice, amount_msat: u64,
+	) -> Result<u64, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let invoice = maybe_deref(invoice);
+		let payment_params = PaymentParameters::from_bolt11_invoice(invoice);
+
+		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
+			if amount_msat < invoice_amount_msat {
+				log_error!(
+					self.logger,
+					"Failed to estimate routing fees as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.", invoice_amount_msat, amount_msat);
+				return Err(Error::InvalidAmount);
+			}
+		}
+
+		let route_params = RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		let first_hops = self.channel_manager.list_usable_channels();
+		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
+
+		let route = (&*self.router).find_route(
+			&self.channel_manager.get_our_node_id(),
+			&route_params,
+			Some(&first_hops.iter().collect::<Vec<_>>()),
+			inflight_htlcs,
+		).map_err(|e| {
+			log_error!(self.logger, "Failed to find route for fee estimation: {:?}", e);
+			Error::RouteNotFound
+		})?;
+
+		let total_fees = route.paths.iter()
+			.map(|path| path.fee_msat())
+			.sum::<u64>();
+
+		Ok(total_fees)
 	}
 }

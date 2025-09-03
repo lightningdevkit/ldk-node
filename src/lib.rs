@@ -846,6 +846,7 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			Arc::clone(&self._router),
 		)
 	}
 
@@ -864,6 +865,7 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			Arc::clone(&self._router),
 		))
 	}
 
