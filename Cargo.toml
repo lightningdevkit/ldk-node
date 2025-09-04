@@ -125,6 +125,7 @@ check-cfg = [
 	"cfg(cln_test)",
 	"cfg(lnd_test)",
 	"cfg(cycle_tests)",
+	"cfg(hrn_tests)",
 ]
 
 [[bench]]

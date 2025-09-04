@@ -26,7 +26,6 @@ use bitcoin_payment_instructions::amount::Amount as BPIAmount;
 use bitcoin_payment_instructions::{PaymentInstructions, PaymentMethod};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
-use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
@@ -39,6 +38,11 @@ use crate::types::HRNResolver;
 use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
+
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = crate::ffi::HumanReadableName;
 
 #[derive(Debug, Clone)]
 struct Extras {
@@ -159,15 +163,30 @@ impl UnifiedPayment {
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	pub async fn send(
 		&self, uri_str: &str, amount_msat: Option<u64>,
-		route_parameters: Option<RouteParametersConfig>,
+		route_parameters: Option<RouteParametersConfig>, #[cfg(hrn_tests)] test_offer: &Offer,
 	) -> Result<UnifiedPaymentResult, Error> {
 		let resolver = self.hrn_resolver.as_ref().clone().ok_or_else(|| {
 			log_error!(self.logger, "No HRN resolver configured. Cannot resolve HRNs.");
 			Error::HrnResolverNotConfigured
 		})?;
 
+		let target_network;
+
+		target_network = if let Ok(_) = HumanReadableName::from_encoded(uri_str) {
+			#[cfg(hrn_tests)]
+			{
+				bitcoin::Network::Bitcoin
+			}
+			#[cfg(not(hrn_tests))]
+			{
+				self.config.network
+			}
+		} else {
+			self.config.network
+		};
+
 		let parse_fut =
-			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false);
+			PaymentInstructions::parse(uri_str, target_network, resolver.as_ref(), false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -231,20 +250,26 @@ impl UnifiedPayment {
 		for method in sorted_payment_methods {
 			match method {
 				PaymentMethod::LightningBolt12(offer) => {
-					let offer = maybe_wrap(offer.clone());
+					#[cfg(not(hrn_tests))]
+					let offer = maybe_wrap(offer);
 
-					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
-						let hrn = maybe_wrap(hrn.clone());
-						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
-					} else if let Some(amount_msat) = amount_msat {
-						self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
-					} else {
-						self.bolt12_payment.send(&offer, None, None, route_parameters)
-					}
-					.map_err(|e| {
-						log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
-						e
-					});
+					#[cfg(hrn_tests)]
+					let offer = maybe_wrap(test_offer.clone());
+
+					let payment_result = {
+						if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+							let hrn = maybe_wrap(hrn.clone());
+							self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
+						} else if let Some(amount_msat) = amount_msat {
+							self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
+						} else {
+							self.bolt12_payment.send(&offer, None, None, route_parameters)
+						}
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
+							e
+						})
+					};
 
 					if let Ok(payment_id) = payment_result {
 						return Ok(UnifiedPaymentResult::Bolt12 { payment_id });

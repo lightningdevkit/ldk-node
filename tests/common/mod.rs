@@ -406,6 +406,7 @@ pub(crate) fn setup_two_nodes_with_store(
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	config_b.store_type = store_type;
+
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
