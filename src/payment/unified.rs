@@ -23,6 +23,7 @@ use bip21::{DeserializationError, DeserializeParams, Param, SerializeParams};
 use bitcoin::address::NetworkChecked;
 use bitcoin::{Amount, Txid};
 use bitcoin_payment_instructions::amount::Amount as BPIAmount;
+use bitcoin_payment_instructions::hrn_resolution::DummyHrnResolver;
 use bitcoin_payment_instructions::{PaymentInstructions, PaymentMethod};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
@@ -165,12 +166,16 @@ impl UnifiedPayment {
 		&self, uri_str: &str, amount_msat: Option<u64>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<UnifiedPaymentResult, Error> {
-		let parse_fut = PaymentInstructions::parse(
-			uri_str,
-			self.config.network,
-			self.hrn_resolver.as_ref(),
-			false,
-		);
+		let resolver;
+
+		if let Ok(_) = HumanReadableName::from_encoded(uri_str) {
+			resolver = Arc::clone(&self.hrn_resolver);
+		} else {
+			resolver = Arc::new(HRNResolver::Dummy(DummyHrnResolver));
+		}
+
+		let parse_fut =
+			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -196,7 +201,7 @@ impl UnifiedPayment {
 					Error::InvalidAmount
 				})?;
 
-				let fut = instr.set_amount(amt, self.hrn_resolver.as_ref());
+				let fut = instr.set_amount(amt, &*resolver);
 
 				tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), fut)
 					.await
@@ -235,7 +240,6 @@ impl UnifiedPayment {
 			match method {
 				PaymentMethod::LightningBolt12(offer) => {
 					let offer = maybe_wrap(offer.clone());
-
 					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
 						let hrn = maybe_wrap(hrn.clone());
 						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
