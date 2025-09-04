@@ -26,8 +26,7 @@ use bitcoin_payment_instructions::amount::Amount as BPIAmount;
 use bitcoin_payment_instructions::hrn_resolution::DummyHrnResolver;
 use bitcoin_payment_instructions::{PaymentInstructions, PaymentMethod};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::offers::offer::Offer;
-use lightning::onion_message::dns_resolution::HumanReadableName;
+use lightning::offers::offer::Offer as LdkOffer;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
@@ -40,6 +39,16 @@ use crate::types::HRNResolver;
 use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
+
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = crate::ffi::HumanReadableName;
+
+#[cfg(not(feature = "uniffi"))]
+type Offer = LdkOffer;
+#[cfg(feature = "uniffi")]
+type Offer = Arc<crate::ffi::Offer>;
 
 #[derive(Debug, Clone)]
 struct Extras {
@@ -67,6 +76,8 @@ pub struct UnifiedPayment {
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 	hrn_resolver: Arc<HRNResolver>,
+	#[cfg(hrn_tests)]
+	test_offer: std::sync::Mutex<Option<Offer>>,
 }
 
 impl UnifiedPayment {
@@ -75,7 +86,16 @@ impl UnifiedPayment {
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
 		hrn_resolver: Arc<HRNResolver>,
 	) -> Self {
-		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger, hrn_resolver }
+		Self {
+			onchain_payment,
+			bolt11_invoice,
+			bolt12_payment,
+			config,
+			logger,
+			hrn_resolver,
+			#[cfg(hrn_tests)]
+			test_offer: std::sync::Mutex::new(None),
+		}
 	}
 }
 
@@ -116,7 +136,7 @@ impl UnifiedPayment {
 
 		let bolt12_offer =
 			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
-				Ok(offer) => Some(offer),
+				Ok(offer) => Some(maybe_wrap(offer)),
 				Err(e) => {
 					log_error!(self.logger, "Failed to create offer: {}", e);
 					None
@@ -167,15 +187,26 @@ impl UnifiedPayment {
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<UnifiedPaymentResult, Error> {
 		let resolver;
+		let target_network;
 
 		if let Ok(_) = HumanReadableName::from_encoded(uri_str) {
 			resolver = Arc::clone(&self.hrn_resolver);
+
+			#[cfg(hrn_tests)]
+			{
+				target_network = bitcoin::Network::Bitcoin;
+			}
+			#[cfg(not(hrn_tests))]
+			{
+				target_network = self.config.network;
+			}
 		} else {
 			resolver = Arc::new(HRNResolver::Dummy(DummyHrnResolver));
+			target_network = self.config.network;
 		}
 
 		let parse_fut =
-			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false);
+			PaymentInstructions::parse(uri_str, target_network, resolver.as_ref(), false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -238,8 +269,18 @@ impl UnifiedPayment {
 
 		for method in sorted_payment_methods {
 			match method {
-				PaymentMethod::LightningBolt12(offer) => {
-					let offer = maybe_wrap(offer.clone());
+				PaymentMethod::LightningBolt12(_offer) => {
+					#[cfg(not(hrn_tests))]
+					let offer = maybe_wrap(_offer.clone());
+
+					#[cfg(hrn_tests)]
+					let offer = {
+						let guard = self.test_offer.lock().unwrap();
+						guard.clone().expect(
+							"hrn_tests is active but no test_offer was set via set_test_offer",
+						)
+					};
+
 					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
 						let hrn = maybe_wrap(hrn.clone());
 						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
@@ -291,6 +332,19 @@ impl UnifiedPayment {
 
 		log_error!(self.logger, "Payable methods not found in URI");
 		Err(Error::PaymentSendingFailed)
+	}
+
+	/// Sets a test offer to be used in the `send` method when the `hrn_tests` config flag is enabled.
+	/// This is necessary to test sending Bolt12 payments via the unified payment handler in HRN tests,
+	/// as we cannot rely on the offer being present in the parsed URI.
+	pub fn set_test_offer(&self, offer: Offer) {
+		#[cfg(hrn_tests)]
+		{
+			let mut guard = self.test_offer.lock().unwrap();
+			*guard = Some(offer);
+		}
+		#[cfg(not(hrn_tests))]
+		let _ = offer;
 	}
 }
 
@@ -399,9 +453,10 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
 			"lno" => {
 				let bolt12_value =
 					String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
-				let offer =
-					bolt12_value.parse::<Offer>().map_err(|_| Error::UriParameterParsingFailed)?;
-				self.bolt12_offer = Some(offer);
+				let offer = bolt12_value
+					.parse::<LdkOffer>()
+					.map_err(|_| Error::UriParameterParsingFailed)?;
+				self.bolt12_offer = Some(maybe_wrap(offer));
 				Ok(bip21::de::ParamKind::Known)
 			},
 			_ => Ok(bip21::de::ParamKind::Unknown),
@@ -424,7 +479,7 @@ mod tests {
 	use bitcoin::address::NetworkUnchecked;
 	use bitcoin::{Address, Network};
 
-	use super::{Amount, Bolt11Invoice, Extras, Offer};
+	use super::{maybe_wrap, Amount, Bolt11Invoice, Extras, LdkOffer};
 
 	#[test]
 	fn parse_uri() {
@@ -478,7 +533,7 @@ mod tests {
 		}
 
 		if let Some(offer) = parsed_uri_with_offer.extras.bolt12_offer {
-			assert_eq!(offer, Offer::from_str(expected_bolt12_offer_2).unwrap());
+			assert_eq!(offer, maybe_wrap(LdkOffer::from_str(expected_bolt12_offer_2).unwrap()));
 		} else {
 			panic!("No offer found.");
 		}
