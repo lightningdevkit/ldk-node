@@ -26,7 +26,7 @@ use bitcoin_payment_instructions::amount::Amount as BPIAmount;
 use bitcoin_payment_instructions::{PaymentInstructions, PaymentMethod};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
-use lightning::onion_message::dns_resolution::HumanReadableName;
+use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
@@ -39,6 +39,11 @@ use crate::types::HRNResolver;
 use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
+
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = LdkHumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = crate::ffi::HumanReadableName;
 
 #[derive(Debug, Clone)]
 struct Extras {
@@ -166,12 +171,33 @@ impl UnifiedPayment {
 			Error::HrnResolverNotConfigured
 		})?;
 
-		let parse_fut = PaymentInstructions::parse(
-			uri_str,
-			self.config.network,
-			self.hrn_resolver.as_ref(),
-			false,
-		);
+		let target_network;
+
+		target_network = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+			#[cfg(feature = "hrn_tests")]
+			{
+				#[cfg(feature = "uniffi")]
+				let hrn_wrapped: Arc<HumanReadableName> = maybe_wrap(hrn);
+				#[cfg(not(feature = "uniffi"))]
+				let hrn_wrapped: HumanReadableName = maybe_wrap(hrn);
+				match crate::dnssec_testing_utils::get_testing_offer_override(Some(
+					hrn_wrapped.into(),
+				)) {
+					Some(_) => bitcoin::Network::Bitcoin,
+					_ => self.config.network,
+				}
+			}
+			#[cfg(not(feature = "hrn_tests"))]
+			{
+				let _ = hrn;
+				self.config.network
+			}
+		} else {
+			self.config.network
+		};
+
+		let parse_fut =
+			PaymentInstructions::parse(uri_str, target_network, resolver.as_ref(), false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -197,7 +223,7 @@ impl UnifiedPayment {
 					Error::InvalidAmount
 				})?;
 
-				let fut = instr.set_amount(amt, self.hrn_resolver.as_ref());
+				let fut = instr.set_amount(amt, resolver.as_ref());
 
 				tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), fut)
 					.await
@@ -237,18 +263,20 @@ impl UnifiedPayment {
 				PaymentMethod::LightningBolt12(offer) => {
 					let offer = maybe_wrap(offer.clone());
 
-					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
-						let hrn = maybe_wrap(hrn.clone());
-						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
-					} else if let Some(amount_msat) = amount_msat {
-						self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
-					} else {
-						self.bolt12_payment.send(&offer, None, None, route_parameters)
-					}
-					.map_err(|e| {
-						log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
-						e
-					});
+					let payment_result = {
+						if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+							let hrn = maybe_wrap(hrn.clone());
+							self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
+						} else if let Some(amount_msat) = amount_msat {
+							self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
+						} else {
+							self.bolt12_payment.send(&offer, None, None, route_parameters)
+						}
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
+							e
+						})
+					};
 
 					if let Ok(payment_id) = payment_result {
 						return Ok(UnifiedPaymentResult::Bolt12 { payment_id });
