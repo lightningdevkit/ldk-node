@@ -210,7 +210,7 @@ impl Runtime {
 		);
 	}
 
-	fn handle(&self) -> &tokio::runtime::Handle {
+	pub(crate) fn handle(&self) -> &tokio::runtime::Handle {
 		match &self.mode {
 			RuntimeMode::Owned(rt) => rt.handle(),
 			RuntimeMode::Handle(handle) => handle,
