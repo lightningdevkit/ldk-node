@@ -25,6 +25,7 @@ panic = 'abort'     # Abort on panic
 
 [features]
 default = []
+hrn_tests = []
 
 [dependencies]
 #lightning = { version = "0.2.0", features = ["std"] }
