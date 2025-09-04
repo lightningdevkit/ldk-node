@@ -26,7 +26,7 @@ use std::vec::IntoIter;
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
-use lightning::onion_message::dns_resolution::HumanReadableName;
+use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
 use bip21::de::ParamKind;
@@ -39,6 +39,11 @@ use bitcoin_payment_instructions::{
 use tokio::time::timeout;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
+
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = LdkHumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 
 #[derive(Debug, Clone)]
 struct Extras {
@@ -162,18 +167,39 @@ impl UnifiedPayment {
 			Error::HrnResolverNotConfigured
 		})?;
 
-		println!("Parsing instructions...");
+		const TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
-		let instructions =
-			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false)
-				.await
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
-					println!("Failed to parse payment instructions: {:?}", e);
-					Error::UriParameterParsingFailed
-				})?;
+		let target_network;
 
-		println!("Sending...");
+		if let Ok(hrn) = LdkHumanReadableName::from_encoded(uri_str) {
+			let hrn: HumanReadableName = maybe_wrap(hrn.clone());
+
+			target_network =
+				match crate::dnssec_testing_utils::get_testing_offer_override(Some(hrn.clone())) {
+					Some(_) => bitcoin::Network::Bitcoin,
+					_ => self.config.network,
+				};
+		} else {
+			target_network = self.config.network;
+		};
+
+		let instructions = timeout(
+			TIMEOUT_DURATION,
+			PaymentInstructions::parse(uri_str, target_network, resolver.as_ref(), false),
+		)
+		.await
+		.map_err(|_| {
+			log_error!(
+				self.logger,
+				"Payment instruction parsing timed out after {:?}",
+				TIMEOUT_DURATION
+			);
+			Error::TimeoutOccurred
+		})?
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
+			Error::UriParameterParsingFailed
+		})?;
 
 		let resolved = match instructions {
 			PaymentInstructions::ConfigurableAmount(instr) => {
@@ -208,7 +234,7 @@ impl UnifiedPayment {
 		{
 			let offer = maybe_wrap(offer.clone());
 
-			let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+			let payment_result = if let Ok(hrn) = LdkHumanReadableName::from_encoded(uri_str) {
 				let hrn = maybe_wrap(hrn.clone());
 				self.bolt12_payment.send_using_amount(&offer, amount_msat.unwrap_or(0), None, None, Some(hrn))
 			} else if let Some(amount_msat) = amount_msat {

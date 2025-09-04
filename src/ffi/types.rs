@@ -270,6 +270,7 @@ impl std::fmt::Display for Offer {
 	}
 }
 
+#[derive(Eq, Hash, PartialEq)]
 pub struct HumanReadableName {
 	pub(crate) inner: LdkHumanReadableName,
 }

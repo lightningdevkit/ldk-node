@@ -194,7 +194,21 @@ impl Bolt12Payment {
 			return Err(Error::NotRunning);
 		}
 
-		let offer = maybe_deref(offer);
+		let mut current_offer = offer.clone();
+
+		if let Some(hrn_ref) = hrn.as_ref() {
+			current_offer = match crate::dnssec_testing_utils::get_testing_offer_override(Some(
+				hrn_ref.clone(),
+			)) {
+				Some(offer) => {
+					log_info!(self.logger, "Using test-specific Offer override.");
+					offer
+				},
+				_ => offer.clone(),
+			};
+		}
+
+		let offer = maybe_deref(&current_offer);
 
 		let mut random_bytes = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut random_bytes);
