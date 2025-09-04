@@ -127,6 +127,8 @@ pub enum Error {
 	AsyncPaymentServicesDisabled,
 	/// Parsing a Human-Readable Name has failed.
 	HrnParsingFailed,
+	/// A HRN resolver was not configured
+	HrnResolverNotConfigured,
 }
 
 impl fmt::Display for Error {
@@ -206,6 +208,9 @@ impl fmt::Display for Error {
 			},
 			Self::HrnParsingFailed => {
 				write!(f, "Failed to parse a human-readable name.")
+			},
+			Self::HrnResolverNotConfigured => {
+				write!(f, "A HRN resolver was not configured.")
 			},
 		}
 	}
