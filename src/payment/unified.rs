@@ -64,14 +64,14 @@ pub struct UnifiedPayment {
 	bolt12_payment: Arc<Bolt12Payment>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	hrn_resolver: Arc<HRNResolver>,
+	hrn_resolver: Arc<Option<Arc<HRNResolver>>>,
 }
 
 impl UnifiedPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
-		hrn_resolver: Arc<HRNResolver>,
+		hrn_resolver: Arc<Option<Arc<HRNResolver>>>,
 	) -> Self {
 		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger, hrn_resolver }
 	}
@@ -161,12 +161,13 @@ impl UnifiedPayment {
 		&self, uri_str: &str, amount_msat: Option<u64>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<UnifiedPaymentResult, Error> {
-		let parse_fut = PaymentInstructions::parse(
-			uri_str,
-			self.config.network,
-			self.hrn_resolver.as_ref(),
-			false,
-		);
+		let resolver = self.hrn_resolver.as_ref().clone().ok_or_else(|| {
+			log_error!(self.logger, "No HRN resolver configured. Cannot resolve HRNs.");
+			Error::HrnResolverNotConfigured
+		})?;
+
+		let parse_fut =
+			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -192,7 +193,7 @@ impl UnifiedPayment {
 					Error::InvalidAmount
 				})?;
 
-				let fut = instr.set_amount(amt, self.hrn_resolver.as_ref());
+				let fut = instr.set_amount(amt, &*resolver);
 
 				tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), fut)
 					.await
