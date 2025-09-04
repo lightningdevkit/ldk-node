@@ -19,6 +19,7 @@ use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::types::ChannelId;
+use lightning::onion_message::dns_resolution::DNSResolverMessageHandler;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
@@ -29,6 +30,7 @@ use lightning::util::persist::{
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
+use lightning_dns_resolver::OMDomainResolver;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
@@ -289,11 +291,13 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
 	Arc<ChannelManager>,
-	Arc<HRNResolver>,
+	Arc<dyn DNSResolverMessageHandler + Sync + Send>,
 	IgnoringMessageHandler,
 >;
 
 pub(crate) type HRNResolver = LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>;
+
+pub(crate) type DomainResolver = OMDomainResolver<IgnoringMessageHandler>;
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,

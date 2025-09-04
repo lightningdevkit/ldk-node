@@ -38,6 +38,7 @@ default = []
 #lightning-transaction-sync = { version = "0.2.0", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
 #lightning-liquidity = { version = "0.2.0", features = ["std"] }
 #lightning-macros = { version = "0.2.0" }
+#lightning-dns-resolver = { version = "0.3.0" }
 
 lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b6c17c593a5d7bacb18fe3b9f69074a0596ae8f0", features = ["std"] }
 lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b6c17c593a5d7bacb18fe3b9f69074a0596ae8f0" }
@@ -50,6 +51,7 @@ lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightnin
 lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b6c17c593a5d7bacb18fe3b9f69074a0596ae8f0", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
 lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b6c17c593a5d7bacb18fe3b9f69074a0596ae8f0", features = ["std"] }
 lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b6c17c593a5d7bacb18fe3b9f69074a0596ae8f0" }
+lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b6c17c593a5d7bacb18fe3b9f69074a0596ae8f0" }
 
 bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
@@ -141,6 +143,7 @@ harness = false
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync" }
 #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
 #lightning-macros = { path = "../rust-lightning/lightning-macros" }
+#lightning-dns-resolver = { path = "../rust-lightning/lightning-dns-resolver" }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
@@ -153,6 +156,7 @@ harness = false
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
+#lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 #lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
@@ -165,6 +169,7 @@ harness = false
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
+#lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 
 #vss-client-ng = { path = "../vss-client" }
 #vss-client-ng = { git = "https://github.com/lightningdevkit/vss-client", branch = "main" }
@@ -181,3 +186,4 @@ harness = false
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync" }
 #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
 #lightning-macros = { path = "../rust-lightning/lightning-macros" }
+#lightning-dns-resolver = { path = "../rust-lightning/lightning-dns-resolver" }
