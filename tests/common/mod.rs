@@ -12,7 +12,7 @@ pub(crate) mod logging;
 
 use logging::TestLogWriter;
 
-use ldk_node::config::{Config, ElectrumSyncConfig, EsploraSyncConfig};
+use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
@@ -311,6 +311,13 @@ pub(crate) fn setup_two_nodes(
 pub(crate) fn setup_node(
 	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
 ) -> TestNode {
+	setup_node_for_async_payments(chain_source, config, seed_bytes, None)
+}
+
+pub(crate) fn setup_node_for_async_payments(
+	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
+	async_payments_role: Option<AsyncPaymentsRole>,
+) -> TestNode {
 	setup_builder!(builder, config.node_config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
@@ -374,6 +381,8 @@ pub(crate) fn setup_node(
 			builder.set_entropy_seed_bytes(bytes);
 		}
 	}
+
+	builder.set_async_payments_role(async_payments_role).unwrap();
 
 	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();

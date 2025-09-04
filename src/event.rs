@@ -5,7 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::types::{CustomTlvRecord, DynStore, PaymentStore, Sweeper, Wallet};
+use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -459,6 +460,8 @@ where
 	logger: L,
 	config: Arc<Config>,
 	static_invoice_store: Option<StaticInvoiceStore>,
+	onion_messenger: Arc<OnionMessenger>,
+	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -472,7 +475,8 @@ where
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
-		static_invoice_store: Option<StaticInvoiceStore>, runtime: Arc<Runtime>, logger: L,
+		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
 		config: Arc<Config>,
 	) -> Self {
 		Self {
@@ -490,6 +494,8 @@ where
 			runtime,
 			config,
 			static_invoice_store,
+			onion_messenger,
+			om_mailbox,
 		}
 	}
 
@@ -1491,11 +1497,33 @@ where
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { .. } => {
-				debug_assert!(false, "We currently don't support onion message interception, so this event should never be emitted.");
+			LdkEvent::OnionMessageIntercepted { peer_node_id, message } => {
+				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
+					om_mailbox.onion_message_intercepted(peer_node_id, message);
+				} else {
+					log_trace!(
+						self.logger,
+						"Onion message intercepted, but no onion message mailbox available"
+					);
+				}
 			},
-			LdkEvent::OnionMessagePeerConnected { .. } => {
-				debug_assert!(false, "We currently don't support onion message interception, so this event should never be emitted.");
+			LdkEvent::OnionMessagePeerConnected { peer_node_id } => {
+				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
+					let messages = om_mailbox.onion_message_peer_connected(peer_node_id);
+
+					for message in messages {
+						if let Err(e) =
+							self.onion_messenger.forward_onion_message(message, &peer_node_id)
+						{
+							log_trace!(
+								self.logger,
+								"Failed to forward onion message to peer {}: {:?}",
+								peer_node_id,
+								e
+							);
+						}
+					}
+				}
 			},
 
 			LdkEvent::PersistStaticInvoice {

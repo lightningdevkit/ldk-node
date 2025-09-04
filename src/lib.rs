@@ -127,8 +127,8 @@ pub use builder::NodeBuilder as Builder;
 
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -136,6 +136,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
+use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
@@ -205,6 +206,8 @@ pub struct Node {
 	is_running: Arc<RwLock<bool>>,
 	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
+	om_mailbox: Option<Arc<OnionMessageMailbox>>,
+	async_payments_role: Option<AsyncPaymentsRole>,
 }
 
 impl Node {
@@ -499,7 +502,8 @@ impl Node {
 			Arc::clone(&self.logger),
 		));
 
-		let static_invoice_store = if self.config.async_payment_services_enabled {
+		let static_invoice_store = if let Some(AsyncPaymentsRole::Server) = self.async_payments_role
+		{
 			Some(StaticInvoiceStore::new(Arc::clone(&self.kv_store)))
 		} else {
 			None
@@ -517,6 +521,8 @@ impl Node {
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			static_invoice_store,
+			Arc::clone(&self.onion_messenger),
+			self.om_mailbox.clone(),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
@@ -826,9 +832,9 @@ impl Node {
 		Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
-			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			self.async_payments_role,
 		)
 	}
 
@@ -840,9 +846,9 @@ impl Node {
 		Arc::new(Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
-			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			self.async_payments_role,
 		))
 	}
 
