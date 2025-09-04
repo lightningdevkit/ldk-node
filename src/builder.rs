@@ -25,6 +25,7 @@ use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArg
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::log_trace;
+use lightning::onion_message::dns_resolution::DNSResolverMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
@@ -38,6 +39,7 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
+use lightning_dns_resolver::OMDomainResolver;
 use lightning_persister::fs_store::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 
@@ -72,8 +74,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph, KeysManager,
-	MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister, SyncAndAsyncKVStore,
+	ChainMonitor, ChannelManager, DomainResolver, DynStore, DynStoreWrapper, GossipSync, Graph,
+	HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister,
+	SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -185,6 +188,8 @@ pub enum BuildError {
 	NetworkMismatch,
 	/// The role of the node in an asynchronous payments context is not compatible with the current configuration.
 	AsyncPaymentsConfigMismatch,
+	/// An attempt to setup a DNS Resolver failed.
+	DNSResolverSetupFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -217,11 +222,20 @@ impl fmt::Display for BuildError {
 					"The async payments role is not compatible with the current configuration."
 				)
 			},
+			Self::DNSResolverSetupFailed => {
+				write!(f, "An attempt to setup a DNS resolver has failed.")
+			},
 		}
 	}
 }
 
 impl std::error::Error for BuildError {}
+
+enum Resolver {
+	HRN(Arc<HRNResolver>),
+	DNS(Arc<DomainResolver>),
+	Ignore(Arc<IgnoringMessageHandler>),
+}
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
 /// the getgo.
@@ -1444,7 +1458,34 @@ fn build_with_store_internal(
 		})?;
 	}
 
-	let hrn_resolver = Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph)));
+	let resolver = if let Some(hrn_config) = &config.hrn_config {
+		if hrn_config.is_hrn_resolver {
+			let dns_addr = hrn_config.dns_server_address.as_str();
+
+			Resolver::DNS(Arc::new(OMDomainResolver::ignoring_incoming_proofs(
+				dns_addr.parse().map_err(|_| BuildError::DNSResolverSetupFailed)?,
+			)))
+		} else {
+			Resolver::HRN(Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(
+				&network_graph,
+			))))
+		}
+	} else {
+		// hrn_config is None, default to the IgnoringMessaageHandler.
+		Resolver::Ignore(Arc::new(IgnoringMessageHandler {}))
+	};
+
+	let om_resolver = match resolver {
+		Resolver::DNS(ref dns_resolver) => {
+			Arc::clone(dns_resolver) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
+		},
+		Resolver::HRN(ref hrn_resolver) => {
+			Arc::clone(hrn_resolver) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
+		},
+		Resolver::Ignore(ref ignoring_handler) => {
+			Arc::clone(ignoring_handler) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
+		},
+	};
 
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> =
@@ -1457,7 +1498,7 @@ fn build_with_store_internal(
 				message_router,
 				Arc::clone(&channel_manager),
 				Arc::clone(&channel_manager),
-				Arc::clone(&hrn_resolver),
+				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
 			))
 		} else {
@@ -1469,7 +1510,7 @@ fn build_with_store_internal(
 				message_router,
 				Arc::clone(&channel_manager),
 				Arc::clone(&channel_manager),
-				Arc::clone(&hrn_resolver),
+				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
 			))
 		};
@@ -1599,9 +1640,16 @@ fn build_with_store_internal(
 
 	let peer_manager_clone = Arc::clone(&peer_manager);
 
-	hrn_resolver.register_post_queue_action(Box::new(move || {
-		peer_manager_clone.process_events();
-	}));
+	let hrn_resolver = match resolver {
+		Resolver::DNS(_) => None,
+		Resolver::HRN(ref hrn_resolver) => {
+			hrn_resolver.register_post_queue_action(Box::new(move || {
+				peer_manager_clone.process_events();
+			}));
+			Some(hrn_resolver)
+		},
+		Resolver::Ignore(_) => None,
+	};
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
@@ -1716,7 +1764,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
-		hrn_resolver,
+		hrn_resolver: hrn_resolver.cloned(),
 	})
 }
 
