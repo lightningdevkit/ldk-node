@@ -25,8 +25,7 @@ use bitcoin::{Amount, Txid};
 use bitcoin_payment_instructions::amount::Amount as BPIAmount;
 use bitcoin_payment_instructions::{PaymentInstructions, PaymentMethod};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::offers::offer::Offer;
-use lightning::onion_message::dns_resolution::HumanReadableName;
+use lightning::offers::offer::Offer as LdkOffer;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
@@ -39,6 +38,16 @@ use crate::types::HRNResolver;
 use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
+
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = crate::ffi::HumanReadableName;
+
+#[cfg(not(feature = "uniffi"))]
+type Offer = LdkOffer;
+#[cfg(feature = "uniffi")]
+type Offer = Arc<crate::ffi::Offer>;
 
 #[derive(Debug, Clone)]
 struct Extras {
@@ -66,6 +75,8 @@ pub struct UnifiedPayment {
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 	hrn_resolver: Arc<HRNResolver>,
+	#[cfg(hrn_tests)]
+	test_offer: std::sync::Mutex<Option<Offer>>,
 }
 
 impl UnifiedPayment {
@@ -74,7 +85,16 @@ impl UnifiedPayment {
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
 		hrn_resolver: Arc<HRNResolver>,
 	) -> Self {
-		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger, hrn_resolver }
+		Self {
+			onchain_payment,
+			bolt11_invoice,
+			bolt12_payment,
+			config,
+			logger,
+			hrn_resolver,
+			#[cfg(hrn_tests)]
+			test_offer: std::sync::Mutex::new(None),
+		}
 	}
 }
 
@@ -115,7 +135,7 @@ impl UnifiedPayment {
 
 		let bolt12_offer =
 			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
-				Ok(offer) => Some(offer),
+				Ok(offer) => Some(maybe_wrap(offer)),
 				Err(e) => {
 					log_error!(self.logger, "Failed to create offer: {}", e);
 					None
@@ -165,12 +185,19 @@ impl UnifiedPayment {
 		&self, uri_str: &str, amount_msat: Option<u64>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<UnifiedPaymentResult, Error> {
-		let parse_fut = PaymentInstructions::parse(
-			uri_str,
-			self.config.network,
-			self.hrn_resolver.as_ref(),
-			false,
-		);
+		let target_network;
+
+		#[cfg(hrn_tests)]
+		{
+			target_network = bitcoin::Network::Bitcoin;
+		}
+		#[cfg(not(hrn_tests))]
+		{
+			target_network = self.config.network;
+		}
+
+		let parse_fut =
+			PaymentInstructions::parse(uri_str, target_network, self.hrn_resolver.as_ref(), false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -233,8 +260,30 @@ impl UnifiedPayment {
 
 		for method in sorted_payment_methods {
 			match method {
-				PaymentMethod::LightningBolt12(offer) => {
-					let offer = maybe_wrap(offer.clone());
+				PaymentMethod::LightningBolt12(_offer) => {
+					#[cfg(not(hrn_tests))]
+					let offer = maybe_wrap(_offer.clone());
+
+					#[cfg(hrn_tests)]
+					// We inject a test-only offer here because full DNSSEC validation is
+					// currently infeasible in regtest environments. This allows us to
+					// bypass the validation requirements that would otherwise fail
+					// without a functional global DNSSEC root in the test runner.
+					let offer = {
+						let test_offer_guard = self.test_offer.lock().map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to lock test_offer due to poisoning: {:?}",
+								e
+							);
+							Error::PaymentSendingFailed
+						})?;
+
+						match &*test_offer_guard {
+							Some(o) => o.clone(),
+							None => maybe_wrap(_offer.clone()),
+						}
+					};
 
 					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
 						let hrn = maybe_wrap(hrn.clone());
@@ -287,6 +336,24 @@ impl UnifiedPayment {
 
 		log_error!(self.logger, "Payable methods not found in URI");
 		Err(Error::PaymentSendingFailed)
+	}
+}
+
+#[cfg(hrn_tests)]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl UnifiedPayment {
+	/// Sets a test offer to be used in the `send` method when the `hrn_tests` config flag is enabled.
+	///
+	/// This is necessary for Bolt12 payments in HRN tests because we typically resolve offers
+	/// via [BIP 353] DNS addresses. Since full DNSSEC validation is infeasible in regtest
+	/// environments, the automated resolution of an offer from a URI will fail. Injected
+	/// offers allow us to bypass this resolution step and test the subsequent payment flow.
+	///
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	pub fn set_test_offer(&self, _offer: Offer) {
+		let _ = self.test_offer.lock().map(|mut guard| *guard = Some(_offer)).map_err(|e| {
+			log_error!(self.logger, "Failed to set test offer due to poisoned lock: {:?}", e)
+		});
 	}
 }
 
@@ -395,9 +462,10 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
 			"lno" => {
 				let bolt12_value =
 					String::try_from(value).map_err(|_| Error::UriParameterParsingFailed)?;
-				let offer =
-					bolt12_value.parse::<Offer>().map_err(|_| Error::UriParameterParsingFailed)?;
-				self.bolt12_offer = Some(offer);
+				let offer = bolt12_value
+					.parse::<LdkOffer>()
+					.map_err(|_| Error::UriParameterParsingFailed)?;
+				self.bolt12_offer = Some(maybe_wrap(offer));
 				Ok(bip21::de::ParamKind::Known)
 			},
 			_ => Ok(bip21::de::ParamKind::Unknown),
@@ -420,7 +488,7 @@ mod tests {
 	use bitcoin::address::NetworkUnchecked;
 	use bitcoin::{Address, Network};
 
-	use super::{Amount, Bolt11Invoice, Extras, Offer};
+	use super::{maybe_wrap, Amount, Bolt11Invoice, Extras, LdkOffer};
 
 	#[test]
 	fn parse_uri() {
@@ -474,7 +542,7 @@ mod tests {
 		}
 
 		if let Some(offer) = parsed_uri_with_offer.extras.bolt12_offer {
-			assert_eq!(offer, Offer::from_str(expected_bolt12_offer_2).unwrap());
+			assert_eq!(offer, maybe_wrap(LdkOffer::from_str(expected_bolt12_offer_2).unwrap()));
 		} else {
 			panic!("No offer found.");
 		}
