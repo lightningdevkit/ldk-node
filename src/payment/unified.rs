@@ -160,18 +160,13 @@ impl UnifiedPayment {
 			Error::HrnResolverNotConfigured
 		})?;
 
-		println!("Parsing instructions...");
-
 		let instructions =
 			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false)
 				.await
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
-					println!("Failed to parse payment instructions: {:?}", e);
 					Error::UriParameterParsingFailed
 				})?;
-
-		println!("Sending...");
 
 		let resolved = match instructions {
 			PaymentInstructions::ConfigurableAmount(instr) => {

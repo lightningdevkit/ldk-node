@@ -281,7 +281,7 @@ pub(crate) use setup_builder;
 
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool,
+	anchors_trusted_no_reserve: bool, second_node_is_hrn_resolver: bool,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config(anchor_channels);
@@ -289,6 +289,9 @@ pub(crate) fn setup_two_nodes(
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
+	if second_node_is_hrn_resolver {
+		config_b.node_config.is_hrn_resolver = true;
+	}
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}

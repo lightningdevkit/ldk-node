@@ -43,7 +43,7 @@ use log::LevelFilter;
 fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
 
@@ -51,7 +51,7 @@ fn channel_full_cycle() {
 fn channel_full_cycle_electrum() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Electrum(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
 
@@ -59,7 +59,7 @@ fn channel_full_cycle_electrum() {
 fn channel_full_cycle_bitcoind_rpc_sync() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
 
@@ -67,7 +67,7 @@ fn channel_full_cycle_bitcoind_rpc_sync() {
 fn channel_full_cycle_bitcoind_rest_sync() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::BitcoindRestSync(&bitcoind);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false);
 }
 
@@ -75,7 +75,7 @@ fn channel_full_cycle_bitcoind_rest_sync() {
 fn channel_full_cycle_force_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
 }
 
@@ -83,7 +83,7 @@ fn channel_full_cycle_force_close() {
 fn channel_full_cycle_force_close_trusted_no_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true);
 }
 
@@ -91,7 +91,7 @@ fn channel_full_cycle_force_close_trusted_no_reserve() {
 fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true, true, false)
 }
 
@@ -99,7 +99,7 @@ fn channel_full_cycle_0conf() {
 fn channel_full_cycle_legacy_staticremotekey() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false);
 }
 
@@ -107,7 +107,7 @@ fn channel_full_cycle_legacy_staticremotekey() {
 fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -308,7 +308,7 @@ fn start_stop_reinit() {
 fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -508,7 +508,7 @@ fn onchain_send_receive() {
 fn onchain_send_all_retains_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	// Setup nodes
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -840,7 +840,7 @@ fn connection_restart_behavior() {
 fn do_connection_restart_behavior(persist: bool) {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, false);
 
 	let node_id_a = node_a.node_id();
 	let node_id_b = node_b.node_id();
@@ -887,7 +887,7 @@ fn do_connection_restart_behavior(persist: bool) {
 fn concurrent_connections_succeed() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	let node_a = Arc::new(node_a);
 	let node_b = Arc::new(node_b);
@@ -914,7 +914,7 @@ fn concurrent_connections_succeed() {
 fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -1364,7 +1364,7 @@ fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -1418,7 +1418,7 @@ async fn unified_send_receive_qr_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -1521,6 +1521,64 @@ async fn unified_send_receive_qr_uri() {
 
 	assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_send_to_hrn() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, true);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premined_sats = 5_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premined_sats),
+	);
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Sleep until we broadcast a node announcement.
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+
+	//let offer = node_b.bolt12_payment().receive(1000000, "test offer", None, None).unwrap();
+	//println!("offer! {:?}", offer.to_string());
+
+	// Sleep one more sec to make sure the node announcement propagates.
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	let hrn = "matt@mattcorallo.com";
+	let offer_payment_id: PaymentId = match node_a.unified_payment().send(&hrn, None).await {
+		Ok(UnifiedPaymentResult::Bolt12 { payment_id }) => {
+			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
+			payment_id
+		},
+		Ok(UnifiedPaymentResult::Bolt11 { payment_id: _ }) => {
+			panic!("Expected Bolt12 payment but got Bolt11");
+		},
+		Ok(UnifiedPaymentResult::Onchain { txid: _ }) => {
+			panic!("Expected Bolt12 payment but got On-chain transaction");
+		},
+		Err(e) => {
+			panic!("Expected Bolt12 payment but got error: {:?}", e);
+		},
+	};
+
+	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
 }
 
 #[test]
@@ -1766,7 +1824,7 @@ fn facade_logging() {
 fn spontaneous_send_with_custom_preimage() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_sat = 1_000_000;
