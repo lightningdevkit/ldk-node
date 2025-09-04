@@ -62,14 +62,14 @@ pub struct UnifiedPayment {
 	bolt12_payment: Arc<Bolt12Payment>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	hrn_resolver: Arc<HRNResolver>,
+	hrn_resolver: Arc<Option<Arc<HRNResolver>>>,
 }
 
 impl UnifiedPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
-		hrn_resolver: Arc<HRNResolver>,
+		hrn_resolver: Arc<Option<Arc<HRNResolver>>>,
 	) -> Self {
 		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger, hrn_resolver }
 	}
@@ -155,17 +155,23 @@ impl UnifiedPayment {
 	pub async fn send(
 		&self, uri_str: &str, amount_msat: Option<u64>,
 	) -> Result<UnifiedPaymentResult, Error> {
-		let instructions = PaymentInstructions::parse(
-			uri_str,
-			self.config.network,
-			self.hrn_resolver.as_ref(),
-			false,
-		)
-		.await
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
-			Error::UriParameterParsingFailed
+		let resolver = self.hrn_resolver.as_ref().clone().ok_or_else(|| {
+			log_error!(self.logger, "No HRN resolver configured. Cannot resolve HRNs.");
+			Error::HrnResolverNotConfigured
 		})?;
+
+		println!("Parsing instructions...");
+
+		let instructions =
+			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false)
+				.await
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
+					println!("Failed to parse payment instructions: {:?}", e);
+					Error::UriParameterParsingFailed
+				})?;
+
+		println!("Sending...");
 
 		let resolved = match instructions {
 			PaymentInstructions::ConfigurableAmount(instr) => {
@@ -179,7 +185,7 @@ impl UnifiedPayment {
 					Error::InvalidAmount
 				})?;
 
-				instr.set_amount(amt, self.hrn_resolver.as_ref()).await.map_err(|e| {
+				instr.set_amount(amt, resolver.as_ref()).await.map_err(|e| {
 					log_error!(self.logger, "Failed to set amount: {:?}", e);
 					Error::InvalidAmount
 				})?

@@ -324,6 +324,7 @@ enum NodeError {
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
 	"HrnParsingFailed",
+	"HrnResolverNotConfigured",
 };
 
 dictionary NodeStatus {
@@ -361,6 +362,7 @@ enum BuildError {
 	"LoggerSetupFailed",
 	"NetworkMismatch",
 	"AsyncPaymentsConfigMismatch",
+	"DNSResolverSetupFailed",
 };
 
 [Trait]
