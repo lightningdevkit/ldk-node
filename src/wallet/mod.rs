@@ -29,6 +29,7 @@ use bitcoin::{
 	Address, Amount, FeeRate, OutPoint, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
 	WitnessProgram, WitnessVersion,
 };
+
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BestBlock, Listen};
@@ -265,31 +266,54 @@ impl Wallet {
 					self.pending_payment_store.insert_or_update(pending_payment)?;
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
-					// Get all payments that are Pending with Confirmed status
+					// Get all on-chain payments that are Pending
 					let pending_payments: Vec<PendingPaymentDetails> =
 						self.pending_payment_store.list_filter(|p| {
 							p.details.status == PaymentStatus::Pending
-								&& matches!(
-									p.details.kind,
-									PaymentKind::Onchain {
-										status: ConfirmationStatus::Confirmed { .. },
-										..
-									}
-								)
+								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
 						});
 
+					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
+
 					for mut payment in pending_payments {
-						if let PaymentKind::Onchain {
-							status: ConfirmationStatus::Confirmed { height, .. },
-							..
-						} = payment.details.kind
-						{
-							let payment_id = payment.details.id;
-							if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-								payment.details.status = PaymentStatus::Succeeded;
-								self.payment_store.insert_or_update(payment.details)?;
-								self.pending_payment_store.remove(&payment_id)?;
-							}
+						match payment.details.kind {
+							PaymentKind::Onchain {
+								status: ConfirmationStatus::Confirmed { height, .. },
+								..
+							} => {
+								let payment_id = payment.details.id;
+								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
+									payment.details.status = PaymentStatus::Succeeded;
+									self.payment_store.insert_or_update(payment.details)?;
+									self.pending_payment_store.remove(&payment_id)?;
+								}
+							},
+							PaymentKind::Onchain {
+								txid,
+								status: ConfirmationStatus::Unconfirmed,
+							} if payment.details.direction == PaymentDirection::Outbound => {
+								unconfirmed_outbound_txids.push(txid);
+							},
+							_ => {},
+						}
+					}
+
+					if !unconfirmed_outbound_txids.is_empty() {
+						let txs_to_broadcast: Vec<Transaction> = unconfirmed_outbound_txids
+							.iter()
+							.filter_map(|txid| {
+								locked_wallet.tx_details(*txid).map(|d| (*d.tx).clone())
+							})
+							.collect();
+
+						if !txs_to_broadcast.is_empty() {
+							let tx_refs: Vec<&Transaction> = txs_to_broadcast.iter().collect();
+							self.broadcaster.broadcast_transactions(&tx_refs);
+							log_info!(
+								self.logger,
+								"Rebroadcast {} unconfirmed transactions on chain tip change",
+								txs_to_broadcast.len()
+							);
 						}
 					}
 				},
