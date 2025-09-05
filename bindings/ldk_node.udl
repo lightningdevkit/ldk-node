@@ -13,6 +13,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	SendingParameters? sending_parameters;
+	boolean auto_rebroadcast_unconfirmed_tx;
 };
 
 dictionary AnchorChannelsConfig {
@@ -231,6 +232,8 @@ interface OnchainPayment {
 	Txid send_to_address([ByRef]Address address, u64 amount_sats, FeeRate? fee_rate);
 	[Throws=NodeError]
 	Txid send_all_to_address([ByRef]Address address, boolean retain_reserve, FeeRate? fee_rate);
+	[Throws=NodeError]
+	void rebroadcast_transaction(PaymentId payment_id);
 };
 
 interface FeeRate {
@@ -311,6 +314,7 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+	"InvalidTransaction",
 };
 
 dictionary NodeStatus {
@@ -409,7 +413,7 @@ interface ClosureReason {
 
 [Enum]
 interface PaymentKind {
-	Onchain(Txid txid, ConfirmationStatus status);
+	Onchain(Txid txid, ConfirmationStatus status, Transaction? raw_tx, u64? last_broadcast_time, u32? broadcast_attempts);
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, u64? counterparty_skimmed_fee_msat, LSPFeeLimits lsp_fee_limits);
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
@@ -865,3 +869,6 @@ typedef string OrderId;
 
 [Custom]
 typedef string DateTime;
+
+[Custom]
+typedef string Transaction;

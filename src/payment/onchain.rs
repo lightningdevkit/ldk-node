@@ -14,6 +14,7 @@ use crate::types::{ChannelManager, Wallet};
 use crate::wallet::OnchainSendAmount;
 
 use bitcoin::{Address, Txid};
+use lightning::ln::channelmanager::PaymentId;
 
 use std::sync::{Arc, RwLock};
 
@@ -119,5 +120,16 @@ impl OnchainPayment {
 
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+	}
+
+	/// Manually trigger a rebroadcast of a specific transaction according to the default policy.
+	///
+	/// This is useful if you suspect a transaction may not have propagated properly through the
+	/// network and you want to attempt to rebroadcast it immediately rather than waiting for the
+	/// automatic background job to handle it.
+	///
+	/// updating the attempt count and last broadcast time for the transaction in the payment store.
+	pub fn rebroadcast_transaction(&self, payment_id: PaymentId) -> Result<(), Error> {
+		self.wallet.rebroadcast_transaction(payment_id)
 	}
 }

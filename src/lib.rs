@@ -129,7 +129,7 @@ pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
 use config::{
 	default_user_config, may_announce_channel, ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL, UNCONFIRMED_TX_BROADCAST_INTERVAL,
 };
 use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
@@ -401,6 +401,33 @@ impl Node {
 				}
 			}
 		});
+
+		// Regularly rebroadcast unconfirmed transactions.
+		let rebroadcast_wallet = Arc::clone(&self.wallet);
+		let rebroadcast_logger = Arc::clone(&self.logger);
+		let mut stop_rebroadcast = self.stop_sender.subscribe();
+		if self.config.auto_rebroadcast_unconfirmed_tx {
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut interval = tokio::time::interval(UNCONFIRMED_TX_BROADCAST_INTERVAL);
+				interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				loop {
+					tokio::select! {
+						_ = stop_rebroadcast.changed() => {
+							log_debug!(
+								rebroadcast_logger,
+								"Stopping rebroadcasting unconfirmed transactions."
+							);
+							return;
+						}
+						_ = interval.tick() => {
+							if let Err(e) = rebroadcast_wallet.rebroadcast_unconfirmed_transactions() {
+								log_error!(rebroadcast_logger, "Background rebroadcast failed: {}", e);
+							}
+						}
+					}
+				}
+			});
+		}
 
 		// Regularly broadcast node announcements.
 		let bcast_cm = Arc::clone(&self.channel_manager);
