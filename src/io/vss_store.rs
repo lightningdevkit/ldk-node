@@ -241,7 +241,14 @@ impl KVStore for VssStore {
 
 impl Drop for VssStore {
 	fn drop(&mut self) {
-		self.data_encryption_key.copy_from_slice(&[0u8; KEY_LENGTH]);
+		// Zeroize the data_encryption_key
+		for elem in self.data_encryption_key.iter_mut() {
+			unsafe {
+				::core::ptr::write_volatile(elem, 0);
+			}
+
+		};
+		::core::sync::atomic::compiler_fence(::core::sync::atomic::Ordering::SeqCst);
 	}
 }
 
