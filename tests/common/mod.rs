@@ -285,7 +285,7 @@ pub(crate) fn setup_two_nodes(
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config(anchor_channels);
-	let node_a = setup_node(chain_source, config_a, None);
+	let node_a = setup_node_from_config(chain_source, config_a, None);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
@@ -301,11 +301,16 @@ pub(crate) fn setup_two_nodes(
 			.trusted_peers_no_reserve
 			.push(node_a.node_id());
 	}
-	let node_b = setup_node(chain_source, config_b, None);
+	let node_b = setup_node_from_config(chain_source, config_b, None);
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(
+pub(crate) fn setup_node(chain_source: &TestChainSource, anchor_channels: bool) -> TestNode {
+	let config = random_config(anchor_channels);
+	setup_node_from_config(chain_source, config, None)
+}
+
+pub(crate) fn setup_node_from_config(
 	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
 ) -> TestNode {
 	setup_node_for_async_payments(chain_source, config, seed_bytes, None)

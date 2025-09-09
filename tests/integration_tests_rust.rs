@@ -23,7 +23,7 @@ use common::{
 	generate_blocks_and_wait, open_channel, open_channel_push_amt, premine_and_distribute_funds,
 	premine_blocks, prepare_rbf, random_config, random_listening_addresses,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_for_async_payments,
-	setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	setup_node_from_config, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -596,7 +596,8 @@ fn onchain_wallet_recovery() {
 	let seed_bytes = vec![42u8; 64];
 
 	let original_config = random_config(true);
-	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
+	let original_node =
+		setup_node_from_config(&chain_source, original_config, Some(seed_bytes.clone()));
 
 	let premine_amount_sat = 100_000;
 
@@ -635,7 +636,7 @@ fn onchain_wallet_recovery() {
 
 	// Now we start from scratch, only the seed remains the same.
 	let recovered_config = random_config(true);
-	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
+	let recovered_node = setup_node_from_config(&chain_source, recovered_config, Some(seed_bytes));
 
 	recovered_node.sync_wallets().unwrap();
 	assert_eq!(
@@ -686,18 +687,11 @@ fn run_rbf_test(is_insert_block: bool) {
 	let chain_source_electrsd = TestChainSource::Electrum(&electrsd);
 	let chain_source_esplora = TestChainSource::Esplora(&electrsd);
 
-	macro_rules! config_node {
-		($chain_source: expr, $anchor_channels: expr) => {{
-			let config_a = random_config($anchor_channels);
-			let node = setup_node(&$chain_source, config_a, None);
-			node
-		}};
-	}
 	let anchor_channels = false;
 	let nodes = vec![
-		config_node!(chain_source_electrsd, anchor_channels),
-		config_node!(chain_source_bitcoind, anchor_channels),
-		config_node!(chain_source_esplora, anchor_channels),
+		setup_node(&chain_source_bitcoind, anchor_channels),
+		setup_node(&chain_source_electrsd, anchor_channels),
+		setup_node(&chain_source_esplora, anchor_channels),
 	];
 
 	let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
@@ -807,7 +801,7 @@ fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, config, None);
+	let node = setup_node_from_config(&chain_source, config, None);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
@@ -1174,7 +1168,7 @@ fn async_payment() {
 	config_receiver.node_config.node_alias = None;
 	config_receiver.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
-	let node_receiver = setup_node(&chain_source, config_receiver, None);
+	let node_receiver = setup_node_from_config(&chain_source, config_receiver, None);
 
 	let address_sender = node_sender.onchain_payment().new_address().unwrap();
 	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().unwrap();
@@ -1296,8 +1290,8 @@ fn test_node_announcement_propagation() {
 	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
 	config_b.node_config.announcement_addresses = None;
 
-	let node_a = setup_node(&chain_source, config_a, None);
-	let node_b = setup_node(&chain_source, config_b, None);
+	let node_a = setup_node_from_config(&chain_source, config_a, None);
+	let node_b = setup_node_from_config(&chain_source, config_b, None);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -1753,7 +1747,7 @@ fn facade_logging() {
 	config.log_writer = TestLogWriter::LogFacade;
 
 	println!("== Facade logging starts ==");
-	let _node = setup_node(&chain_source, config, None);
+	let _node = setup_node_from_config(&chain_source, config, None);
 
 	assert!(!logger.retrieve_logs().is_empty());
 	for (_, entry) in logger.retrieve_logs().iter().enumerate() {
@@ -1834,6 +1828,6 @@ async fn drop_in_async_context() {
 	let seed_bytes = vec![42u8; 64];
 
 	let config = random_config(true);
-	let node = setup_node(&chain_source, config, Some(seed_bytes));
+	let node = setup_node_from_config(&chain_source, config, Some(seed_bytes));
 	node.stop().unwrap();
 }

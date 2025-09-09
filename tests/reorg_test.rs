@@ -9,8 +9,8 @@ use proptest::proptest;
 
 use crate::common::{
 	expect_event, generate_blocks_and_wait, invalidate_blocks, open_channel,
-	premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd, setup_node,
-	wait_for_outpoint_spend, TestChainSource,
+	premine_and_distribute_funds, setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend,
+	TestChainSource,
 };
 
 proptest! {
@@ -23,18 +23,11 @@ proptest! {
 		let chain_source_electrsd = TestChainSource::Electrum(&electrsd);
 		let chain_source_esplora = TestChainSource::Esplora(&electrsd);
 
-		macro_rules! config_node {
-			($chain_source: expr, $anchor_channels: expr) => {{
-				let config_a = random_config($anchor_channels);
-				let node = setup_node(&$chain_source, config_a, None);
-				node
-			}};
-		}
 		let anchor_channels = true;
 		let nodes = vec![
-			config_node!(chain_source_electrsd, anchor_channels),
-			config_node!(chain_source_bitcoind, anchor_channels),
-			config_node!(chain_source_esplora, anchor_channels),
+			setup_node(&chain_source_electrsd, anchor_channels),
+			setup_node(&chain_source_bitcoind, anchor_channels),
+			setup_node(&chain_source_esplora, anchor_channels),
 		];
 
 		let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
