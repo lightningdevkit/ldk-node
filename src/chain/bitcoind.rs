@@ -173,7 +173,7 @@ impl BitcoindChainSource {
 			if let Some(worst_channel_monitor_block_hash) = chain_monitor
 				.list_monitors()
 				.iter()
-				.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
+				.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
 				.map(|m| m.current_best_block())
 				.min_by_key(|b| b.height)
 				.map(|b| b.block_hash)
@@ -1381,11 +1381,11 @@ impl Listen for ChainListener {
 		self.output_sweeper.block_connected(block, height);
 	}
 
-	fn block_disconnected(&self, header: &bitcoin::block::Header, height: u32) {
-		self.onchain_wallet.block_disconnected(header, height);
-		self.channel_manager.block_disconnected(header, height);
-		self.chain_monitor.block_disconnected(header, height);
-		self.output_sweeper.block_disconnected(header, height);
+	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BestBlock) {
+		self.onchain_wallet.blocks_disconnected(fork_point_block);
+		self.channel_manager.blocks_disconnected(fork_point_block);
+		self.chain_monitor.blocks_disconnected(fork_point_block);
+		self.output_sweeper.blocks_disconnected(fork_point_block);
 	}
 }
 

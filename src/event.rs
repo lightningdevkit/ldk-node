@@ -38,6 +38,9 @@ use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
+use lightning::util::config::{
+	ChannelConfigOverrides, ChannelConfigUpdate, ChannelHandshakeConfigUpdate,
+};
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
@@ -56,7 +59,6 @@ use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -358,7 +360,7 @@ where
 				EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 				EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 				EVENT_QUEUE_PERSISTENCE_KEY,
-				&data,
+				data,
 			)
 			.map_err(|e| {
 				log_error!(
@@ -544,7 +546,7 @@ where
 					Err(err) => {
 						log_error!(self.logger, "Failed to create funding transaction: {}", err);
 						self.channel_manager
-							.force_close_without_broadcasting_txn(
+							.force_close_broadcasting_latest_txn(
 								&temporary_channel_id,
 								&counterparty_node_id,
 								"Failed to create funding transaction".to_string(),
@@ -565,13 +567,10 @@ where
 				payment_hash,
 				purpose,
 				amount_msat,
-				receiver_node_id: _,
-				via_channel_id: _,
-				via_user_channel_id: _,
 				claim_deadline,
 				onion_fields,
 				counterparty_skimmed_fee_msat,
-				payment_id: _,
+				..
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
 				if let Some(info) = self.payment_store.get(&payment_id) {
@@ -1043,26 +1042,17 @@ where
 			LdkEvent::PaymentPathFailed { .. } => {},
 			LdkEvent::ProbeSuccessful { .. } => {},
 			LdkEvent::ProbeFailed { .. } => {},
-			LdkEvent::HTLCHandlingFailed { failed_next_destination, .. } => {
+			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_htlc_handling_failed(failed_next_destination);
+					liquidity_source.handle_htlc_handling_failed(failure_type);
 				}
 			},
-			LdkEvent::PendingHTLCsForwardable { time_forwardable } => {
-				let forwarding_channel_manager = self.channel_manager.clone();
-				let min = time_forwardable.as_millis() as u64;
-
-				let future = async move {
-					let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
-					tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
-
-					forwarding_channel_manager.process_pending_htlc_forwards();
-				};
-
-				self.runtime.spawn_cancellable_background_task(future);
-			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
-				match self.output_sweeper.track_spendable_outputs(outputs, channel_id, true, None) {
+				match self
+					.output_sweeper
+					.track_spendable_outputs(outputs, channel_id, true, None)
+					.await
+				{
 					Ok(_) => return Ok(()),
 					Err(_) => {
 						log_error!(self.logger, "Failed to track spendable outputs");
@@ -1084,7 +1074,7 @@ where
 						log_error!(self.logger, "Rejecting inbound announced channel from peer {} due to missing configuration: {}", counterparty_node_id, err);
 
 						self.channel_manager
-							.force_close_without_broadcasting_txn(
+							.force_close_broadcasting_latest_txn(
 								&temporary_channel_id,
 								&counterparty_node_id,
 								"Channel request rejected".to_string(),
@@ -1128,7 +1118,7 @@ where
 								required_amount_sats,
 							);
 							self.channel_manager
-								.force_close_without_broadcasting_txn(
+								.force_close_broadcasting_latest_txn(
 									&temporary_channel_id,
 									&counterparty_node_id,
 									"Channel request rejected".to_string(),
@@ -1145,7 +1135,7 @@ where
 							counterparty_node_id,
 						);
 						self.channel_manager
-							.force_close_without_broadcasting_txn(
+							.force_close_broadcasting_latest_txn(
 								&temporary_channel_id,
 								&counterparty_node_id,
 								"Channel request rejected".to_string(),
@@ -1157,19 +1147,46 @@ where
 					}
 				}
 
-				let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
+				let user_channel_id: u128 = thread_rng().gen::<u128>();
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
+				let mut channel_override_config = None;
+				if let Some((lsp_node_id, _)) = self
+					.liquidity_source
+					.as_ref()
+					.and_then(|ls| ls.as_ref().get_lsps2_lsp_details())
+				{
+					if lsp_node_id == counterparty_node_id {
+						// When we're an LSPS2 client, allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
+						// check that they don't take too much before claiming.
+						//
+						// We also set maximum allowed inbound HTLC value in flight
+						// to 100%. We should eventually be able to set this on a per-channel basis, but for
+						// now we just bump the default for all channels.
+						channel_override_config = Some(ChannelConfigOverrides {
+							handshake_overrides: Some(ChannelHandshakeConfigUpdate {
+								max_inbound_htlc_value_in_flight_percent_of_channel: Some(100),
+								..Default::default()
+							}),
+							update_overrides: Some(ChannelConfigUpdate {
+								accept_underpaying_htlcs: Some(true),
+								..Default::default()
+							}),
+						});
+					}
+				}
 				let res = if allow_0conf {
 					self.channel_manager.accept_inbound_channel_from_trusted_peer_0conf(
 						&temporary_channel_id,
 						&counterparty_node_id,
 						user_channel_id,
+						channel_override_config,
 					)
 				} else {
 					self.channel_manager.accept_inbound_channel(
 						&temporary_channel_id,
 						&counterparty_node_id,
 						user_channel_id,
+						channel_override_config,
 					)
 				};
 
@@ -1469,13 +1486,22 @@ where
 					BumpTransactionEvent::HTLCResolution { .. } => {},
 				}
 
-				self.bump_tx_event_handler.handle_event(&bte);
+				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
 			LdkEvent::OnionMessageIntercepted { .. } => {
 				debug_assert!(false, "We currently don't support onion message interception, so this event should never be emitted.");
 			},
 			LdkEvent::OnionMessagePeerConnected { .. } => {
 				debug_assert!(false, "We currently don't support onion message interception, so this event should never be emitted.");
+			},
+			LdkEvent::PersistStaticInvoice { .. } => {
+				debug_assert!(false, "We currently don't support static invoice persistence, so this event should never be emitted.");
+			},
+			LdkEvent::StaticInvoiceRequested { .. } => {
+				debug_assert!(false, "We currently don't support static invoice persistence, so this event should never be emitted.");
+			},
+			LdkEvent::FundingTransactionReadyForSigning { .. } => {
+				debug_assert!(false, "We currently don't support interactive-tx, so this event should never be emitted.");
 			},
 		}
 		Ok(())

@@ -73,7 +73,7 @@ where
 				PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 				PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 				PEER_INFO_PERSISTENCE_KEY,
-				&data,
+				data,
 			)
 			.map_err(|e| {
 				log_error!(

@@ -9,13 +9,13 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::offers::offer::OfferId;
 use lightning::util::ser::{Readable, Writeable};
-use lightning::util::string::UntrustedString;
 use lightning::{
 	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
 	impl_writeable_tlv_based_enum, write_tlv_fields,
 };
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning_types::string::UntrustedString;
 
 use bitcoin::{BlockHash, Txid};
 

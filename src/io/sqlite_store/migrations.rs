@@ -78,7 +78,7 @@ mod tests {
 	use crate::io::sqlite_store::SqliteStore;
 	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
 
-	use lightning::util::persist::KVStore;
+	use lightning::util::persist::KVStoreSync;
 
 	use rusqlite::{named_params, Connection};
 

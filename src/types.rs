@@ -25,20 +25,23 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::KVStore;
+use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStoreSyncWrapper;
 use lightning::util::ser::{Readable, Writeable, Writer};
-use lightning::util::sweep::OutputSweeper;
 
+use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::{GossipVerifier, UtxoSource};
 
 use lightning_net_tokio::SocketDescriptor;
+
+use lightning_liquidity::utils::time::DefaultTimeProvider;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
 
 use std::sync::{Arc, Mutex};
 
-pub(crate) type DynStore = dyn KVStore + Sync + Send;
+pub(crate) type DynStore = dyn KVStoreSync + Sync + Send;
 
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -47,6 +50,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<OnchainFeeEstimator>,
 	Arc<Logger>,
 	Arc<DynStore>,
+	Arc<KeysManager>,
 >;
 
 pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
@@ -57,10 +61,16 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<Logger>,
 	Arc<NodeCustomMessageHandler<Arc<Logger>>>,
 	Arc<KeysManager>,
+	Arc<ChainMonitor>,
 >;
 
-pub(crate) type LiquidityManager =
-	lightning_liquidity::LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<ChainSource>>;
+pub(crate) type LiquidityManager = lightning_liquidity::LiquidityManager<
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<ChannelManager>,
+	Arc<ChainSource>,
+	Arc<DefaultTimeProvider>,
+>;
 
 pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<ChainMonitor>,
@@ -76,11 +86,8 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 
 pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<Logger>>;
 
-pub(crate) type Wallet =
-	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
-
-pub(crate) type KeysManager =
-	crate::wallet::WalletKeysManager<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
+pub(crate) type Wallet = crate::wallet::Wallet;
+pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<Graph>,
@@ -132,7 +139,7 @@ pub(crate) type Sweeper = OutputSweeper<
 	Arc<KeysManager>,
 	Arc<OnchainFeeEstimator>,
 	Arc<ChainSource>,
-	Arc<DynStore>,
+	KVStoreSyncWrapper<Arc<DynStore>>,
 	Arc<Logger>,
 	Arc<KeysManager>,
 >;

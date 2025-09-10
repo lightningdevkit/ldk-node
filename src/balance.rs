@@ -5,17 +5,16 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::sweep::value_from_descriptor;
-
 use lightning::chain::channelmonitor::Balance as LdkBalance;
 use lightning::chain::channelmonitor::BalanceSource;
 use lightning::ln::types::ChannelId;
+use lightning::sign::SpendableOutputDescriptor;
 use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{BlockHash, Txid};
+use bitcoin::{Amount, BlockHash, Txid};
 
 /// Details of the known available balances returned by [`Node::list_balances`].
 ///
@@ -383,5 +382,13 @@ impl PendingSweepBalance {
 				}
 			},
 		}
+	}
+}
+
+fn value_from_descriptor(descriptor: &SpendableOutputDescriptor) -> Amount {
+	match &descriptor {
+		SpendableOutputDescriptor::StaticOutput { output, .. } => output.value,
+		SpendableOutputDescriptor::DelayedPaymentOutput(output) => output.output.value,
+		SpendableOutputDescriptor::StaticPaymentOutput(output) => output.output.value,
 	}
 }

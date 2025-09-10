@@ -22,13 +22,14 @@ use ldk_node::config::EsploraSyncConfig;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
-	QrPaymentResult, SendingParameters,
+	QrPaymentResult,
 };
 use ldk_node::{Builder, Event, NodeError};
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
-use lightning::util::persist::KVStore;
+use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::KVStoreSync;
 
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -212,11 +213,11 @@ fn multi_hop_sending() {
 	// Sleep a bit for gossip to propagate.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
-	let sending_params = SendingParameters {
-		max_total_routing_fee_msat: Some(Some(75_000).into()),
-		max_total_cltv_expiry_delta: Some(1000),
-		max_path_count: Some(10),
-		max_channel_saturation_power_of_half: Some(2),
+	let route_params = RouteParametersConfig {
+		max_total_routing_fee_msat: Some(75_000),
+		max_total_cltv_expiry_delta: 1000,
+		max_path_count: 10,
+		max_channel_saturation_power_of_half: 2,
 	};
 
 	let invoice_description =
@@ -225,7 +226,7 @@ fn multi_hop_sending() {
 		.bolt11_payment()
 		.receive(2_500_000, &invoice_description.clone().into(), 9217)
 		.unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
 
@@ -246,7 +247,7 @@ fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store: Arc<dyn KVStore + Sync + Send> =
+	let test_sync_store: Arc<dyn KVStoreSync + Sync + Send> =
 		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };

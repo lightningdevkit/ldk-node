@@ -95,7 +95,6 @@ mod message_handler;
 pub mod payment;
 mod peer_store;
 mod runtime;
-mod sweep;
 mod tx_broadcaster;
 mod types;
 mod wallet;
@@ -159,7 +158,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 
-use lightning_background_processor::process_events_async;
+use lightning_background_processor::process_events_async_with_kv_store_sync;
 
 use bitcoin::secp256k1::PublicKey;
 
@@ -522,6 +521,9 @@ impl Node {
 		let background_chan_man = Arc::clone(&self.channel_manager);
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
+		let background_liquidity_man_opt =
+			self.liquidity_source.as_ref().map(|ls| ls.liquidity_manager());
+		let background_sweeper = Arc::clone(&self.output_sweeper);
 		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
@@ -548,7 +550,7 @@ impl Node {
 		};
 
 		self.runtime.spawn_background_processor_task(async move {
-			process_events_async(
+			process_events_async_with_kv_store_sync(
 				background_persister,
 				|e| background_event_handler.handle_event(e),
 				background_chain_mon,
@@ -556,6 +558,8 @@ impl Node {
 				Some(background_onion_messenger),
 				background_gossip_sync,
 				background_peer_man,
+				background_liquidity_man_opt,
+				Some(background_sweeper),
 				background_logger,
 				Some(background_scorer),
 				sleeper,
@@ -1194,12 +1198,17 @@ impl Node {
 		self.runtime.block_on(async move {
 			if chain_source.is_transaction_based() {
 				chain_source.update_fee_rate_estimates().await?;
-				chain_source.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper).await?;
+				chain_source
+					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.await?;
 				chain_source.sync_onchain_wallet().await?;
 			} else {
 				chain_source.update_fee_rate_estimates().await?;
-				chain_source.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper).await?;
+				chain_source
+					.poll_and_update_listeners(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.await?;
 			}
+			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
 			Ok(())
 		})
 	}
@@ -1248,35 +1257,16 @@ impl Node {
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
 			if force {
-				if self.config.anchor_channels_config.as_ref().map_or(false, |acc| {
-					acc.trusted_peers_no_reserve.contains(&counterparty_node_id)
-				}) {
-					self.channel_manager
-						.force_close_without_broadcasting_txn(
-							&channel_details.channel_id,
-							&counterparty_node_id,
-							force_close_reason.unwrap_or_default(),
-						)
-						.map_err(|e| {
-							log_error!(
-								self.logger,
-								"Failed to force-close channel to trusted peer: {:?}",
-								e
-							);
-							Error::ChannelClosingFailed
-						})?;
-				} else {
-					self.channel_manager
-						.force_close_broadcasting_latest_txn(
-							&channel_details.channel_id,
-							&counterparty_node_id,
-							force_close_reason.unwrap_or_default(),
-						)
-						.map_err(|e| {
-							log_error!(self.logger, "Failed to force-close channel: {:?}", e);
-							Error::ChannelClosingFailed
-						})?;
-				}
+				self.channel_manager
+					.force_close_broadcasting_latest_txn(
+						&channel_details.channel_id,
+						&counterparty_node_id,
+						force_close_reason.unwrap_or_default(),
+					)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to force-close channel: {:?}", e);
+						Error::ChannelClosingFailed
+					})?;
 			} else {
 				self.channel_manager
 					.close_channel(&channel_details.channel_id, &counterparty_node_id)
@@ -1341,12 +1331,10 @@ impl Node {
 
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
-		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
-			match self.chain_monitor.get_monitor(funding_txo) {
+		for channel_id in self.chain_monitor.list_monitors() {
+			match self.chain_monitor.get_monitor(channel_id) {
 				Ok(monitor) => {
-					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
-					// LDK Node 0.1 depended on 0.0.115 already.
-					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
+					let counterparty_node_id = monitor.get_counterparty_node_id();
 					for ldk_balance in monitor.get_claimable_balances() {
 						total_lightning_balance_sats += ldk_balance.claimable_amount_satoshis();
 						lightning_balances.push(LightningBalance::from_ldk_balance(

@@ -27,11 +27,6 @@ pub(crate) const PEER_INFO_PERSISTENCE_KEY: &str = "peers";
 pub(crate) const PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "payments";
 pub(crate) const PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
-/// The spendable output information used to persisted under this prefix until LDK Node v0.3.0.
-pub(crate) const DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str =
-	"spendable_outputs";
-pub(crate) const DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
-
 /// The node metrics will be persisted under this key.
 pub(crate) const NODE_METRICS_PRIMARY_NAMESPACE: &str = "";
 pub(crate) const NODE_METRICS_SECONDARY_NAMESPACE: &str = "";

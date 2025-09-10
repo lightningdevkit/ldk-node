@@ -402,7 +402,7 @@ impl ElectrumRuntimeStatus {
 
 struct ElectrumRuntimeClient {
 	electrum_client: Arc<ElectrumClient>,
-	bdk_electrum_client: Arc<BdkElectrumClient<ElectrumClient>>,
+	bdk_electrum_client: Arc<BdkElectrumClient<Arc<ElectrumClient>>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
 	runtime: Arc<Runtime>,
 	config: Arc<Config>,
@@ -424,12 +424,7 @@ impl ElectrumRuntimeClient {
 				Error::ConnectionFailed
 			})?,
 		);
-		let electrum_client_2 =
-			ElectrumClient::from_config(&server_url, electrum_config).map_err(|e| {
-				log_error!(logger, "Failed to connect to electrum server: {}", e);
-				Error::ConnectionFailed
-			})?;
-		let bdk_electrum_client = Arc::new(BdkElectrumClient::new(electrum_client_2));
+		let bdk_electrum_client = Arc::new(BdkElectrumClient::new(Arc::clone(&electrum_client)));
 		let tx_sync = Arc::new(
 			ElectrumSyncClient::new(server_url.clone(), Arc::clone(&logger)).map_err(|e| {
 				log_error!(logger, "Failed to connect to electrum server: {}", e);

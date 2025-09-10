@@ -8,12 +8,12 @@
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 
-use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
+use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::payment::store::ConfirmationStatus;
 use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
-use crate::types::PaymentStore;
+use crate::types::{Broadcaster, PaymentStore};
 use crate::Error;
 
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -23,11 +23,11 @@ use lightning::chain::{BestBlock, Listen};
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
-use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
+use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
 	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
-	Recipient, SignerProvider, SpendableOutputDescriptor,
+	PeerStorageKey, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 
 use lightning::util::message_signing;
@@ -44,13 +44,14 @@ use bitcoin::key::XOnlyPublicKey;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
-use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
+use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
 	Address, Amount, FeeRate, Network, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash,
 	WitnessProgram, WitnessVersion,
 };
 
-use std::ops::Deref;
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -63,32 +64,23 @@ pub(crate) enum OnchainSendAmount {
 pub(crate) mod persist;
 pub(crate) mod ser;
 
-pub(crate) struct Wallet<B: Deref, E: Deref, L: Deref>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
 	persister: Mutex<KVStoreWalletPersister>,
-	broadcaster: B,
-	fee_estimator: E,
+	broadcaster: Arc<Broadcaster>,
+	fee_estimator: Arc<OnchainFeeEstimator>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
-	logger: L,
+	logger: Arc<Logger>,
 }
 
-impl<B: Deref, E: Deref, L: Deref> Wallet<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl Wallet {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
-		wallet_persister: KVStoreWalletPersister, broadcaster: B, fee_estimator: E,
-		payment_store: Arc<PaymentStore>, config: Arc<Config>, logger: L,
+		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
+		fee_estimator: Arc<OnchainFeeEstimator>, payment_store: Arc<PaymentStore>,
+		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
@@ -318,7 +310,7 @@ where
 		#[cfg(debug_assertions)]
 		if balance.confirmed != Amount::ZERO {
 			debug_assert!(
-				self.list_confirmed_utxos().map_or(false, |v| !v.is_empty()),
+				self.list_confirmed_utxos_inner().map_or(false, |v| !v.is_empty()),
 				"Confirmed amounts should always be available for Anchor spending"
 			);
 		}
@@ -568,80 +560,8 @@ where
 
 		Ok(txid)
 	}
-}
 
-impl<B: Deref, E: Deref, L: Deref> Listen for Wallet<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
-	fn filtered_block_connected(
-		&self, _header: &bitcoin::block::Header,
-		_txdata: &lightning::chain::transaction::TransactionData, _height: u32,
-	) {
-		debug_assert!(false, "Syncing filtered blocks is currently not supported");
-		// As far as we can tell this would be a no-op anyways as we don't have to tell BDK about
-		// the header chain of intermediate blocks. According to the BDK team, it's sufficient to
-		// only connect full blocks starting from the last point of disagreement.
-	}
-
-	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		let mut locked_wallet = self.inner.lock().unwrap();
-
-		let pre_checkpoint = locked_wallet.latest_checkpoint();
-		if pre_checkpoint.height() != height - 1
-			|| pre_checkpoint.hash() != block.header.prev_blockhash
-		{
-			log_debug!(
-				self.logger,
-				"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
-				block.header.block_hash(),
-				height
-			);
-		}
-
-		match locked_wallet.apply_block(block, height) {
-			Ok(()) => {
-				if let Err(e) = self.update_payment_store(&mut *locked_wallet) {
-					log_error!(self.logger, "Failed to update payment store: {}", e);
-					return;
-				}
-			},
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to apply connected block to on-chain wallet: {}",
-					e
-				);
-				return;
-			},
-		};
-
-		let mut locked_persister = self.persister.lock().unwrap();
-		match locked_wallet.persist(&mut locked_persister) {
-			Ok(_) => (),
-			Err(e) => {
-				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
-				return;
-			},
-		};
-	}
-
-	fn block_disconnected(&self, _header: &bitcoin::block::Header, _height: u32) {
-		// This is a no-op as we don't have to tell BDK about disconnections. According to the BDK
-		// team, it's sufficient in case of a reorg to always connect blocks starting from the last
-		// point of disagreement.
-	}
-}
-
-impl<B: Deref, E: Deref, L: Deref> WalletSource for Wallet<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
-	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
+	fn list_confirmed_utxos_inner(&self) -> Result<Vec<Utxo>, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut utxos = Vec::new();
 		let confirmed_txs: Vec<Txid> = locked_wallet
@@ -733,7 +653,7 @@ where
 		Ok(utxos)
 	}
 
-	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
+	fn get_change_script_inner(&self) -> Result<ScriptBuf, ()> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut locked_persister = self.persister.lock().unwrap();
 
@@ -745,7 +665,7 @@ where
 		Ok(address_info.address.script_pubkey())
 	}
 
-	fn sign_psbt(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
+	fn sign_psbt_inner(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 
 		// While BDK populates both `witness_utxo` and `non_witness_utxo` fields, LDK does not. As
@@ -775,32 +695,102 @@ where
 	}
 }
 
-/// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
-/// directly spendable by the BDK wallet.
-pub(crate) struct WalletKeysManager<B: Deref, E: Deref, L: Deref>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
-	inner: KeysManager,
-	wallet: Arc<Wallet<B, E, L>>,
-	logger: L,
+impl Listen for Wallet {
+	fn filtered_block_connected(
+		&self, _header: &bitcoin::block::Header,
+		_txdata: &lightning::chain::transaction::TransactionData, _height: u32,
+	) {
+		debug_assert!(false, "Syncing filtered blocks is currently not supported");
+		// As far as we can tell this would be a no-op anyways as we don't have to tell BDK about
+		// the header chain of intermediate blocks. According to the BDK team, it's sufficient to
+		// only connect full blocks starting from the last point of disagreement.
+	}
+
+	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let pre_checkpoint = locked_wallet.latest_checkpoint();
+		if pre_checkpoint.height() != height - 1
+			|| pre_checkpoint.hash() != block.header.prev_blockhash
+		{
+			log_debug!(
+				self.logger,
+				"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
+				block.header.block_hash(),
+				height
+			);
+		}
+
+		match locked_wallet.apply_block(block, height) {
+			Ok(()) => {
+				if let Err(e) = self.update_payment_store(&mut *locked_wallet) {
+					log_error!(self.logger, "Failed to update payment store: {}", e);
+					return;
+				}
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to apply connected block to on-chain wallet: {}",
+					e
+				);
+				return;
+			},
+		};
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		match locked_wallet.persist(&mut locked_persister) {
+			Ok(_) => (),
+			Err(e) => {
+				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
+				return;
+			},
+		};
+	}
+
+	fn blocks_disconnected(&self, _fork_point_block: BestBlock) {
+		// This is a no-op as we don't have to tell BDK about disconnections. According to the BDK
+		// team, it's sufficient in case of a reorg to always connect blocks starting from the last
+		// point of disagreement.
+	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl WalletSource for Wallet {
+	fn list_confirmed_utxos<'a>(
+		&'a self,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<Utxo>, ()>> + Send + 'a>> {
+		Box::pin(async move { self.list_confirmed_utxos_inner() })
+	}
+
+	fn get_change_script<'a>(
+		&'a self,
+	) -> Pin<Box<dyn Future<Output = Result<ScriptBuf, ()>> + Send + 'a>> {
+		Box::pin(async move { self.get_change_script_inner() })
+	}
+
+	fn sign_psbt<'a>(
+		&'a self, psbt: Psbt,
+	) -> Pin<Box<dyn Future<Output = Result<Transaction, ()>> + Send + 'a>> {
+		Box::pin(async move { self.sign_psbt_inner(psbt) })
+	}
+}
+
+/// Similar to [`KeysManager`], but overrides the destination and shutdown scripts so they are
+/// directly spendable by the BDK wallet.
+pub(crate) struct WalletKeysManager {
+	inner: KeysManager,
+	wallet: Arc<Wallet>,
+	logger: Arc<Logger>,
+}
+
+impl WalletKeysManager {
 	/// Constructs a `WalletKeysManager` that overrides the destination and shutdown scripts.
 	///
 	/// See [`KeysManager::new`] for more information on `seed`, `starting_time_secs`, and
 	/// `starting_time_nanos`.
 	pub fn new(
-		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
-		wallet: Arc<Wallet<B, E, L>>, logger: L,
+		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32, wallet: Arc<Wallet>,
+		logger: Arc<Logger>,
 	) -> Self {
 		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
 		Self { inner, wallet, logger }
@@ -819,12 +809,7 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> NodeSigner for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl NodeSigner for WalletKeysManager {
 	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
 		self.inner.get_node_id(recipient)
 	}
@@ -835,8 +820,16 @@ where
 		self.inner.ecdh(recipient, other_key, tweak)
 	}
 
-	fn get_inbound_payment_key(&self) -> ExpandedKey {
-		self.inner.get_inbound_payment_key()
+	fn get_expanded_key(&self) -> ExpandedKey {
+		self.inner.get_expanded_key()
+	}
+
+	fn get_peer_storage_key(&self) -> PeerStorageKey {
+		self.inner.get_peer_storage_key()
+	}
+
+	fn get_receive_auth_key(&self) -> lightning::sign::ReceiveAuthKey {
+		self.inner.get_receive_auth_key()
 	}
 
 	fn sign_invoice(
@@ -854,19 +847,17 @@ where
 	) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
 		self.inner.sign_bolt12_invoice(invoice)
 	}
+	fn sign_message(&self, msg: &[u8]) -> Result<String, ()> {
+		self.inner.sign_message(msg)
+	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> OutputSpender for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl OutputSpender for WalletKeysManager {
 	/// See [`KeysManager::spend_spendable_outputs`] for documentation on this method.
-	fn spend_spendable_outputs<C: Signing>(
+	fn spend_spendable_outputs(
 		&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>,
 		change_destination_script: ScriptBuf, feerate_sat_per_1000_weight: u32,
-		locktime: Option<LockTime>, secp_ctx: &Secp256k1<C>,
+		locktime: Option<LockTime>, secp_ctx: &Secp256k1<All>,
 	) -> Result<Transaction, ()> {
 		self.inner.spend_spendable_outputs(
 			descriptors,
@@ -879,39 +870,21 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> EntropySource for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl EntropySource for WalletKeysManager {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
 		self.inner.get_secure_random_bytes()
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> SignerProvider for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
+impl SignerProvider for WalletKeysManager {
 	type EcdsaSigner = InMemorySigner;
 
-	fn generate_channel_keys_id(
-		&self, inbound: bool, channel_value_satoshis: u64, user_channel_id: u128,
-	) -> [u8; 32] {
-		self.inner.generate_channel_keys_id(inbound, channel_value_satoshis, user_channel_id)
+	fn generate_channel_keys_id(&self, inbound: bool, user_channel_id: u128) -> [u8; 32] {
+		self.inner.generate_channel_keys_id(inbound, user_channel_id)
 	}
 
-	fn derive_channel_signer(
-		&self, channel_value_satoshis: u64, channel_keys_id: [u8; 32],
-	) -> Self::EcdsaSigner {
-		self.inner.derive_channel_signer(channel_value_satoshis, channel_keys_id)
-	}
-
-	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::EcdsaSigner, DecodeError> {
-		self.inner.read_chan_signer(reader)
+	fn derive_channel_signer(&self, channel_keys_id: [u8; 32]) -> Self::EcdsaSigner {
+		self.inner.derive_channel_signer(channel_keys_id)
 	}
 
 	fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
@@ -941,16 +914,20 @@ where
 	}
 }
 
-impl<B: Deref, E: Deref, L: Deref> ChangeDestinationSource for WalletKeysManager<B, E, L>
-where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
-{
-	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.get_new_internal_address().map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
-		Ok(address.script_pubkey())
+impl ChangeDestinationSource for WalletKeysManager {
+	fn get_change_destination_script<'a>(
+		&self,
+	) -> Pin<Box<dyn Future<Output = Result<ScriptBuf, ()>> + Send + 'a>> {
+		let wallet = Arc::clone(&self.wallet);
+		let logger = Arc::clone(&self.logger);
+		Box::pin(async move {
+			wallet
+				.get_new_internal_address()
+				.map_err(|e| {
+					log_error!(logger, "Failed to retrieve new address from wallet: {}", e);
+				})
+				.map(|addr| addr.script_pubkey())
+				.map_err(|_| ())
+		})
 	}
 }

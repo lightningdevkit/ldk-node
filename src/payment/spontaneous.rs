@@ -11,11 +11,10 @@ use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use crate::payment::SendingParameters;
 use crate::types::{ChannelManager, CustomTlvRecord, KeysManager, PaymentStore};
 
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
-use lightning::routing::router::{PaymentParameters, RouteParameters};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
 use lightning::sign::EntropySource;
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -52,41 +51,43 @@ impl SpontaneousPayment {
 
 	/// Send a spontaneous aka. "keysend", payment.
 	///
-	/// If `sending_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::sending_parameters`] on a per-field basis.
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send(
-		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
+		&self, amount_msat: u64, node_id: PublicKey,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, sending_parameters, None, None)
+		self.send_inner(amount_msat, node_id, route_parameters, None, None)
 	}
 
 	/// Send a spontaneous payment including a list of custom TLVs.
 	pub fn send_with_custom_tlvs(
-		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
-		custom_tlvs: Vec<CustomTlvRecord>,
+		&self, amount_msat: u64, node_id: PublicKey,
+		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Vec<CustomTlvRecord>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, sending_parameters, Some(custom_tlvs), None)
+		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), None)
 	}
 
 	/// Send a spontaneous payment with custom preimage
 	pub fn send_with_preimage(
 		&self, amount_msat: u64, node_id: PublicKey, preimage: PaymentPreimage,
-		sending_parameters: Option<SendingParameters>,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, sending_parameters, None, Some(preimage))
+		self.send_inner(amount_msat, node_id, route_parameters, None, Some(preimage))
 	}
 
 	/// Send a spontaneous payment with custom preimage including a list of custom TLVs.
 	pub fn send_with_preimage_and_custom_tlvs(
 		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<CustomTlvRecord>,
-		preimage: PaymentPreimage, sending_parameters: Option<SendingParameters>,
+		preimage: PaymentPreimage, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, sending_parameters, Some(custom_tlvs), Some(preimage))
+		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), Some(preimage))
 	}
 
 	fn send_inner(
-		&self, amount_msat: u64, node_id: PublicKey, sending_parameters: Option<SendingParameters>,
-		custom_tlvs: Option<Vec<CustomTlvRecord>>, preimage: Option<PaymentPreimage>,
+		&self, amount_msat: u64, node_id: PublicKey,
+		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Option<Vec<CustomTlvRecord>>,
+		preimage: Option<PaymentPreimage>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -112,20 +113,19 @@ impl SpontaneousPayment {
 			amount_msat,
 		);
 
-		let override_params =
-			sending_parameters.as_ref().or(self.config.sending_parameters.as_ref());
-		if let Some(override_params) = override_params {
-			override_params
-				.max_total_routing_fee_msat
-				.map(|f| route_params.max_total_routing_fee_msat = f.into());
-			override_params
-				.max_total_cltv_expiry_delta
-				.map(|d| route_params.payment_params.max_total_cltv_expiry_delta = d);
-			override_params.max_path_count.map(|p| route_params.payment_params.max_path_count = p);
-			override_params
-				.max_channel_saturation_power_of_half
-				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
-		};
+		if let Some(RouteParametersConfig {
+			max_total_routing_fee_msat,
+			max_total_cltv_expiry_delta,
+			max_path_count,
+			max_channel_saturation_power_of_half,
+		}) = route_parameters.as_ref().or(self.config.route_parameters.as_ref())
+		{
+			route_params.max_total_routing_fee_msat = *max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta = *max_total_cltv_expiry_delta;
+			route_params.payment_params.max_path_count = *max_path_count;
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				*max_channel_saturation_power_of_half;
+		}
 
 		let recipient_fields = match custom_tlvs {
 			Some(tlvs) => RecipientOnionFields::spontaneous_empty()
