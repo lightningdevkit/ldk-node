@@ -44,6 +44,7 @@ dictionary LSPS2ServiceConfig {
 	u32 max_client_to_self_delay;
 	u64 min_payment_size_msat;
 	u64 max_payment_size_msat;
+	boolean client_trusts_lsp;
 };
 
 enum LogLevel {
@@ -194,6 +195,13 @@ interface Bolt11Payment {
 	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
 	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount_via_jit_channel_for_hash([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat, PaymentHash payment_hash);
+	[Throws=NodeError]
+	JitChannelManualClaim receive_via_jit_channel_manual_claim(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_total_lsp_fee_limit_msat);
+};
+
+dictionary JitChannelManualClaim {
+    Bolt11Invoice invoice;
+    PaymentPreimage preimage;
 };
 
 interface Bolt12Payment {

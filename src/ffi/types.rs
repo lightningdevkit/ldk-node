@@ -1175,6 +1175,22 @@ impl UniffiCustomTypeConverter for LSPSDateTime {
 	}
 }
 
+/// A payable invoice and its corresponding preimage for manual claiming via a JIT channel.
+#[derive(Debug, Clone)]
+pub struct JitChannelManualClaim {
+	/// The payable invoice.
+	pub invoice: Arc<Bolt11Invoice>,
+	/// The payment preimage.
+	pub preimage: PaymentPreimage,
+}
+
+impl From<(Arc<Bolt11Invoice>, PaymentPreimage)> for JitChannelManualClaim {
+	fn from(value: (Arc<Bolt11Invoice>, PaymentPreimage)) -> Self {
+		let (invoice, preimage) = value;
+		JitChannelManualClaim { invoice, preimage }
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{

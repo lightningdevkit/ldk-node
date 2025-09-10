@@ -49,6 +49,11 @@ type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 #[cfg(feature = "uniffi")]
 type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 
+#[cfg(not(feature = "uniffi"))]
+type JitChannelManualClaim = (Bolt11Invoice, PaymentPreimage);
+#[cfg(feature = "uniffi")]
+type JitChannelManualClaim = crate::ffi::JitChannelManualClaim;
+
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
 /// Should be retrieved by calling [`Node::bolt11_payment`].
@@ -602,11 +607,11 @@ impl Bolt11Payment {
 	pub fn receive_via_jit_channel_manual_claim(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
-	) -> Result<(Bolt11Invoice, PaymentPreimage), Error> {
+	) -> Result<JitChannelManualClaim, Error> {
 		let description = maybe_try_convert_enum(description)?;
 		let (invoice, preimage) = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
-			description,
+			&description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
@@ -614,7 +619,7 @@ impl Bolt11Payment {
 			false,
 		)?;
 		let preimage = preimage.ok_or(Error::InvoiceCreationFailed)?;
-		Ok((maybe_wrap(invoice), preimage))
+		Ok((maybe_wrap(invoice), preimage).into())
 	}
 
 	/// Returns a payable invoice that can be used to request a variable amount payment (also known
