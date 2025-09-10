@@ -11,7 +11,9 @@ use crate::chain::ChainSource;
 use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
+use crate::types::{
+	Broadcaster, ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet,
+};
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
 use lightning::events::HTLCHandlingFailureType;
@@ -19,6 +21,7 @@ use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::routing::router::{RouteHint, RouteHintHop};
+use lightning::util::errors::APIError;
 
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 
@@ -40,6 +43,7 @@ use lightning_types::payment::PaymentHash;
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bitcoin::Transaction;
 
 use tokio::sync::oneshot;
 
@@ -55,7 +59,6 @@ use std::time::Duration;
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
-const LSPS2_CLIENT_TRUSTS_LSP_MODE: bool = true;
 const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
 
 struct LSPS1Client {
@@ -134,6 +137,8 @@ pub struct LSPS2ServiceConfig {
 	pub min_payment_size_msat: u64,
 	/// The maximum payment size that we will accept when opening a channel.
 	pub max_payment_size_msat: u64,
+	/// Use the client trusts lsp model
+	pub client_trusts_lsp: bool,
 }
 
 pub(crate) struct LiquiditySourceBuilder<L: Deref>
@@ -149,6 +154,7 @@ where
 	chain_source: Arc<ChainSource>,
 	config: Arc<Config>,
 	logger: L,
+	broadcaster: Arc<Broadcaster>,
 }
 
 impl<L: Deref> LiquiditySourceBuilder<L>
@@ -158,6 +164,7 @@ where
 	pub(crate) fn new(
 		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
 		chain_source: Arc<ChainSource>, config: Arc<Config>, logger: L,
+		broadcaster: Arc<Broadcaster>,
 	) -> Self {
 		let lsps1_client = None;
 		let lsps2_client = None;
@@ -172,6 +179,7 @@ where
 			chain_source,
 			config,
 			logger,
+			broadcaster,
 		}
 	}
 
@@ -242,6 +250,7 @@ where
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.channel_manager),
 			Some(Arc::clone(&self.chain_source)),
+			Arc::clone(&self.broadcaster),
 			None,
 			liquidity_service_config,
 			liquidity_client_config,
@@ -296,6 +305,79 @@ where
 
 	pub(crate) fn get_lsps2_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
 		self.lsps2_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
+	}
+
+	pub(crate) fn lsps2_channel_needs_manual_broadcast(
+		&self, counterparty_node_id: PublicKey, user_channel_id: u128,
+	) -> Result<bool, APIError> {
+		// if we are not in a client_trusts_lsp model, we don't check and just return false
+		if !self.is_client_trusts_lsp() {
+			log_debug!(self.logger, "Skipping funding transaction broadcast as client trusts LSP.");
+			return Ok(false);
+		}
+
+		// if we are in a client_trusts_lsp model, then we check if the LSP has an LSPS2 operation in progress
+		self.lsps2_service.as_ref().map_or(Ok(false), |_| {
+			let lsps2_service_handler = self.liquidity_manager.lsps2_service_handler();
+			if let Some(handler) = lsps2_service_handler {
+				handler.channel_needs_manual_broadcast(user_channel_id, &counterparty_node_id)
+			} else {
+				log_error!(self.logger, "LSPS2 service handler is not available.");
+				Ok(false)
+			}
+		})
+	}
+
+	pub(crate) fn lsps2_store_funding_transaction(
+		&self, user_channel_id: u128, counterparty_node_id: PublicKey, funding_tx: Transaction,
+	) {
+		if !self.is_client_trusts_lsp() {
+			log_debug!(self.logger, "Skipping funding transaction broadcast as client trusts LSP.");
+			return;
+		}
+		self.lsps2_service.as_ref().map(|_| {
+			let lsps2_service_handler = self.liquidity_manager.lsps2_service_handler();
+			if let Some(handler) = lsps2_service_handler {
+				handler
+					.store_funding_transaction(user_channel_id, &counterparty_node_id, funding_tx)
+					.unwrap_or_else(|e| {
+						debug_assert!(false, "Failed to store funding transaction: {:?}", e);
+						log_error!(self.logger, "Failed to store funding transaction: {:?}", e);
+					});
+			} else {
+				log_error!(self.logger, "LSPS2 service handler is not available.");
+			}
+		});
+	}
+
+	pub(crate) fn lsps2_funding_tx_broadcast_safe(
+		&self, user_channel_id: u128, counterparty_node_id: PublicKey,
+	) {
+		if !self.is_client_trusts_lsp() {
+			log_debug!(self.logger, "Skipping funding transaction broadcast as client trusts LSP.");
+			return;
+		}
+		self.lsps2_service.as_ref().map(|_| {
+			let lsps2_service_handler = self.liquidity_manager.lsps2_service_handler();
+			if let Some(handler) = lsps2_service_handler {
+				handler
+					.set_funding_tx_broadcast_safe(user_channel_id, &counterparty_node_id)
+					.unwrap_or_else(|e| {
+						debug_assert!(false, "Failed to store funding transaction: {:?}", e);
+						log_error!(self.logger, "Failed to store funding transaction: {:?}", e);
+					});
+			} else {
+				log_error!(self.logger, "LSPS2 service handler is not available.");
+			}
+		});
+	}
+
+	fn is_client_trusts_lsp(&self) -> bool {
+		if let Some(lsps2_service) = self.lsps2_service.as_ref() {
+			lsps2_service.service_config.client_trusts_lsp
+		} else {
+			false
+		}
 	}
 
 	pub(crate) async fn handle_next_event(&self) {
@@ -586,7 +668,7 @@ where
 						request_id,
 						intercept_scid,
 						LSPS2_CHANNEL_CLTV_EXPIRY_DELTA,
-						LSPS2_CLIENT_TRUSTS_LSP_MODE,
+						service_config.client_trusts_lsp,
 						user_channel_id,
 					) {
 						Ok(()) => {},
@@ -1296,10 +1378,14 @@ where
 		}
 	}
 
-	pub(crate) fn handle_payment_forwarded(&self, next_channel_id: Option<ChannelId>) {
+	pub(crate) fn handle_payment_forwarded(
+		&self, next_channel_id: Option<ChannelId>, skimmed_fee_msat: Option<u64>,
+	) {
 		if let Some(next_channel_id) = next_channel_id {
 			if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
-				if let Err(e) = lsps2_service_handler.payment_forwarded(next_channel_id) {
+				if let Err(e) = lsps2_service_handler
+					.payment_forwarded(next_channel_id, skimmed_fee_msat.unwrap_or(0))
+				{
 					log_error!(
 						self.logger,
 						"LSPS2 service failed to handle PaymentForwarded: {:?}",

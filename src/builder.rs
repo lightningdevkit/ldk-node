@@ -1507,6 +1507,7 @@ fn build_with_store_internal(
 				Arc::clone(&chain_source),
 				Arc::clone(&config),
 				Arc::clone(&logger),
+				Arc::clone(&tx_broadcaster),
 			);
 
 			lsc.lsps1_client.as_ref().map(|config| {

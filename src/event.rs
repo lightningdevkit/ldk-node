@@ -497,7 +497,7 @@ where
 				counterparty_node_id,
 				channel_value_satoshis,
 				output_script,
-				..
+				user_channel_id,
 			} => {
 				// Construct the raw transaction with the output that is paid the amount of the
 				// channel.
@@ -516,12 +516,43 @@ where
 					locktime,
 				) {
 					Ok(final_tx) => {
-						// Give the funding transaction back to LDK for opening the channel.
-						match self.channel_manager.funding_transaction_generated(
-							temporary_channel_id,
-							counterparty_node_id,
-							final_tx,
-						) {
+						let needs_manual_broadcast =
+							match self.liquidity_source.as_ref().map(|ls| {
+								ls.as_ref().lsps2_channel_needs_manual_broadcast(
+									counterparty_node_id,
+									user_channel_id,
+								)
+							}) {
+								Some(Ok(v)) => v,
+								Some(Err(e)) => {
+									log_error!(self.logger, "Failed to determine if channel needs manual broadcast: {:?}", e);
+									false
+								},
+								None => false,
+							};
+
+						let result = if needs_manual_broadcast {
+							self.liquidity_source.as_ref().map(|ls| {
+								ls.lsps2_store_funding_transaction(
+									user_channel_id,
+									counterparty_node_id,
+									final_tx.clone(),
+								);
+							});
+							self.channel_manager.funding_transaction_generated_manual_broadcast(
+								temporary_channel_id,
+								counterparty_node_id,
+								final_tx,
+							)
+						} else {
+							self.channel_manager.funding_transaction_generated(
+								temporary_channel_id,
+								counterparty_node_id,
+								final_tx,
+							)
+						};
+
+						match result {
 							Ok(()) => {},
 							Err(APIError::APIMisuseError { err }) => {
 								log_error!(self.logger, "Panicking due to APIMisuseError: {}", err);
@@ -560,8 +591,10 @@ where
 					},
 				}
 			},
-			LdkEvent::FundingTxBroadcastSafe { .. } => {
-				debug_assert!(false, "We currently only support safe funding, so this event should never be emitted.");
+			LdkEvent::FundingTxBroadcastSafe { user_channel_id, counterparty_node_id, .. } => {
+				self.liquidity_source.as_ref().map(|ls| {
+					ls.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
+				});
 			},
 			LdkEvent::PaymentClaimable {
 				payment_hash,
@@ -686,7 +719,7 @@ where
 					match info.kind {
 						PaymentKind::Bolt11 { preimage, .. }
 						| PaymentKind::Bolt11Jit { preimage, .. } => {
-							if purpose.preimage().is_none() {
+							if preimage.is_none() || purpose.preimage().is_none() {
 								debug_assert!(
 									preimage.is_none(),
 									"We would have registered the preimage if we knew"
@@ -1280,7 +1313,7 @@ where
 				}
 
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_payment_forwarded(next_channel_id);
+					liquidity_source.handle_payment_forwarded(next_channel_id, skimmed_fee_msat);
 				}
 
 				let event = Event::PaymentForwarded {
