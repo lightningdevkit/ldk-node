@@ -47,6 +47,14 @@ type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 #[cfg(feature = "uniffi")]
 type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 
+#[cfg(not(feature = "uniffi"))]
+pub struct JitChannelManualClaim {
+	pub invoice: Bolt11Invoice,
+	pub preimage: PaymentPreimage,
+}
+#[cfg(feature = "uniffi")]
+type JitChannelManualClaim = crate::ffi::JitChannelManualClaim;
+
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
 /// Should be retrieved by calling [`Node::bolt11_payment`].
@@ -542,13 +550,14 @@ impl Bolt11Payment {
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		let (invoice, _) = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
 			&description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
 			None,
+			true,
 		)?;
 		Ok(maybe_wrap(invoice))
 	}
@@ -581,15 +590,38 @@ impl Bolt11Payment {
 		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		let (invoice, _) = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
 			&description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
 			Some(payment_hash),
+			true,
 		)?;
 		Ok(maybe_wrap(invoice))
+	}
+
+	/// Returns a payable invoice for manual claiming via a JIT channel.
+	///
+	/// Similar to `receive_via_jit_channel` but requires manual claiming via `claim_for_hash`.
+	pub fn receive_via_jit_channel_manual_claim(
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_total_lsp_fee_limit_msat: Option<u64>,
+	) -> Result<JitChannelManualClaim, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let (invoice, preimage) = self.receive_via_jit_channel_inner(
+			Some(amount_msat),
+			&description,
+			expiry_secs,
+			max_total_lsp_fee_limit_msat,
+			None,
+			None,
+			false,
+		)?;
+		let preimage = preimage.ok_or(Error::InvoiceCreationFailed)?;
+		let invoice = maybe_wrap(invoice);
+		Ok(JitChannelManualClaim { invoice, preimage })
 	}
 
 	/// Returns a payable invoice that can be used to request a variable amount payment (also known
@@ -608,13 +640,14 @@ impl Bolt11Payment {
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		let (invoice, _) = self.receive_via_jit_channel_inner(
 			None,
 			&description,
 			expiry_secs,
 			None,
 			max_proportional_lsp_fee_limit_ppm_msat,
 			None,
+			true,
 		)?;
 		Ok(maybe_wrap(invoice))
 	}
@@ -648,13 +681,14 @@ impl Bolt11Payment {
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		let (invoice, _) = self.receive_via_jit_channel_inner(
 			None,
 			&description,
 			expiry_secs,
 			None,
 			max_proportional_lsp_fee_limit_ppm_msat,
 			Some(payment_hash),
+			true,
 		)?;
 		Ok(maybe_wrap(invoice))
 	}
@@ -663,7 +697,8 @@ impl Bolt11Payment {
 		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
-	) -> Result<LdkBolt11Invoice, Error> {
+		auto_claim: bool,
+	) -> Result<(LdkBolt11Invoice, Option<PaymentPreimage>), Error> {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -721,9 +756,12 @@ impl Bolt11Payment {
 		let id = PaymentId(payment_hash.0);
 		let preimage =
 			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
+
+		let stored_preimage = if auto_claim { preimage } else { None };
+
 		let kind = PaymentKind::Bolt11Jit {
 			hash: payment_hash,
-			preimage,
+			preimage: stored_preimage,
 			secret: Some(payment_secret.clone()),
 			counterparty_skimmed_fee_msat: None,
 			lsp_fee_limits,
@@ -741,7 +779,7 @@ impl Bolt11Payment {
 		// Persist LSP peer to make sure we reconnect on restart.
 		self.peer_store.add_peer(peer_info)?;
 
-		Ok(invoice)
+		Ok((invoice, preimage))
 	}
 
 	/// Sends payment probes over all paths of a route that would be used to pay the given invoice.
