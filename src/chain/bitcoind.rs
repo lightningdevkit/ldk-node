@@ -261,6 +261,7 @@ impl BitcoindChainSource {
 		log_info!(self.logger, "Starting continuous polling for chain updates.");
 
 		// Start the polling loop.
+		let mut last_best_block_hash = None;
 		loop {
 			tokio::select! {
 				_ = stop_sync_receiver.changed() => {
@@ -278,7 +279,12 @@ impl BitcoindChainSource {
 					).await;
 				}
 				_ = fee_rate_update_interval.tick() => {
-					let _ = self.update_fee_rate_estimates().await;
+					if last_best_block_hash != Some(channel_manager.current_best_block().block_hash) {
+						let update_res = self.update_fee_rate_estimates().await;
+						if update_res.is_ok() {
+							last_best_block_hash = Some(channel_manager.current_best_block().block_hash);
+						}
+					}
 				}
 			}
 		}
