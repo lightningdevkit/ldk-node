@@ -29,6 +29,9 @@ const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
+const DEFAULT_MIN_REBROADCAST_INTERVAL_SECS: u64 = 300;
+const DEFAULT_MAX_BROADCAST_ATTEMPTS: u32 = 24;
+const DEFAULT_BACKOFF_FACTOR: f32 = 1.5;
 
 /// The default log level.
 pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
@@ -94,6 +97,9 @@ pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
 /// The length in bytes of our wallets' keys seed.
 pub const WALLET_KEYS_SEED_LEN: usize = 64;
 
+// The time in-between unconfirmed transaction broadcasts.
+pub(crate) const UNCONFIRMED_TX_BROADCAST_INTERVAL: Duration = Duration::from_secs(300);
+
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
 ///
@@ -115,6 +121,7 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `sending_parameters`                   | None               |
+/// | `auto_rebroadcast_unconfirmed_tx`      | true               |
 ///
 /// See [`AnchorChannelsConfig`] and [`SendingParameters`] for more information regarding their
 /// respective default values.
@@ -179,6 +186,16 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub sending_parameters: Option<SendingParameters>,
+	/// This will determine whether to automatically rebroadcast unconfirmed transactions
+	/// (e.g., channel funding or sweep transactions).
+	///
+	/// If enabled, the node will periodically attempt to rebroadcast any unconfirmed transactions to
+	/// increase propagation and confirmation likelihood. This is helpful in cases where transactions
+	/// were dropped by the mempool or not widely propagated.
+	///
+	/// Defaults to `true`. Disabling this may be desired for privacy-sensitive use cases or low-bandwidth
+	/// environments, but may result in slower or failed confirmations if transactions are not re-announced.
+	pub auto_rebroadcast_unconfirmed_tx: bool,
 }
 
 impl Default for Config {
@@ -193,6 +210,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			sending_parameters: None,
 			node_alias: None,
+			auto_rebroadcast_unconfirmed_tx: true,
 		}
 	}
 }
@@ -530,6 +548,49 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 			MaxDustHTLCExposure::FeeRateMultiplier { multiplier } => {
 				Self::FeeRateMultiplier(multiplier)
 			},
+		}
+	}
+}
+
+/// Policy for controlling transaction rebroadcasting behavior.
+///
+/// Determines the strategy for resending unconfirmed transactions to the network
+/// to ensure they remain in mempools and eventually get confirmed.
+#[derive(Clone, Debug)]
+pub struct RebroadcastPolicy {
+	/// Minimum time between rebroadcast attempts in seconds.
+	///
+	/// This prevents excessive network traffic by ensuring a minimum delay
+	/// between consecutive rebroadcast attempts.
+	///
+	/// **Recommended values**: 60-600 seconds (1-10 minutes)
+	pub min_rebroadcast_interval_secs: u64,
+	/// Maximum number of broadcast attempts before giving up.
+	///
+	/// After reaching this limit, the transaction will no longer be rebroadcast
+	/// automatically. Manual intervention may be required.
+	///
+	/// **Recommended values**: 12-48 attempts
+	pub max_broadcast_attempts: u32,
+	/// Exponential backoff factor for increasing intervals between attempts.
+	///
+	/// Each subsequent rebroadcast wait time is multiplied by this factor,
+	/// creating an exponential backoff pattern.
+	///
+	/// - `1.0`: No backoff (constant interval)
+	/// - `1.5`: 50% increase each attempt
+	/// - `2.0`: 100% increase (doubling) each attempt
+	///
+	/// **Recommended values**: 1.2-2.0
+	pub backoff_factor: f32,
+}
+
+impl Default for RebroadcastPolicy {
+	fn default() -> Self {
+		Self {
+			min_rebroadcast_interval_secs: DEFAULT_MIN_REBROADCAST_INTERVAL_SECS,
+			max_broadcast_attempts: DEFAULT_MAX_BROADCAST_ATTEMPTS,
+			backoff_factor: DEFAULT_BACKOFF_FACTOR,
 		}
 	}
 }

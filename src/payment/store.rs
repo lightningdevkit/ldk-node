@@ -17,7 +17,7 @@ use lightning::{
 
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
-use bitcoin::{BlockHash, Txid};
+use bitcoin::{BlockHash, Transaction, Txid};
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -293,6 +293,33 @@ impl StorableObject for PaymentDetails {
 			}
 		}
 
+		if let Some(tx) = &update.raw_tx {
+			match self.kind {
+				PaymentKind::Onchain { ref mut raw_tx, .. } => {
+					update_if_necessary!(*raw_tx, tx.clone());
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(attempts) = update.broadcast_attempts {
+			match self.kind {
+				PaymentKind::Onchain { ref mut broadcast_attempts, .. } => {
+					update_if_necessary!(*broadcast_attempts, attempts);
+				},
+				_ => {},
+			}
+		}
+
+		if let Some(broadcast_time) = update.last_broadcast_time {
+			match self.kind {
+				PaymentKind::Onchain { ref mut last_broadcast_time, .. } => {
+					update_if_necessary!(*last_broadcast_time, broadcast_time);
+				},
+				_ => {},
+			}
+		}
+
 		if updated {
 			self.latest_update_timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -353,6 +380,12 @@ pub enum PaymentKind {
 		txid: Txid,
 		/// The confirmation status of this payment.
 		status: ConfirmationStatus,
+		/// The raw transaction for rebroadcasting
+		raw_tx: Option<Transaction>,
+		/// Last broadcast attempt timestamp (UNIX seconds)
+		last_broadcast_time: Option<u64>,
+		/// Number of broadcast attempts
+		broadcast_attempts: Option<u32>,
 	},
 	/// A [BOLT 11] payment.
 	///
@@ -450,7 +483,10 @@ pub enum PaymentKind {
 impl_writeable_tlv_based_enum!(PaymentKind,
 	(0, Onchain) => {
 		(0, txid, required),
+		(1, raw_tx, option),
 		(2, status, required),
+		(3, last_broadcast_time, option),
+		(5, broadcast_attempts, option),
 	},
 	(2, Bolt11) => {
 		(0, hash, required),
@@ -542,6 +578,9 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
+	pub raw_tx: Option<Option<Transaction>>,
+	pub last_broadcast_time: Option<Option<u64>>,
+	pub broadcast_attempts: Option<Option<u32>>,
 }
 
 impl PaymentDetailsUpdate {
@@ -557,6 +596,9 @@ impl PaymentDetailsUpdate {
 			direction: None,
 			status: None,
 			confirmation_status: None,
+			raw_tx: None,
+			last_broadcast_time: None,
+			broadcast_attempts: None,
 		}
 	}
 }
@@ -572,10 +614,17 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			_ => (None, None, None),
 		};
 
-		let confirmation_status = match value.kind {
-			PaymentKind::Onchain { status, .. } => Some(status),
-			_ => None,
-		};
+		let (confirmation_status, raw_tx, last_broadcast_time, broadcast_attempts) =
+			match &value.kind {
+				PaymentKind::Onchain {
+					status,
+					raw_tx,
+					last_broadcast_time,
+					broadcast_attempts,
+					..
+				} => (Some(*status), raw_tx.clone(), *last_broadcast_time, *broadcast_attempts),
+				_ => (None, None, None, None),
+			};
 
 		let counterparty_skimmed_fee_msat = match value.kind {
 			PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
@@ -595,6 +644,9 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			direction: Some(value.direction),
 			status: Some(value.status),
 			confirmation_status,
+			raw_tx: Some(raw_tx),
+			last_broadcast_time: Some(last_broadcast_time),
+			broadcast_attempts: Some(broadcast_attempts),
 		}
 	}
 }

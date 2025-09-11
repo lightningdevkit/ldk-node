@@ -36,7 +36,7 @@ pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
 pub use lightning_liquidity::lsps1::msgs::ChannelInfo as ChannelOrderInfo;
 pub use lightning_liquidity::lsps1::msgs::{OrderId, OrderParameters, PaymentState};
 
-pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Txid};
+pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Transaction, Txid};
 
 pub use bip39::Mnemonic;
 
@@ -1114,6 +1114,21 @@ impl UniffiCustomTypeConverter for DateTime {
 
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.to_rfc3339()
+	}
+}
+
+impl UniffiCustomTypeConverter for Transaction {
+	type Builtin = String;
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(bytes) = hex_utils::to_vec(&val) {
+			if let Ok(tx) = bitcoin::consensus::deserialize::<Transaction>(&bytes) {
+				return Ok(tx);
+			}
+		}
+		Err(Error::InvalidTransaction.into())
+	}
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&bitcoin::consensus::serialize(&obj))
 	}
 }
 

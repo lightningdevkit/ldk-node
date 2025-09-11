@@ -5,14 +5,15 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 use persist::KVStoreWalletPersister;
 
-use crate::config::Config;
+use crate::config::{Config, RebroadcastPolicy};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
 
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator};
 use crate::payment::store::ConfirmationStatus;
-use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
+use crate::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::PaymentStore;
 use crate::Error;
 
@@ -53,7 +54,7 @@ use bitcoin::{
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
 	AllRetainingReserve { cur_anchor_reserve_sats: u64 },
@@ -200,7 +201,27 @@ where
 			// create and persist a list of 'static pending outputs' that we could use
 			// here to determine the `PaymentKind`, but that's not really satisfactory, so
 			// we're punting on it until we can come up with a better solution.
-			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
+			let existing_payment = self.payment_store.get(&id);
+			let (last_broadcast_time, broadcast_attempts) = if let Some(existing) = existing_payment
+			{
+				if let PaymentKind::Onchain { last_broadcast_time, broadcast_attempts, .. } =
+					existing.kind
+				{
+					(last_broadcast_time, broadcast_attempts)
+				} else {
+					(None, None)
+				}
+			} else {
+				(None, None)
+			};
+
+			let kind = crate::payment::PaymentKind::Onchain {
+				txid,
+				status: confirmation_status,
+				raw_tx: Some((*wtx.tx_node.tx).clone()),
+				last_broadcast_time,
+				broadcast_attempts,
+			};
 			let fee = locked_wallet.calculate_fee(&wtx.tx_node.tx).unwrap_or(Amount::ZERO);
 			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
 			let (direction, amount_msat) = if sent > received {
@@ -533,9 +554,68 @@ where
 			})?
 		};
 
+		let txid = tx.compute_txid();
+
+		// Calculate amounts for payment tracking
+		let (amount_msat, fee_paid_msat) = {
+			let locked_wallet = self.inner.lock().unwrap();
+			let (sent, received) = locked_wallet.sent_and_received(&tx);
+			let fee = locked_wallet.calculate_fee(&tx).unwrap_or(Amount::ZERO);
+
+			let amount_msat =
+				sent.checked_sub(received)
+					.unwrap_or(Amount::ZERO)
+					.to_sat()
+					.checked_sub(fee.to_sat())
+					.unwrap_or(0) * 1000;
+
+			let fee_paid_msat = fee.to_sat() * 1000;
+
+			(Some(amount_msat), Some(fee_paid_msat))
+		};
+
+		// Create payment details
+		let payment_details = PaymentDetails {
+			id: PaymentId(txid.to_byte_array()),
+			kind: PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				raw_tx: Some(tx.clone()),
+				last_broadcast_time: None,
+				broadcast_attempts: None,
+			},
+			amount_msat,
+			fee_paid_msat,
+			direction: PaymentDirection::Outbound,
+			status: PaymentStatus::Pending,
+			latest_update_timestamp: SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs(),
+		};
+
+		// Store payment details before broadcasting
+		self.payment_store.insert_or_update(payment_details)?;
+
 		self.broadcaster.broadcast_transactions(&[&tx]);
 
-		let txid = tx.compute_txid();
+		if let Some(mut payment) = self.payment_store.get(&PaymentId(txid.to_byte_array())) {
+			if let PaymentKind::Onchain {
+				ref mut last_broadcast_time,
+				ref mut broadcast_attempts,
+				..
+			} = &mut payment.kind
+			{
+				*last_broadcast_time = Some(
+					SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.unwrap_or(Duration::from_secs(0))
+						.as_secs(),
+				);
+				*broadcast_attempts = Some(broadcast_attempts.unwrap_or(0) + 1);
+				self.payment_store.insert_or_update(payment)?;
+			}
+		}
 
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
@@ -567,6 +647,309 @@ where
 		}
 
 		Ok(txid)
+	}
+
+	pub(crate) fn rebroadcast_unconfirmed_transactions(&self) -> Result<(), Error> {
+		let policy = RebroadcastPolicy::default();
+		let unconfirmed_txids = self.get_unconfirmed_txids();
+
+		log_debug!(self.logger, "Found {} unconfirmed transactions", unconfirmed_txids.len());
+
+		if unconfirmed_txids.is_empty() {
+			log_info!(self.logger, "No unconfirmed transactions to rebroadcast");
+			return Ok(());
+		}
+
+		let mut rebroadcast_count = 0;
+		let locked_wallet = self.inner.lock().unwrap();
+
+		for txid in unconfirmed_txids {
+			let now = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs();
+
+			if let Some(mut payment) = self.payment_store.get(&PaymentId(txid.to_byte_array())) {
+				if let PaymentKind::Onchain {
+					ref mut last_broadcast_time,
+					ref mut broadcast_attempts,
+					ref raw_tx,
+					ref mut status,
+					..
+				} = &mut payment.kind
+				{
+					if !matches!(status, ConfirmationStatus::Unconfirmed) {
+						log_info!(self.logger, "Skipping confirmed transaction {}", txid);
+						continue;
+					}
+
+					let Some(raw_tx) = raw_tx else {
+						log_info!(self.logger, "No raw transaction data for {}", txid);
+						continue;
+					};
+
+					let should_rebroadcast = match last_broadcast_time {
+						Some(last_time) => {
+							let next_allowed_time = *last_time
+								+ self.calculate_backoff_interval(
+									(*broadcast_attempts).unwrap_or(0),
+									&policy,
+								);
+							now >= next_allowed_time
+								&& (*broadcast_attempts).unwrap_or(0)
+									< policy.max_broadcast_attempts
+						},
+						None => true,
+					};
+
+					if !should_rebroadcast {
+						continue;
+					}
+
+					*last_broadcast_time = Some(now);
+					*broadcast_attempts = Some(broadcast_attempts.unwrap_or(0) + 1);
+
+					self.broadcaster.broadcast_transactions(&[&raw_tx]);
+					rebroadcast_count += 1;
+
+					log_info!(self.logger, "Rebroadcast unconfirmed transaction {}", txid);
+
+					if let Err(e) = self.payment_store.insert_or_update(payment) {
+						log_error!(
+							self.logger,
+							"Failed to update payment store for {}: {}",
+							txid,
+							e
+						);
+					}
+				}
+			} else {
+				log_info!(self.logger, "No details found for payment {} in store", txid);
+
+				if let Some(tx_entry) = locked_wallet.get_tx(txid) {
+					self.broadcaster.broadcast_transactions(&[&tx_entry.tx_node.tx]);
+					rebroadcast_count += 1;
+					log_info!(
+						self.logger,
+						"Rebroadcast unconfirmed transaction {} (from wallet)",
+						txid
+					);
+				} else {
+					log_info!(
+						self.logger,
+						"Transaction {} not found in wallet or payment store",
+						txid
+					);
+				}
+			}
+		}
+
+		if rebroadcast_count > 0 {
+			log_info!(self.logger, "Successfully rebroadcast {} transactions", rebroadcast_count);
+		}
+
+		Ok(())
+	}
+
+	fn calculate_backoff_interval(&self, attempt: u32, policy: &RebroadcastPolicy) -> u64 {
+		let base_interval = policy.min_rebroadcast_interval_secs as f32;
+		let interval = base_interval * policy.backoff_factor.powi(attempt as i32);
+		interval.round() as u64
+	}
+
+	pub(crate) fn rebroadcast_transaction(&self, payment_id: PaymentId) -> Result<(), Error> {
+		let now = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or(Duration::from_secs(0))
+			.as_secs();
+
+		if let Some(mut payment) = self.payment_store.get(&payment_id) {
+			if let PaymentKind::Onchain {
+				ref mut last_broadcast_time,
+				ref mut broadcast_attempts,
+				ref mut raw_tx,
+				..
+			} = &mut payment.kind
+			{
+				if let Some(raw_tx) = raw_tx {
+					*last_broadcast_time = Some(now);
+					*broadcast_attempts = Some(broadcast_attempts.unwrap_or(0) + 1);
+
+					self.broadcaster.broadcast_transactions(&[raw_tx]);
+					log_info!(self.logger, "Rebroadcast transaction {}", payment_id);
+
+					self.payment_store.insert_or_update(payment)?;
+					return Ok(());
+				} else {
+					log_info!(self.logger, "No details found for payment {} in store", payment_id);
+					return Err(Error::InvalidPaymentId);
+				}
+			}
+		}
+
+		log_info!(self.logger, "No details found for payment {} in store", payment_id);
+		return Err(Error::InvalidPaymentId);
+	}
+
+	pub(crate) fn bump_fee_rbf(&self, payment_id: PaymentId) -> Result<Txid, Error> {
+		let old_payment =
+			self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?.clone();
+
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let txid = Txid::from_slice(&payment_id.0).expect("32 bytes");
+
+		let wallet_tx = locked_wallet.get_tx(txid).ok_or(Error::InvalidPaymentId)?;
+		let (sent, received) = locked_wallet.sent_and_received(&wallet_tx.tx_node.tx);
+
+		if sent <= received {
+			log_error!(
+				self.logger,
+				"Transaction {} is not an outbound payment (sent: {}, received: {})",
+				txid,
+				sent,
+				received
+			);
+			return Err(Error::InvalidPaymentId);
+		}
+
+		if old_payment.direction != PaymentDirection::Outbound {
+			log_error!(self.logger, "Transaction {} is not an outbound payment", txid);
+			return Err(Error::InvalidPaymentId);
+		}
+
+		if let PaymentKind::Onchain { status, .. } = &old_payment.kind {
+			match status {
+				ConfirmationStatus::Confirmed { .. } => {
+					log_error!(
+						self.logger,
+						"Transaction {} is already confirmed and cannot be fee bumped",
+						txid
+					);
+					return Err(Error::InvalidPaymentId);
+				},
+				ConfirmationStatus::Unconfirmed => {},
+			}
+		}
+
+		let confirmation_target = ConfirmationTarget::OnchainPayment;
+		let estimated_fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
+
+		log_info!(self.logger, "Bumping fee to {}", estimated_fee_rate);
+
+		let mut psbt = {
+			let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
+				log_error!(self.logger, "BDK fee bump failed for {}: {:?}", txid, e);
+				match e {
+					BuildFeeBumpError::TransactionNotFound(_) => Error::InvalidPaymentId,
+					BuildFeeBumpError::TransactionConfirmed(_) => Error::InvalidPaymentId,
+					BuildFeeBumpError::IrreplaceableTransaction(_) => Error::InvalidPaymentId,
+					BuildFeeBumpError::FeeRateUnavailable => Error::InvalidPaymentId,
+					_ => Error::InvalidFeeRate,
+				}
+			})?;
+
+			builder.fee_rate(estimated_fee_rate);
+
+			match builder.finish() {
+				Ok(psbt) => Ok(psbt),
+				Err(CreateTxError::FeeRateTooLow { required }) => {
+					log_info!(self.logger, "BDK requires higher fee rate: {}", required);
+
+					// Safety check
+					const MAX_REASONABLE_FEE_RATE_SAT_VB: u64 = 1000;
+					if required.to_sat_per_vb_ceil() > MAX_REASONABLE_FEE_RATE_SAT_VB {
+						log_error!(
+							self.logger,
+							"BDK requires unreasonably high fee rate: {} sat/vB",
+							required.to_sat_per_vb_ceil()
+						);
+						return Err(Error::InvalidFeeRate);
+					}
+
+					let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
+						log_error!(self.logger, "BDK fee bump retry failed for {}: {:?}", txid, e);
+						Error::InvalidFeeRate
+					})?;
+
+					builder.fee_rate(required);
+					builder.finish().map_err(|e| {
+						log_error!(
+							self.logger,
+							"Failed to finish PSBT with required fee rate: {:?}",
+							e
+						);
+						Error::InvalidFeeRate
+					})
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to create fee bump PSBT: {:?}", e);
+					Err(Error::InvalidFeeRate)
+				},
+			}?
+		};
+
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					return Err(Error::OnchainTxCreationFailed);
+				}
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create transaction: {}", err);
+				return Err(err.into());
+			},
+		}
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		let fee_bumped_tx = psbt.extract_tx().map_err(|e| {
+			log_error!(self.logger, "Failed to extract transaction: {}", e);
+			e
+		})?;
+
+		let new_txid = fee_bumped_tx.compute_txid();
+
+		self.broadcaster.broadcast_transactions(&[&fee_bumped_tx]);
+
+		let new_fee = locked_wallet.calculate_fee(&fee_bumped_tx).unwrap_or(Amount::ZERO);
+		let new_fee_sats = new_fee.to_sat();
+
+		let payment_details = PaymentDetails {
+			id: PaymentId(new_txid.to_byte_array()),
+			kind: PaymentKind::Onchain {
+				txid: new_txid,
+				status: ConfirmationStatus::Unconfirmed,
+				raw_tx: Some(fee_bumped_tx),
+				last_broadcast_time: Some(
+					SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.unwrap_or(Duration::from_secs(0))
+						.as_secs(),
+				),
+				broadcast_attempts: Some(1),
+			},
+			amount_msat: old_payment.amount_msat,
+			fee_paid_msat: Some(new_fee_sats * 1000),
+			direction: old_payment.direction,
+			status: PaymentStatus::Pending,
+			latest_update_timestamp: SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs(),
+		};
+
+		self.payment_store.remove(&payment_id)?;
+
+		self.payment_store.insert_or_update(payment_details)?;
+
+		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
+
+		Ok(new_txid)
 	}
 }
 
