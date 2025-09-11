@@ -132,4 +132,18 @@ impl OnchainPayment {
 	pub fn rebroadcast_transaction(&self, payment_id: PaymentId) -> Result<(), Error> {
 		self.wallet.rebroadcast_transaction(payment_id)
 	}
+
+	/// Attempt to bump the fee of an unconfirmed transaction using Replace-by-Fee (RBF).
+	///
+	/// This creates a new transaction that replaces the original one, increasing the fee by the
+	/// specified increment to improve its chances of confirmation. The original transaction must
+	/// be signaling RBF replaceability for this to succeed.
+	///
+	/// The new transaction will have the same outputs as the original but with a
+	/// higher fee, resulting in faster confirmation potential.
+	///
+	/// Returns the Txid of the new replacement transaction if successful.
+	pub fn bump_fee_rbf(&self, payment_id: PaymentId) -> Result<Txid, Error> {
+		self.wallet.bump_fee_rbf(payment_id)
+	}
 }

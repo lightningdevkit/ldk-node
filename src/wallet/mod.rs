@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 use persist::KVStoreWalletPersister;
 
 use crate::config::{Config, RebroadcastPolicy};
@@ -788,6 +789,167 @@ where
 
 		log_info!(self.logger, "No details found for payment {} in store", payment_id);
 		return Err(Error::InvalidPaymentId);
+	}
+
+	pub(crate) fn bump_fee_rbf(&self, payment_id: PaymentId) -> Result<Txid, Error> {
+		let old_payment =
+			self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?.clone();
+
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let txid = Txid::from_slice(&payment_id.0).expect("32 bytes");
+
+		let wallet_tx = locked_wallet.get_tx(txid).ok_or(Error::InvalidPaymentId)?;
+		let (sent, received) = locked_wallet.sent_and_received(&wallet_tx.tx_node.tx);
+
+		if sent <= received {
+			log_error!(
+				self.logger,
+				"Transaction {} is not an outbound payment (sent: {}, received: {})",
+				txid,
+				sent,
+				received
+			);
+			return Err(Error::InvalidPaymentId);
+		}
+
+		if old_payment.direction != PaymentDirection::Outbound {
+			log_error!(self.logger, "Transaction {} is not an outbound payment", txid);
+			return Err(Error::InvalidPaymentId);
+		}
+
+		if let PaymentKind::Onchain { status, .. } = &old_payment.kind {
+			match status {
+				ConfirmationStatus::Confirmed { .. } => {
+					log_error!(
+						self.logger,
+						"Transaction {} is already confirmed and cannot be fee bumped",
+						txid
+					);
+					return Err(Error::InvalidPaymentId);
+				},
+				ConfirmationStatus::Unconfirmed => {},
+			}
+		}
+
+		let confirmation_target = ConfirmationTarget::OnchainPayment;
+		let estimated_fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
+
+		log_info!(self.logger, "Bumping fee to {}", estimated_fee_rate);
+
+		let mut psbt = {
+			let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
+				log_error!(self.logger, "BDK fee bump failed for {}: {:?}", txid, e);
+				match e {
+					BuildFeeBumpError::TransactionNotFound(_) => Error::InvalidPaymentId,
+					BuildFeeBumpError::TransactionConfirmed(_) => Error::InvalidPaymentId,
+					BuildFeeBumpError::IrreplaceableTransaction(_) => Error::InvalidPaymentId,
+					BuildFeeBumpError::FeeRateUnavailable => Error::InvalidPaymentId,
+					_ => Error::InvalidFeeRate,
+				}
+			})?;
+
+			builder.fee_rate(estimated_fee_rate);
+
+			match builder.finish() {
+				Ok(psbt) => Ok(psbt),
+				Err(CreateTxError::FeeRateTooLow { required }) => {
+					log_info!(self.logger, "BDK requires higher fee rate: {}", required);
+
+					// Safety check
+					const MAX_REASONABLE_FEE_RATE_SAT_VB: u64 = 1000;
+					if required.to_sat_per_vb_ceil() > MAX_REASONABLE_FEE_RATE_SAT_VB {
+						log_error!(
+							self.logger,
+							"BDK requires unreasonably high fee rate: {} sat/vB",
+							required.to_sat_per_vb_ceil()
+						);
+						return Err(Error::InvalidFeeRate);
+					}
+
+					let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
+						log_error!(self.logger, "BDK fee bump retry failed for {}: {:?}", txid, e);
+						Error::InvalidFeeRate
+					})?;
+
+					builder.fee_rate(required);
+					builder.finish().map_err(|e| {
+						log_error!(
+							self.logger,
+							"Failed to finish PSBT with required fee rate: {:?}",
+							e
+						);
+						Error::InvalidFeeRate
+					})
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to create fee bump PSBT: {:?}", e);
+					Err(Error::InvalidFeeRate)
+				},
+			}?
+		};
+
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					return Err(Error::OnchainTxCreationFailed);
+				}
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create transaction: {}", err);
+				return Err(err.into());
+			},
+		}
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		let fee_bumped_tx = psbt.extract_tx().map_err(|e| {
+			log_error!(self.logger, "Failed to extract transaction: {}", e);
+			e
+		})?;
+
+		let new_txid = fee_bumped_tx.compute_txid();
+
+		self.broadcaster.broadcast_transactions(&[&fee_bumped_tx]);
+
+		let new_fee = locked_wallet.calculate_fee(&fee_bumped_tx).unwrap_or(Amount::ZERO);
+		let new_fee_sats = new_fee.to_sat();
+
+		let payment_details = PaymentDetails {
+			id: PaymentId(new_txid.to_byte_array()),
+			kind: PaymentKind::Onchain {
+				txid: new_txid,
+				status: ConfirmationStatus::Unconfirmed,
+				raw_tx: Some(fee_bumped_tx),
+				last_broadcast_time: Some(
+					SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.unwrap_or(Duration::from_secs(0))
+						.as_secs(),
+				),
+				broadcast_attempts: Some(1),
+			},
+			amount_msat: old_payment.amount_msat,
+			fee_paid_msat: Some(new_fee_sats * 1000),
+			direction: old_payment.direction,
+			status: PaymentStatus::Pending,
+			latest_update_timestamp: SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs(),
+		};
+
+		self.payment_store.remove(&payment_id)?;
+
+		self.payment_store.insert_or_update(payment_details)?;
+
+		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
+
+		Ok(new_txid)
 	}
 }
 

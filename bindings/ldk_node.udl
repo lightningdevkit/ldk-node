@@ -234,6 +234,8 @@ interface OnchainPayment {
 	Txid send_all_to_address([ByRef]Address address, boolean retain_reserve, FeeRate? fee_rate);
 	[Throws=NodeError]
 	void rebroadcast_transaction(PaymentId payment_id);
+	[Throws=NodeError]
+	Txid bump_fee_rbf(PaymentId payment_id);
 };
 
 interface FeeRate {
