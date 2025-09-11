@@ -1780,7 +1780,7 @@ fn lsps2_client_trusts_lsp() {
 	let jit_amount_msat = 100_000_000;
 
 	println!("Generating JIT invoice!");
-	let (jit_invoice, preimage) = client_node
+	let res = client_node
 		.bolt11_payment()
 		.receive_via_jit_channel_manual_claim(
 			jit_amount_msat,
@@ -1789,6 +1789,8 @@ fn lsps2_client_trusts_lsp() {
 			None,
 		)
 		.unwrap();
+	let jit_invoice = res.invoice;
+	let preimage = res.preimage;
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
@@ -1921,7 +1923,7 @@ fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let jit_amount_msat = 100_000_000;
 
 	println!("Generating JIT invoice!");
-	let (jit_invoice, _) = client_node
+	let res = client_node
 		.bolt11_payment()
 		.receive_via_jit_channel_manual_claim(
 			jit_amount_msat,
@@ -1930,6 +1932,7 @@ fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 			None,
 		)
 		.unwrap();
+	let jit_invoice = res.invoice;
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");

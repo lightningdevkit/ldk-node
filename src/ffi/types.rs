@@ -1184,13 +1184,6 @@ pub struct JitChannelManualClaim {
 	pub preimage: PaymentPreimage,
 }
 
-impl From<(Arc<Bolt11Invoice>, PaymentPreimage)> for JitChannelManualClaim {
-	fn from(value: (Arc<Bolt11Invoice>, PaymentPreimage)) -> Self {
-		let (invoice, preimage) = value;
-		JitChannelManualClaim { invoice, preimage }
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use std::{

@@ -50,7 +50,10 @@ type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 
 #[cfg(not(feature = "uniffi"))]
-type JitChannelManualClaim = (Bolt11Invoice, PaymentPreimage);
+pub struct JitChannelManualClaim {
+	pub invoice: Bolt11Invoice,
+	pub preimage: PaymentPreimage,
+}
 #[cfg(feature = "uniffi")]
 type JitChannelManualClaim = crate::ffi::JitChannelManualClaim;
 
@@ -619,7 +622,8 @@ impl Bolt11Payment {
 			false,
 		)?;
 		let preimage = preimage.ok_or(Error::InvoiceCreationFailed)?;
-		Ok((maybe_wrap(invoice), preimage).into())
+		let invoice = maybe_wrap(invoice);
+		Ok(JitChannelManualClaim { invoice, preimage })
 	}
 
 	/// Returns a payable invoice that can be used to request a variable amount payment (also known
