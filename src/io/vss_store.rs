@@ -127,7 +127,7 @@ impl VssStore {
 		Ok(keys)
 	}
 
-	fn read_internal(
+	async fn read_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
@@ -135,7 +135,7 @@ impl VssStore {
 			store_id: self.store_id.clone(),
 			key: self.build_key(primary_namespace, secondary_namespace, key)?,
 		};
-		let resp = self.runtime.block_on(self.client.get_object(&request)).map_err(|e| {
+		let resp = self.client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
 				"Failed to read from key {}/{}/{}: {}",
 				primary_namespace, secondary_namespace, key, e
@@ -145,6 +145,7 @@ impl VssStore {
 				_ => Error::new(ErrorKind::Other, msg),
 			}
 		})?;
+
 		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
 		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
 		let storable = Storable::decode(&resp.value.unwrap().value[..]).map_err(|e| {
@@ -158,7 +159,7 @@ impl VssStore {
 		Ok(self.storable_builder.deconstruct(storable)?.0)
 	}
 
-	fn write_internal(
+	async fn write_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
@@ -175,7 +176,7 @@ impl VssStore {
 			delete_items: vec![],
 		};
 
-		self.runtime.block_on(self.client.put_object(&request)).map_err(|e| {
+		self.client.put_object(&request).await.map_err(|e| {
 			let msg = format!(
 				"Failed to write to key {}/{}/{}: {}",
 				primary_namespace, secondary_namespace, key, e
@@ -186,7 +187,7 @@ impl VssStore {
 		Ok(())
 	}
 
-	fn remove_internal(
+	async fn remove_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
@@ -199,25 +200,24 @@ impl VssStore {
 			}),
 		};
 
-		self.runtime.block_on(self.client.delete_object(&request)).map_err(|e| {
+		self.client.delete_object(&request).await.map_err(|e| {
 			let msg = format!(
 				"Failed to delete key {}/{}/{}: {}",
 				primary_namespace, secondary_namespace, key, e
 			);
 			Error::new(ErrorKind::Other, msg)
 		})?;
+
 		Ok(())
 	}
 
-	fn list_internal(
+	async fn list_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
 
-		let keys = self
-			.runtime
-			.block_on(self.list_all_keys(primary_namespace, secondary_namespace))
-			.map_err(|e| {
+		let keys =
+			self.list_all_keys(primary_namespace, secondary_namespace).await.map_err(|e| {
 				let msg = format!(
 					"Failed to retrieve keys in namespace: {}/{} : {}",
 					primary_namespace, secondary_namespace, e
@@ -233,23 +233,27 @@ impl KVStoreSync for VssStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
-		self.read_internal(primary_namespace, secondary_namespace, key)
+		let fut = self.read_internal(primary_namespace, secondary_namespace, key);
+		self.runtime.block_on(fut)
 	}
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
-		self.write_internal(primary_namespace, secondary_namespace, key, buf)
+		let fut = self.write_internal(primary_namespace, secondary_namespace, key, buf);
+		self.runtime.block_on(fut)
 	}
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
-		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
+		let fut = self.remove_internal(primary_namespace, secondary_namespace, key, lazy);
+		self.runtime.block_on(fut)
 	}
 
 	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.list_internal(primary_namespace, secondary_namespace)
+		let fut = self.list_internal(primary_namespace, secondary_namespace);
+		self.runtime.block_on(fut)
 	}
 }
 
