@@ -90,7 +90,8 @@ serde = { version = "1.0.210", default-features = false, features = ["std", "der
 serde_json = { version = "1.0.128", default-features = false, features = ["std"] }
 log = { version = "0.4.22", default-features = false, features = ["std"]}
 
-vss-client = "0.3"
+#vss-client = "0.3"
+vss-client = { git = "https://github.com/tnull/vss-rust-client", rev = "03ca9d99f70387aabec225020e46434cda8d18ff" }
 prost = { version = "0.11.6", default-features = false}
 
 [target.'cfg(windows)'.dependencies]
