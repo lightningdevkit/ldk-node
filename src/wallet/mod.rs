@@ -52,8 +52,9 @@ use bitcoin::{
 
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+#[derive(Debug, Copy, Clone)]
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
 	AllRetainingReserve { cur_anchor_reserve_sats: u64 },
@@ -352,6 +353,114 @@ where
 			.map_err(|_| Error::InvalidAddress)
 	}
 
+	pub(crate) fn estimate_fee(
+		&self, address: &Address, send_amount: OnchainSendAmount, fee_rate: Option<FeeRate>,
+	) -> Result<Amount, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		// Use the set fee_rate or default to fee estimation.
+		let confirmation_target = ConfirmationTarget::OnchainPayment;
+		let fee_rate =
+			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
+
+		self.estimate_fee_internal(&mut locked_wallet, address, send_amount, fee_rate).map_err(
+			|e| {
+				log_error!(self.logger, "Failed to estimate fee: {e}");
+				e
+			},
+		)
+	}
+
+	pub(crate) fn estimate_fee_internal(
+		&self, locked_wallet: &mut MutexGuard<PersistedWallet<KVStoreWalletPersister>>,
+		address: &Address, send_amount: OnchainSendAmount, fee_rate: FeeRate,
+	) -> Result<Amount, Error> {
+		const DUST_LIMIT_SATS: u64 = 546;
+		match send_amount {
+			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
+				let mut tx_builder = locked_wallet.build_tx();
+				let amount = Amount::from_sat(amount_sats);
+				tx_builder.add_recipient(address.script_pubkey(), amount).fee_rate(fee_rate);
+
+				let psbt = match tx_builder.finish() {
+					Ok(psbt) => psbt,
+					Err(err) => {
+						log_error!(self.logger, "Failed to create temporary transaction: {}", err);
+						return Err(err.into());
+					},
+				};
+
+				// 'cancel' the transaction to free up any used change addresses
+				locked_wallet.cancel_tx(&psbt.unsigned_tx);
+				psbt.fee().map_err(|_| Error::WalletOperationFailed)
+			},
+			OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats }
+				if cur_anchor_reserve_sats > DUST_LIMIT_SATS =>
+			{
+				let change_address_info = locked_wallet.peek_address(KeychainKind::Internal, 0);
+				let balance = locked_wallet.balance();
+				let spendable_amount_sats = self
+					.get_balances_inner(balance, cur_anchor_reserve_sats)
+					.map(|(_, s)| s)
+					.unwrap_or(0);
+				let mut tx_builder = locked_wallet.build_tx();
+				tx_builder
+					.drain_wallet()
+					.drain_to(address.script_pubkey())
+					.add_recipient(
+						change_address_info.address.script_pubkey(),
+						Amount::from_sat(cur_anchor_reserve_sats),
+					)
+					.fee_rate(fee_rate);
+
+				let psbt = match tx_builder.finish() {
+					Ok(psbt) => psbt,
+					Err(err) => {
+						log_error!(self.logger, "Failed to create temporary transaction: {}", err);
+						return Err(err.into());
+					},
+				};
+
+				// 'cancel' the transaction to free up any used change addresses
+				locked_wallet.cancel_tx(&psbt.unsigned_tx);
+
+				let estimated_tx_fee = psbt.fee().map_err(|_| Error::WalletOperationFailed)?;
+
+				// enforce the reserve requirements to make sure we can actually afford the tx + fee
+				let estimated_spendable_amount = Amount::from_sat(
+					spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
+				);
+
+				if estimated_spendable_amount == Amount::ZERO {
+					log_error!(self.logger,
+						"Unable to send payment without infringing on Anchor reserves. Available: {}sats, estimated fee required: {}sats.",
+						spendable_amount_sats,
+						estimated_tx_fee,
+					);
+					return Err(Error::InsufficientFunds);
+				}
+
+				Ok(estimated_tx_fee)
+			},
+			OnchainSendAmount::AllDrainingReserve
+			| OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats: _ } => {
+				let mut tx_builder = locked_wallet.build_tx();
+				tx_builder.drain_wallet().drain_to(address.script_pubkey()).fee_rate(fee_rate);
+				let psbt = match tx_builder.finish() {
+					Ok(psbt) => psbt,
+					Err(err) => {
+						log_error!(self.logger, "Failed to create temporary transaction: {}", err);
+						return Err(err.into());
+					},
+				};
+
+				// 'cancel' the transaction to free up any used change addresses
+				locked_wallet.cancel_tx(&psbt.unsigned_tx);
+				psbt.fee().map_err(|_| Error::WalletOperationFailed)
+			},
+		}
+	}
+
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
 		fee_rate: Option<FeeRate>,
@@ -378,59 +487,23 @@ where
 				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats }
 					if cur_anchor_reserve_sats > DUST_LIMIT_SATS =>
 				{
-					let change_address_info = locked_wallet.peek_address(KeychainKind::Internal, 0);
 					let balance = locked_wallet.balance();
 					let spendable_amount_sats = self
 						.get_balances_inner(balance, cur_anchor_reserve_sats)
 						.map(|(_, s)| s)
 						.unwrap_or(0);
-					let tmp_tx = {
-						let mut tmp_tx_builder = locked_wallet.build_tx();
-						tmp_tx_builder
-							.drain_wallet()
-							.drain_to(address.script_pubkey())
-							.add_recipient(
-								change_address_info.address.script_pubkey(),
-								Amount::from_sat(cur_anchor_reserve_sats),
-							)
-							.fee_rate(fee_rate);
-						match tmp_tx_builder.finish() {
-							Ok(psbt) => psbt.unsigned_tx,
-							Err(err) => {
-								log_error!(
-									self.logger,
-									"Failed to create temporary transaction: {}",
-									err
-								);
-								return Err(err.into());
-							},
-						}
-					};
 
-					let estimated_tx_fee = locked_wallet.calculate_fee(&tmp_tx).map_err(|e| {
-						log_error!(
-							self.logger,
-							"Failed to calculate fee of temporary transaction: {}",
+					// estimate_fee_internal will enforce that we are retaining the reserve limits
+					let estimated_tx_fee = self
+						.estimate_fee_internal(&mut locked_wallet, address, send_amount, fee_rate)
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to estimate fee: {e}");
 							e
-						);
-						e
-					})?;
-
-					// 'cancel' the transaction to free up any used change addresses
-					locked_wallet.cancel_tx(&tmp_tx);
+						})?;
 
 					let estimated_spendable_amount = Amount::from_sat(
 						spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
 					);
-
-					if estimated_spendable_amount == Amount::ZERO {
-						log_error!(self.logger,
-							"Unable to send payment without infringing on Anchor reserves. Available: {}sats, estimated fee required: {}sats.",
-							spendable_amount_sats,
-							estimated_tx_fee,
-						);
-						return Err(Error::InsufficientFunds);
-					}
 
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
