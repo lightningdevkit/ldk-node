@@ -5,16 +5,22 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::boxed::Box;
+use std::collections::HashMap;
+use std::future::Future;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
 use lightning::io::{self, Error, ErrorKind};
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::{KVStore, KVStoreSync};
 use prost::Message;
 use rand::RngCore;
+use tokio::sync::RwLock;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
 use vss_client::headers::VssHeaderProvider;
@@ -42,6 +48,9 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 /// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
 	inner: Arc<VssStoreInner>,
+	// Version counter to ensure that writes are applied in the correct order. It is assumed that read and list
+	// operations aren't sensitive to the order of execution.
+	next_version: AtomicU64,
 	runtime: Arc<Runtime>,
 }
 
@@ -51,7 +60,32 @@ impl VssStore {
 		header_provider: Arc<dyn VssHeaderProvider>, runtime: Arc<Runtime>,
 	) -> Self {
 		let inner = Arc::new(VssStoreInner::new(base_url, store_id, vss_seed, header_provider));
-		Self { inner, runtime }
+		let next_version = AtomicU64::new(1);
+		Self { inner, next_version, runtime }
+	}
+
+	// Same logic as for the obfuscated keys below, but just for locking, using the plaintext keys
+	fn build_locking_key(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> String {
+		if primary_namespace.is_empty() {
+			key.to_owned()
+		} else {
+			format!("{}#{}#{}", primary_namespace, secondary_namespace, key)
+		}
+	}
+
+	fn get_new_version_and_lock_ref(&self, locking_key: String) -> (Arc<RwLock<u64>>, u64) {
+		let version = self.next_version.fetch_add(1, Ordering::Relaxed);
+		if version == u64::MAX {
+			panic!("VssStore version counter overflowed");
+		}
+
+		// Get a reference to the inner lock. We do this early so that the arc can double as an in-flight counter for
+		// cleaning up unused locks.
+		let inner_lock_ref = self.inner.get_inner_lock_ref(locking_key);
+
+		(inner_lock_ref, version)
 	}
 }
 
@@ -66,14 +100,34 @@ impl KVStoreSync for VssStore {
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
-		let fut = self.inner.write_internal(primary_namespace, secondary_namespace, key, buf);
+		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
+		let fut = self.inner.write_internal(
+			inner_lock_ref,
+			locking_key,
+			version,
+			primary_namespace,
+			secondary_namespace,
+			key,
+			buf,
+		);
 		self.runtime.block_on(fut)
 	}
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
-		let fut = self.inner.remove_internal(primary_namespace, secondary_namespace, key, lazy);
+		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
+		let fut = self.inner.remove_internal(
+			inner_lock_ref,
+			locking_key,
+			version,
+			primary_namespace,
+			secondary_namespace,
+			key,
+			lazy,
+		);
 		self.runtime.block_on(fut)
 	}
 
@@ -83,11 +137,82 @@ impl KVStoreSync for VssStore {
 	}
 }
 
+impl KVStore for VssStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		Box::pin(async move {
+			inner.read_internal(&primary_namespace, &secondary_namespace, &key).await
+		})
+	}
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		Box::pin(async move {
+			inner
+				.write_internal(
+					inner_lock_ref,
+					locking_key,
+					version,
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
+					buf,
+				)
+				.await
+		})
+	}
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		Box::pin(async move {
+			inner
+				.remove_internal(
+					inner_lock_ref,
+					locking_key,
+					version,
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
+					lazy,
+				)
+				.await
+		})
+	}
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let inner = Arc::clone(&self.inner);
+		Box::pin(async move { inner.list_internal(&primary_namespace, &secondary_namespace).await })
+	}
+}
+
 struct VssStoreInner {
 	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
 	storable_builder: StorableBuilder<RandEntropySource>,
 	key_obfuscator: KeyObfuscator,
+	// Per-key locks that ensures that we don't have concurrent writes to the same namespace/key.
+	// The lock also encapsulates the latest written version per key.
+	locks: Mutex<HashMap<String, Arc<RwLock<u64>>>>,
 }
 
 impl VssStoreInner {
@@ -113,10 +238,18 @@ impl VssStoreInner {
 			}) as _);
 
 		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
-		Self { client, store_id, storable_builder, key_obfuscator }
+		let locks = Mutex::new(HashMap::new());
+		Self { client, store_id, storable_builder, key_obfuscator, locks }
 	}
 
-	fn build_key(&self, primary_namespace: &str, secondary_namespace: &str, key: &str) -> String {
+	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<RwLock<u64>> {
+		let mut outer_lock = self.locks.lock().unwrap();
+		Arc::clone(&outer_lock.entry(locking_key).or_default())
+	}
+
+	fn build_obfuscated_key(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> String {
 		let obfuscated_key = self.key_obfuscator.obfuscate(key);
 		if primary_namespace.is_empty() {
 			obfuscated_key
@@ -171,10 +304,9 @@ impl VssStoreInner {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
-		let request = GetObjectRequest {
-			store_id: self.store_id.clone(),
-			key: self.build_key(primary_namespace, secondary_namespace, key),
-		};
+
+		let obfuscated_key = self.build_obfuscated_key(primary_namespace, secondary_namespace, key);
+		let request = GetObjectRequest { store_id: self.store_id.clone(), key: obfuscated_key };
 		let resp = self.client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
 				"Failed to read from key {}/{}/{}: {}",
@@ -200,55 +332,65 @@ impl VssStoreInner {
 	}
 
 	async fn write_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		&self, inner_lock_ref: Arc<RwLock<u64>>, locking_key: String, version: u64,
+		primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
-		let version = -1;
-		let storable = self.storable_builder.build(buf, version);
-		let request = PutObjectRequest {
-			store_id: self.store_id.clone(),
-			global_version: None,
-			transaction_items: vec![KeyValue {
-				key: self.build_key(primary_namespace, secondary_namespace, key),
-				version,
-				value: storable.encode_to_vec(),
-			}],
-			delete_items: vec![],
-		};
 
-		self.client.put_object(&request).await.map_err(|e| {
-			let msg = format!(
-				"Failed to write to key {}/{}/{}: {}",
-				primary_namespace, secondary_namespace, key, e
-			);
-			Error::new(ErrorKind::Other, msg)
-		})?;
+		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
+			let obfuscated_key =
+				self.build_obfuscated_key(primary_namespace, secondary_namespace, key);
+			let vss_version = -1;
+			let storable = self.storable_builder.build(buf, vss_version);
+			let request = PutObjectRequest {
+				store_id: self.store_id.clone(),
+				global_version: None,
+				transaction_items: vec![KeyValue {
+					key: obfuscated_key,
+					version: vss_version,
+					value: storable.encode_to_vec(),
+				}],
+				delete_items: vec![],
+			};
 
-		Ok(())
+			self.client.put_object(&request).await.map_err(|e| {
+				let msg = format!(
+					"Failed to write to key {}/{}/{}: {}",
+					primary_namespace, secondary_namespace, key, e
+				);
+				Error::new(ErrorKind::Other, msg)
+			})?;
+
+			Ok(())
+		})
+		.await
 	}
 
 	async fn remove_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
+		&self, inner_lock_ref: Arc<RwLock<u64>>, locking_key: String, version: u64,
+		primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
-		let request = DeleteObjectRequest {
-			store_id: self.store_id.clone(),
-			key_value: Some(KeyValue {
-				key: self.build_key(primary_namespace, secondary_namespace, key),
-				version: -1,
-				value: vec![],
-			}),
-		};
 
-		self.client.delete_object(&request).await.map_err(|e| {
-			let msg = format!(
-				"Failed to delete key {}/{}/{}: {}",
-				primary_namespace, secondary_namespace, key, e
-			);
-			Error::new(ErrorKind::Other, msg)
-		})?;
+		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
+			let obfuscated_key =
+				self.build_obfuscated_key(primary_namespace, secondary_namespace, key);
+			let request = DeleteObjectRequest {
+				store_id: self.store_id.clone(),
+				key_value: Some(KeyValue { key: obfuscated_key, version: -1, value: vec![] }),
+			};
 
-		Ok(())
+			self.client.delete_object(&request).await.map_err(|e| {
+				let msg = format!(
+					"Failed to delete key {}/{}/{}: {}",
+					primary_namespace, secondary_namespace, key, e
+				);
+				Error::new(ErrorKind::Other, msg)
+			})?;
+
+			Ok(())
+		})
+		.await
 	}
 
 	async fn list_internal(
@@ -266,6 +408,49 @@ impl VssStoreInner {
 			})?;
 
 		Ok(keys)
+	}
+
+	async fn execute_locked_write<
+		F: Future<Output = Result<(), lightning::io::Error>>,
+		FN: FnOnce() -> F,
+	>(
+		&self, inner_lock_ref: Arc<RwLock<u64>>, locking_key: String, version: u64, callback: FN,
+	) -> Result<(), lightning::io::Error> {
+		let res = {
+			let mut last_written_version = inner_lock_ref.write().await;
+
+			// Check if we already have a newer version written/removed. This is used in async contexts to realize eventual
+			// consistency.
+			let is_stale_version = version <= *last_written_version;
+
+			// If the version is not stale, we execute the callback. Otherwise we can and must skip writing.
+			if is_stale_version {
+				Ok(())
+			} else {
+				callback().await.map(|_| {
+					*last_written_version = version;
+				})
+			}
+		};
+
+		self.clean_locks(&inner_lock_ref, locking_key);
+
+		res
+	}
+
+	fn clean_locks(&self, inner_lock_ref: &Arc<RwLock<u64>>, locking_key: String) {
+		// If there no arcs in use elsewhere, this means that there are no in-flight writes. We can remove the map entry
+		// to prevent leaking memory. The two arcs that are expected are the one in the map and the one held here in
+		// inner_lock_ref. The outer lock is obtained first, to avoid a new arc being cloned after we've already
+		// counted.
+		let mut outer_lock = self.locks.lock().unwrap();
+
+		let strong_count = Arc::strong_count(&inner_lock_ref);
+		debug_assert!(strong_count >= 2, "Unexpected VssStore strong count");
+
+		if strong_count == 2 {
+			outer_lock.remove(&locking_key);
+		}
 	}
 }
 
