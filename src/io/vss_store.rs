@@ -41,17 +41,59 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 
 /// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
-	client: VssClient<CustomRetryPolicy>,
-	store_id: String,
+	inner: Arc<VssStoreInner>,
 	runtime: Arc<Runtime>,
-	storable_builder: StorableBuilder<RandEntropySource>,
-	key_obfuscator: KeyObfuscator,
 }
 
 impl VssStore {
 	pub(crate) fn new(
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>, runtime: Arc<Runtime>,
+	) -> Self {
+		let inner = Arc::new(VssStoreInner::new(base_url, store_id, vss_seed, header_provider));
+		Self { inner, runtime }
+	}
+}
+
+impl KVStoreSync for VssStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<Vec<u8>> {
+		let fut = self.inner.read_internal(primary_namespace, secondary_namespace, key);
+		self.runtime.block_on(fut)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> io::Result<()> {
+		let fut = self.inner.write_internal(primary_namespace, secondary_namespace, key, buf);
+		self.runtime.block_on(fut)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> io::Result<()> {
+		let fut = self.inner.remove_internal(primary_namespace, secondary_namespace, key, lazy);
+		self.runtime.block_on(fut)
+	}
+
+	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
+		let fut = self.inner.list_internal(primary_namespace, secondary_namespace);
+		self.runtime.block_on(fut)
+	}
+}
+
+struct VssStoreInner {
+	client: VssClient<CustomRetryPolicy>,
+	store_id: String,
+	storable_builder: StorableBuilder<RandEntropySource>,
+	key_obfuscator: KeyObfuscator,
+}
+
+impl VssStoreInner {
+	pub(crate) fn new(
+		base_url: String, store_id: String, vss_seed: [u8; 32],
+		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Self {
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
@@ -71,7 +113,7 @@ impl VssStore {
 			}) as _);
 
 		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
-		Self { client, store_id, runtime, storable_builder, key_obfuscator }
+		Self { client, store_id, storable_builder, key_obfuscator }
 	}
 
 	fn build_key(
@@ -226,34 +268,6 @@ impl VssStore {
 			})?;
 
 		Ok(keys)
-	}
-}
-
-impl KVStoreSync for VssStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		let fut = self.read_internal(primary_namespace, secondary_namespace, key);
-		self.runtime.block_on(fut)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		let fut = self.write_internal(primary_namespace, secondary_namespace, key, buf);
-		self.runtime.block_on(fut)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		let fut = self.remove_internal(primary_namespace, secondary_namespace, key, lazy);
-		self.runtime.block_on(fut)
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		let fut = self.list_internal(primary_namespace, secondary_namespace);
-		self.runtime.block_on(fut)
 	}
 }
 
