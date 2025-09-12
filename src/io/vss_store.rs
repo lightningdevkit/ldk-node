@@ -126,10 +126,8 @@ impl VssStore {
 		}
 		Ok(keys)
 	}
-}
 
-impl KVStoreSync for VssStore {
-	fn read(
+	fn read_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
@@ -160,7 +158,7 @@ impl KVStoreSync for VssStore {
 		Ok(self.storable_builder.deconstruct(storable)?.0)
 	}
 
-	fn write(
+	fn write_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
@@ -188,7 +186,7 @@ impl KVStoreSync for VssStore {
 		Ok(())
 	}
 
-	fn remove(
+	fn remove_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
@@ -211,7 +209,9 @@ impl KVStoreSync for VssStore {
 		Ok(())
 	}
 
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
+	fn list_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
 
 		let keys = self
@@ -226,6 +226,30 @@ impl KVStoreSync for VssStore {
 			})?;
 
 		Ok(keys)
+	}
+}
+
+impl KVStoreSync for VssStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<Vec<u8>> {
+		self.read_internal(primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> io::Result<()> {
+		self.write_internal(primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> io::Result<()> {
+		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
+		self.list_internal(primary_namespace, secondary_namespace)
 	}
 }
 
