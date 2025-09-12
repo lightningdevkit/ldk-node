@@ -37,9 +37,7 @@ const SCHEMA_USER_VERSION: u16 = 2;
 ///
 /// [SQLite]: https://sqlite.org
 pub struct SqliteStore {
-	connection: Arc<Mutex<Connection>>,
-	data_dir: PathBuf,
-	kv_table_name: String,
+	inner: Arc<SqliteStoreInner>,
 }
 
 impl SqliteStore {
@@ -50,6 +48,50 @@ impl SqliteStore {
 	///
 	/// Similarly, the given `kv_table_name` will be used or default to [`DEFAULT_KV_TABLE_NAME`].
 	pub fn new(
+		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
+	) -> io::Result<Self> {
+		let inner = Arc::new(SqliteStoreInner::new(data_dir, db_file_name, kv_table_name)?);
+		Ok(Self { inner })
+	}
+
+	/// Returns the data directory.
+	pub fn get_data_dir(&self) -> PathBuf {
+		self.inner.data_dir.clone()
+	}
+}
+
+impl KVStoreSync for SqliteStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<Vec<u8>> {
+		self.inner.read_internal(primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> io::Result<()> {
+		self.inner.write_internal(primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> io::Result<()> {
+		self.inner.remove_internal(primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
+		self.inner.list_internal(primary_namespace, secondary_namespace)
+	}
+}
+
+struct SqliteStoreInner {
+	connection: Arc<Mutex<Connection>>,
+	data_dir: PathBuf,
+	kv_table_name: String,
+}
+
+impl SqliteStoreInner {
+	fn new(
 		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
 	) -> io::Result<Self> {
 		let db_file_name = db_file_name.unwrap_or(DEFAULT_SQLITE_DB_FILE_NAME.to_string());
@@ -120,11 +162,6 @@ impl SqliteStore {
 
 		let connection = Arc::new(Mutex::new(connection));
 		Ok(Self { connection, data_dir, kv_table_name })
-	}
-
-	/// Returns the data directory.
-	pub fn get_data_dir(&self) -> PathBuf {
-		self.data_dir.clone()
 	}
 
 	fn read_internal(
@@ -285,30 +322,6 @@ impl SqliteStore {
 	}
 }
 
-impl KVStoreSync for SqliteStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		self.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		self.write_internal(primary_namespace, secondary_namespace, key, buf)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.list_internal(primary_namespace, secondary_namespace)
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -318,7 +331,7 @@ mod tests {
 
 	impl Drop for SqliteStore {
 		fn drop(&mut self) {
-			match fs::remove_dir_all(&self.data_dir) {
+			match fs::remove_dir_all(&self.inner.data_dir) {
 				Err(e) => println!("Failed to remove test store directory: {}", e),
 				_ => {},
 			}
