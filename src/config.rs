@@ -107,6 +107,9 @@ pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort a parsing/looking up an HRN resolution.
 pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 
+// The timeout after which we abort an LNURL-auth operation.
+pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
+
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
 ///
