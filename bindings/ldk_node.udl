@@ -13,6 +13,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
+	boolean async_payment_services_enabled;
 };
 
 dictionary AnchorChannelsConfig {
@@ -209,6 +210,12 @@ interface Bolt12Payment {
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
 	[Throws=NodeError]
 	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, u64? quantity, string? payer_note);
+	[Throws=NodeError]
+	Offer receive_async();
+	[Throws=NodeError]
+	void set_paths_to_static_invoice_server(bytes paths);
+	[Throws=NodeError]
+	bytes blinded_paths_for_async_recipient(bytes recipient_id);
 };
 
 interface SpontaneousPayment {
@@ -311,6 +318,8 @@ enum NodeError {
 	"InsufficientFunds",
 	"LiquiditySourceUnavailable",
 	"LiquidityFeeTooHigh",
+	"InvalidBlindedPaths",
+	"AsyncPaymentServicesDisabled",
 };
 
 dictionary NodeStatus {

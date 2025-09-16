@@ -136,6 +136,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
+use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
 	UnifiedQrPayment,
@@ -498,6 +499,12 @@ impl Node {
 			Arc::clone(&self.logger),
 		));
 
+		let static_invoice_store = if self.config.async_payment_services_enabled {
+			Some(StaticInvoiceStore::new(Arc::clone(&self.kv_store)))
+		} else {
+			None
+		};
+
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
@@ -509,6 +516,7 @@ impl Node {
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
+			static_invoice_store,
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
@@ -818,6 +826,7 @@ impl Node {
 		Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
@@ -831,6 +840,7 @@ impl Node {
 		Arc::new(Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))

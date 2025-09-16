@@ -6,7 +6,6 @@
 // accordance with one or both of these licenses.
 
 use crate::types::{CustomTlvRecord, DynStore, PaymentStore, Sweeper, Wallet};
-
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -19,6 +18,7 @@ use crate::fee_estimator::ConfirmationTarget;
 use crate::liquidity::LiquiditySource;
 use crate::logger::Logger;
 
+use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
@@ -27,7 +27,7 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_debug, log_error, log_info, LdkLogger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
 
 use crate::runtime::Runtime;
 
@@ -458,6 +458,7 @@ where
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
+	static_invoice_store: Option<StaticInvoiceStore>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -470,8 +471,9 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>, runtime: Arc<Runtime>,
-		logger: L, config: Arc<Config>,
+		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
+		static_invoice_store: Option<StaticInvoiceStore>, runtime: Arc<Runtime>, logger: L,
+		config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -487,6 +489,7 @@ where
 			logger,
 			runtime,
 			config,
+			static_invoice_store,
 		}
 	}
 
@@ -1494,11 +1497,55 @@ where
 			LdkEvent::OnionMessagePeerConnected { .. } => {
 				debug_assert!(false, "We currently don't support onion message interception, so this event should never be emitted.");
 			},
-			LdkEvent::PersistStaticInvoice { .. } => {
-				debug_assert!(false, "We currently don't support static invoice persistence, so this event should never be emitted.");
+
+			LdkEvent::PersistStaticInvoice {
+				invoice,
+				invoice_slot,
+				recipient_id,
+				invoice_persisted_path,
+			} => {
+				if let Some(store) = self.static_invoice_store.as_ref() {
+					match store
+						.handle_persist_static_invoice(invoice, invoice_slot, recipient_id)
+						.await
+					{
+						Ok(_) => {
+							self.channel_manager.static_invoice_persisted(invoice_persisted_path);
+						},
+						Err(e) => {
+							log_error!(self.logger, "Failed to persist static invoice: {}", e);
+							return Err(ReplayEvent());
+						},
+					};
+				}
 			},
-			LdkEvent::StaticInvoiceRequested { .. } => {
-				debug_assert!(false, "We currently don't support static invoice persistence, so this event should never be emitted.");
+			LdkEvent::StaticInvoiceRequested { recipient_id, invoice_slot, reply_path } => {
+				if let Some(store) = self.static_invoice_store.as_ref() {
+					let invoice =
+						store.handle_static_invoice_requested(&recipient_id, invoice_slot).await;
+
+					match invoice {
+						Ok(Some(invoice)) => {
+							if let Err(e) =
+								self.channel_manager.send_static_invoice(invoice, reply_path)
+							{
+								log_error!(self.logger, "Failed to send static invoice: {:?}", e);
+							}
+						},
+						Ok(None) => {
+							log_trace!(
+								self.logger,
+								"No static invoice found for recipient {} and slot {}",
+								hex_utils::to_string(&recipient_id),
+								invoice_slot
+							);
+						},
+						Err(e) => {
+							log_error!(self.logger, "Failed to retrieve static invoice: {}", e);
+							return Err(ReplayEvent());
+						},
+					}
+				}
 			},
 			LdkEvent::FundingTransactionReadyForSigning { .. } => {
 				debug_assert!(false, "We currently don't support interactive-tx, so this event should never be emitted.");

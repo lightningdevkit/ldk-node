@@ -179,6 +179,8 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// Whether to enable the static invoice service to support async payment reception for clients.
+	pub async_payment_services_enabled: bool,
 }
 
 impl Default for Config {
@@ -193,6 +195,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			async_payment_services_enabled: false,
 		}
 	}
 }
