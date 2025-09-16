@@ -124,6 +124,10 @@ pub enum Error {
 	InvalidBlindedPaths,
 	/// Asynchronous payment services are disabled.
 	AsyncPaymentServicesDisabled,
+	/// LNURL-auth authentication failed.
+	LnurlAuthFailed,
+	/// The provided lnurl is invalid.
+	InvalidLnurl,
 }
 
 impl fmt::Display for Error {
@@ -201,6 +205,8 @@ impl fmt::Display for Error {
 			Self::AsyncPaymentServicesDisabled => {
 				write!(f, "Asynchronous payment services are disabled.")
 			},
+			Self::LnurlAuthFailed => write!(f, "LNURL-auth authentication failed."),
+			Self::InvalidLnurl => write!(f, "The provided lnurl is invalid."),
 		}
 	}
 }
