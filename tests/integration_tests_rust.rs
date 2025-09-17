@@ -12,6 +12,7 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
 	generate_blocks_and_wait,
+	logging::MultiNodeLogger,
 	logging::{init_log_logger, validate_log_entry, TestLogWriter},
 	open_channel, premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
 	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
@@ -1135,17 +1136,27 @@ fn static_invoice_server() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let config_sender = random_config(true);
+	let mut config_sender = random_config(true);
+	config_sender.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender      ".to_string())));
 	let node_sender = setup_node(&chain_source, config_sender, None);
 
-	let config_sender_lsp = random_config(true);
+	let mut config_sender_lsp = random_config(true);
+	config_sender_lsp.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender_lsp  ".to_string())));
 	let node_sender_lsp = setup_node(&chain_source, config_sender_lsp, None);
 
 	let mut config_receiver_lsp = random_config(true);
 	config_receiver_lsp.node_config.async_payment_services_enabled = true;
+	config_receiver_lsp.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver_lsp".to_string())));
+
 	let node_receiver_lsp = setup_node(&chain_source, config_receiver_lsp, None);
 
-	let config_receiver = random_config(true);
+	let mut config_receiver = random_config(true);
+	config_receiver.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
+
 	let node_receiver = setup_node(&chain_source, config_receiver, None);
 
 	let address_sender = node_sender.onchain_payment().new_address().unwrap();
