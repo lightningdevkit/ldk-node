@@ -590,13 +590,20 @@ pub fn open_channel(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
 ) -> OutPoint {
+	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd)
+}
+
+pub fn open_channel_push_amt(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
+	should_announce: bool, electrsd: &ElectrsD,
+) -> OutPoint {
 	if should_announce {
 		node_a
 			.open_announced_channel(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();
@@ -606,7 +613,7 @@ pub fn open_channel(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();

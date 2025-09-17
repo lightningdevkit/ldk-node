@@ -1378,6 +1378,10 @@ fn build_with_store_internal(
 			100;
 	}
 
+	if config.async_payment_services_enabled {
+		user_config.accept_forwards_to_priv_channels = true;
+	}
+
 	let message_router =
 		Arc::new(MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager)));
 
