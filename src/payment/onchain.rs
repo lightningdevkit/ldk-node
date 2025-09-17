@@ -17,6 +17,8 @@ use crate::logger::{log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, Wallet};
 use crate::wallet::OnchainSendAmount;
 
+use lightning::ln::channelmanager::PaymentId;
+
 #[cfg(not(feature = "uniffi"))]
 type FeeRate = bitcoin::FeeRate;
 #[cfg(feature = "uniffi")]
@@ -119,5 +121,32 @@ impl OnchainPayment {
 
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+	}
+
+	/// Bumps the fee of a given UTXO using Child-Pays-For-Parent (CPFP) by creating a new transaction.
+	///
+	/// This method creates a new transaction that spends the specified UTXO with a higher fee rate,
+	/// effectively increasing the priority of both the new transaction and the parent transaction
+	/// it depends on. This is useful when a transaction is stuck in the mempool due to insufficient
+	/// fees and you want to accelerate its confirmation.
+	///
+	/// CPFP works by creating a child transaction that spends one or more outputs from the parent
+	/// transaction. Miners will consider the combined fees of both transactions when deciding
+	/// which transactions to include in a block.
+	///
+	/// # Parameters
+	/// * `payment_id` - The identifier of the payment whose UTXO should be fee-bumped
+	///
+	/// # Returns
+	/// * `Ok(Txid)` - The transaction ID of the newly created CPFP transaction on success
+	/// * `Err(Error)` - If the payment cannot be found, the UTXO is not suitable for CPFP,
+	///   or if there's an error creating the transaction
+	///
+	/// # Note
+	/// CPFP is specifically designed to work with unconfirmed UTXOs. The child transaction
+	/// can spend outputs from unconfirmed parent transactions, allowing miners to consider
+	/// the combined fees of both transactions when building a block.
+	pub fn bump_fee_cpfp(&self, payment_id: PaymentId) -> Result<Txid, Error> {
+		self.wallet.bump_fee_cpfp(payment_id)
 	}
 }
