@@ -19,7 +19,7 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{KVStoreSync, KVStoreSyncWrapper};
+use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::{GossipVerifier, UtxoSource};
@@ -35,7 +35,19 @@ use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::PaymentDetails;
 
-pub(crate) type DynStore = dyn KVStoreSync + Sync + Send;
+/// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
+/// same time.
+pub trait SyncAndAsyncKVStore: KVStore + KVStoreSync {}
+
+impl<T> SyncAndAsyncKVStore for T
+where
+	T: KVStore,
+	T: KVStoreSync,
+{
+}
+
+/// A type alias for [`SyncAndAsyncKVStore`] with `Sync`/`Send` markers;
+pub type DynStore = dyn SyncAndAsyncKVStore + Sync + Send;
 
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -133,7 +145,7 @@ pub(crate) type Sweeper = OutputSweeper<
 	Arc<KeysManager>,
 	Arc<OnchainFeeEstimator>,
 	Arc<ChainSource>,
-	KVStoreSyncWrapper<Arc<DynStore>>,
+	Arc<DynStore>,
 	Arc<Logger>,
 	Arc<KeysManager>,
 >;

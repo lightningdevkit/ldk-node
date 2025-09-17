@@ -134,7 +134,8 @@ use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning_background_processor::process_events_async_with_kv_store_sync;
+use lightning::util::persist::KVStoreSync;
+use lightning_background_processor::process_events_async;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
@@ -147,10 +148,12 @@ use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
 use runtime::Runtime;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, KeysManager,
+	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
+pub use types::{
+	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
+};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -562,7 +565,7 @@ impl Node {
 		};
 
 		self.runtime.spawn_background_processor_task(async move {
-			process_events_async_with_kv_store_sync(
+			process_events_async(
 				background_persister,
 				|e| background_event_handler.handle_event(e),
 				background_chain_mon,
@@ -1478,20 +1481,20 @@ impl Node {
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
 	/// a limited view of the network.
 	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
-		self.kv_store
-			.read(
-				lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-				lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-				lightning::util::persist::SCORER_PERSISTENCE_KEY,
-			)
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Failed to access store while exporting pathfinding scores: {}",
-					e
-				);
-				Error::PersistenceFailed
-			})
+		KVStoreSync::read(
+			&*self.kv_store,
+			lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+			lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+			lightning::util::persist::SCORER_PERSISTENCE_KEY,
+		)
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Failed to access store while exporting pathfinding scores: {}",
+				e
+			);
+			Error::PersistenceFailed
+		})
 	}
 }
 

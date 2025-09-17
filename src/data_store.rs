@@ -9,6 +9,7 @@ use std::collections::{hash_map, HashMap};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
+use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::logger::{log_error, LdkLogger};
@@ -97,19 +98,24 @@ where
 		let removed = self.objects.lock().unwrap().remove(id).is_some();
 		if removed {
 			let store_key = id.encode_to_hex_str();
-			self.kv_store
-				.remove(&self.primary_namespace, &self.secondary_namespace, &store_key, false)
-				.map_err(|e| {
-					log_error!(
-						self.logger,
-						"Removing object data for key {}/{}/{} failed due to: {}",
-						&self.primary_namespace,
-						&self.secondary_namespace,
-						store_key,
-						e
-					);
-					Error::PersistenceFailed
-				})?;
+			KVStoreSync::remove(
+				&*self.kv_store,
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				&store_key,
+				false,
+			)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Removing object data for key {}/{}/{} failed due to: {}",
+					&self.primary_namespace,
+					&self.secondary_namespace,
+					store_key,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
 		}
 		Ok(())
 	}
@@ -141,9 +147,14 @@ where
 	fn persist(&self, object: &SO) -> Result<(), Error> {
 		let store_key = object.id().encode_to_hex_str();
 		let data = object.encode();
-		self.kv_store
-			.write(&self.primary_namespace, &self.secondary_namespace, &store_key, data)
-			.map_err(|e| {
+		KVStoreSync::write(
+			&*self.kv_store,
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			&store_key,
+			data,
+		)
+		.map_err(|e| {
 			log_error!(
 				self.logger,
 				"Write for key {}/{}/{} failed due to: {}",
@@ -241,13 +252,15 @@ mod tests {
 		let store_key = id.encode_to_hex_str();
 
 		// Check we start empty.
-		assert!(store.read(&primary_namespace, &secondary_namespace, &store_key).is_err());
+		assert!(KVStoreSync::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+			.is_err());
 
 		// Check we successfully store an object and return `false`
 		let object = TestObject { id, data: [23u8; 3] };
 		assert_eq!(Ok(false), data_store.insert(object.clone()));
 		assert_eq!(Some(object), data_store.get(&id));
-		assert!(store.read(&primary_namespace, &secondary_namespace, &store_key).is_ok());
+		assert!(KVStoreSync::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+			.is_ok());
 
 		// Test re-insertion returns `true`
 		let mut override_object = object.clone();

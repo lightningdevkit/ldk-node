@@ -31,11 +31,10 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{Builder, DynStore, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
-use lightning::util::persist::KVStoreSync;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
@@ -243,7 +242,7 @@ fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store: Arc<dyn KVStoreSync + Sync + Send> =
+	let test_sync_store: Arc<DynStore> =
 		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };

@@ -24,11 +24,12 @@ use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::util::persist::{
-	KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
-	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
-	OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_KEY,
+	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
+	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::sweep::OutputSweeper;
@@ -131,7 +132,8 @@ pub(crate) fn read_network_graph<L: Deref + Clone>(
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(kv_store.read(
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
 		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 		NETWORK_GRAPH_PERSISTENCE_KEY,
@@ -150,7 +152,8 @@ where
 	L::Target: LdkLogger,
 {
 	let params = ProbabilisticScoringDecayParameters::default();
-	let mut reader = Cursor::new(kv_store.read(
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
 		SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 		SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 		SCORER_PERSISTENCE_KEY,
@@ -169,7 +172,8 @@ pub(crate) fn read_event_queue<L: Deref + Clone>(
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(kv_store.read(
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
 		EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 		EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 		EVENT_QUEUE_PERSISTENCE_KEY,
@@ -187,7 +191,8 @@ pub(crate) fn read_peer_info<L: Deref + Clone>(
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(kv_store.read(
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
 		PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 		PEER_INFO_PERSISTENCE_KEY,
@@ -207,11 +212,13 @@ where
 {
 	let mut res = Vec::new();
 
-	for stored_key in kv_store.list(
+	for stored_key in KVStoreSync::list(
+		&*kv_store,
 		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	)? {
-		let mut reader = Cursor::new(kv_store.read(
+		let mut reader = Cursor::new(KVStoreSync::read(
+			&*kv_store,
 			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 			&stored_key,
@@ -234,7 +241,8 @@ pub(crate) fn read_output_sweeper(
 	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
 	logger: Arc<Logger>,
 ) -> Result<Sweeper, std::io::Error> {
-	let mut reader = Cursor::new(kv_store.read(
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
 		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
 		OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
 		OUTPUT_SWEEPER_PERSISTENCE_KEY,
@@ -248,7 +256,7 @@ pub(crate) fn read_output_sweeper(
 		kv_store,
 		logger.clone(),
 	);
-	OutputSweeper::read_with_kv_store_sync(&mut reader, args).map_err(|e| {
+	OutputSweeper::read(&mut reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize OutputSweeper: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize OutputSweeper")
 	})
@@ -260,7 +268,8 @@ pub(crate) fn read_node_metrics<L: Deref>(
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(kv_store.read(
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
 		NODE_METRICS_PRIMARY_NAMESPACE,
 		NODE_METRICS_SECONDARY_NAMESPACE,
 		NODE_METRICS_KEY,
@@ -278,24 +287,24 @@ where
 	L::Target: LdkLogger,
 {
 	let data = node_metrics.encode();
-	kv_store
-		.write(
+	KVStoreSync::write(
+		&*kv_store,
+		NODE_METRICS_PRIMARY_NAMESPACE,
+		NODE_METRICS_SECONDARY_NAMESPACE,
+		NODE_METRICS_KEY,
+		data,
+	)
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Writing data to key {}/{}/{} failed due to: {}",
 			NODE_METRICS_PRIMARY_NAMESPACE,
 			NODE_METRICS_SECONDARY_NAMESPACE,
 			NODE_METRICS_KEY,
-			data,
-		)
-		.map_err(|e| {
-			log_error!(
-				logger,
-				"Writing data to key {}/{}/{} failed due to: {}",
-				NODE_METRICS_PRIMARY_NAMESPACE,
-				NODE_METRICS_SECONDARY_NAMESPACE,
-				NODE_METRICS_KEY,
-				e
-			);
-			Error::PersistenceFailed
-		})
+			e
+		);
+		Error::PersistenceFailed
+	})
 }
 
 pub(crate) fn is_valid_kvstore_str(key: &str) -> bool {
@@ -397,24 +406,26 @@ macro_rules! impl_read_write_change_set_type {
 		where
 			L::Target: LdkLogger,
 		{
-			let bytes = match kv_store.read($primary_namespace, $secondary_namespace, $key) {
-				Ok(bytes) => bytes,
-				Err(e) => {
-					if e.kind() == lightning::io::ErrorKind::NotFound {
-						return Ok(None);
-					} else {
-						log_error!(
-							logger,
-							"Reading data from key {}/{}/{} failed due to: {}",
-							$primary_namespace,
-							$secondary_namespace,
-							$key,
-							e
-						);
-						return Err(e.into());
-					}
-				},
-			};
+			let bytes =
+				match KVStoreSync::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
+				{
+					Ok(bytes) => bytes,
+					Err(e) => {
+						if e.kind() == lightning::io::ErrorKind::NotFound {
+							return Ok(None);
+						} else {
+							log_error!(
+								logger,
+								"Reading data from key {}/{}/{} failed due to: {}",
+								$primary_namespace,
+								$secondary_namespace,
+								$key,
+								e
+							);
+							return Err(e.into());
+						}
+					},
+				};
 
 			let mut reader = Cursor::new(bytes);
 			let res: Result<ChangeSetDeserWrapper<$change_set_type>, DecodeError> =
@@ -438,17 +449,18 @@ macro_rules! impl_read_write_change_set_type {
 			L::Target: LdkLogger,
 		{
 			let data = ChangeSetSerWrapper(value).encode();
-			kv_store.write($primary_namespace, $secondary_namespace, $key, data).map_err(|e| {
-				log_error!(
-					logger,
-					"Writing data to key {}/{}/{} failed due to: {}",
-					$primary_namespace,
-					$secondary_namespace,
-					$key,
-					e
-				);
-				e.into()
-			})
+			KVStoreSync::write(&*kv_store, $primary_namespace, $secondary_namespace, $key, data)
+				.map_err(|e| {
+					log_error!(
+						logger,
+						"Writing data to key {}/{}/{} failed due to: {}",
+						$primary_namespace,
+						$secondary_namespace,
+						$key,
+						e
+					);
+					e.into()
+				})
 		}
 	};
 }
