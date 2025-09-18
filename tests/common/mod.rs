@@ -1190,14 +1190,51 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 // A `KVStore` impl for testing purposes that wraps all our `KVStore`s and asserts their synchronicity.
 pub(crate) struct TestSyncStore {
+	inner: Arc<TestSyncStoreInner>,
+}
+
+impl TestSyncStore {
+	pub(crate) fn new(dest_dir: PathBuf) -> Self {
+		let inner = Arc::new(TestSyncStoreInner::new(dest_dir));
+		Self { inner }
+	}
+}
+
+impl KVStoreSync for TestSyncStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> lightning::io::Result<Vec<u8>> {
+		self.inner.read_internal(primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> lightning::io::Result<()> {
+		self.inner.write_internal(primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> lightning::io::Result<()> {
+		self.inner.remove_internal(primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> lightning::io::Result<Vec<String>> {
+		self.inner.list_internal(primary_namespace, secondary_namespace)
+	}
+}
+
+struct TestSyncStoreInner {
 	serializer: RwLock<()>,
 	test_store: TestStore,
 	fs_store: FilesystemStore,
 	sqlite_store: SqliteStore,
 }
 
-impl TestSyncStore {
-	pub(crate) fn new(dest_dir: PathBuf) -> Self {
+impl TestSyncStoreInner {
+	fn new(dest_dir: PathBuf) -> Self {
 		let serializer = RwLock::new(());
 		let mut fs_dir = dest_dir.clone();
 		fs_dir.push("fs_store");
@@ -1330,31 +1367,5 @@ impl TestSyncStore {
 	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().unwrap();
 		self.do_list(primary_namespace, secondary_namespace)
-	}
-}
-
-impl KVStoreSync for TestSyncStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> lightning::io::Result<Vec<u8>> {
-		self.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> lightning::io::Result<()> {
-		self.write_internal(primary_namespace, secondary_namespace, key, buf)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> lightning::io::Result<()> {
-		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
-	}
-
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> lightning::io::Result<Vec<String>> {
-		self.list_internal(primary_namespace, secondary_namespace)
 	}
 }
