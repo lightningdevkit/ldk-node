@@ -14,9 +14,9 @@ use common::{
 	generate_blocks_and_wait,
 	logging::MultiNodeLogger,
 	logging::{init_log_logger, validate_log_entry, TestLogWriter},
-	open_channel, premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
-	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	open_channel, open_channel_push_amt, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	random_config, random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder,
+	setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
 };
 
 use ldk_node::config::EsploraSyncConfig;
@@ -1137,11 +1137,14 @@ fn static_invoice_server() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
 	let mut config_sender = random_config(true);
+	config_sender.node_config.listening_addresses = None;
+	config_sender.node_config.node_alias = None;
 	config_sender.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender      ".to_string())));
 	let node_sender = setup_node(&chain_source, config_sender, None);
 
 	let mut config_sender_lsp = random_config(true);
+	config_sender_lsp.node_config.async_payment_services_enabled = true;
 	config_sender_lsp.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender_lsp  ".to_string())));
 	let node_sender_lsp = setup_node(&chain_source, config_sender_lsp, None);
@@ -1154,9 +1157,10 @@ fn static_invoice_server() {
 	let node_receiver_lsp = setup_node(&chain_source, config_receiver_lsp, None);
 
 	let mut config_receiver = random_config(true);
+	config_receiver.node_config.listening_addresses = None;
+	config_receiver.node_config.node_alias = None;
 	config_receiver.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
-
 	let node_receiver = setup_node(&chain_source, config_receiver, None);
 
 	let address_sender = node_sender.onchain_payment().new_address().unwrap();
@@ -1176,9 +1180,16 @@ fn static_invoice_server() {
 	node_receiver_lsp.sync_wallets().unwrap();
 	node_receiver.sync_wallets().unwrap();
 
-	open_channel(&node_sender, &node_sender_lsp, 400_000, true, &electrsd);
+	open_channel(&node_sender, &node_sender_lsp, 400_000, false, &electrsd);
 	open_channel(&node_sender_lsp, &node_receiver_lsp, 400_000, true, &electrsd);
-	open_channel(&node_receiver_lsp, &node_receiver, 400_000, true, &electrsd);
+	open_channel_push_amt(
+		&node_receiver,
+		&node_receiver_lsp,
+		400_000,
+		Some(200_000_000),
+		false,
+		&electrsd,
+	);
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
 
@@ -1201,14 +1212,14 @@ fn static_invoice_server() {
 			.filter(|n| {
 				node.network_graph().node(n).map_or(false, |info| info.announcement_info.is_some())
 			})
-			.count() >= 4
+			.count() >= 2
 	};
 
 	// Wait for everyone to see all channels and node announcements.
-	while node_sender.network_graph().list_channels().len() < 3
-		|| node_sender_lsp.network_graph().list_channels().len() < 3
-		|| node_receiver_lsp.network_graph().list_channels().len() < 3
-		|| node_receiver.network_graph().list_channels().len() < 3
+	while node_sender.network_graph().list_channels().len() < 1
+		|| node_sender_lsp.network_graph().list_channels().len() < 1
+		|| node_receiver_lsp.network_graph().list_channels().len() < 1
+		|| node_receiver.network_graph().list_channels().len() < 1
 		|| !has_node_announcements(&node_sender)
 		|| !has_node_announcements(&node_sender_lsp)
 		|| !has_node_announcements(&node_receiver_lsp)

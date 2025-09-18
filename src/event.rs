@@ -1500,13 +1500,19 @@ where
 
 			LdkEvent::PersistStaticInvoice {
 				invoice,
+				invoice_request_path,
 				invoice_slot,
 				recipient_id,
 				invoice_persisted_path,
 			} => {
 				if let Some(store) = self.static_invoice_store.as_ref() {
 					match store
-						.handle_persist_static_invoice(invoice, invoice_slot, recipient_id)
+						.handle_persist_static_invoice(
+							invoice,
+							invoice_request_path,
+							invoice_slot,
+							recipient_id,
+						)
 						.await
 					{
 						Ok(_) => {
@@ -1519,16 +1525,24 @@ where
 					};
 				}
 			},
-			LdkEvent::StaticInvoiceRequested { recipient_id, invoice_slot, reply_path } => {
+			LdkEvent::StaticInvoiceRequested {
+				recipient_id,
+				invoice_slot,
+				reply_path,
+				invoice_request,
+			} => {
 				if let Some(store) = self.static_invoice_store.as_ref() {
 					let invoice =
 						store.handle_static_invoice_requested(&recipient_id, invoice_slot).await;
 
 					match invoice {
-						Ok(Some(invoice)) => {
-							if let Err(e) =
-								self.channel_manager.send_static_invoice(invoice, reply_path)
-							{
+						Ok(Some((invoice, invoice_request_path))) => {
+							if let Err(e) = self.channel_manager.respond_to_static_invoice_request(
+								invoice,
+								reply_path,
+								invoice_request,
+								invoice_request_path,
+							) {
 								log_error!(self.logger, "Failed to send static invoice: {:?}", e);
 							}
 						},

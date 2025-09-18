@@ -15,10 +15,22 @@ use crate::types::DynStore;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 
-use lightning::{offers::static_invoice::StaticInvoice, util::ser::Writeable};
+use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::impl_writeable_tlv_based;
+use lightning::{offers::static_invoice::StaticInvoice, util::ser::Readable, util::ser::Writeable};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+struct PersistedStaticInvoice {
+	invoice: StaticInvoice,
+	request_path: BlindedMessagePath,
+}
+
+impl_writeable_tlv_based!(PersistedStaticInvoice, {
+	(0, invoice, required),
+	(2, request_path, required)
+});
 
 pub(crate) struct StaticInvoiceStore {
 	kv_store: Arc<DynStore>,
@@ -60,7 +72,7 @@ impl StaticInvoiceStore {
 
 	pub(crate) async fn handle_static_invoice_requested(
 		&self, recipient_id: &[u8], invoice_slot: u16,
-	) -> Result<Option<StaticInvoice>, lightning::io::Error> {
+	) -> Result<Option<(StaticInvoice, BlindedMessagePath)>, lightning::io::Error> {
 		Self::check_rate_limit(&self.request_rate_limiter, &recipient_id)?;
 
 		let (secondary_namespace, key) = Self::get_storage_location(invoice_slot, recipient_id);
@@ -68,12 +80,16 @@ impl StaticInvoiceStore {
 		self.kv_store
 			.read(STATIC_INVOICE_STORE_PRIMARY_NAMESPACE, &secondary_namespace, &key)
 			.and_then(|data| {
-				data.try_into().map(Some).map_err(|e| {
-					lightning::io::Error::new(
-						lightning::io::ErrorKind::InvalidData,
-						format!("Failed to parse static invoice: {:?}", e),
-					)
-				})
+				PersistedStaticInvoice::read(&mut &*data)
+					.map(|persisted_invoice| {
+						Some((persisted_invoice.invoice, persisted_invoice.request_path))
+					})
+					.map_err(|e| {
+						lightning::io::Error::new(
+							lightning::io::ErrorKind::InvalidData,
+							format!("Failed to parse static invoice: {:?}", e),
+						)
+					})
 			})
 			.or_else(
 				|e| {
@@ -87,14 +103,18 @@ impl StaticInvoiceStore {
 	}
 
 	pub(crate) async fn handle_persist_static_invoice(
-		&self, invoice: StaticInvoice, invoice_slot: u16, recipient_id: Vec<u8>,
+		&self, invoice: StaticInvoice, invoice_request_path: BlindedMessagePath, invoice_slot: u16,
+		recipient_id: Vec<u8>,
 	) -> Result<(), lightning::io::Error> {
 		Self::check_rate_limit(&self.persist_rate_limiter, &recipient_id)?;
 
 		let (secondary_namespace, key) = Self::get_storage_location(invoice_slot, &recipient_id);
 
+		let persisted_invoice =
+			PersistedStaticInvoice { invoice, request_path: invoice_request_path };
+
 		let mut buf = Vec::new();
-		invoice.write(&mut buf)?;
+		persisted_invoice.write(&mut buf)?;
 
 		// Static invoices will be persisted at "static_invoices/<sha256(recipient_id)>/<invoice_slot>".
 		//
@@ -144,15 +164,21 @@ mod tests {
 
 		let static_invoice = invoice();
 		let recipient_id = vec![1, 1, 1];
+		let invoice_request_path = blinded_path();
 		assert!(static_invoice_store
-			.handle_persist_static_invoice(static_invoice.clone(), 0, recipient_id.clone())
+			.handle_persist_static_invoice(
+				static_invoice.clone(),
+				invoice_request_path.clone(),
+				0,
+				recipient_id.clone()
+			)
 			.await
 			.is_ok());
 
 		let requested_invoice =
 			static_invoice_store.handle_static_invoice_requested(&recipient_id, 0).await.unwrap();
 
-		assert_eq!(requested_invoice.unwrap(), static_invoice);
+		assert_eq!(requested_invoice.unwrap(), (static_invoice, invoice_request_path));
 
 		assert!(static_invoice_store
 			.handle_static_invoice_requested(&recipient_id, 1)
