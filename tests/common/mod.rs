@@ -1242,10 +1242,8 @@ impl TestSyncStore {
 			},
 		}
 	}
-}
 
-impl KVStoreSync for TestSyncStore {
-	fn read(
+	fn read_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> lightning::io::Result<Vec<u8>> {
 		let _guard = self.serializer.read().unwrap();
@@ -1270,7 +1268,7 @@ impl KVStoreSync for TestSyncStore {
 		}
 	}
 
-	fn write(
+	fn write_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
@@ -1299,7 +1297,7 @@ impl KVStoreSync for TestSyncStore {
 		}
 	}
 
-	fn remove(
+	fn remove_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
@@ -1327,10 +1325,36 @@ impl KVStoreSync for TestSyncStore {
 		}
 	}
 
-	fn list(
+	fn list_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().unwrap();
 		self.do_list(primary_namespace, secondary_namespace)
+	}
+}
+
+impl KVStoreSync for TestSyncStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> lightning::io::Result<Vec<u8>> {
+		self.read_internal(primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> lightning::io::Result<()> {
+		self.write_internal(primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> lightning::io::Result<()> {
+		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> lightning::io::Result<Vec<String>> {
+		self.list_internal(primary_namespace, secondary_namespace)
 	}
 }
