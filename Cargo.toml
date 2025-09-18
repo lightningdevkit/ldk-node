@@ -52,17 +52,17 @@ default = []
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4", features = ["std"] }
-lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4" }
-lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4", features = ["std"] }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4" }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4" }
-lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4" }
-lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4" }
-lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
-lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4" }
-lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4" }
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6", features = ["std"] }
+lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6" }
+lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6", features = ["std"] }
+lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6" }
+lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6" }
+lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6" }
+lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6" }
+lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6", features = ["rest-client", "rpc-client", "tokio"] }
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
+lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6" }
+lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6" }
 
 #lightning = { path = "../rust-lightning/lightning", features = ["std"] }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
@@ -109,7 +109,7 @@ winapi = { version = "0.3", features = ["winbase"] }
 [dev-dependencies]
 #lightning = { version = "0.1.0", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b002e43ec5f9c1cbdcd1ac8588402c5a65ecd2e4", features = ["std", "_test_utils"] }
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "50391d3a3efa7a8f32d119d126a633e4b1981ee6", features = ["std", "_test_utils"] }
 #lightning = { path = "../rust-lightning/lightning", features = ["std", "_test_utils"] }
 proptest = "1.0.0"
 regex = "1.5.6"
