@@ -278,11 +278,10 @@ pub(crate) struct TestConfig {
 macro_rules! setup_builder {
 	($builder: ident, $config: expr) => {
 		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_config($config.node_config.clone());
+		let mut $builder = Builder::from_config($config.node_config.clone());
 		#[cfg(not(feature = "uniffi"))]
 		let mut $builder = Builder::from_config($config.node_config.clone());
 
-		#[cfg(not(feature = "uniffi"))]
 		crate::common::set_builder_log_writer(&mut $builder, &$config);
 	};
 }
