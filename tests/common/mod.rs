@@ -179,6 +179,7 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+	bitcoind_conf.view_stdout = true;
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
@@ -188,6 +189,7 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut electrsd_conf = electrsd::Conf::default();
 	electrsd_conf.http_enabled = true;
 	electrsd_conf.network = "regtest";
+	electrsd_conf.view_stderr = true;
 	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
 	(bitcoind, electrsd)
 }
