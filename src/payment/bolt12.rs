@@ -17,7 +17,7 @@ use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, Payme
 use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
 use lightning::offers::offer::{Amount, Offer as LdkOffer};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
@@ -82,8 +82,6 @@ impl Bolt12Payment {
 		let mut random_bytes = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -97,15 +95,11 @@ impl Bolt12Payment {
 			},
 		};
 
-		match self.channel_manager.pay_for_offer(
-			&offer,
-			if offer.expects_quantity() { Some(1) } else { None },
-			None,
-			payer_note.clone(),
-			payment_id,
-			retry_strategy,
-			route_params_config,
-		) {
+		let mut optional_params = OptionalOfferPaymentParams::default();
+		optional_params.retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		optional_params.payer_note = payer_note.clone();
+
+		match self.channel_manager.pay_for_offer(&offer, None, payment_id, optional_params) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
 				log_info!(
@@ -183,8 +177,6 @@ impl Bolt12Payment {
 		let mut random_bytes = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -201,15 +193,15 @@ impl Bolt12Payment {
 				"Failed to pay as the given amount needs to be at least the offer amount: required {}msat, gave {}msat.", offer_amount_msat, amount_msat);
 			return Err(Error::InvalidAmount);
 		}
+		let mut optional_params = OptionalOfferPaymentParams::default();
+		optional_params.retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		optional_params.payer_note = payer_note.clone();
 
 		match self.channel_manager.pay_for_offer(
 			&offer,
-			if offer.expects_quantity() { Some(1) } else { None },
 			Some(amount_msat),
-			payer_note.clone(),
 			payment_id,
-			retry_strategy,
-			route_params_config,
+			optional_params,
 		) {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
