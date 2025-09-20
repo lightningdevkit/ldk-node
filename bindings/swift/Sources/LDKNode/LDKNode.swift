@@ -1015,17 +1015,17 @@ public func FfiConverterTypeBolt11Payment_lower(_ value: Bolt11Payment) -> Unsaf
 
 public protocol Bolt12PaymentProtocol : AnyObject {
     
-    func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, quantity: UInt64?, payerNote: String?) throws  -> Refund
+    func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, payerNote: String?) throws  -> Refund
     
-    func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?, quantity: UInt64?) throws  -> Offer
+    func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?) throws  -> Offer
     
     func receiveVariableAmount(description: String, expirySecs: UInt32?) throws  -> Offer
     
     func requestRefundPayment(refund: Refund) throws  -> Bolt12Invoice
     
-    func send(offer: Offer, quantity: UInt64?, payerNote: String?) throws  -> PaymentId
+    func send(offer: Offer, payerNote: String?) throws  -> PaymentId
     
-    func sendUsingAmount(offer: Offer, amountMsat: UInt64, quantity: UInt64?, payerNote: String?) throws  -> PaymentId
+    func sendUsingAmount(offer: Offer, amountMsat: UInt64, payerNote: String?) throws  -> PaymentId
     
 }
 
@@ -1070,24 +1070,22 @@ open class Bolt12Payment:
     
 
     
-open func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, quantity: UInt64?, payerNote: String?)throws  -> Refund {
+open func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, payerNote: String?)throws  -> Refund {
     return try  FfiConverterTypeRefund.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
     uniffi_ldk_node_fn_method_bolt12payment_initiate_refund(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
         FfiConverterUInt32.lower(expirySecs),
-        FfiConverterOptionUInt64.lower(quantity),
         FfiConverterOptionString.lower(payerNote),$0
     )
 })
 }
     
-open func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?, quantity: UInt64?)throws  -> Offer {
+open func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?)throws  -> Offer {
     return try  FfiConverterTypeOffer.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
     uniffi_ldk_node_fn_method_bolt12payment_receive(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
         FfiConverterString.lower(description),
-        FfiConverterOptionUInt32.lower(expirySecs),
-        FfiConverterOptionUInt64.lower(quantity),$0
+        FfiConverterOptionUInt32.lower(expirySecs),$0
     )
 })
 }
@@ -1109,22 +1107,20 @@ open func requestRefundPayment(refund: Refund)throws  -> Bolt12Invoice {
 })
 }
     
-open func send(offer: Offer, quantity: UInt64?, payerNote: String?)throws  -> PaymentId {
+open func send(offer: Offer, payerNote: String?)throws  -> PaymentId {
     return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
     uniffi_ldk_node_fn_method_bolt12payment_send(self.uniffiClonePointer(),
         FfiConverterTypeOffer.lower(offer),
-        FfiConverterOptionUInt64.lower(quantity),
         FfiConverterOptionString.lower(payerNote),$0
     )
 })
 }
     
-open func sendUsingAmount(offer: Offer, amountMsat: UInt64, quantity: UInt64?, payerNote: String?)throws  -> PaymentId {
+open func sendUsingAmount(offer: Offer, amountMsat: UInt64, payerNote: String?)throws  -> PaymentId {
     return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
     uniffi_ldk_node_fn_method_bolt12payment_send_using_amount(self.uniffiClonePointer(),
         FfiConverterTypeOffer.lower(offer),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterOptionUInt64.lower(quantity),
         FfiConverterOptionString.lower(payerNote),$0
     )
 })
@@ -7098,9 +7094,9 @@ public enum PaymentKind {
     )
     case bolt11Jit(hash: PaymentHash, preimage: PaymentPreimage?, secret: PaymentSecret?, counterpartySkimmedFeeMsat: UInt64?, lspFeeLimits: LspFeeLimits
     )
-    case bolt12Offer(hash: PaymentHash?, preimage: PaymentPreimage?, secret: PaymentSecret?, offerId: OfferId, payerNote: UntrustedString?, quantity: UInt64?
+    case bolt12Offer(hash: PaymentHash?, preimage: PaymentPreimage?, secret: PaymentSecret?, offerId: OfferId, payerNote: UntrustedString?
     )
-    case bolt12Refund(hash: PaymentHash?, preimage: PaymentPreimage?, secret: PaymentSecret?, payerNote: UntrustedString?, quantity: UInt64?
+    case bolt12Refund(hash: PaymentHash?, preimage: PaymentPreimage?, secret: PaymentSecret?, payerNote: UntrustedString?
     )
     case spontaneous(hash: PaymentHash, preimage: PaymentPreimage?
     )
@@ -7123,10 +7119,10 @@ public struct FfiConverterTypePaymentKind: FfiConverterRustBuffer {
         case 3: return .bolt11Jit(hash: try FfiConverterTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), counterpartySkimmedFeeMsat: try FfiConverterOptionUInt64.read(from: &buf), lspFeeLimits: try FfiConverterTypeLSPFeeLimits.read(from: &buf)
         )
         
-        case 4: return .bolt12Offer(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), offerId: try FfiConverterTypeOfferId.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf), quantity: try FfiConverterOptionUInt64.read(from: &buf)
+        case 4: return .bolt12Offer(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), offerId: try FfiConverterTypeOfferId.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf)
         )
         
-        case 5: return .bolt12Refund(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf), quantity: try FfiConverterOptionUInt64.read(from: &buf)
+        case 5: return .bolt12Refund(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf)
         )
         
         case 6: return .spontaneous(hash: try FfiConverterTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf)
@@ -7162,23 +7158,21 @@ public struct FfiConverterTypePaymentKind: FfiConverterRustBuffer {
             FfiConverterTypeLSPFeeLimits.write(lspFeeLimits, into: &buf)
             
         
-        case let .bolt12Offer(hash,preimage,secret,offerId,payerNote,quantity):
+        case let .bolt12Offer(hash,preimage,secret,offerId,payerNote):
             writeInt(&buf, Int32(4))
             FfiConverterOptionTypePaymentHash.write(hash, into: &buf)
             FfiConverterOptionTypePaymentPreimage.write(preimage, into: &buf)
             FfiConverterOptionTypePaymentSecret.write(secret, into: &buf)
             FfiConverterTypeOfferId.write(offerId, into: &buf)
             FfiConverterOptionTypeUntrustedString.write(payerNote, into: &buf)
-            FfiConverterOptionUInt64.write(quantity, into: &buf)
             
         
-        case let .bolt12Refund(hash,preimage,secret,payerNote,quantity):
+        case let .bolt12Refund(hash,preimage,secret,payerNote):
             writeInt(&buf, Int32(5))
             FfiConverterOptionTypePaymentHash.write(hash, into: &buf)
             FfiConverterOptionTypePaymentPreimage.write(preimage, into: &buf)
             FfiConverterOptionTypePaymentSecret.write(secret, into: &buf)
             FfiConverterOptionTypeUntrustedString.write(payerNote, into: &buf)
-            FfiConverterOptionUInt64.write(quantity, into: &buf)
             
         
         case let .spontaneous(hash,preimage):

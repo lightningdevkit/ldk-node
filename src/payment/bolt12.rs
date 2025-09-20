@@ -18,7 +18,7 @@ use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{PaymentId, Retry};
-use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
+use lightning::offers::offer::{Amount, Offer as LdkOffer};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
 
@@ -28,7 +28,6 @@ use lightning_types::string::UntrustedString;
 
 use rand::RngCore;
 
-use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -73,11 +72,7 @@ impl Bolt12Payment {
 	///
 	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
 	/// response.
-	///
-	/// If `quantity` is `Some` it represents the number of items requested.
-	pub fn send(
-		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
-	) -> Result<PaymentId, Error> {
+	pub fn send(&self, offer: &Offer, payer_note: Option<String>) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
@@ -104,7 +99,7 @@ impl Bolt12Payment {
 
 		match self.channel_manager.pay_for_offer(
 			&offer,
-			quantity,
+			if offer.expects_quantity() { Some(1) } else { None },
 			None,
 			payer_note.clone(),
 			payment_id,
@@ -126,7 +121,6 @@ impl Bolt12Payment {
 					secret: None,
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
-					quantity,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -151,7 +145,6 @@ impl Bolt12Payment {
 							secret: None,
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
-							quantity,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -179,7 +172,7 @@ impl Bolt12Payment {
 	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
 	/// response.
 	pub fn send_using_amount(
-		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
+		&self, offer: &Offer, amount_msat: u64, payer_note: Option<String>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -211,7 +204,7 @@ impl Bolt12Payment {
 
 		match self.channel_manager.pay_for_offer(
 			&offer,
-			quantity,
+			if offer.expects_quantity() { Some(1) } else { None },
 			Some(amount_msat),
 			payer_note.clone(),
 			payment_id,
@@ -233,7 +226,6 @@ impl Bolt12Payment {
 					secret: None,
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
-					quantity,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -258,7 +250,6 @@ impl Bolt12Payment {
 							secret: None,
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
-							quantity,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -277,7 +268,7 @@ impl Bolt12Payment {
 	}
 
 	pub(crate) fn receive_inner(
-		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
+		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>,
 	) -> Result<LdkOffer, Error> {
 		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
 			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
@@ -291,17 +282,7 @@ impl Bolt12Payment {
 			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
 		}
 
-		let mut offer =
-			offer_builder.amount_msats(amount_msat).description(description.to_string());
-
-		if let Some(qty) = quantity {
-			if qty == 0 {
-				log_error!(self.logger, "Failed to create offer: quantity can't be zero.");
-				return Err(Error::InvalidQuantity);
-			} else {
-				offer = offer.supported_quantity(Quantity::Bounded(NonZeroU64::new(qty).unwrap()))
-			};
-		};
+		let offer = offer_builder.amount_msats(amount_msat).description(description.to_string());
 
 		let finalized_offer = offer.build().map_err(|e| {
 			log_error!(self.logger, "Failed to create offer: {:?}", e);
@@ -314,9 +295,9 @@ impl Bolt12Payment {
 	/// Returns a payable offer that can be used to request and receive a payment of the amount
 	/// given.
 	pub fn receive(
-		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
+		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
-		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity)?;
+		let offer = self.receive_inner(amount_msat, description, expiry_secs)?;
 		Ok(maybe_wrap(offer))
 	}
 
@@ -371,7 +352,6 @@ impl Bolt12Payment {
 			preimage: None,
 			secret: None,
 			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
-			quantity: refund.quantity(),
 		};
 
 		let payment = PaymentDetails::new(
@@ -392,8 +372,7 @@ impl Bolt12Payment {
 	///
 	/// [`Refund`]: lightning::offers::refund::Refund
 	pub fn initiate_refund(
-		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
-		payer_note: Option<String>,
+		&self, amount_msat: u64, expiry_secs: u32, payer_note: Option<String>,
 	) -> Result<Refund, Error> {
 		let mut random_bytes = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut random_bytes);
@@ -419,10 +398,6 @@ impl Bolt12Payment {
 				Error::RefundCreationFailed
 			})?;
 
-		if let Some(qty) = quantity {
-			refund_builder = refund_builder.quantity(qty);
-		}
-
 		if let Some(note) = payer_note.clone() {
 			refund_builder = refund_builder.payer_note(note);
 		}
@@ -439,7 +414,6 @@ impl Bolt12Payment {
 			preimage: None,
 			secret: None,
 			payer_note: payer_note.map(|note| UntrustedString(note)),
-			quantity,
 		};
 		let payment = PaymentDetails::new(
 			payment_id,

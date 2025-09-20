@@ -199,17 +199,17 @@ interface Bolt11Payment {
 
 interface Bolt12Payment {
 	[Throws=NodeError]
-	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note);
+	PaymentId send([ByRef]Offer offer, string? payer_note);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note);
+	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, string? payer_note);
 	[Throws=NodeError]
-	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
+	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs);
 	[Throws=NodeError]
 	Offer receive_variable_amount([ByRef]string description, u32? expiry_secs);
 	[Throws=NodeError]
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
 	[Throws=NodeError]
-	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, u64? quantity, string? payer_note);
+	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, string? payer_note);
 	[Throws=NodeError]
 	Offer receive_async();
 	[Throws=NodeError]
@@ -422,8 +422,8 @@ interface PaymentKind {
 	Onchain(Txid txid, ConfirmationStatus status);
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, u64? counterparty_skimmed_fee_msat, LSPFeeLimits lsp_fee_limits);
-	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
-	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, UntrustedString? payer_note, u64? quantity);
+	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note);
+	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, UntrustedString? payer_note);
 	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
 };
 
