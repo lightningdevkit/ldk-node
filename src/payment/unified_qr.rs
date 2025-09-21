@@ -95,14 +95,14 @@ impl UnifiedQrPayment {
 
 		let amount_msats = amount_sats * 1_000;
 
-		let bolt12_offer =
-			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
-				Ok(offer) => Some(offer),
-				Err(e) => {
-					log_error!(self.logger, "Failed to create offer: {}", e);
-					None
-				},
-			};
+		let bolt12_offer = match self.bolt12_payment.receive_inner(amount_msats, description, None)
+		{
+			Ok(offer) => Some(offer),
+			Err(e) => {
+				log_error!(self.logger, "Failed to create offer: {}", e);
+				None
+			},
+		};
 
 		let invoice_description = Bolt11InvoiceDescription::Direct(
 			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
@@ -148,7 +148,7 @@ impl UnifiedQrPayment {
 
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
 			let offer = maybe_wrap(offer);
-			match self.bolt12_payment.send(&offer, None, None) {
+			match self.bolt12_payment.send(&offer, None) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
 			}
