@@ -995,6 +995,14 @@ impl Node {
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
+
+		log_info!(
+			self.logger,
+			"Attempt connection to peer {}@{}..",
+			peer_info.node_id,
+			peer_info.address
+		);
+
 		self.runtime.block_on(async move {
 			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
