@@ -199,6 +199,10 @@ pub enum Event {
 		funding_txo: OutPoint,
 	},
 	/// A channel is ready to be used.
+	///
+	/// This event is emitted when:
+	/// - A new channel has been established and is ready for use
+	/// - An existing channel has been spliced and is ready with the new funding output
 	ChannelReady {
 		/// The `channel_id` of the channel.
 		channel_id: ChannelId,
@@ -208,6 +212,14 @@ pub enum Event {
 		///
 		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
 		counterparty_node_id: Option<PublicKey>,
+		/// The outpoint of the channel's funding transaction.
+		///
+		/// This represents the channel's current funding output, which may change when the
+		/// channel is spliced. For spliced channels, this will contain the new funding output
+		/// from the confirmed splice transaction.
+		///
+		/// This will be `None` for events serialized by LDK Node v0.6.0 and prior.
+		funding_txo: Option<OutPoint>,
 	},
 	/// A channel has been closed.
 	ChannelClosed {
@@ -246,6 +258,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, channel_id, required),
 		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
+		(3, funding_txo, option),
 	},
 	(4, ChannelPending) => {
 		(0, channel_id, required),
@@ -1363,14 +1376,28 @@ where
 				}
 			},
 			LdkEvent::ChannelReady {
-				channel_id, user_channel_id, counterparty_node_id, ..
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+				funding_txo,
+				..
 			} => {
-				log_info!(
-					self.logger,
-					"Channel {} with counterparty {} ready to be used.",
-					channel_id,
-					counterparty_node_id,
-				);
+				if let Some(funding_txo) = funding_txo {
+					log_info!(
+						self.logger,
+						"Channel {} with counterparty {} ready to be used with funding_txo {}",
+						channel_id,
+						counterparty_node_id,
+						funding_txo,
+					);
+				} else {
+					log_info!(
+						self.logger,
+						"Channel {} with counterparty {} ready to be used",
+						channel_id,
+						counterparty_node_id,
+					);
+				}
 
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					liquidity_source
@@ -1382,6 +1409,7 @@ where
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
 					counterparty_node_id: Some(counterparty_node_id),
+					funding_txo,
 				};
 				match self.event_queue.add_event(event) {
 					Ok(_) => {},
@@ -1620,6 +1648,7 @@ mod tests {
 			channel_id: ChannelId([23u8; 32]),
 			user_channel_id: UserChannelId(2323),
 			counterparty_node_id: None,
+			funding_txo: None,
 		};
 		event_queue.add_event(expected_event.clone()).unwrap();
 
@@ -1656,6 +1685,7 @@ mod tests {
 			channel_id: ChannelId([23u8; 32]),
 			user_channel_id: UserChannelId(2323),
 			counterparty_node_id: None,
+			funding_txo: None,
 		};
 
 		// Check `next_event_async` won't return if the queue is empty and always rather timeout.
