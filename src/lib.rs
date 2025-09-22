@@ -110,6 +110,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::scoring::setup_background_pathfinding_scores_sync;
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::Amount;
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -132,10 +133,11 @@ use graph::NetworkGraph;
 pub use io::utils::generate_entropy_mnemonic;
 use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
-use lightning::events::bump_transaction::Wallet as LdkWallet;
+use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
@@ -1221,6 +1223,96 @@ impl Node {
 			channel_config,
 			true,
 		)
+	}
+
+	/// Add funds from the on-chain wallet into an existing channel.
+	///
+	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	pub fn splice_in(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		splice_amount_sats: u64,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
+
+			const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
+				1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
+			let funding_txo = channel_details.funding_txo.ok_or_else(|| {
+				log_error!(self.logger, "Failed to splice channel: channel not yet ready",);
+				Error::ChannelSplicingFailed
+			})?;
+			let shared_input = Input {
+				outpoint: funding_txo.into_bitcoin_outpoint(),
+				previous_utxo: bitcoin::TxOut {
+					value: Amount::from_sat(channel_details.channel_value_satoshis),
+					script_pubkey: lightning::ln::chan_utils::make_funding_redeemscript(
+						&PublicKey::from_slice(&[2; 33]).unwrap(),
+						&PublicKey::from_slice(&[2; 33]).unwrap(),
+					)
+					.to_p2wsh(),
+				},
+				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT
+					+ lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT,
+			};
+
+			let shared_output = bitcoin::TxOut {
+				value: shared_input.previous_utxo.value + Amount::from_sat(splice_amount_sats),
+				script_pubkey: lightning::ln::chan_utils::make_funding_redeemscript(
+					&PublicKey::from_slice(&[2; 33]).unwrap(),
+					&PublicKey::from_slice(&[2; 33]).unwrap(),
+				)
+				.to_p2wsh(),
+			};
+
+			let fee_rate = self.wallet.estimate_channel_funding_fee_rate();
+
+			let inputs = self
+				.wallet
+				.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
+				.map_err(|()| {
+					log_error!(
+						self.logger,
+						"Failed to splice channel: insufficient confirmed UTXOs",
+					);
+					Error::ChannelSplicingFailed
+				})?;
+
+			let contribution = SpliceContribution::SpliceIn {
+				value: Amount::from_sat(splice_amount_sats),
+				inputs,
+				change_script: None,
+			};
+
+			let funding_feerate_per_kw = fee_rate.to_sat_per_kwu().try_into().unwrap_or(u32::MAX);
+
+			self.channel_manager
+				.splice_channel(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					funding_feerate_per_kw,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id: {:?} and counterparty: {}",
+				user_channel_id,
+				counterparty_node_id
+			);
+
+			Err(Error::ChannelSplicingFailed)
+		}
 	}
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
