@@ -325,7 +325,6 @@ enum NodeError {
 
 dictionary NodeStatus {
 	boolean is_running;
-	boolean is_listening;
 	BestBlock current_best_block;
 	u64? latest_lightning_wallet_sync_timestamp;
 	u64? latest_onchain_wallet_sync_timestamp;
