@@ -437,32 +437,31 @@ pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 }
 
 pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
-	let mut tx_res = electrs.transaction_get(&txid);
-	loop {
-		if tx_res.is_ok() {
-			break;
-		}
-		tx_res = exponential_backoff_poll(|| {
-			electrs.ping().unwrap();
-			Some(electrs.transaction_get(&txid))
-		});
+	if electrs.transaction_get(&txid).is_ok() {
+		return;
 	}
+
+	exponential_backoff_poll(|| {
+		electrs.ping().unwrap();
+		electrs.transaction_get(&txid).ok()
+	});
 }
 
 pub(crate) fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
-	let mut is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
-	loop {
-		if is_spent {
-			break;
-		}
 
-		is_spent = exponential_backoff_poll(|| {
-			electrs.ping().unwrap();
-			Some(!electrs.script_get_history(&txout_script).unwrap().is_empty())
-		});
+	let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+	if is_spent {
+		return;
 	}
+
+	exponential_backoff_poll(|| {
+		electrs.ping().unwrap();
+
+		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+		is_spent.then_some(())
+	});
 }
 
 pub(crate) fn exponential_backoff_poll<T, F>(mut poll: F) -> T
