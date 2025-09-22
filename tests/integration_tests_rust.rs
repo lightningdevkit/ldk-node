@@ -837,10 +837,7 @@ fn do_connection_restart_behavior(persist: bool) {
 	let node_id_b = node_b.node_id();
 
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-
-	while !node_b.status().is_listening {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
+	assert!(node_b.status().is_listening);
 
 	node_a.connect(node_id_b, node_addr_b, persist).unwrap();
 
@@ -890,10 +887,7 @@ fn concurrent_connections_succeed() {
 
 	let node_id_b = node_b.node_id();
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-
-	while !node_b.status().is_listening {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
+	assert!(node_b.status().is_listening);
 
 	let mut handles = Vec::new();
 	for _ in 0..10 {

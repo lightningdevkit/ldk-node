@@ -167,7 +167,6 @@ use rand::Rng;
 
 use std::default::Default;
 use std::net::ToSocketAddrs;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -203,7 +202,6 @@ pub struct Node {
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	is_running: Arc<RwLock<bool>>,
-	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 }
 
@@ -305,9 +303,7 @@ impl Node {
 		if let Some(listening_addresses) = &self.config.listening_addresses {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
-			let mut stop_listen = self.stop_sender.subscribe();
 			let listening_logger = Arc::clone(&self.logger);
-			let listening_indicator = Arc::clone(&self.is_listening);
 
 			let mut bind_addrs = Vec::with_capacity(listening_addresses.len());
 
@@ -325,46 +321,62 @@ impl Node {
 				bind_addrs.extend(resolved_address);
 			}
 
-			let runtime = Arc::clone(&self.runtime);
-			self.runtime.spawn_cancellable_background_task(async move {
-				{
-				let listener =
-					tokio::net::TcpListener::bind(&*bind_addrs).await
-										.unwrap_or_else(|e| {
-											log_error!(listening_logger, "Failed to bind to listen addresses/ports - is something else already listening on it?: {}", e);
-											panic!(
-												"Failed to bind to listen address/port - is something else already listening on it?",
-												);
-										});
+			let logger = Arc::clone(&listening_logger);
+			let listeners = self.runtime.block_on(async move {
+				let mut listeners = Vec::new();
 
-				listening_indicator.store(true, Ordering::Release);
-
-				loop {
-					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
-					tokio::select! {
-						_ = stop_listen.changed() => {
-							log_debug!(
-								listening_logger,
-								"Stopping listening to inbound connections."
+				// Try to bind to all addresses
+				for addr in &*bind_addrs {
+					match tokio::net::TcpListener::bind(addr).await {
+						Ok(listener) => {
+							log_trace!(logger, "Listener bound to {}", addr);
+							listeners.push(listener);
+						},
+						Err(e) => {
+							log_error!(
+								logger,
+								"Failed to bind to {}: {} - is something else already listening?",
+								addr,
+								e
 							);
-							break;
-						}
-						res = listener.accept() => {
-							let tcp_stream = res.unwrap().0;
-							runtime.spawn_cancellable_background_task(async move {
-								lightning_net_tokio::setup_inbound(
-									Arc::clone(&peer_mgr),
-									tcp_stream.into_std().unwrap(),
-									)
-									.await;
-							});
-						}
+							return Err(Error::InvalidSocketAddress);
+						},
 					}
 				}
-				}
 
-				listening_indicator.store(false, Ordering::Release);
-			});
+				Ok(listeners)
+			})?;
+
+			for listener in listeners {
+				let logger = Arc::clone(&listening_logger);
+				let peer_mgr = Arc::clone(&peer_manager_connection_handler);
+				let mut stop_listen = self.stop_sender.subscribe();
+				let runtime = Arc::clone(&self.runtime);
+				self.runtime.spawn_cancellable_background_task(async move {
+					loop {
+						tokio::select! {
+							_ = stop_listen.changed() => {
+								log_debug!(
+									logger,
+									"Stopping listening to inbound connections."
+								);
+								break;
+							}
+							res = listener.accept() => {
+								let tcp_stream = res.unwrap().0;
+								let peer_mgr = Arc::clone(&peer_mgr);
+								runtime.spawn_cancellable_background_task(async move {
+									lightning_net_tokio::setup_inbound(
+										Arc::clone(&peer_mgr),
+										tcp_stream.into_std().unwrap(),
+										)
+										.await;
+								});
+							}
+						}
+					}
+				});
+			}
 		}
 
 		// Regularly reconnect to persisted peers.
@@ -676,7 +688,8 @@ impl Node {
 	/// Returns the status of the [`Node`].
 	pub fn status(&self) -> NodeStatus {
 		let is_running = *self.is_running.read().unwrap();
-		let is_listening = self.is_listening.load(Ordering::Acquire);
+		let is_listening =
+			is_running && self.config.listening_addresses.as_ref().map_or(false, |v| !v.is_empty());
 		let current_best_block = self.channel_manager.current_best_block().into();
 		let locked_node_metrics = self.node_metrics.read().unwrap();
 		let latest_lightning_wallet_sync_timestamp =
