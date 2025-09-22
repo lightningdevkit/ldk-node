@@ -313,6 +313,7 @@ impl Node {
 				bind_addrs.extend(resolved_address);
 			}
 
+			let runtime = Arc::clone(&self.runtime);
 			self.runtime.spawn_cancellable_background_task(async move {
 				{
 				let listener =
@@ -338,7 +339,7 @@ impl Node {
 						}
 						res = listener.accept() => {
 							let tcp_stream = res.unwrap().0;
-							tokio::spawn(async move {
+							runtime.spawn_cancellable_background_task(async move {
 								lightning_net_tokio::setup_inbound(
 									Arc::clone(&peer_mgr),
 									tcp_stream.into_std().unwrap(),
