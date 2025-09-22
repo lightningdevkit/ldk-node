@@ -1741,6 +1741,7 @@ where
 				user_channel_id,
 				counterparty_node_id,
 				abandoned_funding_txo,
+				contributed_outputs,
 				..
 			} => {
 				if let Some(funding_txo) = abandoned_funding_txo {
@@ -1758,6 +1759,17 @@ where
 						channel_id,
 						counterparty_node_id,
 					);
+				}
+
+				let tx = bitcoin::Transaction {
+					version: bitcoin::transaction::Version::TWO,
+					lock_time: bitcoin::absolute::LockTime::ZERO,
+					input: vec![],
+					output: contributed_outputs,
+				};
+				if let Err(e) = self.wallet.cancel_tx(&tx) {
+					log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
+					return Err(ReplayEvent());
 				}
 
 				let event = Event::SpliceFailed {
