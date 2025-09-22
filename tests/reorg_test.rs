@@ -1,20 +1,22 @@
 mod common;
-use std::collections::HashMap;
-
-use bitcoin::Amount;
+use bitcoin::{Amount, ScriptBuf};
 use ldk_node::payment::{PaymentDirection, PaymentKind};
 use ldk_node::{Event, LightningBalance, PendingSweepBalance};
-use proptest::prelude::prop;
-use proptest::proptest;
+use proptest::strategy::Strategy;
+use proptest::strategy::ValueTree;
+use proptest::{prelude::prop, proptest};
+use std::collections::{HashMap, HashSet};
 
 use crate::common::{
-	expect_event, generate_blocks_and_wait, invalidate_blocks, open_channel,
-	premine_and_distribute_funds, setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend,
-	TestChainSource,
+	bump_fee_and_broadcast, distribute_funds_unconfirmed, expect_event,
+	generate_block_and_insert_transactions, generate_blocks_and_wait, invalidate_blocks,
+	open_channel, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, TestChainSource,
 };
 
 proptest! {
 	#![proptest_config(proptest::test_runner::Config::with_cases(5))]
+
 	#[test]
 	fn reorg_test(reorg_depth in 1..=6usize, force_close in prop::bool::ANY) {
 		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -184,5 +186,99 @@ proptest! {
 
 			assert_eq!(node.next_event(), None);
 		});
+	}
+
+	#[test]
+	fn test_reorg_rbf(
+		reorg_depth in 2..=5usize,
+		quantity_rbf in 2..=6usize,
+	) {
+		let mut runner = proptest::test_runner::TestRunner::default();
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+		let chain_source_bitcoind = TestChainSource::BitcoindRpcSync(&bitcoind);
+		let chain_source_electrsd = TestChainSource::Electrum(&electrsd);
+		let chain_source_esplora = TestChainSource::Esplora(&electrsd);
+
+		let anchor_channels = true;
+		let nodes = vec![
+			setup_node(&chain_source_bitcoind, anchor_channels),
+			setup_node(&chain_source_electrsd, anchor_channels),
+			setup_node(&chain_source_esplora, anchor_channels),
+		];
+
+		let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
+
+		let mut amount_sat = 2_100_000;
+		let all_addrs =
+			nodes.iter().map(|node| node.onchain_payment().new_address().unwrap()).collect::<Vec<_>>();
+		let scripts_buf: HashSet<ScriptBuf> =
+			all_addrs.iter().map(|addr| addr.script_pubkey()).collect();
+
+		premine_blocks(bitcoind, electrs);
+		generate_blocks_and_wait(bitcoind, electrs, reorg_depth);
+		let txid = distribute_funds_unconfirmed(bitcoind, electrs, all_addrs, Amount::from_sat(amount_sat));
+
+		let mut is_spendable = false;
+		macro_rules! verify_wallet_balances_and_transactions {
+			($expected_balance_sat: expr, $expected_size_list_payments: expr) => {
+				let spend_balance = if is_spendable { $expected_balance_sat } else { 0 };
+				for node in &nodes {
+					node.sync_wallets().unwrap();
+					let balances = node.list_balances();
+					assert_eq!(balances.total_onchain_balance_sats, $expected_balance_sat);
+					assert_eq!(balances.spendable_onchain_balance_sats, spend_balance);
+				}
+			};
+		}
+
+		let mut tx_to_amount = HashMap::new();
+		let (mut tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+		tx_to_amount.insert(tx.clone(), amount_sat);
+		generate_block_and_insert_transactions(bitcoind, electrs, &[]);
+		verify_wallet_balances_and_transactions!(amount_sat, expected_size_list_payments);
+		for _ in 0..quantity_rbf {
+			let is_alterable_value = prop::bool::ANY.new_tree(&mut runner).unwrap().current();
+			if is_alterable_value {
+				let value_sat = (5000..20000u64).new_tree(&mut runner).unwrap().current();
+				let is_acrent_value = prop::bool::ANY.new_tree(&mut runner).unwrap().current();
+				amount_sat = if is_acrent_value {amount_sat + value_sat} else {amount_sat - value_sat};
+				for output in &mut tx.output {
+					if scripts_buf.contains(&output.script_pubkey) {
+						output.value = Amount::from_sat(amount_sat);
+					}
+				}
+				let fee_sat = Amount::from_sat(scripts_buf.len() as u64 * value_sat);
+				if is_acrent_value {
+					tx.output[fee_output_index].value -= fee_sat;
+				} else {
+					tx.output[fee_output_index].value += fee_sat;
+				}
+
+			}
+
+			tx = bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_spendable);
+			tx_to_amount.insert(tx.clone(), amount_sat);
+
+			verify_wallet_balances_and_transactions!(amount_sat, expected_size_list_payments);
+		}
+
+		is_spendable = true;
+		let index_tx_confirm = (0..tx_to_amount.len() - 1).new_tree(&mut runner).unwrap().current();
+		let tx_to_confirm = tx_to_amount.iter().nth(index_tx_confirm).unwrap();
+		generate_block_and_insert_transactions(bitcoind, electrs, &[tx_to_confirm.0.clone()]);
+		generate_blocks_and_wait(bitcoind, electrs, reorg_depth - 1);
+		amount_sat = *tx_to_confirm.1;
+		verify_wallet_balances_and_transactions!(amount_sat, expected_size_list_payments);
+
+		invalidate_blocks(bitcoind, reorg_depth);
+		generate_block_and_insert_transactions(bitcoind, electrs, &[]);
+
+		let index_tx_confirm = (0..tx_to_amount.len() - 1).new_tree(&mut runner).unwrap().current();
+		let tx_to_confirm = tx_to_amount.iter().nth(index_tx_confirm).unwrap();
+		generate_block_and_insert_transactions(bitcoind, electrs, &[tx_to_confirm.0.clone()]);
+		amount_sat = *tx_to_confirm.1;
+		generate_blocks_and_wait(bitcoind, electrs, 5);
+		verify_wallet_balances_and_transactions!(amount_sat, expected_size_list_payments);
 	}
 }
