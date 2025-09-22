@@ -14,18 +14,26 @@ use std::boxed::Box;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
+use std::iter;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
-use bitcoin::hashes::hex::FromHex;
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
+use bitcoin::absolute::LockTime;
+use bitcoin::block::{Header, Version as BlockVersion};
+use bitcoin::hashes::{hex::FromHex, sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
+use bitcoin::merkle_tree::calculate_root;
+use bitcoin::script::Builder as BuilderScriptBitcoin;
 use bitcoin::{
-	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
+	opcodes::all::OP_RETURN, transaction::Version, Address, Amount, Block, BlockHash,
+	CompactTarget, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxMerkleNode, Txid,
+	Witness, Wtxid,
 };
-use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
+use electrsd::corepc_node::{
+	Client as BitcoindClient, Node as BitcoinD, TemplateRequest, TemplateRules,
+};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
@@ -394,6 +402,116 @@ pub(crate) fn setup_node_for_async_payments(
 	node
 }
 
+pub(crate) fn generate_block_and_insert_transactions<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, txs: &[Transaction],
+) {
+	let _ = bitcoind.create_wallet("ldk_node_test");
+	let _ = bitcoind.load_wallet("ldk_node_test");
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let cur_height = blockchain_info.blocks;
+	let address = bitcoind.new_address().expect("failed to get new address");
+
+	let request_block_template = TemplateRequest { rules: vec![TemplateRules::Segwit] };
+	let bt =
+		bitcoind.get_block_template(&request_block_template).expect("failed to get block template");
+
+	// === BIP 141: Witness Commitment Calculation ===
+	let witness_root = calculate_root(
+		iter::once(Wtxid::all_zeros()).chain(txs.iter().map(|tx| tx.compute_wtxid())),
+	)
+	.map(|root| TxMerkleNode::from_byte_array(root.to_byte_array()))
+	.unwrap();
+
+	// BIP 141: Witness reserved value (32 zero bytes)
+	let witness_reserved_value = [0u8; 32];
+
+	// === Coinbase Transaction Construction ===
+	// BIP 141: Coinbase witness contains the witness reserved value
+	let coinbase_witness = Witness::from(vec![witness_reserved_value.to_vec()]);
+
+	// BIP 141: Calculate commitment hash = Double-SHA256(witness root || witness reserved value)
+	let commitment_hash =
+		Sha256d::hash(&[witness_root.to_byte_array(), witness_reserved_value].concat());
+
+	// Format: OP_RETURN + OP_PUSHBYTES_36 + 0xaa21a9ed + 32-byte commitment hash
+	let witness_commitment_script = BuilderScriptBitcoin::new()
+		.push_opcode(OP_RETURN)
+		.push_slice(&{
+			let mut data = [0u8; 36];
+			data[..4].copy_from_slice(&[0xaa, 0x21, 0xa9, 0xed]);
+			data[4..].copy_from_slice(&commitment_hash.to_byte_array());
+			data
+		})
+		.into_script();
+
+	// BIP 34: Block height in coinbase input script
+	let block_height = bt.height;
+	let height_script = BuilderScriptBitcoin::new()
+		.push_int(block_height as i64) // BIP 34: block height as first item
+		.push_int(rand::random()) // Random nonce for uniqueness
+		.into_script();
+
+	// Do not use the coinbase value from the block template.
+	// The template may include transactions not actually mined, so fees may be incorrect.
+	let coinbase_output_value = 1_250_000_000;
+
+	let coinbase_tx = Transaction {
+		version: Version::ONE,
+		lock_time: LockTime::from_height(0).unwrap(),
+		input: vec![bitcoin::TxIn {
+			previous_output: OutPoint::default(), // Null outpoint for coinbase
+			script_sig: height_script,            // BIP 34: height + random data
+			sequence: Sequence::default(),
+			witness: coinbase_witness, // BIP 141: witness reserved value
+		}],
+		output: vec![
+			// Coinbase reward output
+			bitcoin::TxOut {
+				value: Amount::from_sat(coinbase_output_value),
+				script_pubkey: address.script_pubkey(),
+			},
+			// BIP 141: Witness commitment output (must be last output)
+			bitcoin::TxOut { value: Amount::ZERO, script_pubkey: witness_commitment_script },
+		],
+	};
+
+	// === Block Construction ===
+	let bits: [u8; 4] = Vec::from_hex(&bt.bits).unwrap().try_into().expect("bits must be 4 bytes");
+	let prev_hash_block = BlockHash::from_str(&bt.previous_block_hash).expect("invalid prev hash");
+
+	let txdata = [coinbase_tx].into_iter().chain(txs.iter().cloned()).collect::<Vec<_>>();
+	let mut block = Block {
+		header: Header {
+			version: BlockVersion::default(),
+			prev_blockhash: prev_hash_block,
+			merkle_root: TxMerkleNode::all_zeros(), // Will be calculated below
+			time: Ord::max(bt.min_time, UNIX_EPOCH.elapsed().unwrap().as_secs() as u32),
+			bits: CompactTarget::from_consensus(u32::from_be_bytes(bits)),
+			nonce: 0,
+		},
+		txdata,
+	};
+
+	block.header.merkle_root = block.compute_merkle_root().expect("must compute");
+
+	for nonce in 0..=u32::MAX {
+		block.header.nonce = nonce;
+		if block.header.target().is_met_by(block.block_hash()) {
+			break;
+		}
+	}
+
+	match bitcoind.submit_block(&block) {
+		Ok(_) => {},
+		Err(e) => panic!("Failed to submit block: {:?}", e),
+	}
+	wait_for_block(electrs, cur_height as usize + 1);
+
+	txs.iter().for_each(|tx| {
+		wait_for_tx(electrs, tx.compute_txid());
+	});
+}
+
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
@@ -575,11 +693,13 @@ pub(crate) fn bump_fee_and_broadcast<E: ElectrumApi>(
 		let tx_bytes = Vec::<u8>::from_hex(&signed_result.hex).unwrap();
 		tx = bitcoin::consensus::encode::deserialize::<Transaction>(&tx_bytes).unwrap();
 
+		if is_insert_block {
+			generate_block_and_insert_transactions(bitcoind, electrs, &[tx.clone()]);
+			return tx;
+		}
+
 		match bitcoind.send_raw_transaction(&tx) {
 			Ok(res) => {
-				if is_insert_block {
-					generate_blocks_and_wait(bitcoind, electrs, 1);
-				}
 				let new_txid: Txid = res.0.parse().unwrap();
 				wait_for_tx(electrs, new_txid);
 				return tx;

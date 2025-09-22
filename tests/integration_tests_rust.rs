@@ -20,10 +20,11 @@ use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
-	generate_blocks_and_wait, open_channel, open_channel_push_amt, premine_and_distribute_funds,
-	premine_blocks, prepare_rbf, random_config, random_listening_addresses,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_for_async_payments,
-	setup_node_from_config, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	generate_block_and_insert_transactions, generate_blocks_and_wait, open_channel,
+	open_channel_push_amt, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	random_config, random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder,
+	setup_node, setup_node_for_async_payments, setup_node_from_config, setup_two_nodes,
+	wait_for_tx, TestChainSource, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -669,19 +670,24 @@ fn onchain_wallet_recovery() {
 }
 
 #[test]
-fn test_rbf_via_mempool() {
-	run_rbf_test(false);
+fn test_rbf_only_in_mempool() {
+	run_rbf_test(false, false);
 }
 
 #[test]
-fn test_rbf_via_direct_block_insertion() {
-	run_rbf_test(true);
+fn test_rbf_direct_block_insertion_rbf_tx() {
+	run_rbf_test(true, false);
+}
+
+#[test]
+fn test_rbf_direct_block_insertion_original_tx() {
+	run_rbf_test(false, true);
 }
 
 // `is_insert_block`:
 // - `true`: transaction is mined immediately (no mempool), testing confirmed-Tx handling.
 // - `false`: transaction stays in mempool until confirmation, testing unconfirmed-Tx handling.
-fn run_rbf_test(is_insert_block: bool) {
+fn run_rbf_test(is_insert_block: bool, is_insertion_original_tx: bool) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source_bitcoind = TestChainSource::BitcoindRpcSync(&bitcoind);
 	let chain_source_electrsd = TestChainSource::Electrum(&electrsd);
@@ -724,15 +730,29 @@ fn run_rbf_test(is_insert_block: bool) {
 		};
 	}
 
+	macro_rules! validate_total_onchain_balance {
+		($expected_balance_sat: expr) => {
+			for node in &nodes {
+				node.sync_wallets().unwrap();
+				let balances = node.list_balances();
+				assert_eq!(balances.total_onchain_balance_sats, $expected_balance_sat);
+			}
+		};
+	}
+
 	let scripts_buf: HashSet<ScriptBuf> =
 		all_addrs.iter().map(|addr| addr.script_pubkey()).collect();
 	let mut tx;
 	let mut fee_output_index;
 
-	// Modify the output to the nodes
+	let mut final_amount_sat = 0;
+	let mut original_tx;
+
+	// Step 1: Bump fee and change output address
 	distribute_funds_all_nodes!();
 	validate_balances!(amount_sat, false);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	tx.output.iter_mut().for_each(|output| {
 		if scripts_buf.contains(&output.script_pubkey) {
 			let new_addr = bitcoind.new_address().unwrap();
@@ -740,42 +760,68 @@ fn run_rbf_test(is_insert_block: bool) {
 		}
 	});
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	validate_balances!(0, is_insert_block);
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
+	if is_insertion_original_tx {
+		final_amount_sat += amount_sat;
+	}
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
 
-	// Not modifying the output scripts, but still bumping the fee.
+	// Step 2: Bump fee only
 	distribute_funds_all_nodes!();
-	validate_balances!(amount_sat, false);
+	validate_total_onchain_balance!(amount_sat + final_amount_sat);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	validate_balances!(amount_sat, is_insert_block);
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
+	final_amount_sat += amount_sat;
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
 
-	let mut final_amount_sat = amount_sat * 2;
+	// Step 3: Increase output value
 	let value_sat = 21_000;
-
-	// Increase the value of the nodes' outputs
 	distribute_funds_all_nodes!();
+	validate_total_onchain_balance!(amount_sat + final_amount_sat);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	tx.output.iter_mut().for_each(|output| {
 		if scripts_buf.contains(&output.script_pubkey) {
 			output.value = Amount::from_sat(output.value.to_sat() + value_sat);
 		}
 	});
+	tx.output[fee_output_index].value -= Amount::from_sat(scripts_buf.len() as u64 * value_sat);
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	final_amount_sat += value_sat;
-	validate_balances!(final_amount_sat, is_insert_block);
-
-	// Decreases the value of the nodes' outputs
-	distribute_funds_all_nodes!();
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
 	final_amount_sat += amount_sat;
+	if !is_insertion_original_tx {
+		final_amount_sat += value_sat;
+	}
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
+
+	// Step 4: Decrease output value
+	distribute_funds_all_nodes!();
+	validate_total_onchain_balance!(amount_sat + final_amount_sat);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	tx.output.iter_mut().for_each(|output| {
 		if scripts_buf.contains(&output.script_pubkey) {
 			output.value = Amount::from_sat(output.value.to_sat() - value_sat);
 		}
 	});
+	tx.output[fee_output_index].value += Amount::from_sat(scripts_buf.len() as u64 * value_sat);
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	final_amount_sat -= value_sat;
-	validate_balances!(final_amount_sat, is_insert_block);
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
+	final_amount_sat += amount_sat;
+	if !is_insertion_original_tx {
+		final_amount_sat -= value_sat;
+	}
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
 
 	if !is_insert_block {
 		generate_blocks_and_wait(bitcoind, electrs, 1);
