@@ -17,7 +17,7 @@ use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, Payme
 use crate::types::{ChannelManager, PaymentStore};
 
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
 use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
@@ -102,15 +102,19 @@ impl Bolt12Payment {
 			},
 		};
 
-		match self.channel_manager.pay_for_offer(
-			&offer,
-			quantity,
-			None,
-			payer_note.clone(),
-			payment_id,
+		let params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config,
-		) {
+		};
+		let res = if let Some(quantity) = quantity {
+			self.channel_manager
+				.pay_for_offer_with_quantity(&offer, None, payment_id, params, quantity)
+		} else {
+			self.channel_manager.pay_for_offer(&offer, None, payment_id, params)
+		};
+
+		match res {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
 				log_info!(
@@ -209,15 +213,24 @@ impl Bolt12Payment {
 			return Err(Error::InvalidAmount);
 		}
 
-		match self.channel_manager.pay_for_offer(
-			&offer,
-			quantity,
-			Some(amount_msat),
-			payer_note.clone(),
-			payment_id,
+		let params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config,
-		) {
+		};
+		let res = if let Some(quantity) = quantity {
+			self.channel_manager.pay_for_offer_with_quantity(
+				&offer,
+				Some(amount_msat),
+				payment_id,
+				params,
+				quantity,
+			)
+		} else {
+			self.channel_manager.pay_for_offer(&offer, Some(amount_msat), payment_id, params)
+		};
+
+		match res {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
 				log_info!(
