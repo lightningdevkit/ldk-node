@@ -1059,50 +1059,14 @@ impl Node {
 		let con_addr = peer_info.address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
-		let cur_anchor_reserve_sats =
-			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-		let spendable_amount_sats =
-			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
-
-		// Fail early if we have less than the channel value available.
-		if spendable_amount_sats < channel_amount_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, channel_amount_sats
-			);
-			return Err(Error::InsufficientFunds);
-		}
-
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		self.runtime.block_on(async move {
 			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
-		// Fail if we have less than the channel value + anchor reserve available (if applicable).
-		let init_features = self
-			.peer_manager
-			.peer_by_node_id(&node_id)
-			.ok_or(Error::ConnectionFailed)?
-			.init_features;
-		let required_funds_sats = channel_amount_sats
-			+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-				if init_features.requires_anchors_zero_fee_htlc_tx()
-					&& !c.trusted_peers_no_reserve.contains(&node_id)
-				{
-					c.per_channel_reserve_sats
-				} else {
-					0
-				}
-			});
-
-		if spendable_amount_sats < required_funds_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, required_funds_sats
-			);
-			return Err(Error::InsufficientFunds);
-		}
+		// Check funds availability after connection (includes anchor reserve calculation)
+		self.check_sufficient_funds_for_channel(channel_amount_sats, &node_id)?;
 
 		let mut user_config = default_user_config(&self.config);
 		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
@@ -1141,6 +1105,51 @@ impl Node {
 				Err(Error::ChannelCreationFailed)
 			},
 		}
+	}
+
+	fn check_sufficient_funds_for_channel(
+		&self, amount_sats: u64, peer_node_id: &PublicKey,
+	) -> Result<(), Error> {
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let spendable_amount_sats =
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+
+		// Fail early if we have less than the channel value available.
+		if spendable_amount_sats < amount_sats {
+			log_error!(self.logger,
+				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+				spendable_amount_sats, amount_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		// Fail if we have less than the channel value + anchor reserve available (if applicable).
+		let init_features = self
+			.peer_manager
+			.peer_by_node_id(peer_node_id)
+			.ok_or(Error::ConnectionFailed)?
+			.init_features;
+		let required_funds_sats = amount_sats
+			+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
+				if init_features.requires_anchors_zero_fee_htlc_tx()
+					&& !c.trusted_peers_no_reserve.contains(peer_node_id)
+				{
+					c.per_channel_reserve_sats
+				} else {
+					0
+				}
+			});
+
+		if spendable_amount_sats < required_funds_sats {
+			log_error!(self.logger,
+				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+				spendable_amount_sats, required_funds_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		Ok(())
 	}
 
 	/// Connect to a node and open a new unannounced channel.
