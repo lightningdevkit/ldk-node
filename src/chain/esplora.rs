@@ -144,12 +144,22 @@ impl EsploraChainSource {
 						},
 						Err(e) => match *e {
 							esplora_client::Error::Reqwest(he) => {
-								log_error!(
-									self.logger,
-									"{} of on-chain wallet failed due to HTTP connection error: {}",
-									if incremental_sync { "Incremental sync" } else { "Sync" },
-									he
-								);
+								if let Some(status_code) = he.status() {
+									log_error!(
+										self.logger,
+										"{} of on-chain wallet failed due to HTTP {} error: {}",
+										if incremental_sync { "Incremental sync" } else { "Sync" },
+										status_code,
+										he,
+									);
+								} else {
+									log_error!(
+										self.logger,
+										"{} of on-chain wallet failed due to HTTP error: {}",
+										if incremental_sync { "Incremental sync" } else { "Sync" },
+										he,
+									);
+								}
 								Err(Error::WalletOperationFailed)
 							},
 							_ => {
