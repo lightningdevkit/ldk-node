@@ -141,6 +141,8 @@ interface Node {
 	[Throws=NodeError]
 	UserChannelId open_announced_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
 	[Throws=NodeError]
+	void splice_in([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, u64 splice_amount_sats);
+	[Throws=NodeError]
 	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
 	void force_close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, string? reason);
@@ -281,6 +283,7 @@ enum NodeError {
 	"ProbeSendingFailed",
 	"ChannelCreationFailed",
 	"ChannelClosingFailed",
+	"ChannelSplicingFailed",
 	"ChannelConfigUpdateFailed",
 	"PersistenceFailed",
 	"FeerateEstimationUpdateFailed",
