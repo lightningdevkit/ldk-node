@@ -130,6 +130,7 @@ interface Node {
 	OnchainPayment onchain_payment();
 	UnifiedQrPayment unified_qr_payment();
 	LSPS1Liquidity lsps1_liquidity();
+	LSPS5Liquidity lsps5_liquidity();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
@@ -264,6 +265,15 @@ interface LSPS1Liquidity {
 	LSPS1OrderStatus check_order_status(LSPS1OrderId order_id);
 };
 
+interface LSPS5Liquidity {
+	[Throws=NodeError]
+	LSPS5SetWebhookResponse set_webhook(string app_name, string webhook_url);
+	[Throws=NodeError]
+	LSPS5ListWebhooksResponse list_webhooks();
+	[Throws=NodeError]
+	LSPS5RemoveWebhookResponse remove_webhook(string app_name);
+};
+
 [Error]
 enum NodeError {
 	"AlreadyRunning",
@@ -320,6 +330,8 @@ enum NodeError {
 	"LiquidityFeeTooHigh",
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
+	"LiquiditySetWebhookFailed",
+	"LiquidityRemoveWebhookFailed",
 };
 
 dictionary NodeStatus {
@@ -529,6 +541,20 @@ enum LSPS1PaymentState {
 	"ExpectPayment",
 	"Paid",
 	"Refunded",
+};
+
+dictionary LSPS5SetWebhookResponse {
+	u32 num_webhooks;
+	u32 max_webhooks;
+	boolean no_change;
+};
+
+dictionary LSPS5ListWebhooksResponse {
+	sequence<string> app_names;
+	u32 max_webhooks;
+};
+
+dictionary LSPS5RemoveWebhookResponse {
 };
 
 [NonExhaustive]

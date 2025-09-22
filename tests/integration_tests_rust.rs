@@ -20,7 +20,7 @@ use common::{
 };
 
 use ldk_node::config::EsploraSyncConfig;
-use ldk_node::liquidity::LSPS2ServiceConfig;
+use ldk_node::liquidity::{HttpClient, HttpClientError, LSPS2ServiceConfig, LSPS5ServiceConfig};
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
@@ -33,6 +33,7 @@ use lightning::routing::router::RouteParametersConfig;
 use lightning::util::persist::KVStoreSync;
 
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lightning_liquidity::lsps5::msgs::SetWebhookResponse;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use bitcoin::address::NetworkUnchecked;
@@ -41,9 +42,42 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf};
 use log::LevelFilter;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Mock HTTP client for testing that captures all requests.
+#[derive(Debug)]
+pub struct MockHttpClient {
+	/// Vector of captured requests as (url, headers, body) tuples.
+	pub requests: Arc<Mutex<Vec<(String, HashMap<String, String>, String)>>>,
+}
+
+impl MockHttpClient {
+	/// Create a new mock HTTP client.
+	pub fn new() -> Self {
+		Self { requests: Arc::new(Mutex::new(Vec::new())) }
+	}
+
+	/// Get all captured requests.
+	pub fn get_requests(&self) -> Vec<(String, HashMap<String, String>, String)> {
+		self.requests.lock().unwrap().clone()
+	}
+
+	/// Check if a request was made to a specific URL.
+	pub fn has_request_to(&self, url: &str) -> bool {
+		self.requests.lock().unwrap().iter().any(|(req_url, _, _)| req_url == url)
+	}
+}
+
+impl HttpClient for MockHttpClient {
+	fn post(
+		&self, url: &str, headers: &HashMap<String, String>, body: &str,
+	) -> Result<(), HttpClientError> {
+		self.requests.lock().unwrap().push((url.to_string(), headers.clone(), body.to_string()));
+		Ok(())
+	}
+}
 
 #[test]
 fn channel_full_cycle() {
@@ -1721,6 +1755,140 @@ fn lsps2_client_service_integration() {
 
 	expect_event!(payer_node, PaymentFailed);
 	assert_eq!(client_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+}
+
+#[test]
+fn lsps5_webhook_flow() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	let service_config = random_config(true);
+	let mock_http_client = Arc::new(MockHttpClient::new());
+	let mock_http_client_for_test = Arc::clone(&mock_http_client);
+
+	let lsps5_service_config = LSPS5ServiceConfig::with_http_client(5, mock_http_client);
+
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.set_liquidity_provider_lsps5(lsps5_service_config);
+	let service_node = service_builder.build().unwrap();
+	service_node.start().unwrap();
+
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	client_builder.set_liquidity_source_lsps5(service_node_id, service_addr);
+	let client_node = client_builder.build().unwrap();
+	client_node.start().unwrap();
+
+	let service_onchain_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_onchain_addr = client_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_onchain_addr, client_onchain_addr],
+		Amount::from_sat(5_000_000),
+	);
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+
+	open_channel(&client_node, &service_node, 1_000_000, false, &electrsd);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+
+	let app_name = "walletapp".to_string();
+	let webhook_url = "https://www.whatever.com/webhook".to_string();
+	let client_lsps5_liquidity = client_node.lsps5_liquidity();
+	let service_lsps5_liquidity = service_node.lsps5_liquidity();
+	let registration_result =
+		client_lsps5_liquidity.set_webhook(app_name.clone(), webhook_url.clone());
+
+	let registration: SetWebhookResponse = registration_result.unwrap();
+
+	assert_eq!(registration.num_webhooks, 1);
+	assert_eq!(registration.max_webhooks, 5);
+	assert!(!registration.no_change);
+
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	{
+		let captured_requests = mock_http_client_for_test.get_requests();
+
+		assert_eq!(
+			captured_requests.len(),
+			1,
+			"Expected exactly 1 webhook request after registration"
+		);
+
+		let (url, headers, body) = &captured_requests[0];
+
+		assert_eq!(url, &webhook_url, "Webhook URL should match the registered URL");
+		assert!(headers.contains_key("Content-Type"), "Should have Content-Type header");
+		assert_eq!(
+			headers.get("Content-Type").unwrap(),
+			"application/json",
+			"Content-Type should be application/json"
+		);
+		assert!(headers.contains_key("x-lsps5-timestamp"), "Should have x-lsps5-timestamp header");
+		assert!(headers.contains_key("x-lsps5-signature"), "Should have x-lsps5-signature header");
+
+		let parsed_body: serde_json::Value =
+			serde_json::from_str(body).expect("Body should be valid JSON");
+		assert_eq!(
+			parsed_body.get("jsonrpc"),
+			Some(&serde_json::Value::String("2.0".to_string())),
+			"Should have jsonrpc 2.0"
+		);
+		assert_eq!(
+			parsed_body.get("method"),
+			Some(&serde_json::Value::String("lsps5.webhook_registered".to_string())),
+			"Method should be lsps5.webhook_registered"
+		);
+		assert!(parsed_body.get("params").is_some(), "Should have params object");
+	}
+
+	let list = client_lsps5_liquidity.list_webhooks().unwrap();
+	assert_eq!(
+		vec![app_name.clone()],
+		list.app_names.into_iter().map(|s| s.to_string()).collect::<Vec<_>>()
+	);
+	assert_eq!(list.max_webhooks, 5);
+
+	service_lsps5_liquidity.notify_payment_incoming(client_node.node_id()).unwrap();
+
+	std::thread::sleep(std::time::Duration::from_secs(3));
+
+	{
+		let captured_requests = mock_http_client_for_test.get_requests();
+
+		assert!(captured_requests.len() == 2, "Should have at least the registration webhook");
+
+		let (url, _headers, body) = &captured_requests[1];
+		assert_eq!(url, &webhook_url, "second webhook URL should match the registered URL");
+
+		let parsed_body: serde_json::Value =
+			serde_json::from_str(body).expect("Body should be valid JSON");
+		assert_eq!(
+			parsed_body.get("method"),
+			Some(&serde_json::Value::String("lsps5.payment_incoming".to_string())),
+			"second webhook should be payment_incoming"
+		);
+	}
+
+	let _ = client_lsps5_liquidity.remove_webhook(app_name.clone()).unwrap();
+
+	let list_after = client_lsps5_liquidity.list_webhooks().unwrap();
+	assert!(list_after.app_names.is_empty());
 }
 
 #[test]

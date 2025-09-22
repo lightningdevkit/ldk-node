@@ -172,6 +172,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "uniffi")]
+use crate::liquidity::{
+	LSPS5Liquidity, LSPS5ListWebhooksResponse, LSPS5RemoveWebhookResponse, LSPS5SetWebhookResponse,
+};
+
+#[cfg(not(feature = "uniffi"))]
+use crate::liquidity::LSPS5Liquidity;
+
+#[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
 
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
@@ -952,6 +960,32 @@ impl Node {
 		Arc::new(LSPS1Liquidity::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a liquidity handler allowing to handle webhooks and notifications via the [bLIP-55 / LSPS5] protocol.
+	///
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	#[cfg(not(feature = "uniffi"))]
+	pub fn lsps5_liquidity(&self) -> LSPS5Liquidity {
+		LSPS5Liquidity::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
+			Arc::clone(&self.logger),
+		)
+	}
+
+	/// Returns a liquidity handler allowing to handle webhooks and notifications via the [bLIP-55 / LSPS5] protocol.
+	///
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	#[cfg(feature = "uniffi")]
+	pub fn lsps5_liquidity(&self) -> Arc<LSPS5Liquidity> {
+		Arc::new(LSPS5Liquidity::new(
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.logger),
