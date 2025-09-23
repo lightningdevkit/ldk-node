@@ -195,7 +195,7 @@ pub(crate) fn random_storage_path() -> PathBuf {
 
 pub(crate) fn random_port() -> u16 {
 	let mut rng = thread_rng();
-	rng.gen_range(5000..65535)
+	rng.gen_range(5000..32768)
 }
 
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
