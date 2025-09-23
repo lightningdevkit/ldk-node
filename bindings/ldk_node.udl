@@ -201,7 +201,7 @@ interface Bolt12Payment {
 	[Throws=NodeError]
 	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note);
+	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, HumanReadableName? hrn);
 	[Throws=NodeError]
 	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
@@ -320,6 +320,7 @@ enum NodeError {
 	"LiquidityFeeTooHigh",
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
+	"HrnParsingFailed",
 };
 
 dictionary NodeStatus {
@@ -773,6 +774,13 @@ interface Offer {
 	sequence<u8>? metadata();
 	u64? absolute_expiry_seconds();
 	PublicKey? issuer_signing_pubkey();
+};
+
+interface HumanReadableName {
+	[Throws=NodeError, Name=from_encoded]
+	constructor([ByRef] string encoded);
+	string user();
+	string domain();
 };
 
 [Traits=(Debug, Display, Eq)]

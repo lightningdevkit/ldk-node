@@ -23,6 +23,7 @@ use crate::Config;
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
+use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
 use bip21::de::ParamKind;
@@ -199,8 +200,12 @@ impl UnifiedPayment {
 			resolved.methods().iter().find(|m| matches!(m, PaymentMethod::LightningBolt12(_)))
 		{
 			let offer = maybe_wrap(offer.clone());
-			let payment_result = if let Some(amount_msat) = amount_msat {
-				self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None)
+			
+			let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+				let hrn = maybe_wrap(hrn.clone());
+				self.bolt12_payment.send_using_amount(&offer, amount_msat.unwrap_or(0), None, None, Some(hrn))
+			} else if let Some(amount_msat) = amount_msat {
+				self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, None)
 			} else {
 				self.bolt12_payment.send(&offer, None, None)
 			}
