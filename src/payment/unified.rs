@@ -25,6 +25,7 @@ use std::vec::IntoIter;
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
+use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
@@ -199,55 +200,65 @@ impl UnifiedPayment {
 			},
 		};
 
-		if let Some(PaymentMethod::LightningBolt12(offer)) =
-			resolved.methods().iter().find(|m| matches!(m, PaymentMethod::LightningBolt12(_)))
-		{
-			let offer = maybe_wrap(offer.clone());
-			let payment_result = if let Some(amount_msat) = amount_msat {
-				self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
-			} else {
-				self.bolt12_payment.send(&offer, None, None, route_parameters)
+		let mut sorted_payment_methods = resolved.methods().to_vec();
+		sorted_payment_methods.sort_by_key(|method| match method {
+			PaymentMethod::LightningBolt12(_) => 0,
+			PaymentMethod::LightningBolt11(_) => 1,
+			PaymentMethod::OnChain(_) => 2,
+		});
+
+		for method in sorted_payment_methods {
+			match method {
+				PaymentMethod::LightningBolt12(offer) => {
+					let offer = maybe_wrap(offer.clone());
+
+					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
+						let hrn = maybe_wrap(hrn.clone());
+						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
+					} else if let Some(amount_msat) = amount_msat {
+						self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
+					} else {
+						self.bolt12_payment.send(&offer, None, None, route_parameters)
+					}
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
+						e
+					});
+
+					if let Ok(payment_id) = payment_result {
+						return Ok(UnifiedPaymentResult::Bolt12 { payment_id });
+					}
+				},
+				PaymentMethod::LightningBolt11(invoice) => {
+					let invoice = maybe_wrap(invoice.clone());
+					let payment_result = self.bolt11_invoice.send(&invoice, route_parameters)
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
+							e
+						});
+
+					if let Ok(payment_id) = payment_result {
+						return Ok(UnifiedPaymentResult::Bolt11 { payment_id });
+					}
+				},
+				PaymentMethod::OnChain(address) => {
+					let amount = resolved.onchain_payment_amount().ok_or_else(|| {
+						log_error!(self.logger, "No amount specified. Aborting the payment.");
+						Error::InvalidAmount
+					})?;
+
+					let amt_sats = amount.sats().map_err(|_| {
+						log_error!(
+							self.logger,
+							"Amount in sats returned an error. Aborting the payment."
+						);
+						Error::InvalidAmount
+					})?;
+
+					let txid = self.onchain_payment.send_to_address(&address, amt_sats, None)?;
+					return Ok(UnifiedPaymentResult::Onchain { txid });
+				},
 			}
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
-				e
-			});
-
-			if let Ok(payment_id) = payment_result {
-				return Ok(UnifiedPaymentResult::Bolt12 { payment_id });
-			}
-		}
-
-		if let Some(PaymentMethod::LightningBolt11(invoice)) =
-			resolved.methods().iter().find(|m| matches!(m, PaymentMethod::LightningBolt11(_)))
-		{
-			let invoice = maybe_wrap(invoice.clone());
-			let payment_result = self.bolt11_invoice.send(&invoice, route_parameters)
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
-					e
-				});
-
-			if let Ok(payment_id) = payment_result {
-				return Ok(UnifiedPaymentResult::Bolt11 { payment_id });
-			}
-		}
-
-		if let Some(PaymentMethod::OnChain(address)) =
-			resolved.methods().iter().find(|m| matches!(m, PaymentMethod::OnChain(_)))
-		{
-			let amount = resolved.onchain_payment_amount().ok_or_else(|| {
-				log_error!(self.logger, "No amount specified. Aborting the payment.");
-				Error::InvalidAmount
-			})?;
-
-			let amt_sats = amount.sats().map_err(|_| {
-				log_error!(self.logger, "Amount in sats returned an error. Aborting the payment.");
-				Error::InvalidAmount
-			})?;
-
-			let txid = self.onchain_payment.send_to_address(&address, amt_sats, None)?;
-			return Ok(UnifiedPaymentResult::Onchain { txid });
 		}
 		log_error!(self.logger, "Payable methods not found in URI");
 		Err(Error::PaymentSendingFailed)
