@@ -1023,7 +1023,7 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	assert!(node_a
 		.bolt12_payment()
-		.send_using_amount(&offer, less_than_offer_amount, None, None, None)
+		.send_using_amount(&offer, less_than_offer_amount, None, None, None, None)
 		.is_err());
 	let payment_id = node_a
 		.bolt12_payment()
@@ -1032,6 +1032,7 @@ async fn simple_bolt12_send_receive() {
 			expected_amount_msat,
 			expected_quantity,
 			expected_payer_note.clone(),
+			None,
 			None,
 		)
 		.unwrap();
@@ -1281,8 +1282,10 @@ async fn async_payment() {
 
 	node_receiver.stop().unwrap();
 
-	let payment_id =
-		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None).unwrap();
+	let payment_id = node_sender
+		.bolt12_payment()
+		.send_using_amount(&offer, 5_000, None, None, None, None)
+		.unwrap();
 
 	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
 	tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
