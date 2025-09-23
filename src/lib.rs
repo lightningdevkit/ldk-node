@@ -167,6 +167,7 @@ use rand::Rng;
 
 use std::default::Default;
 use std::net::ToSocketAddrs;
+use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -333,6 +334,23 @@ impl Node {
 							listeners.push(listener);
 						},
 						Err(e) => {
+							let pid = std::process::id();
+							println!("Failed to bind to port {}: {} (this pid: {})", addr, e, pid);
+
+							let output = Command::new("lsof")
+								.args(&["-i", &format!(":{}", &addr.port())])
+								.output()
+								.expect("failed to execute lsof");
+
+							println!("LSOF output: {}", String::from_utf8_lossy(&output.stdout));
+
+							let output = Command::new("netstat")
+								.args(&["-an"])
+								.output()
+								.expect("failed to execute netstat");
+
+							println!("Netstat output: {}", String::from_utf8_lossy(&output.stdout));
+
 							log_error!(
 								logger,
 								"Failed to bind to {}: {} - is something else already listening?",
