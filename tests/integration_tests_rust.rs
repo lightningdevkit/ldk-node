@@ -1016,7 +1016,7 @@ fn simple_bolt12_send_receive() {
 			expected_amount_msat,
 			expected_quantity,
 			expected_payer_note.clone(),
-			None
+			None,
 		)
 		.unwrap();
 
