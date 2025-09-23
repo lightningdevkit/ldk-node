@@ -1007,7 +1007,7 @@ fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	assert!(node_a
 		.bolt12_payment()
-		.send_using_amount(&offer, less_than_offer_amount, None, None)
+		.send_using_amount(&offer, less_than_offer_amount, None, None, None)
 		.is_err());
 	let payment_id = node_a
 		.bolt12_payment()
@@ -1016,6 +1016,7 @@ fn simple_bolt12_send_receive() {
 			expected_amount_msat,
 			expected_quantity,
 			expected_payer_note.clone(),
+			None
 		)
 		.unwrap();
 
@@ -1242,7 +1243,7 @@ fn static_invoice_server() {
 	};
 
 	let payment_id =
-		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None).unwrap();
+		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None).unwrap();
 
 	expect_payment_successful_event!(node_sender, Some(payment_id), None);
 }
