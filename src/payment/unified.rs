@@ -200,7 +200,7 @@ impl UnifiedPayment {
 			resolved.methods().iter().find(|m| matches!(m, PaymentMethod::LightningBolt12(_)))
 		{
 			let offer = maybe_wrap(offer.clone());
-			
+
 			let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
 				let hrn = maybe_wrap(hrn.clone());
 				self.bolt12_payment.send_using_amount(&offer, amount_msat.unwrap_or(0), None, None, Some(hrn))

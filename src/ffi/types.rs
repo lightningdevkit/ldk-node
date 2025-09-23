@@ -26,9 +26,9 @@ pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 pub use lightning::ln::types::ChannelId;
 pub use lightning::offers::offer::OfferId;
+pub use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
-pub use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning_types::string::UntrustedString;
 
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
