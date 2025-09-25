@@ -179,6 +179,7 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+	bitcoind_conf.view_stdout = true;
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
@@ -188,6 +189,7 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut electrsd_conf = electrsd::Conf::default();
 	electrsd_conf.http_enabled = true;
 	electrsd_conf.network = "regtest";
+	electrsd_conf.view_stderr = true;
 	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
 	(bitcoind, electrsd)
 }
@@ -202,7 +204,7 @@ pub(crate) fn random_storage_path() -> PathBuf {
 
 pub(crate) fn random_port() -> u16 {
 	let mut rng = thread_rng();
-	rng.gen_range(5000..65535)
+	rng.gen_range(5000..32768)
 }
 
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
@@ -227,7 +229,7 @@ pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	Some(NodeAlias(bytes))
 }
 
-pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
+pub(crate) fn random_config(anchor_channels: bool, node_id: String) -> TestConfig {
 	let mut node_config = Config::default();
 
 	if !anchor_channels {
@@ -249,7 +251,9 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 	println!("Setting random LDK node alias: {:?}", alias);
 	node_config.node_alias = alias;
 
-	TestConfig { node_config, ..Default::default() }
+	let log_writer = TestLogWriter::Custom(Arc::new(MultiNodeLogger::new(node_id)));
+
+	TestConfig { node_config, log_writer }
 }
 
 #[cfg(feature = "uniffi")]
@@ -274,24 +278,28 @@ pub(crate) struct TestConfig {
 macro_rules! setup_builder {
 	($builder: ident, $config: expr) => {
 		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_config($config.clone());
+		let mut $builder = Builder::from_config($config.node_config.clone());
 		#[cfg(not(feature = "uniffi"))]
-		let mut $builder = Builder::from_config($config.clone());
+		let mut $builder = Builder::from_config($config.node_config.clone());
+
+		crate::common::set_builder_log_writer(&mut $builder, &$config);
 	};
 }
 
 pub(crate) use setup_builder;
+
+use crate::common::logging::MultiNodeLogger;
 
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
-	let config_a = random_config(anchor_channels);
+	let config_a = random_config(anchor_channels, "node_a".to_string());
 	let node_a = setup_node(chain_source, config_a, None);
 
 	println!("\n== Node B ==");
-	let mut config_b = random_config(anchor_channels);
+	let mut config_b = random_config(anchor_channels, "node_b".to_string());
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -311,7 +319,7 @@ pub(crate) fn setup_two_nodes(
 pub(crate) fn setup_node(
 	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
 ) -> TestNode {
-	setup_builder!(builder, config.node_config);
+	setup_builder!(builder, config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
@@ -350,18 +358,6 @@ pub(crate) fn setup_node(
 		},
 	}
 
-	match &config.log_writer {
-		TestLogWriter::FileWriter => {
-			builder.set_filesystem_logger(None, None);
-		},
-		TestLogWriter::LogFacade => {
-			builder.set_log_facade_logger();
-		},
-		TestLogWriter::Custom(custom_log_writer) => {
-			builder.set_custom_logger(Arc::clone(custom_log_writer));
-		},
-	}
-
 	if let Some(seed) = seed_bytes {
 		#[cfg(feature = "uniffi")]
 		{
@@ -381,6 +377,20 @@ pub(crate) fn setup_node(
 	assert!(node.status().is_running);
 	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
 	node
+}
+
+pub(crate) fn set_builder_log_writer(builder: &mut Builder, config: &TestConfig) {
+	match &config.log_writer {
+		TestLogWriter::FileWriter => {
+			builder.set_filesystem_logger(None, None);
+		},
+		TestLogWriter::LogFacade => {
+			builder.set_log_facade_logger();
+		},
+		TestLogWriter::Custom(custom_log_writer) => {
+			builder.set_custom_logger(Arc::clone(custom_log_writer));
+		},
+	}
 }
 
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(

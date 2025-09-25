@@ -44,7 +44,7 @@ fn test_cln() {
 	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1);
 
 	// Setup LDK Node
-	let config = common::random_config(true);
+	let config = common::random_config(true, "ldk_node".to_string());
 	let mut builder = Builder::from_config(config.node_config);
 	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
 

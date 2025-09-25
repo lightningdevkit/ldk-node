@@ -75,7 +75,6 @@ use std::default::Default;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
@@ -1105,7 +1104,6 @@ fn build_with_store_internal(
 	}
 
 	// Initialize the status fields.
-	let is_listening = Arc::new(AtomicBool::new(false));
 	let node_metrics = match read_node_metrics(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(metrics) => Arc::new(RwLock::new(metrics)),
 		Err(e) => {
@@ -1679,7 +1677,6 @@ fn build_with_store_internal(
 		peer_store,
 		payment_store,
 		is_running,
-		is_listening,
 		node_metrics,
 	})
 }

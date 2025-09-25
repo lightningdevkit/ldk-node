@@ -12,7 +12,6 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
 	generate_blocks_and_wait,
-	logging::MultiNodeLogger,
 	logging::{init_log_logger, validate_log_entry, TestLogWriter},
 	open_channel, open_channel_push_amt, premine_and_distribute_funds, premine_blocks, prepare_rbf,
 	random_config, random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder,
@@ -151,10 +150,10 @@ fn multi_hop_sending() {
 
 	// Setup and fund 5 nodes
 	let mut nodes = Vec::new();
-	for _ in 0..5 {
-		let config = random_config(true);
+	for node_idx in 0..5 {
+		let config = random_config(true, format!("node_{}", node_idx));
 		let sync_config = EsploraSyncConfig { background_sync_config: None };
-		setup_builder!(builder, config.node_config);
+		setup_builder!(builder, config);
 		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		let node = builder.build().unwrap();
 		node.start().unwrap();
@@ -244,7 +243,7 @@ fn multi_hop_sending() {
 #[test]
 fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let config = random_config(true);
+	let config = random_config(true, "single_node".to_string());
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
@@ -252,7 +251,7 @@ fn start_stop_reinit() {
 		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };
-	setup_builder!(builder, config.node_config);
+	setup_builder!(builder, config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
@@ -276,9 +275,6 @@ fn start_stop_reinit() {
 	node.sync_wallets().unwrap();
 	assert_eq!(node.list_balances().spendable_onchain_balance_sats, expected_amount.to_sat());
 
-	let log_file = format!("{}/ldk_node.log", config.node_config.clone().storage_dir_path);
-	assert!(std::path::Path::new(&log_file).exists());
-
 	node.stop().unwrap();
 	assert_eq!(node.stop(), Err(NodeError::NotRunning));
 
@@ -289,7 +285,7 @@ fn start_stop_reinit() {
 	assert_eq!(node.stop(), Err(NodeError::NotRunning));
 	drop(node);
 
-	setup_builder!(builder, config.node_config);
+	setup_builder!(builder, config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let reinitialized_node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
@@ -601,7 +597,7 @@ fn onchain_wallet_recovery() {
 
 	let seed_bytes = vec![42u8; 64];
 
-	let original_config = random_config(true);
+	let original_config = random_config(true, "original_node".to_string());
 	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
 
 	let premine_amount_sat = 100_000;
@@ -640,7 +636,7 @@ fn onchain_wallet_recovery() {
 	drop(original_node);
 
 	// Now we start from scratch, only the seed remains the same.
-	let recovered_config = random_config(true);
+	let recovered_config = random_config(true, "recovered_node".to_string());
 	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
 
 	recovered_node.sync_wallets().unwrap();
@@ -693,17 +689,17 @@ fn run_rbf_test(is_insert_block: bool) {
 	let chain_source_esplora = TestChainSource::Esplora(&electrsd);
 
 	macro_rules! config_node {
-		($chain_source: expr, $anchor_channels: expr) => {{
-			let config_a = random_config($anchor_channels);
+		($chain_source: expr, $anchor_channels: expr, $node_id: expr) => {{
+			let config_a = random_config($anchor_channels, $node_id);
 			let node = setup_node(&$chain_source, config_a, None);
 			node
 		}};
 	}
 	let anchor_channels = false;
 	let nodes = vec![
-		config_node!(chain_source_electrsd, anchor_channels),
-		config_node!(chain_source_bitcoind, anchor_channels),
-		config_node!(chain_source_esplora, anchor_channels),
+		config_node!(chain_source_electrsd, anchor_channels, "node_electrsd".to_string()),
+		config_node!(chain_source_bitcoind, anchor_channels, "node_bitcoind".to_string()),
+		config_node!(chain_source_esplora, anchor_channels, "node_esplora".to_string()),
 	];
 
 	let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
@@ -811,7 +807,7 @@ fn run_rbf_test(is_insert_block: bool) {
 #[test]
 fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let config = random_config(true);
+	let config = random_config(true, "single_node".to_string());
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let node = setup_node(&chain_source, config, None);
 
@@ -837,10 +833,7 @@ fn do_connection_restart_behavior(persist: bool) {
 	let node_id_b = node_b.node_id();
 
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-
-	while !node_b.status().is_listening {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
+	assert!(node_b.status().is_listening);
 
 	node_a.connect(node_id_b, node_addr_b, persist).unwrap();
 
@@ -890,10 +883,7 @@ fn concurrent_connections_succeed() {
 
 	let node_id_b = node_b.node_id();
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-
-	while !node_b.status().is_listening {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
+	assert!(node_b.status().is_listening);
 
 	let mut handles = Vec::new();
 	for _ in 0..10 {
@@ -1136,31 +1126,23 @@ fn static_invoice_server() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let mut config_sender = random_config(true);
+	let mut config_sender = random_config(true, "sender      ".to_string());
 	config_sender.node_config.listening_addresses = None;
 	config_sender.node_config.node_alias = None;
-	config_sender.log_writer =
-		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender      ".to_string())));
 	let node_sender = setup_node(&chain_source, config_sender, None);
 
-	let mut config_sender_lsp = random_config(true);
+	let mut config_sender_lsp = random_config(true, "sender_lsp  ".to_string());
 	config_sender_lsp.node_config.async_payment_services_enabled = true;
-	config_sender_lsp.log_writer =
-		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender_lsp  ".to_string())));
 	let node_sender_lsp = setup_node(&chain_source, config_sender_lsp, None);
 
-	let mut config_receiver_lsp = random_config(true);
+	let mut config_receiver_lsp = random_config(true, "receiver_lsp".to_string());
 	config_receiver_lsp.node_config.async_payment_services_enabled = true;
-	config_receiver_lsp.log_writer =
-		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver_lsp".to_string())));
 
 	let node_receiver_lsp = setup_node(&chain_source, config_receiver_lsp, None);
 
-	let mut config_receiver = random_config(true);
+	let mut config_receiver = random_config(true, "receiver    ".to_string());
 	config_receiver.node_config.listening_addresses = None;
 	config_receiver.node_config.node_alias = None;
-	config_receiver.log_writer =
-		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
 	let node_receiver = setup_node(&chain_source, config_receiver, None);
 
 	let address_sender = node_sender.onchain_payment().new_address().unwrap();
@@ -1253,7 +1235,7 @@ fn test_node_announcement_propagation() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
 	// Node A will use both listening and announcement addresses
-	let mut config_a = random_config(true);
+	let mut config_a = random_config(true, "node_a".to_string());
 	let node_a_alias_string = "ldk-node-a".to_string();
 	let mut node_a_alias_bytes = [0u8; 32];
 	node_a_alias_bytes[..node_a_alias_string.as_bytes().len()]
@@ -1265,7 +1247,7 @@ fn test_node_announcement_propagation() {
 	config_a.node_config.announcement_addresses = Some(node_a_announcement_addresses.clone());
 
 	// Node B will only use listening addresses
-	let mut config_b = random_config(true);
+	let mut config_b = random_config(true, "node_b".to_string());
 	let node_b_alias_string = "ldk-node-b".to_string();
 	let mut node_b_alias_bytes = [0u8; 32];
 	node_b_alias_bytes[..node_b_alias_string.as_bytes().len()]
@@ -1525,8 +1507,8 @@ fn lsps2_client_service_integration() {
 		max_client_to_self_delay: 1024,
 	};
 
-	let service_config = random_config(true);
-	setup_builder!(service_builder, service_config.node_config);
+	let service_config = random_config(true, "service_node".to_string());
+	setup_builder!(service_builder, service_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
 	let service_node = service_builder.build().unwrap();
@@ -1535,15 +1517,15 @@ fn lsps2_client_service_integration() {
 	let service_node_id = service_node.node_id();
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
 
-	let client_config = random_config(true);
-	setup_builder!(client_builder, client_config.node_config);
+	let client_config = random_config(true, "client_node".to_string());
+	setup_builder!(client_builder, client_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
 	let client_node = client_builder.build().unwrap();
 	client_node.start().unwrap();
 
-	let payer_config = random_config(true);
-	setup_builder!(payer_builder, payer_config.node_config);
+	let payer_config = random_config(true, "payer_node".to_string());
+	setup_builder!(payer_builder, payer_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	let payer_node = payer_builder.build().unwrap();
 	payer_node.start().unwrap();
@@ -1729,7 +1711,7 @@ fn facade_logging() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
 	let logger = init_log_logger(LevelFilter::Trace);
-	let mut config = random_config(false);
+	let mut config = random_config(false, "single_node".to_string());
 	config.log_writer = TestLogWriter::LogFacade;
 
 	println!("== Facade logging starts ==");
@@ -1813,7 +1795,7 @@ async fn drop_in_async_context() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let seed_bytes = vec![42u8; 64];
 
-	let config = random_config(true);
+	let config = random_config(true, "single_node".to_string());
 	let node = setup_node(&chain_source, config, Some(seed_bytes));
 	node.stop().unwrap();
 }

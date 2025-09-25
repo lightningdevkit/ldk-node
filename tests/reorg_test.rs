@@ -22,17 +22,17 @@ proptest! {
 		let chain_source_esplora = TestChainSource::Esplora(&electrsd);
 
 		macro_rules! config_node {
-			($chain_source: expr, $anchor_channels: expr) => {{
-				let config_a = random_config($anchor_channels);
+			($chain_source: expr, $anchor_channels: expr, $node_id: expr) => {{
+				let config_a = random_config($anchor_channels, $node_id);
 				let node = setup_node(&$chain_source, config_a, None);
 				node
 			}};
 		}
 		let anchor_channels = true;
 		let nodes = vec![
-			config_node!(chain_source_electrsd, anchor_channels),
-			config_node!(chain_source_bitcoind, anchor_channels),
-			config_node!(chain_source_esplora, anchor_channels),
+			config_node!(chain_source_electrsd, anchor_channels, "node_electrsd".to_string()),
+			config_node!(chain_source_bitcoind, anchor_channels, "node_bitcoind".to_string()),
+			config_node!(chain_source_esplora, anchor_channels, "node_esplora".to_string()),
 		];
 
 		let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
