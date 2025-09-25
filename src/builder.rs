@@ -7,9 +7,9 @@
 
 use crate::chain::ChainSource;
 use crate::config::{
-	default_user_config, may_announce_channel, AnnounceError, BitcoindRestClientConfig, Config,
-	ElectrumSyncConfig, EsploraSyncConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME,
-	DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
+	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
+	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 
 use crate::connection::ConnectionManager;
@@ -27,6 +27,7 @@ use crate::liquidity::{
 };
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
+use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
@@ -191,6 +192,8 @@ pub enum BuildError {
 	LoggerSetupFailed,
 	/// The given network does not match the node's previously configured network.
 	NetworkMismatch,
+	/// The role of the node in an asynchronous payments context is not compatible with the current configuration.
+	AsyncPaymentsConfigMismatch,
 }
 
 impl fmt::Display for BuildError {
@@ -219,6 +222,12 @@ impl fmt::Display for BuildError {
 			Self::NetworkMismatch => {
 				write!(f, "Given network does not match the node's previously configured network.")
 			},
+			Self::AsyncPaymentsConfigMismatch => {
+				write!(
+					f,
+					"The async payments role is not compatible with the current configuration."
+				)
+			},
 		}
 	}
 }
@@ -240,6 +249,7 @@ pub struct NodeBuilder {
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
+	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 }
 
@@ -266,6 +276,7 @@ impl NodeBuilder {
 			liquidity_source_config,
 			log_writer_config,
 			runtime_handle,
+			async_payments_role: None,
 		}
 	}
 
@@ -544,6 +555,21 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Sets the role of the node in an asynchronous payments context.
+	///
+	/// See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.
+	pub fn set_async_payments_role(
+		&mut self, role: Option<AsyncPaymentsRole>,
+	) -> Result<&mut Self, BuildError> {
+		if let Some(AsyncPaymentsRole::Server) = role {
+			may_announce_channel(&self.config)
+				.map_err(|_| BuildError::AsyncPaymentsConfigMismatch)?;
+		}
+
+		self.async_payments_role = role;
+		Ok(self)
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Result<Node, BuildError> {
@@ -700,6 +726,7 @@ impl NodeBuilder {
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
+			self.async_payments_role,
 			seed_bytes,
 			runtime,
 			logger,
@@ -732,6 +759,7 @@ impl NodeBuilder {
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
+			self.async_payments_role,
 			seed_bytes,
 			runtime,
 			logger,
@@ -989,6 +1017,13 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
 	}
 
+	/// Sets the role of the node in an asynchronous payments context.
+	pub fn set_async_payments_role(
+		&self, role: Option<AsyncPaymentsRole>,
+	) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_async_payments_role(role).map(|_| ())
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Result<Arc<Node>, BuildError> {
@@ -1082,8 +1117,9 @@ impl ArcedNodeBuilder {
 fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
-	liquidity_source_config: Option<&LiquiditySourceConfig>, seed_bytes: [u8; 64],
-	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	liquidity_source_config: Option<&LiquiditySourceConfig>,
+	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
+	logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1378,8 +1414,14 @@ fn build_with_store_internal(
 			100;
 	}
 
-	if config.async_payment_services_enabled {
-		user_config.accept_forwards_to_priv_channels = true;
+	if let Some(role) = async_payments_role {
+		match role {
+			AsyncPaymentsRole::Server => {
+				user_config.accept_forwards_to_priv_channels = true;
+				user_config.enable_htlc_hold = true;
+			},
+			AsyncPaymentsRole::Client => user_config.hold_outbound_htlcs_at_next_hop = true,
+		}
 	}
 
 	let message_router =
@@ -1452,17 +1494,32 @@ fn build_with_store_internal(
 	}
 
 	// Initialize the PeerManager
-	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
-		Arc::clone(&keys_manager),
-		Arc::clone(&keys_manager),
-		Arc::clone(&logger),
-		Arc::clone(&channel_manager),
-		message_router,
-		Arc::clone(&channel_manager),
-		Arc::clone(&channel_manager),
-		IgnoringMessageHandler {},
-		IgnoringMessageHandler {},
-	));
+	let onion_messenger: Arc<OnionMessenger> =
+		if let Some(AsyncPaymentsRole::Server) = async_payments_role {
+			Arc::new(OnionMessenger::new_with_offline_peer_interception(
+				Arc::clone(&keys_manager),
+				Arc::clone(&keys_manager),
+				Arc::clone(&logger),
+				Arc::clone(&channel_manager),
+				message_router,
+				Arc::clone(&channel_manager),
+				Arc::clone(&channel_manager),
+				IgnoringMessageHandler {},
+				IgnoringMessageHandler {},
+			))
+		} else {
+			Arc::new(OnionMessenger::new(
+				Arc::clone(&keys_manager),
+				Arc::clone(&keys_manager),
+				Arc::clone(&logger),
+				Arc::clone(&channel_manager),
+				message_router,
+				Arc::clone(&channel_manager),
+				Arc::clone(&channel_manager),
+				IgnoringMessageHandler {},
+				IgnoringMessageHandler {},
+			))
+		};
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
 
 	// Initialize the GossipSource
@@ -1649,6 +1706,12 @@ fn build_with_store_internal(
 		},
 	};
 
+	let om_mailbox = if let Some(AsyncPaymentsRole::Server) = async_payments_role {
+		Some(Arc::new(OnionMessageMailbox::new()))
+	} else {
+		None
+	};
+
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (background_processor_stop_sender, _) = tokio::sync::watch::channel(());
 	let is_running = Arc::new(RwLock::new(false));
@@ -1681,6 +1744,8 @@ fn build_with_store_internal(
 		is_running,
 		is_listening,
 		node_metrics,
+		om_mailbox,
+		async_payments_role,
 	})
 }
 

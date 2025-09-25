@@ -9,7 +9,7 @@
 //!
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 
-use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::{AsyncPaymentsRole, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
@@ -57,16 +57,17 @@ pub struct Bolt12Payment {
 	channel_manager: Arc<ChannelManager>,
 	payment_store: Arc<PaymentStore>,
 	is_running: Arc<RwLock<bool>>,
-	config: Arc<Config>,
 	logger: Arc<Logger>,
+	async_payments_role: Option<AsyncPaymentsRole>,
 }
 
 impl Bolt12Payment {
 	pub(crate) fn new(
 		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
-		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
-		Self { channel_manager, payment_store, config, is_running, logger }
+		Self { channel_manager, payment_store, is_running, logger, async_payments_role }
 	}
 
 	/// Send a payment given an offer.
@@ -554,8 +555,11 @@ impl Bolt12Payment {
 	fn blinded_paths_for_async_recipient_internal(
 		&self, recipient_id: Vec<u8>,
 	) -> Result<Vec<BlindedMessagePath>, Error> {
-		if !self.config.async_payment_services_enabled {
-			return Err(Error::AsyncPaymentServicesDisabled);
+		match self.async_payments_role {
+			Some(AsyncPaymentsRole::Server) => {},
+			_ => {
+				return Err(Error::AsyncPaymentServicesDisabled);
+			},
 		}
 
 		self.channel_manager

@@ -13,7 +13,6 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
-	boolean async_payment_services_enabled;
 };
 
 dictionary AnchorChannelsConfig {
@@ -95,6 +94,8 @@ interface Builder {
 	void set_announcement_addresses(sequence<SocketAddress> announcement_addresses);
 	[Throws=BuildError]
 	void set_node_alias(string node_alias);
+	[Throws=BuildError]
+	void set_async_payments_role(AsyncPaymentsRole? role);
 	[Throws=BuildError]
 	Node build();
 	[Throws=BuildError]
@@ -356,6 +357,7 @@ enum BuildError {
 	"WalletSetupFailed",
 	"LoggerSetupFailed",
 	"NetworkMismatch",
+	"AsyncPaymentsConfigMismatch",
 };
 
 [Trait]
@@ -718,6 +720,11 @@ enum Currency {
 	"Regtest",
 	"Simnet",
 	"Signet",
+};
+
+enum AsyncPaymentsRole {
+	"Client",
+	"Server",
 };
 
 dictionary RouteHintHop {

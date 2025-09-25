@@ -179,8 +179,6 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
-	/// Whether to enable the static invoice service to support async payment reception for clients.
-	pub async_payment_services_enabled: bool,
 }
 
 impl Default for Config {
@@ -195,7 +193,6 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
-			async_payment_services_enabled: false,
 		}
 	}
 }
@@ -535,6 +532,19 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 			},
 		}
 	}
+}
+
+#[derive(Debug, Clone, Copy)]
+/// The role of the node in an asynchronous payments context.
+///
+/// See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.
+pub enum AsyncPaymentsRole {
+	/// Node acts a client in an async payments context. This means that if possible, it will instruct its peers to hold
+	/// HTLCs for it, so that it can go offline.
+	Client,
+	/// Node acts as a server in an async payments context. This means that it will hold async payments HTLCs and onion
+	/// messages for its peers.
+	Server,
 }
 
 #[cfg(test)]

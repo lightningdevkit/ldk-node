@@ -16,10 +16,11 @@ use common::{
 	logging::{init_log_logger, validate_log_entry, TestLogWriter},
 	open_channel, open_channel_push_amt, premine_and_distribute_funds, premine_blocks, prepare_rbf,
 	random_config, random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	setup_node, setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource,
+	TestSyncStore,
 };
 
-use ldk_node::config::EsploraSyncConfig;
+use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -1132,7 +1133,7 @@ fn simple_bolt12_send_receive() {
 }
 
 #[test]
-fn static_invoice_server() {
+fn async_payment() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
@@ -1141,20 +1142,33 @@ fn static_invoice_server() {
 	config_sender.node_config.node_alias = None;
 	config_sender.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender      ".to_string())));
-	let node_sender = setup_node(&chain_source, config_sender, None);
+	let node_sender = setup_node_for_async_payments(
+		&chain_source,
+		config_sender,
+		None,
+		Some(AsyncPaymentsRole::Client),
+	);
 
 	let mut config_sender_lsp = random_config(true);
-	config_sender_lsp.node_config.async_payment_services_enabled = true;
 	config_sender_lsp.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender_lsp  ".to_string())));
-	let node_sender_lsp = setup_node(&chain_source, config_sender_lsp, None);
+	let node_sender_lsp = setup_node_for_async_payments(
+		&chain_source,
+		config_sender_lsp,
+		None,
+		Some(AsyncPaymentsRole::Server),
+	);
 
 	let mut config_receiver_lsp = random_config(true);
-	config_receiver_lsp.node_config.async_payment_services_enabled = true;
 	config_receiver_lsp.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver_lsp".to_string())));
 
-	let node_receiver_lsp = setup_node(&chain_source, config_receiver_lsp, None);
+	let node_receiver_lsp = setup_node_for_async_payments(
+		&chain_source,
+		config_receiver_lsp,
+		None,
+		Some(AsyncPaymentsRole::Server),
+	);
 
 	let mut config_receiver = random_config(true);
 	config_receiver.node_config.listening_addresses = None;
@@ -1241,8 +1255,15 @@ fn static_invoice_server() {
 		std::thread::sleep(std::time::Duration::from_millis(100));
 	};
 
+	node_receiver.stop().unwrap();
+
 	let payment_id =
 		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None).unwrap();
+
+	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
+	std::thread::sleep(std::time::Duration::from_millis(3000));
+
+	node_receiver.start().unwrap();
 
 	expect_payment_successful_event!(node_sender, Some(payment_id), None);
 }

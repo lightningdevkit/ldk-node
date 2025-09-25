@@ -5,5 +5,6 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+pub(crate) mod om_mailbox;
 mod rate_limiter;
 pub(crate) mod static_invoice_store;
