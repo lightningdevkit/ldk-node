@@ -124,6 +124,10 @@ pub enum Error {
 	InvalidBlindedPaths,
 	/// Asynchronous payment services are disabled.
 	AsyncPaymentServicesDisabled,
+	/// Failed to set a webhook with the LSP.
+	LiquiditySetWebhookFailed,
+	/// Failed to remove a webhook with the LSP.
+	LiquidityRemoveWebhookFailed,
 }
 
 impl fmt::Display for Error {
@@ -200,6 +204,12 @@ impl fmt::Display for Error {
 			Self::InvalidBlindedPaths => write!(f, "The given blinded paths are invalid."),
 			Self::AsyncPaymentServicesDisabled => {
 				write!(f, "Asynchronous payment services are disabled.")
+			},
+			Self::LiquiditySetWebhookFailed => {
+				write!(f, "Failed to set a webhook with the LSP.")
+			},
+			Self::LiquidityRemoveWebhookFailed => {
+				write!(f, "Failed to remove a webhook with the LSP.")
 			},
 		}
 	}

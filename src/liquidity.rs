@@ -34,6 +34,12 @@ use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
 use lightning_liquidity::lsps2::msgs::{LSPS2OpeningFeeParams, LSPS2RawOpeningFeeParams};
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
+use lightning_liquidity::lsps5::client::LSPS5ClientConfig as LdkLSPS5ClientConfig;
+use lightning_liquidity::lsps5::event::{LSPS5ClientEvent, LSPS5ServiceEvent};
+use lightning_liquidity::lsps5::msgs::{
+	LSPS5Error, ListWebhooksResponse, RemoveWebhookResponse, SetWebhookResponse,
+};
+use lightning_liquidity::lsps5::service::LSPS5ServiceConfig as LdkLSPS5ServiceConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
 
 use lightning_types::payment::PaymentHash;
@@ -51,6 +57,77 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+
+/// Error type for HTTP client operations.
+#[derive(Debug)]
+pub enum HttpClientError {
+	/// Network or connection error.
+	Network(String),
+	/// HTTP status error.
+	Status(u16),
+	/// Other error.
+	Other(String),
+}
+
+impl std::fmt::Display for HttpClientError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			HttpClientError::Network(msg) => write!(f, "Network error: {}", msg),
+			HttpClientError::Status(code) => write!(f, "HTTP error: {}", code),
+			HttpClientError::Other(msg) => write!(f, "HTTP client error: {}", msg),
+		}
+	}
+}
+
+impl std::error::Error for HttpClientError {}
+
+/// Trait for making HTTP requests.
+pub trait HttpClient: Send + Sync + std::fmt::Debug {
+	/// Make a POST request to the specified URL with headers and body.
+	fn post(
+		&self, url: &str, headers: &HashMap<String, String>, body: &str,
+	) -> Result<(), HttpClientError>;
+}
+
+/// Default HTTP client implementation using reqwest.
+#[derive(Debug, Clone)]
+pub struct DefaultHttpClient;
+
+impl HttpClient for DefaultHttpClient {
+	fn post(
+		&self, url: &str, headers: &HashMap<String, String>, body: &str,
+	) -> Result<(), HttpClientError> {
+		let url = url.to_string();
+		let headers = headers.clone();
+		let body = body.to_string();
+
+		let handle = std::thread::spawn(move || -> Result<(), HttpClientError> {
+			let client = reqwest::blocking::Client::builder()
+				.timeout(Duration::from_secs(5))
+				.build()
+				.map_err(|e| HttpClientError::Network(e.to_string()))?;
+
+			let mut request = client.post(&url);
+
+			for (key, value) in &headers {
+				request = request.header(key, value);
+			}
+
+			let response =
+				request.body(body).send().map_err(|e| HttpClientError::Network(e.to_string()))?;
+
+			if response.status().is_success() {
+				Ok(())
+			} else {
+				Err(HttpClientError::Status(response.status().as_u16()))
+			}
+		});
+
+		handle
+			.join()
+			.map_err(|_| HttpClientError::Other("HTTP client thread panicked".to_string()))?
+	}
+}
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
@@ -98,6 +175,29 @@ struct LSPS2Service {
 	ldk_service_config: LdkLSPS2ServiceConfig,
 }
 
+struct LSPS5Client {
+	lsp_node_id: PublicKey,
+	lsp_address: SocketAddress,
+	ldk_client_config: LdkLSPS5ClientConfig,
+	pending_set_webhook_requests:
+		Mutex<HashMap<LSPSRequestId, oneshot::Sender<Result<SetWebhookResponse, LSPS5Error>>>>,
+	pending_list_webhooks_requests:
+		Mutex<HashMap<LSPSRequestId, oneshot::Sender<Result<ListWebhooksResponse, LSPS5Error>>>>,
+	pending_remove_webhook_requests:
+		Mutex<HashMap<LSPSRequestId, oneshot::Sender<Result<RemoveWebhookResponse, LSPS5Error>>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LSPS5ClientConfig {
+	pub node_id: PublicKey,
+	pub address: SocketAddress,
+}
+
+struct LSPS5Service {
+	service_config: LSPS5ServiceConfig,
+	ldk_service_config: LdkLSPS5ServiceConfig,
+}
+
 /// Represents the configuration of the LSPS2 service.
 ///
 /// See [bLIP-52 / LSPS2] for more information.
@@ -136,6 +236,39 @@ pub struct LSPS2ServiceConfig {
 	pub max_payment_size_msat: u64,
 }
 
+/// Represents the configuration of the LSPS5 service.
+///
+/// See [bLIP-55 / LSPS5] for more information.
+///
+/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+#[derive(Debug, Clone)]
+pub struct LSPS5ServiceConfig {
+	/// Maximum number of webhooks allowed per client.
+	pub max_webhooks_per_client: u32,
+	/// HTTP client for sending webhook notifications.
+	pub http_client: Arc<dyn HttpClient>,
+}
+
+impl Default for LSPS5ServiceConfig {
+	fn default() -> Self {
+		Self { max_webhooks_per_client: 5, http_client: Arc::new(DefaultHttpClient) }
+	}
+}
+
+impl LSPS5ServiceConfig {
+	/// Creates a new LSPS5ServiceConfig with the default HTTP client.
+	pub fn new(max_webhooks_per_client: u32) -> Self {
+		Self { max_webhooks_per_client, http_client: Arc::new(DefaultHttpClient) }
+	}
+
+	/// Creates a new LSPS5ServiceConfig with a custom HTTP client.
+	pub fn with_http_client(
+		max_webhooks_per_client: u32, http_client: Arc<dyn HttpClient>,
+	) -> Self {
+		Self { max_webhooks_per_client, http_client }
+	}
+}
+
 pub(crate) struct LiquiditySourceBuilder<L: Deref>
 where
 	L::Target: LdkLogger,
@@ -143,6 +276,8 @@ where
 	lsps1_client: Option<LSPS1Client>,
 	lsps2_client: Option<LSPS2Client>,
 	lsps2_service: Option<LSPS2Service>,
+	lsps5_client: Option<LSPS5Client>,
+	lsps5_service: Option<LSPS5Service>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
@@ -162,10 +297,14 @@ where
 		let lsps1_client = None;
 		let lsps2_client = None;
 		let lsps2_service = None;
+		let lsps5_service = None;
+		let lsps5_client = None;
 		Self {
 			lsps1_client,
 			lsps2_client,
 			lsps2_service,
+			lsps5_client,
+			lsps5_service,
 			wallet,
 			channel_manager,
 			keys_manager,
@@ -220,17 +359,58 @@ where
 		self
 	}
 
-	pub(crate) fn build(self) -> LiquiditySource<L> {
-		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
-			let lsps2_service_config = Some(s.ldk_service_config.clone());
-			let lsps5_service_config = None;
-			let advertise_service = s.service_config.advertise_service;
-			LiquidityServiceConfig { lsps2_service_config, lsps5_service_config, advertise_service }
+	pub(crate) fn lsps5_client(
+		&mut self, lsp_node_id: PublicKey, lsp_address: SocketAddress,
+	) -> &mut Self {
+		let ldk_client_config = LdkLSPS5ClientConfig {};
+
+		let pending_set_webhook_requests = Mutex::new(HashMap::new());
+		let pending_list_webhooks_requests = Mutex::new(HashMap::new());
+		let pending_remove_webhook_requests = Mutex::new(HashMap::new());
+
+		self.lsps5_client = Some(LSPS5Client {
+			ldk_client_config,
+			lsp_node_id,
+			lsp_address,
+			pending_set_webhook_requests,
+			pending_list_webhooks_requests,
+			pending_remove_webhook_requests,
 		});
+		self
+	}
+
+	pub(crate) fn lsps5_service(&mut self, service_config: LSPS5ServiceConfig) -> &mut Self {
+		let ldk_service_config = LdkLSPS5ServiceConfig {
+			max_webhooks_per_client: service_config.max_webhooks_per_client,
+		};
+		self.lsps5_service = Some(LSPS5Service { service_config, ldk_service_config });
+		self
+	}
+
+	pub(crate) fn build(self) -> LiquiditySource<L> {
+		let lsps2_service_config =
+			self.lsps2_service.as_ref().map(|s| s.ldk_service_config.clone());
+		let lsps5_service_config =
+			self.lsps5_service.as_ref().map(|s| s.ldk_service_config.clone());
+		let advertise_service = self
+			.lsps2_service
+			.as_ref()
+			.map(|s| s.service_config.advertise_service)
+			.unwrap_or(false);
+		let liquidity_service_config =
+			if lsps2_service_config.is_some() || lsps5_service_config.is_some() {
+				Some(LiquidityServiceConfig {
+					lsps2_service_config,
+					lsps5_service_config,
+					advertise_service,
+				})
+			} else {
+				None
+			};
 
 		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.ldk_client_config.clone());
 		let lsps2_client_config = self.lsps2_client.as_ref().map(|s| s.ldk_client_config.clone());
-		let lsps5_client_config = None;
+		let lsps5_client_config = self.lsps5_client.as_ref().map(|s| s.ldk_client_config.clone());
 		let liquidity_client_config = Some(LiquidityClientConfig {
 			lsps1_client_config,
 			lsps2_client_config,
@@ -251,6 +431,8 @@ where
 			lsps1_client: self.lsps1_client,
 			lsps2_client: self.lsps2_client,
 			lsps2_service: self.lsps2_service,
+			lsps5_client: self.lsps5_client,
+			lsps5_service: self.lsps5_service,
 			wallet: self.wallet,
 			channel_manager: self.channel_manager,
 			peer_manager: RwLock::new(None),
@@ -269,6 +451,8 @@ where
 	lsps1_client: Option<LSPS1Client>,
 	lsps2_client: Option<LSPS2Client>,
 	lsps2_service: Option<LSPS2Service>,
+	lsps5_client: Option<LSPS5Client>,
+	lsps5_service: Option<LSPS5Service>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	peer_manager: RwLock<Option<Arc<PeerManager>>>,
@@ -296,6 +480,10 @@ where
 
 	pub(crate) fn get_lsps2_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
 		self.lsps2_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
+	}
+
+	pub(crate) fn get_lsps5_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
+		self.lsps5_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
 	}
 
 	pub(crate) async fn handle_next_event(&self) {
@@ -820,6 +1008,296 @@ where
 					);
 				}
 			},
+			LiquidityEvent::LSPS5Client(event) => {
+				if let Some(lsps5_client) = self.lsps5_client.as_ref() {
+					match event {
+						LSPS5ClientEvent::WebhookRegistered {
+							request_id,
+							counterparty_node_id,
+							num_webhooks,
+							max_webhooks,
+							no_change,
+							..
+						} => {
+							if counterparty_node_id != lsps5_client.lsp_node_id {
+								debug_assert!(
+									false,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								log_error!(
+									self.logger,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								return;
+							}
+
+							let response =
+								Ok(SetWebhookResponse { num_webhooks, max_webhooks, no_change });
+
+							match lsps5_client
+								.pending_set_webhook_requests
+								.lock()
+								.unwrap()
+								.remove(&request_id)
+							{
+								Some(sender) => {
+									if sender.send(response).is_err() {
+										log_error!(
+											self.logger,
+											"Failed to handle response for request {:?} from liquidity service",
+											request_id
+										);
+									}
+								},
+								None => {
+									debug_assert!(false, "Received response from liquidity service for unknown request.");
+									log_error!(
+										self.logger,
+										"Received response from liquidity service for unknown request."
+									);
+								},
+							}
+						},
+						LSPS5ClientEvent::WebhookRegistrationFailed {
+							request_id,
+							counterparty_node_id,
+							error,
+							app_name,
+							url,
+						} => {
+							if counterparty_node_id != lsps5_client.lsp_node_id {
+								debug_assert!(
+									false,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								log_error!(
+									self.logger,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								return;
+							}
+
+							match lsps5_client
+								.pending_set_webhook_requests
+								.lock()
+								.unwrap()
+								.remove(&request_id)
+							{
+								Some(sender) => {
+									log_error!(
+										self.logger,
+										"Webhook registration failed for app '{}' with url '{}': {:?}",
+										app_name,
+										url,
+										error
+									);
+									if sender.send(Err(error)).is_err() {
+										log_error!(
+											self.logger,
+											"Failed to handle response for request {:?} from liquidity service",
+											request_id
+										);
+									}
+								},
+								None => {
+									debug_assert!(false, "Received response from liquidity service for unknown request.");
+									log_error!(
+										self.logger,
+										"Received response from liquidity service for unknown request."
+									);
+								},
+							}
+						},
+						LSPS5ClientEvent::WebhooksListed {
+							request_id,
+							counterparty_node_id,
+							app_names,
+							max_webhooks,
+						} => {
+							if counterparty_node_id != lsps5_client.lsp_node_id {
+								debug_assert!(
+									false,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								log_error!(
+									self.logger,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								return;
+							}
+
+							let response = Ok(ListWebhooksResponse {
+								app_names: app_names.clone(),
+								max_webhooks,
+							});
+
+							match lsps5_client
+								.pending_list_webhooks_requests
+								.lock()
+								.unwrap()
+								.remove(&request_id)
+							{
+								Some(sender) => {
+									if sender.send(response).is_err() {
+										log_error!(
+											self.logger,
+											"Failed to handle response for request {:?} from liquidity service",
+											request_id
+										);
+									}
+								},
+								None => {
+									debug_assert!(false, "Received response from liquidity service for unknown request.");
+									log_error!(
+										self.logger,
+										"Received response from liquidity service for unknown request."
+									);
+								},
+							}
+						},
+						LSPS5ClientEvent::WebhookRemoved {
+							request_id,
+							counterparty_node_id,
+							..
+						} => {
+							if counterparty_node_id != lsps5_client.lsp_node_id {
+								debug_assert!(
+									false,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								log_error!(
+									self.logger,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								return;
+							}
+
+							match lsps5_client
+								.pending_remove_webhook_requests
+								.lock()
+								.unwrap()
+								.remove(&request_id)
+							{
+								Some(sender) => {
+									if sender.send(Ok(RemoveWebhookResponse {})).is_err() {
+										log_error!(
+											self.logger,
+											"Failed to handle response for request {:?} from liquidity service",
+											request_id
+										);
+									}
+								},
+								None => {
+									debug_assert!(false, "Received response from liquidity service for unknown request.");
+									log_error!(
+										self.logger,
+										"Received response from liquidity service for unknown request."
+									);
+								},
+							}
+						},
+						LSPS5ClientEvent::WebhookRemovalFailed {
+							request_id,
+							counterparty_node_id,
+							error,
+							app_name,
+						} => {
+							if counterparty_node_id != lsps5_client.lsp_node_id {
+								debug_assert!(
+									false,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								log_error!(
+									self.logger,
+									"Received response from unexpected LSP counterparty. This should never happen."
+								);
+								return;
+							}
+
+							match lsps5_client
+								.pending_remove_webhook_requests
+								.lock()
+								.unwrap()
+								.remove(&request_id)
+							{
+								Some(sender) => {
+									log_error!(
+										self.logger,
+										"Webhook removal failed for app '{}': {:?}",
+										app_name,
+										error
+									);
+									if sender.send(Err(error)).is_err() {
+										log_error!(
+											self.logger,
+											"Failed to handle response for request {:?} from liquidity service",
+											request_id
+										);
+									}
+								},
+								None => {
+									debug_assert!(false, "Received response from liquidity service for unknown request.");
+									log_error!(
+										self.logger,
+										"Received response from liquidity service for unknown request."
+									);
+								},
+							}
+						},
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Received LSPS5 client event but LSPS5 client was not configured."
+					);
+				}
+			},
+			LiquidityEvent::LSPS5Service(LSPS5ServiceEvent::SendWebhookNotification {
+				counterparty_node_id: _,
+				app_name,
+				url,
+				notification,
+				headers,
+			}) => {
+				if let Some(ref lsps5_service) = self.lsps5_service {
+					log_info!(
+						self.logger,
+						"Sending webhook notification for {} to {}: {:?}",
+						app_name,
+						url,
+						notification
+					);
+
+					let headers_std: HashMap<String, String> = headers.into_iter().collect();
+					let notification_str = serde_json::to_string(&notification)
+						.unwrap_or_else(|_| format!("{:?}", notification));
+
+					if let Err(e) = lsps5_service.service_config.http_client.post(
+						&url,
+						&headers_std,
+						&notification_str,
+					) {
+						println!("");
+						println!(
+							"LSPS5 SendWebhookNotification event: {} to {}, {}",
+							app_name, url, e
+						);
+						println!("");
+						log_error!(
+							self.logger,
+							"Failed to send webhook notification for {} to {}: {}",
+							app_name,
+							url,
+							e
+						);
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Received LSPS5 service event but LSPS5 service was not configured."
+					);
+				}
+			},
 			e => {
 				log_error!(self.logger, "Received unexpected liquidity event: {:?}", e);
 			},
@@ -1246,6 +1724,133 @@ where
 			})
 	}
 
+	pub(crate) async fn lsps5_set_webhook(
+		&self, app_name: String, webhook_url: String,
+	) -> Result<SetWebhookResponse, Error> {
+		let lsps5_client = self.lsps5_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let client_handler = self.liquidity_manager.lsps5_client_handler().ok_or_else(|| {
+			log_error!(self.logger, "LSPS5 liquidity client was not configured.");
+			Error::LiquiditySourceUnavailable
+		})?;
+
+		let (sender, receiver) = oneshot::channel();
+		let request_id = match client_handler.set_webhook(
+			lsps5_client.lsp_node_id,
+			app_name.clone(),
+			webhook_url.clone(),
+		) {
+			Ok(request_id) => request_id,
+			Err(_) => return Err(Error::LiquiditySetWebhookFailed),
+		};
+
+		lsps5_client
+			.pending_set_webhook_requests
+			.lock()
+			.unwrap()
+			.insert(request_id.clone(), sender);
+
+		match tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), receiver)
+			.await
+		{
+			Ok(Ok(result)) => result.map_err(|_| {
+				log_error!(self.logger, "Failed to handle response from liquidity service");
+				Error::LiquidityRequestFailed
+			}),
+			Ok(Err(_)) => {
+				log_error!(self.logger, "Failed to handle response from liquidity service");
+				Err(Error::LiquidityRequestFailed)
+			},
+			Err(e) => {
+				lsps5_client.pending_set_webhook_requests.lock().unwrap().remove(&request_id);
+				log_error!(self.logger, "Liquidity request timed out: {}", e);
+				Err(Error::LiquidityRequestFailed)
+			},
+		}
+	}
+
+	pub(crate) async fn lsps5_list_webhooks(&self) -> Result<ListWebhooksResponse, Error> {
+		let lsps5_client = self.lsps5_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let client_handler = self.liquidity_manager.lsps5_client_handler().ok_or_else(|| {
+			log_error!(self.logger, "LSPS5 liquidity client was not configured.");
+			Error::LiquiditySourceUnavailable
+		})?;
+
+		let (sender, receiver) = oneshot::channel();
+		let request_id = client_handler.list_webhooks(lsps5_client.lsp_node_id);
+		lsps5_client
+			.pending_list_webhooks_requests
+			.lock()
+			.unwrap()
+			.insert(request_id.clone(), sender);
+
+		match tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), receiver)
+			.await
+		{
+			Ok(Ok(result)) => result.map_err(|_| {
+				log_error!(self.logger, "Failed to handle response from liquidity service");
+				Error::LiquidityRequestFailed
+			}),
+			Ok(Err(_)) => {
+				log_error!(self.logger, "Failed to handle response from liquidity service");
+				Err(Error::LiquidityRequestFailed)
+			},
+			Err(e) => {
+				lsps5_client.pending_list_webhooks_requests.lock().unwrap().remove(&request_id);
+				log_error!(self.logger, "Liquidity request timed out: {}", e);
+				Err(Error::LiquidityRequestFailed)
+			},
+		}
+	}
+
+	pub(crate) async fn lsps5_remove_webhook(
+		&self, app_name: String,
+	) -> Result<RemoveWebhookResponse, Error> {
+		let lsps5_client = self.lsps5_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let client_handler = self.liquidity_manager.lsps5_client_handler().ok_or_else(|| {
+			log_error!(self.logger, "LSPS5 liquidity client was not configured.");
+			Error::LiquiditySourceUnavailable
+		})?;
+
+		let (sender, receiver) = oneshot::channel();
+		let request_id =
+			match client_handler.remove_webhook(lsps5_client.lsp_node_id, app_name.clone()) {
+				Ok(request_id) => request_id,
+				Err(_) => return Err(Error::LiquidityRemoveWebhookFailed),
+			};
+
+		lsps5_client
+			.pending_remove_webhook_requests
+			.lock()
+			.unwrap()
+			.insert(request_id.clone(), sender);
+
+		match tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), receiver)
+			.await
+		{
+			Ok(Ok(result)) => result.map_err(|_| {
+				log_error!(self.logger, "Failed to handle response from liquidity service");
+				Error::LiquidityRequestFailed
+			}),
+			Ok(Err(_)) => {
+				log_error!(self.logger, "Failed to handle response from liquidity service");
+				Err(Error::LiquidityRequestFailed)
+			},
+			Err(e) => {
+				lsps5_client.pending_remove_webhook_requests.lock().unwrap().remove(&request_id);
+				log_error!(self.logger, "Liquidity request timed out: {}", e);
+				Err(Error::LiquidityRequestFailed)
+			},
+		}
+	}
+
+	pub(crate) fn lsps5_notify_payment_incoming(&self, client_id: PublicKey) -> Result<(), Error> {
+		let handler = self
+			.liquidity_manager
+			.lsps5_service_handler()
+			.ok_or(Error::LiquiditySourceUnavailable)?;
+		handler.notify_payment_incoming(client_id).map_err(|_| Error::LiquidityRequestFailed)
+	}
+
 	pub(crate) fn handle_channel_ready(
 		&self, user_channel_id: u128, channel_id: &ChannelId, counterparty_node_id: &PublicKey,
 	) {
@@ -1442,5 +2047,172 @@ impl LSPS1Liquidity {
 			.runtime
 			.block_on(async move { liquidity_source.lsps1_check_order_status(order_id).await })?;
 		Ok(response)
+	}
+}
+
+/// A liquidity handler for handling LSPS5 webhooks and notifications.
+#[derive(Clone)]
+pub struct LSPS5Liquidity {
+	runtime: Arc<Runtime>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	logger: Arc<Logger>,
+}
+
+impl LSPS5Liquidity {
+	pub(crate) fn new(
+		runtime: Arc<Runtime>, connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>, logger: Arc<Logger>,
+	) -> Self {
+		Self { runtime, connection_manager, liquidity_source, logger }
+	}
+
+	fn set_webhook_impl(
+		&self, app_name: String, webhook_url: String,
+	) -> Result<SetWebhookResponse, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps5_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response = self.runtime.block_on(async move {
+			liquidity_source.lsps5_set_webhook(app_name, webhook_url).await
+		})?;
+
+		Ok(response)
+	}
+
+	/// Sets a webhook URL at the configured LSP for receiving LSPS5 notifications.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn set_webhook(
+		&self, app_name: String, webhook_url: String,
+	) -> Result<SetWebhookResponse, Error> {
+		self.set_webhook_impl(app_name, webhook_url)
+	}
+
+	/// Sets a webhook URL at the configured LSP for receiving LSPS5 notifications.
+	#[cfg(feature = "uniffi")]
+	pub fn set_webhook(
+		&self, app_name: String, webhook_url: String,
+	) -> Result<LSPS5SetWebhookResponse, Error> {
+		self.set_webhook_impl(app_name, webhook_url)
+	}
+
+	fn list_webhooks_impl(&self) -> Result<ListWebhooksResponse, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps5_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response =
+			self.runtime.block_on(async move { liquidity_source.lsps5_list_webhooks().await })?;
+		Ok(response)
+	}
+
+	/// Lists all currently configured webhooks at the configured LSP.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn list_webhooks(&self) -> Result<ListWebhooksResponse, Error> {
+		self.list_webhooks_impl()
+	}
+
+	/// Lists all currently configured webhooks at the configured LSP.
+	#[cfg(feature = "uniffi")]
+	pub fn list_webhooks(&self) -> Result<LSPS5ListWebhooksResponse, Error> {
+		self.list_webhooks_impl().map(|response| response.into())
+	}
+
+	fn remove_webhook_impl(&self, app_name: String) -> Result<RemoveWebhookResponse, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps5_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response = self
+			.runtime
+			.block_on(async move { liquidity_source.lsps5_remove_webhook(app_name).await })?;
+
+		Ok(response)
+	}
+
+	/// Removes a previously-configured webhook at the configured LSP.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn remove_webhook(&self, app_name: String) -> Result<RemoveWebhookResponse, Error> {
+		self.remove_webhook_impl(app_name)
+	}
+
+	/// Removes a previously-configured webhook at the configured LSP.
+	#[cfg(feature = "uniffi")]
+	pub fn remove_webhook(&self, app_name: String) -> Result<LSPS5RemoveWebhookResponse, Error> {
+		self.remove_webhook_impl(app_name)
+	}
+
+	/// Notifies the configured LSP about an incoming payment.
+	pub fn notify_payment_incoming(&self, client_id: PublicKey) -> Result<(), Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		liquidity_source.lsps5_notify_payment_incoming(client_id)
+	}
+}
+
+#[cfg(feature = "uniffi")]
+// Re-export LSPS5 response types for uniffi
+pub use lightning_liquidity::lsps5::msgs::{
+	RemoveWebhookResponse as LSPS5RemoveWebhookResponse,
+	SetWebhookResponse as LSPS5SetWebhookResponse,
+};
+
+#[cfg(feature = "uniffi")]
+/// Wrapper for ListWebhooksResponse that converts LSPS5AppName to String for uniffi
+#[derive(Clone, Debug)]
+pub struct LSPS5ListWebhooksResponse {
+	pub app_names: Vec<String>,
+	pub max_webhooks: u32,
+}
+
+#[cfg(feature = "uniffi")]
+impl From<ListWebhooksResponse> for LSPS5ListWebhooksResponse {
+	fn from(response: ListWebhooksResponse) -> Self {
+		Self {
+			app_names: response.app_names.into_iter().map(|name| name.to_string()).collect(),
+			max_webhooks: response.max_webhooks,
+		}
 	}
 }
