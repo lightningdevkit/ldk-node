@@ -38,11 +38,12 @@ use lightning_types::payment::PaymentHash;
 use rand::Rng;
 use tokio::sync::oneshot;
 
+use crate::builder::BuildError;
 use crate::chain::ChainSource;
 use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
+use crate::types::{ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -140,6 +141,7 @@ where
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	chain_source: Arc<ChainSource>,
+	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: L,
 }
@@ -150,7 +152,7 @@ where
 {
 	pub(crate) fn new(
 		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		chain_source: Arc<ChainSource>, config: Arc<Config>, logger: L,
+		chain_source: Arc<ChainSource>, kv_store: Arc<DynStore>, config: Arc<Config>, logger: L,
 	) -> Self {
 		let lsps1_client = None;
 		let lsps2_client = None;
@@ -163,6 +165,7 @@ where
 			channel_manager,
 			keys_manager,
 			chain_source,
+			kv_store,
 			config,
 			logger,
 		}
@@ -213,7 +216,7 @@ where
 		self
 	}
 
-	pub(crate) fn build(self) -> LiquiditySource<L> {
+	pub(crate) async fn build(self) -> Result<LiquiditySource<L>, BuildError> {
 		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
 			let lsps5_service_config = None;
@@ -230,17 +233,22 @@ where
 			lsps5_client_config,
 		});
 
-		let liquidity_manager = Arc::new(LiquidityManager::new(
-			Arc::clone(&self.keys_manager),
-			Arc::clone(&self.keys_manager),
-			Arc::clone(&self.channel_manager),
-			Some(Arc::clone(&self.chain_source)),
-			None,
-			liquidity_service_config,
-			liquidity_client_config,
-		));
+		let liquidity_manager = Arc::new(
+			LiquidityManager::new(
+				Arc::clone(&self.keys_manager),
+				Arc::clone(&self.keys_manager),
+				Arc::clone(&self.channel_manager),
+				Some(Arc::clone(&self.chain_source)),
+				None,
+				Arc::clone(&self.kv_store),
+				liquidity_service_config,
+				liquidity_client_config,
+			)
+			.await
+			.map_err(|_| BuildError::ReadFailed)?,
+		);
 
-		LiquiditySource {
+		Ok(LiquiditySource {
 			lsps1_client: self.lsps1_client,
 			lsps2_client: self.lsps2_client,
 			lsps2_service: self.lsps2_service,
@@ -251,7 +259,7 @@ where
 			liquidity_manager,
 			config: self.config,
 			logger: self.logger,
-		}
+		})
 	}
 }
 
@@ -574,14 +582,17 @@ where
 						}
 					}
 
-					match lsps2_service_handler.invoice_parameters_generated(
-						&counterparty_node_id,
-						request_id,
-						intercept_scid,
-						LSPS2_CHANNEL_CLTV_EXPIRY_DELTA,
-						LSPS2_CLIENT_TRUSTS_LSP_MODE,
-						user_channel_id,
-					) {
+					match lsps2_service_handler
+						.invoice_parameters_generated(
+							&counterparty_node_id,
+							request_id,
+							intercept_scid,
+							LSPS2_CHANNEL_CLTV_EXPIRY_DELTA,
+							LSPS2_CLIENT_TRUSTS_LSP_MODE,
+							user_channel_id,
+						)
+						.await
+					{
 						Ok(()) => {},
 						Err(e) => {
 							log_error!(
@@ -1239,15 +1250,14 @@ where
 			})
 	}
 
-	pub(crate) fn handle_channel_ready(
+	pub(crate) async fn handle_channel_ready(
 		&self, user_channel_id: u128, channel_id: &ChannelId, counterparty_node_id: &PublicKey,
 	) {
 		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
-			if let Err(e) = lsps2_service_handler.channel_ready(
-				user_channel_id,
-				channel_id,
-				counterparty_node_id,
-			) {
+			if let Err(e) = lsps2_service_handler
+				.channel_ready(user_channel_id, channel_id, counterparty_node_id)
+				.await
+			{
 				log_error!(
 					self.logger,
 					"LSPS2 service failed to handle ChannelReady event: {:?}",
@@ -1257,17 +1267,20 @@ where
 		}
 	}
 
-	pub(crate) fn handle_htlc_intercepted(
+	pub(crate) async fn handle_htlc_intercepted(
 		&self, intercept_scid: u64, intercept_id: InterceptId, expected_outbound_amount_msat: u64,
 		payment_hash: PaymentHash,
 	) {
 		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
-			if let Err(e) = lsps2_service_handler.htlc_intercepted(
-				intercept_scid,
-				intercept_id,
-				expected_outbound_amount_msat,
-				payment_hash,
-			) {
+			if let Err(e) = lsps2_service_handler
+				.htlc_intercepted(
+					intercept_scid,
+					intercept_id,
+					expected_outbound_amount_msat,
+					payment_hash,
+				)
+				.await
+			{
 				log_error!(
 					self.logger,
 					"LSPS2 service failed to handle HTLCIntercepted event: {:?}",
@@ -1277,9 +1290,9 @@ where
 		}
 	}
 
-	pub(crate) fn handle_htlc_handling_failed(&self, failure_type: HTLCHandlingFailureType) {
+	pub(crate) async fn handle_htlc_handling_failed(&self, failure_type: HTLCHandlingFailureType) {
 		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
-			if let Err(e) = lsps2_service_handler.htlc_handling_failed(failure_type) {
+			if let Err(e) = lsps2_service_handler.htlc_handling_failed(failure_type).await {
 				log_error!(
 					self.logger,
 					"LSPS2 service failed to handle HTLCHandlingFailed event: {:?}",
@@ -1289,10 +1302,10 @@ where
 		}
 	}
 
-	pub(crate) fn handle_payment_forwarded(&self, next_channel_id: Option<ChannelId>) {
+	pub(crate) async fn handle_payment_forwarded(&self, next_channel_id: Option<ChannelId>) {
 		if let Some(next_channel_id) = next_channel_id {
 			if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
-				if let Err(e) = lsps2_service_handler.payment_forwarded(next_channel_id) {
+				if let Err(e) = lsps2_service_handler.payment_forwarded(next_channel_id).await {
 					log_error!(
 						self.logger,
 						"LSPS2 service failed to handle PaymentForwarded: {:?}",

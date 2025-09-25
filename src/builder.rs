@@ -1557,6 +1557,7 @@ fn build_with_store_internal(
 				Arc::clone(&channel_manager),
 				Arc::clone(&keys_manager),
 				Arc::clone(&chain_source),
+				Arc::clone(&kv_store),
 				Arc::clone(&config),
 				Arc::clone(&logger),
 			);
@@ -1590,7 +1591,8 @@ fn build_with_store_internal(
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
 
-			let liquidity_source = Arc::new(liquidity_source_builder.build());
+			let liquidity_source = runtime
+				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
 			let custom_message_handler =
 				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
 			(Some(liquidity_source), custom_message_handler)

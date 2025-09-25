@@ -1046,7 +1046,7 @@ where
 			LdkEvent::ProbeFailed { .. } => {},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_htlc_handling_failed(failure_type);
+					liquidity_source.handle_htlc_handling_failed(failure_type).await;
 				}
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
@@ -1229,40 +1229,46 @@ where
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
 			} => {
-				let read_only_network_graph = self.network_graph.read_only();
-				let nodes = read_only_network_graph.nodes();
-				let channels = self.channel_manager.list_channels();
+				{
+					let read_only_network_graph = self.network_graph.read_only();
+					let nodes = read_only_network_graph.nodes();
+					let channels = self.channel_manager.list_channels();
 
-				let node_str = |channel_id: &Option<ChannelId>| {
-					channel_id
-						.and_then(|channel_id| channels.iter().find(|c| c.channel_id == channel_id))
-						.and_then(|channel| {
-							nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id))
-						})
-						.map_or("private_node".to_string(), |node| {
-							node.announcement_info
-								.as_ref()
-								.map_or("unnamed node".to_string(), |ann| {
-									format!("node {}", ann.alias())
-								})
-						})
-				};
-				let channel_str = |channel_id: &Option<ChannelId>| {
-					channel_id
-						.map(|channel_id| format!(" with channel {}", channel_id))
-						.unwrap_or_default()
-				};
-				let from_prev_str = format!(
-					" from {}{}",
-					node_str(&prev_channel_id),
-					channel_str(&prev_channel_id)
-				);
-				let to_next_str =
-					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
+					let node_str = |channel_id: &Option<ChannelId>| {
+						channel_id
+							.and_then(|channel_id| {
+								channels.iter().find(|c| c.channel_id == channel_id)
+							})
+							.and_then(|channel| {
+								nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id))
+							})
+							.map_or("private_node".to_string(), |node| {
+								node.announcement_info
+									.as_ref()
+									.map_or("unnamed node".to_string(), |ann| {
+										format!("node {}", ann.alias())
+									})
+							})
+					};
+					let channel_str = |channel_id: &Option<ChannelId>| {
+						channel_id
+							.map(|channel_id| format!(" with channel {}", channel_id))
+							.unwrap_or_default()
+					};
+					let from_prev_str = format!(
+						" from {}{}",
+						node_str(&prev_channel_id),
+						channel_str(&prev_channel_id)
+					);
+					let to_next_str = format!(
+						" to {}{}",
+						node_str(&next_channel_id),
+						channel_str(&next_channel_id)
+					);
 
-				let fee_earned = total_fee_earned_msat.unwrap_or(0);
-				if claim_from_onchain_tx {
-					log_info!(
+					let fee_earned = total_fee_earned_msat.unwrap_or(0);
+					if claim_from_onchain_tx {
+						log_info!(
 						self.logger,
 						"Forwarded payment{}{} of {}msat, earning {}msat in fees from claiming onchain.",
 						from_prev_str,
@@ -1270,19 +1276,20 @@ where
 						outbound_amount_forwarded_msat.unwrap_or(0),
 						fee_earned,
 					);
-				} else {
-					log_info!(
-						self.logger,
-						"Forwarded payment{}{} of {}msat, earning {}msat in fees.",
-						from_prev_str,
-						to_next_str,
-						outbound_amount_forwarded_msat.unwrap_or(0),
-						fee_earned,
-					);
+					} else {
+						log_info!(
+							self.logger,
+							"Forwarded payment{}{} of {}msat, earning {}msat in fees.",
+							from_prev_str,
+							to_next_str,
+							outbound_amount_forwarded_msat.unwrap_or(0),
+							fee_earned,
+						);
+					}
 				}
 
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_payment_forwarded(next_channel_id);
+					liquidity_source.handle_payment_forwarded(next_channel_id).await;
 				}
 
 				let event = Event::PaymentForwarded {
@@ -1375,11 +1382,9 @@ where
 				);
 
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_channel_ready(
-						user_channel_id,
-						&channel_id,
-						&counterparty_node_id,
-					);
+					liquidity_source
+						.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
+						.await;
 				}
 
 				let event = Event::ChannelReady {
@@ -1428,12 +1433,14 @@ where
 				..
 			} => {
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_htlc_intercepted(
-						requested_next_hop_scid,
-						intercept_id,
-						expected_outbound_amount_msat,
-						payment_hash,
-					);
+					liquidity_source
+						.handle_htlc_intercepted(
+							requested_next_hop_scid,
+							intercept_id,
+							expected_outbound_amount_msat,
+							payment_hash,
+						)
+						.await;
 				}
 			},
 			LdkEvent::InvoiceReceived { .. } => {
