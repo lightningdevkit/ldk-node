@@ -12,7 +12,9 @@ use crate::runtime::Runtime;
 use crate::types::{GossipSync, Graph, P2PGossipSync, PeerManager, RapidGossipSync, UtxoLookup};
 use crate::Error;
 
-use lightning_block_sync::gossip::{FutureSpawner, GossipVerifier};
+use lightning_block_sync::gossip::GossipVerifier;
+
+use lightning::util::native_async::FutureSpawner;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
