@@ -90,6 +90,7 @@ pub mod graph;
 mod hex_utils;
 pub mod io;
 pub mod liquidity;
+mod lnurl_auth;
 pub mod logger;
 mod message_handler;
 pub mod payment;
@@ -136,6 +137,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
+use lnurl_auth::LnurlAuth;
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
@@ -203,6 +205,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	lnurl_auth: LnurlAuth,
 	is_running: Arc<RwLock<bool>>,
 	is_listening: Arc<AtomicBool>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
@@ -934,6 +937,14 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 		))
+	}
+
+	/// Authenticates the user via [LNURL-auth] for the given LNURL string.
+	///
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	pub fn lnurl_auth(&self, lnurl: String) -> Result<(), Error> {
+		let auth = self.lnurl_auth.clone();
+		self.runtime.block_on(async move { auth.authenticate(&lnurl).await })
 	}
 
 	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
