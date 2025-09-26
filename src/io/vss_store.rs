@@ -116,14 +116,12 @@ impl VssStoreInner {
 		Self { client, store_id, storable_builder, key_obfuscator }
 	}
 
-	fn build_key(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<String> {
+	fn build_key(&self, primary_namespace: &str, secondary_namespace: &str, key: &str) -> String {
 		let obfuscated_key = self.key_obfuscator.obfuscate(key);
 		if primary_namespace.is_empty() {
-			Ok(obfuscated_key)
+			obfuscated_key
 		} else {
-			Ok(format!("{}#{}#{}", primary_namespace, secondary_namespace, obfuscated_key))
+			format!("{}#{}#{}", primary_namespace, secondary_namespace, obfuscated_key)
 		}
 	}
 
@@ -175,7 +173,7 @@ impl VssStoreInner {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
 		let request = GetObjectRequest {
 			store_id: self.store_id.clone(),
-			key: self.build_key(primary_namespace, secondary_namespace, key)?,
+			key: self.build_key(primary_namespace, secondary_namespace, key),
 		};
 		let resp = self.client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
@@ -211,7 +209,7 @@ impl VssStoreInner {
 			store_id: self.store_id.clone(),
 			global_version: None,
 			transaction_items: vec![KeyValue {
-				key: self.build_key(primary_namespace, secondary_namespace, key)?,
+				key: self.build_key(primary_namespace, secondary_namespace, key),
 				version,
 				value: storable.encode_to_vec(),
 			}],
@@ -236,7 +234,7 @@ impl VssStoreInner {
 		let request = DeleteObjectRequest {
 			store_id: self.store_id.clone(),
 			key_value: Some(KeyValue {
-				key: self.build_key(primary_namespace, secondary_namespace, key)?,
+				key: self.build_key(primary_namespace, secondary_namespace, key),
 				version: -1,
 				value: vec![],
 			}),
