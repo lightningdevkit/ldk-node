@@ -31,3 +31,11 @@ swift.swiftdoc
 # fork
 !/bindings/kotlin/ldk-node-android/lib/src/main/jniLibs
 !/bindings/kotlin/ldk-node-android/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
+
+# IDE and local files
+.idea
+.build
+.cursor
+.claude
+*.local.*
+CLAUDE.md
