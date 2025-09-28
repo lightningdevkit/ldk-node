@@ -9,26 +9,21 @@
 
 mod common;
 
+use std::default::Default;
+use std::str::FromStr;
+
+use clightningrpc::lightningrpc::LightningRPC;
+use clightningrpc::responses::NetworkAddress;
+use electrsd::corepc_client::client_sync::Auth;
+use electrsd::corepc_node::Client as BitcoindClient;
+use electrum_client::Client as ElectrumClient;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event};
-use lightning_invoice::{Bolt11InvoiceDescription, Description};
-
-use clightningrpc::lightningrpc::LightningRPC;
-use clightningrpc::responses::NetworkAddress;
-
-use electrsd::corepc_client::client_sync::Auth;
-use electrsd::corepc_node::Client as BitcoindClient;
-
-use electrum_client::Client as ElectrumClient;
-use lightning_invoice::Bolt11Invoice;
-
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-
-use std::default::Default;
-use std::str::FromStr;
 
 #[test]
 fn test_cln() {

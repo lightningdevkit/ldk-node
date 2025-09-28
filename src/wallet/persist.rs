@@ -5,6 +5,11 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::sync::Arc;
+
+use bdk_chain::Merge;
+use bdk_wallet::{ChangeSet, WalletPersister};
+
 use crate::io::utils::{
 	read_bdk_wallet_change_set, write_bdk_wallet_change_descriptor, write_bdk_wallet_descriptor,
 	write_bdk_wallet_indexer, write_bdk_wallet_local_chain, write_bdk_wallet_network,
@@ -12,11 +17,6 @@ use crate::io::utils::{
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::types::DynStore;
-
-use bdk_chain::Merge;
-use bdk_wallet::{ChangeSet, WalletPersister};
-
-use std::sync::Arc;
 pub(crate) struct KVStoreWalletPersister {
 	latest_change_set: Option<ChangeSet>,
 	kv_store: Arc<DynStore>,

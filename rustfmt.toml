@@ -10,3 +10,5 @@ match_block_trailing_comma = true
 # UNSTABLE: format_macro_matchers = true
 # UNSTABLE: format_strings = true
 # UNSTABLE: group_imports = "StdExternalCrate"
+# UNSTABLE: reorder_imports = true
+# UNSTABLE: imports_granularity = "Module"

@@ -7,15 +7,15 @@
 
 //! Holds a payment handler allowing to send and receive on-chain payments.
 
+use std::sync::{Arc, RwLock};
+
+use bitcoin::{Address, Txid};
+
 use crate::config::Config;
 use crate::error::Error;
 use crate::logger::{log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, Wallet};
 use crate::wallet::OnchainSendAmount;
-
-use bitcoin::{Address, Txid};
-
-use std::sync::{Arc, RwLock};
 
 #[cfg(not(feature = "uniffi"))]
 type FeeRate = bitcoin::FeeRate;

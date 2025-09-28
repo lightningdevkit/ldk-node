@@ -5,13 +5,47 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
+use std::convert::TryInto;
+use std::default::Default;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, Once, RwLock};
+use std::time::SystemTime;
+use std::{fmt, fs};
+
+use bdk_wallet::template::Bip84;
+use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
+use bip39::Mnemonic;
+use bitcoin::bip32::{ChildNumber, Xpriv};
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::{BlockHash, Network};
+use lightning::chain::{chainmonitor, BestBlock, Watch};
+use lightning::io::Cursor;
+use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
+use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
+use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::routing::gossip::NodeAlias;
+use lightning::routing::router::DefaultRouter;
+use lightning::routing::scoring::{
+	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
+};
+use lightning::sign::{EntropySource, NodeSigner};
+use lightning::util::persist::{
+	read_channel_monitors, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+};
+use lightning::util::ser::ReadableArgs;
+use lightning::util::sweep::OutputSweeper;
+use lightning_persister::fs_store::FilesystemStore;
+use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
+
 use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
-
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -38,48 +72,6 @@ use crate::types::{
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics};
-
-use lightning::chain::{chainmonitor, BestBlock, Watch};
-use lightning::io::Cursor;
-use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
-use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
-use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
-use lightning::routing::gossip::NodeAlias;
-use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::{
-	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
-};
-use lightning::sign::{EntropySource, NodeSigner};
-
-use lightning::util::persist::{
-	read_channel_monitors, CHANNEL_MANAGER_PERSISTENCE_KEY,
-	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-};
-use lightning::util::ser::ReadableArgs;
-use lightning::util::sweep::OutputSweeper;
-
-use lightning_persister::fs_store::FilesystemStore;
-
-use bdk_wallet::template::Bip84;
-use bdk_wallet::KeychainKind;
-use bdk_wallet::Wallet as BdkWallet;
-
-use bip39::Mnemonic;
-
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::{BlockHash, Network};
-
-use bitcoin::bip32::{ChildNumber, Xpriv};
-use std::collections::HashMap;
-use std::convert::TryInto;
-use std::default::Default;
-use std::fmt;
-use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, Once, RwLock};
-use std::time::SystemTime;
-use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
 const VSS_HARDENED_CHILD_INDEX: u32 = 877;
 const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;

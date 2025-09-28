@@ -1,10 +1,10 @@
+use std::sync::{Arc, Mutex};
+
 use chrono::Utc;
-use ldk_node::logger::LogRecord;
-use ldk_node::logger::{LogLevel, LogWriter};
+use ldk_node::logger::{LogLevel, LogRecord, LogWriter};
 #[cfg(not(feature = "uniffi"))]
 use log::Record as LogFacadeRecord;
 use log::{Level as LogFacadeLevel, LevelFilter as LogFacadeLevelFilter, Log as LogFacadeLog};
-use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub(crate) enum TestLogWriter {

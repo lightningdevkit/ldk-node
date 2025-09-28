@@ -5,20 +5,20 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use super::*;
-use crate::config::WALLET_KEYS_SEED_LEN;
+use std::fs;
+use std::io::Write;
+use std::ops::Deref;
+use std::path::Path;
+use std::sync::Arc;
 
-use crate::chain::ChainSource;
-use crate::fee_estimator::OnchainFeeEstimator;
-use crate::io::{
-	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
-};
-use crate::logger::{log_error, LdkLogger, Logger};
-use crate::peer_store::PeerStore;
-use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
-use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
-
+use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
+use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
+use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
+use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
+use bdk_chain::ConfirmationBlockTime;
+use bdk_wallet::ChangeSet as BdkWalletChangeSet;
+use bip39::Mnemonic;
+use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
@@ -32,25 +32,21 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::sweep::OutputSweeper;
-
 use lightning_types::string::PrintableString;
-
-use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
-use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
-use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
-use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
-use bdk_chain::ConfirmationBlockTime;
-use bdk_wallet::ChangeSet as BdkWalletChangeSet;
-
-use bip39::Mnemonic;
-use bitcoin::Network;
 use rand::{thread_rng, RngCore};
 
-use std::fs;
-use std::io::Write;
-use std::ops::Deref;
-use std::path::Path;
-use std::sync::Arc;
+use super::*;
+use crate::chain::ChainSource;
+use crate::config::WALLET_KEYS_SEED_LEN;
+use crate::fee_estimator::OnchainFeeEstimator;
+use crate::io::{
+	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+};
+use crate::logger::{log_error, LdkLogger, Logger};
+use crate::peer_store::PeerStore;
+use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
+use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
+use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 /// Generates a random [BIP 39] mnemonic.
 ///

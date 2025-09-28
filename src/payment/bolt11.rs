@@ -9,6 +9,19 @@
 //!
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 
+use std::sync::{Arc, RwLock};
+
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use lightning::ln::channelmanager::{
+	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
+};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning_invoice::{
+	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
+};
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -23,21 +36,6 @@ use crate::payment::store::{
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, PaymentStore};
-
-use lightning::ln::channelmanager::{
-	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
-};
-use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
-
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
-use lightning_invoice::Bolt11Invoice as LdkBolt11Invoice;
-use lightning_invoice::Bolt11InvoiceDescription as LdkBolt11InvoiceDescription;
-
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
-
-use std::sync::{Arc, RwLock};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;

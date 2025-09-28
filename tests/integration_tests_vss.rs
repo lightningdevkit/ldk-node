@@ -9,8 +9,9 @@
 
 mod common;
 
-use ldk_node::Builder;
 use std::collections::HashMap;
+
+use ldk_node::Builder;
 
 #[test]
 fn channel_full_cycle_with_vss_store() {

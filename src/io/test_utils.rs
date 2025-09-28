@@ -5,21 +5,19 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::panic::RefUnwindSafe;
+use std::path::PathBuf;
+
+use lightning::events::ClosureReason;
 use lightning::ln::functional_test_utils::{
 	connect_block, create_announced_chan_between_nodes, create_chanmon_cfgs, create_dummy_block,
 	create_network, create_node_cfgs, create_node_chanmgrs, send_payment,
 };
 use lightning::util::persist::{read_channel_monitors, KVStoreSync, KVSTORE_NAMESPACE_KEY_MAX_LEN};
-
-use lightning::events::ClosureReason;
 use lightning::util::test_utils;
 use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
-
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-
-use std::panic::RefUnwindSafe;
-use std::path::PathBuf;
 
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();

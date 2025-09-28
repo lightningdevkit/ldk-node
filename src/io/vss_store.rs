@@ -5,18 +5,16 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::io::utils::check_namespace_key_validity;
-use crate::runtime::Runtime;
+#[cfg(test)]
+use std::panic::RefUnwindSafe;
+use std::sync::Arc;
+use std::time::Duration;
 
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
 use lightning::io::{self, Error, ErrorKind};
 use lightning::util::persist::KVStoreSync;
 use prost::Message;
 use rand::RngCore;
-#[cfg(test)]
-use std::panic::RefUnwindSafe;
-use std::sync::Arc;
-use std::time::Duration;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
 use vss_client::headers::VssHeaderProvider;
@@ -30,6 +28,9 @@ use vss_client::util::retry::{
 	MaxAttemptsRetryPolicy, MaxTotalDelayRetryPolicy, RetryPolicy,
 };
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
+
+use crate::io::utils::check_namespace_key_validity;
+use crate::runtime::Runtime;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
 	JitteredRetryPolicy<
@@ -256,13 +257,15 @@ impl RefUnwindSafe for VssStore {}
 #[cfg(test)]
 #[cfg(vss_test)]
 mod tests {
-	use super::*;
-	use crate::io::test_utils::do_read_write_remove_list_persist;
+	use std::collections::HashMap;
+
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng, RngCore};
-	use std::collections::HashMap;
 	use tokio::runtime;
 	use vss_client::headers::FixedHeaders;
+
+	use super::*;
+	use crate::io::test_utils::do_read_write_remove_list_persist;
 
 	#[test]
 	fn vss_read_write_remove_list_persist() {

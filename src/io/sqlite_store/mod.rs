@@ -6,18 +6,16 @@
 // accordance with one or both of these licenses.
 
 //! Objects related to [`SqliteStore`] live here.
-use crate::io::utils::check_namespace_key_validity;
-
-use lightning::io;
-use lightning::util::persist::KVStoreSync;
-
-use lightning_types::string::PrintableString;
-
-use rusqlite::{named_params, Connection};
-
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+use lightning::io;
+use lightning::util::persist::KVStoreSync;
+use lightning_types::string::PrintableString;
+use rusqlite::{named_params, Connection};
+
+use crate::io::utils::check_namespace_key_validity;
 
 mod migrations;
 

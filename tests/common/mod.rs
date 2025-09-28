@@ -10,45 +10,38 @@
 
 pub(crate) mod logging;
 
-use logging::TestLogWriter;
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
+use bitcoin::hashes::hex::FromHex;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::{
+	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
+};
+use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
+use electrsd::{corepc_node, ElectrsD};
+use electrum_client::ElectrumApi;
 use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
 };
-
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
 use lightning::util::test_utils::TestStore;
-
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
 use lightning_persister::fs_store::FilesystemStore;
-
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::{hex::FromHex, Hash};
-use bitcoin::{
-	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
-};
-
-use electrsd::corepc_node::Client as BitcoindClient;
-use electrsd::corepc_node::Node as BitcoinD;
-use electrsd::{corepc_node, ElectrsD};
-use electrum_client::ElectrumApi;
-
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use logging::TestLogWriter;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use serde_json::{json, Value};
-
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 macro_rules! expect_event {
 	($node: expr, $event_type: ident) => {{

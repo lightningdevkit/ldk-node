@@ -5,21 +5,18 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::liquidity::LiquiditySource;
+use std::ops::Deref;
+use std::sync::Arc;
 
+use bitcoin::secp256k1::PublicKey;
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::ln::wire::CustomMessageReader;
 use lightning::util::logger::Logger;
 use lightning::util::ser::LengthLimitedRead;
-
+use lightning_liquidity::lsps0::ser::RawLSPSMessage;
 use lightning_types::features::{InitFeatures, NodeFeatures};
 
-use lightning_liquidity::lsps0::ser::RawLSPSMessage;
-
-use bitcoin::secp256k1::PublicKey;
-
-use std::ops::Deref;
-use std::sync::Arc;
+use crate::liquidity::LiquiditySource;
 
 pub(crate) enum NodeCustomMessageHandler<L: Deref>
 where
