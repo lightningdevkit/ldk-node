@@ -5,19 +5,18 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::{log_error, log_info, LdkLogger};
-use crate::types::PeerManager;
-use crate::Error;
-
-use lightning::ln::msgs::SocketAddress;
-
-use bitcoin::secp256k1::PublicKey;
-
 use std::collections::hash_map::{self, HashMap};
 use std::net::ToSocketAddrs;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use bitcoin::secp256k1::PublicKey;
+use lightning::ln::msgs::SocketAddress;
+
+use crate::logger::{log_error, log_info, LdkLogger};
+use crate::types::PeerManager;
+use crate::Error;
 
 pub(crate) struct ConnectionManager<L: Deref + Clone + Sync + Send>
 where

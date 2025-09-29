@@ -5,9 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use rusqlite::Connection;
-
 use lightning::io;
+use rusqlite::Connection;
 
 pub(super) fn migrate_schema(
 	connection: &mut Connection, kv_table_name: &str, from_version: u16, to_version: u16,
@@ -75,14 +74,13 @@ pub(super) fn migrate_schema(
 
 #[cfg(test)]
 mod tests {
-	use crate::io::sqlite_store::SqliteStore;
-	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
+	use std::fs;
 
 	use lightning::util::persist::KVStoreSync;
-
 	use rusqlite::{named_params, Connection};
 
-	use std::fs;
+	use crate::io::sqlite_store::SqliteStore;
+	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
 
 	#[test]
 	fn rwrl_post_schema_1_migration() {

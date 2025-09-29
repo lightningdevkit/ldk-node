@@ -9,6 +9,14 @@ mod bitcoind;
 mod electrum;
 mod esplora;
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use bitcoin::{Script, Txid};
+use lightning::chain::Filter;
+use lightning_block_sync::gossip::UtxoSource;
+
 use crate::chain::bitcoind::BitcoindChainSource;
 use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
@@ -22,16 +30,6 @@ use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
-
-use lightning::chain::Filter;
-
-use lightning_block_sync::gossip::UtxoSource;
-
-use bitcoin::{Script, Txid};
-
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 pub(crate) enum WalletSyncStatus {
 	Completed,

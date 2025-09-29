@@ -5,16 +5,15 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::{log_error, LdkLogger};
-use crate::types::DynStore;
-use crate::Error;
+use std::collections::{hash_map, HashMap};
+use std::ops::Deref;
+use std::sync::{Arc, Mutex};
 
 use lightning::util::ser::{Readable, Writeable};
 
-use std::collections::hash_map;
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use crate::logger::{log_error, LdkLogger};
+use crate::types::DynStore;
+use crate::Error;
 
 pub(crate) trait StorableObject: Clone + Readable + Writeable {
 	type Id: StorableObjectId;
@@ -164,9 +163,8 @@ mod tests {
 	use lightning::impl_writeable_tlv_based;
 	use lightning::util::test_utils::{TestLogger, TestStore};
 
-	use crate::hex_utils;
-
 	use super::*;
+	use crate::hex_utils;
 
 	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 	struct TestObjectId {

@@ -5,37 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use persist::KVStoreWalletPersister;
-
-use crate::config::Config;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-
-use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
-use crate::payment::store::ConfirmationStatus;
-use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
-use crate::types::{Broadcaster, PaymentStore};
-use crate::Error;
-
-use lightning::chain::chaininterface::BroadcasterInterface;
-use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
-use lightning::chain::{BestBlock, Listen};
-
-use lightning::events::bump_transaction::{Utxo, WalletSource};
-use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::inbound_payment::ExpandedKey;
-use lightning::ln::msgs::UnsignedGossipMessage;
-use lightning::ln::script::ShutdownScript;
-use lightning::sign::{
-	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
-	PeerStorageKey, Recipient, SignerProvider, SpendableOutputDescriptor,
-};
-
-use lightning::util::message_signing;
-use lightning_invoice::RawBolt11Invoice;
+use std::future::Future;
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::{Balance, KeychainKind, PersistedWallet, SignOptions, Update};
-
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -49,11 +25,29 @@ use bitcoin::{
 	Address, Amount, FeeRate, Network, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash,
 	WitnessProgram, WitnessVersion,
 };
+use lightning::chain::chaininterface::BroadcasterInterface;
+use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
+use lightning::chain::{BestBlock, Listen};
+use lightning::events::bump_transaction::{Utxo, WalletSource};
+use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::inbound_payment::ExpandedKey;
+use lightning::ln::msgs::UnsignedGossipMessage;
+use lightning::ln::script::ShutdownScript;
+use lightning::sign::{
+	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
+	PeerStorageKey, Recipient, SignerProvider, SpendableOutputDescriptor,
+};
+use lightning::util::message_signing;
+use lightning_invoice::RawBolt11Invoice;
+use persist::KVStoreWalletPersister;
 
-use std::future::Future;
-use std::pin::Pin;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use crate::config::Config;
+use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::payment::store::ConfirmationStatus;
+use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
+use crate::types::{Broadcaster, PaymentStore};
+use crate::Error;
 
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },

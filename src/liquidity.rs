@@ -7,21 +7,20 @@
 
 //! Objects related to liquidity management.
 
-use crate::chain::ChainSource;
-use crate::connection::ConnectionManager;
-use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
-use crate::runtime::Runtime;
-use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
-use crate::{total_anchor_channels_reserve_sats, Config, Error};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use chrono::Utc;
 use lightning::events::HTLCHandlingFailureType;
 use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::routing::router::{RouteHint, RouteHintHop};
-
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
-
 use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::ser::{LSPSDateTime, LSPSRequestId};
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
@@ -35,22 +34,16 @@ use lightning_liquidity::lsps2::msgs::{LSPS2OpeningFeeParams, LSPS2RawOpeningFee
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
-
 use lightning_types::payment::PaymentHash;
-
-use bitcoin::hashes::{sha256, Hash};
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
-
+use rand::Rng;
 use tokio::sync::oneshot;
 
-use chrono::Utc;
-
-use rand::Rng;
-
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use crate::chain::ChainSource;
+use crate::connection::ConnectionManager;
+use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
+use crate::runtime::Runtime;
+use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
+use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 

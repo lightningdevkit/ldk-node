@@ -5,8 +5,18 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bdk_esplora::EsploraAsyncExt;
+use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
+use esplora_client::AsyncClient as EsploraAsyncClient;
+use lightning::chain::{Confirm, Filter, WatchedOutput};
+use lightning::util::ser::Writeable;
+use lightning_transaction_sync::EsploraSyncClient;
+
+use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
 	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS,
@@ -20,21 +30,6 @@ use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
-
-use lightning::chain::{Confirm, Filter, WatchedOutput};
-use lightning::util::ser::Writeable;
-
-use lightning_transaction_sync::EsploraSyncClient;
-
-use bdk_esplora::EsploraAsyncExt;
-
-use esplora_client::AsyncClient as EsploraAsyncClient;
-
-use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,

@@ -7,20 +7,20 @@
 
 //! Store implementation for [`StaticInvoice`]s.
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::impl_writeable_tlv_based;
+use lightning::offers::static_invoice::StaticInvoice;
+use lightning::util::ser::{Readable, Writeable};
+
 use crate::hex_utils;
 use crate::io::STATIC_INVOICE_STORE_PRIMARY_NAMESPACE;
 use crate::payment::asynchronous::rate_limiter::RateLimiter;
 use crate::types::DynStore;
-
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
-
-use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::impl_writeable_tlv_based;
-use lightning::{offers::static_invoice::StaticInvoice, util::ser::Readable, util::ser::Writeable};
-
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 struct PersistedStaticInvoice {
 	invoice: StaticInvoice,
@@ -133,23 +133,18 @@ impl StaticInvoiceStore {
 
 #[cfg(test)]
 mod tests {
-	use std::{sync::Arc, time::Duration};
+	use std::sync::Arc;
+	use std::time::Duration;
 
-	use bitcoin::{
-		key::{Keypair, Secp256k1},
-		secp256k1::{PublicKey, SecretKey},
-	};
-	use lightning::blinded_path::{
-		message::BlindedMessagePath,
-		payment::{BlindedPayInfo, BlindedPaymentPath},
-		BlindedHop,
-	};
+	use bitcoin::key::{Keypair, Secp256k1};
+	use bitcoin::secp256k1::{PublicKey, SecretKey};
+	use lightning::blinded_path::message::BlindedMessagePath;
+	use lightning::blinded_path::payment::{BlindedPayInfo, BlindedPaymentPath};
+	use lightning::blinded_path::BlindedHop;
 	use lightning::ln::inbound_payment::ExpandedKey;
-	use lightning::offers::{
-		nonce::Nonce,
-		offer::OfferBuilder,
-		static_invoice::{StaticInvoice, StaticInvoiceBuilder},
-	};
+	use lightning::offers::nonce::Nonce;
+	use lightning::offers::offer::OfferBuilder;
+	use lightning::offers::static_invoice::{StaticInvoice, StaticInvoiceBuilder};
 	use lightning::sign::EntropySource;
 	use lightning::util::test_utils::TestStore;
 	use lightning_types::features::BlindedHopFeatures;

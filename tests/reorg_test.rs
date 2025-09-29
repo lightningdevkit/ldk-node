@@ -1,9 +1,11 @@
 mod common;
+use std::collections::HashMap;
+
 use bitcoin::Amount;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
 use ldk_node::{Event, LightningBalance, PendingSweepBalance};
-use proptest::{prelude::prop, proptest};
-use std::collections::HashMap;
+use proptest::prelude::prop;
+use proptest::proptest;
 
 use crate::common::{
 	expect_event, generate_blocks_and_wait, invalidate_blocks, open_channel,

@@ -7,20 +7,19 @@
 
 //! Objects for configuring the node.
 
-use crate::logger::LogLevel;
-
-use lightning::ln::msgs::SocketAddress;
-use lightning::routing::gossip::NodeAlias;
-use lightning::routing::router::RouteParametersConfig;
-use lightning::util::config::ChannelConfig as LdkChannelConfig;
-use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
-use lightning::util::config::UserConfig;
+use std::fmt;
+use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
+use lightning::routing::router::RouteParametersConfig;
+use lightning::util::config::{
+	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
+};
 
-use std::fmt;
-use std::time::Duration;
+use crate::logger::LogLevel;
 
 // Config defaults
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
@@ -551,11 +550,7 @@ pub enum AsyncPaymentsRole {
 mod tests {
 	use std::str::FromStr;
 
-	use super::may_announce_channel;
-	use super::AnnounceError;
-	use super::Config;
-	use super::NodeAlias;
-	use super::SocketAddress;
+	use super::{may_announce_channel, AnnounceError, Config, NodeAlias, SocketAddress};
 
 	#[test]
 	fn node_announce_channel() {

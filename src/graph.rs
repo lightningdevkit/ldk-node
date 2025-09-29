@@ -7,19 +7,17 @@
 
 //! Objects for querying the network graph.
 
-use crate::types::Graph;
-
-use lightning::routing::gossip::NodeId;
+use std::sync::Arc;
 
 #[cfg(feature = "uniffi")]
 use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeId;
 #[cfg(feature = "uniffi")]
 use lightning::routing::gossip::RoutingFees;
-
 #[cfg(not(feature = "uniffi"))]
 use lightning::routing::gossip::{ChannelInfo, NodeInfo};
 
-use std::sync::Arc;
+use crate::types::Graph;
 
 /// Represents the network as nodes and channels between them.
 pub struct NetworkGraph {

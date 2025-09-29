@@ -7,21 +7,19 @@
 
 //! Holds a payment handler allowing to send spontaneous ("keysend") payments.
 
+use std::sync::{Arc, RwLock};
+
+use bitcoin::secp256k1::PublicKey;
+use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning::sign::EntropySource;
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, CustomTlvRecord, KeysManager, PaymentStore};
-
-use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
-use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
-use lightning::sign::EntropySource;
-
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
-use bitcoin::secp256k1::PublicKey;
-
-use std::sync::{Arc, RwLock};
 
 // The default `final_cltv_expiry_delta` we apply when not set.
 const LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 144;

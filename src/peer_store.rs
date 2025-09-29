@@ -5,6 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::{Arc, RwLock};
+
+use bitcoin::secp256k1::PublicKey;
+use lightning::impl_writeable_tlv_based;
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+
 use crate::io::{
 	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -12,15 +20,6 @@ use crate::io::{
 use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::{Error, SocketAddress};
-
-use lightning::impl_writeable_tlv_based;
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-
-use bitcoin::secp256k1::PublicKey;
-
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::{Arc, RwLock};
 
 pub struct PeerStore<L: Deref>
 where
@@ -149,11 +148,12 @@ impl_writeable_tlv_based!(PeerInfo, {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use lightning::util::test_utils::{TestLogger, TestStore};
-
 	use std::str::FromStr;
 	use std::sync::Arc;
+
+	use lightning::util::test_utils::{TestLogger, TestStore};
+
+	use super::*;
 
 	#[test]
 	fn peer_info_persistence() {

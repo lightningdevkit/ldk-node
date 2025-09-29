@@ -5,36 +5,19 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
-use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
-use crate::{
-	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
-	UserChannelId,
-};
+use core::future::Future;
+use core::task::{Poll, Waker};
+use std::collections::VecDeque;
+use std::ops::Deref;
+use std::sync::{Arc, Condvar, Mutex};
 
-use crate::config::{may_announce_channel, Config};
-use crate::connection::ConnectionManager;
-use crate::data_store::DataStoreUpdateResult;
-use crate::fee_estimator::ConfirmationTarget;
-use crate::liquidity::LiquiditySource;
-use crate::logger::Logger;
-
-use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
-use crate::payment::store::{
-	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
-};
-
-use crate::io::{
-	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
-	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
-};
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
-
-use crate::runtime::Runtime;
-
+use bitcoin::blockdata::locktime::absolute::LockTime;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::{Amount, OutPoint};
 use lightning::events::bump_transaction::BumpTransactionEvent;
-use lightning::events::{ClosureReason, PaymentPurpose, ReplayEvent};
-use lightning::events::{Event as LdkEvent, PaymentFailureReason};
+use lightning::events::{
+	ClosureReason, Event as LdkEvent, PaymentFailureReason, PaymentPurpose, ReplayEvent,
+};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
@@ -44,22 +27,31 @@ use lightning::util::config::{
 };
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
-
-use bitcoin::blockdata::locktime::absolute::LockTime;
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
-
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use rand::{thread_rng, Rng};
 
-use core::future::Future;
-use core::task::{Poll, Waker};
-use std::collections::VecDeque;
-use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex};
+use crate::config::{may_announce_channel, Config};
+use crate::connection::ConnectionManager;
+use crate::data_store::DataStoreUpdateResult;
+use crate::fee_estimator::ConfirmationTarget;
+use crate::io::{
+	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+};
+use crate::liquidity::LiquiditySource;
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::store::{
+	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+};
+use crate::runtime::Runtime;
+use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
+use crate::{
+	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
+	UserChannelId,
+};
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -1599,10 +1591,12 @@ where
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use lightning::util::test_utils::{TestLogger, TestStore};
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::Duration;
+
+	use lightning::util::test_utils::{TestLogger, TestStore};
+
+	use super::*;
 
 	#[tokio::test]
 	async fn event_queue_persistence() {

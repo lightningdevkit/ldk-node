@@ -72,9 +72,9 @@ impl RateLimiter {
 
 #[cfg(test)]
 mod tests {
-	use crate::payment::asynchronous::rate_limiter::RateLimiter;
-
 	use std::time::Duration;
+
+	use crate::payment::asynchronous::rate_limiter::RateLimiter;
 
 	#[test]
 	fn rate_limiter_test() {

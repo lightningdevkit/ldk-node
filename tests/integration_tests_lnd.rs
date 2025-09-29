@@ -2,29 +2,25 @@
 
 mod common;
 
+use std::default::Default;
+use std::str::FromStr;
+
+use bitcoin::hex::DisplayHex;
+use electrsd::corepc_client::client_sync::Auth;
+use electrsd::corepc_node::Client as BitcoindClient;
+use electrum_client::Client as ElectrumClient;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event};
-
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lnd_grpc_rust::lnrpc::invoice::InvoiceState::Settled as LndInvoiceStateSettled;
 use lnd_grpc_rust::lnrpc::{
-	invoice::InvoiceState::Settled as LndInvoiceStateSettled, GetInfoRequest as LndGetInfoRequest,
-	GetInfoResponse as LndGetInfoResponse, Invoice as LndInvoice,
-	ListInvoiceRequest as LndListInvoiceRequest, QueryRoutesRequest as LndQueryRoutesRequest,
-	Route as LndRoute, SendRequest as LndSendRequest,
+	GetInfoRequest as LndGetInfoRequest, GetInfoResponse as LndGetInfoResponse,
+	Invoice as LndInvoice, ListInvoiceRequest as LndListInvoiceRequest,
+	QueryRoutesRequest as LndQueryRoutesRequest, Route as LndRoute, SendRequest as LndSendRequest,
 };
 use lnd_grpc_rust::{connect, LndClient};
-
-use electrsd::corepc_client::client_sync::Auth;
-use electrsd::corepc_node::Client as BitcoindClient;
-
-use electrum_client::Client as ElectrumClient;
-use lightning_invoice::{Bolt11InvoiceDescription, Description};
-
-use bitcoin::hex::DisplayHex;
-
-use std::default::Default;
-use std::str::FromStr;
 use tokio::fs;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

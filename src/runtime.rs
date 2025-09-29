@@ -5,16 +5,16 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::task::{JoinHandle, JoinSet};
+
 use crate::config::{
 	BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS, LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS,
 };
 use crate::logger::{log_debug, log_error, log_trace, LdkLogger, Logger};
-
-use tokio::task::{JoinHandle, JoinSet};
-
-use std::future::Future;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 pub(crate) struct Runtime {
 	mode: RuntimeMode,

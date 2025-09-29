@@ -5,14 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::chaininterface::FeeEstimator as LdkFeeEstimator;
-use lightning::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
-
-use bitcoin::FeeRate;
-
 use std::collections::HashMap;
 use std::sync::RwLock;
+
+use bitcoin::FeeRate;
+use lightning::chain::chaininterface::{
+	ConfirmationTarget as LdkConfirmationTarget, FeeEstimator as LdkFeeEstimator,
+	FEERATE_FLOOR_SATS_PER_KW,
+};
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ConfirmationTarget {
