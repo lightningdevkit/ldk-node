@@ -1289,7 +1289,16 @@ where
 				}
 
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_payment_forwarded(next_channel_id).await;
+					if let Some(skimmed_fee_msat) = skimmed_fee_msat {
+						liquidity_source
+							.handle_payment_forwarded(next_channel_id, skimmed_fee_msat)
+							.await;
+					} else {
+						debug_assert!(
+							false,
+							"We expect skimmed_fee_msat to be set since LDK 0.0.122"
+						);
+					}
 				}
 
 				let event = Event::PaymentForwarded {
