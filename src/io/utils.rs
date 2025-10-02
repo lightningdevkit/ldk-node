@@ -32,7 +32,6 @@ use lightning::util::persist::{
 	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
-use lightning::util::sweep::OutputSweeper;
 use lightning_types::string::PrintableString;
 use rand::{thread_rng, RngCore};
 
@@ -256,10 +255,11 @@ pub(crate) fn read_output_sweeper(
 		kv_store,
 		logger.clone(),
 	);
-	OutputSweeper::read(&mut reader, args).map_err(|e| {
+	let (_, sweeper) = <(_, Sweeper)>::read(&mut reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize OutputSweeper: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize OutputSweeper")
-	})
+	})?;
+	Ok(sweeper)
 }
 
 pub(crate) fn read_node_metrics<L: Deref>(
