@@ -16,7 +16,8 @@ use crate::io::utils::{
 	write_bdk_wallet_tx_graph,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
-use crate::types::DynStore;
+use crate::DynStore;
+
 pub(crate) struct KVStoreWalletPersister {
 	latest_change_set: Option<ChangeSet>,
 	kv_store: Arc<DynStore>,

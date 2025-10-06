@@ -13,8 +13,7 @@ use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::logger::{log_error, LdkLogger};
-use crate::types::DynStore;
-use crate::Error;
+use crate::{DynStore, Error};
 
 pub(crate) trait StorableObject: Clone + Readable + Writeable {
 	type Id: StorableObjectId;
@@ -175,8 +174,8 @@ mod tests {
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
-	use crate::hex_utils;
 	use crate::io::test_utils::InMemoryStore;
+	use crate::{hex_utils, wrap_store};
 
 	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 	struct TestObjectId {
@@ -235,7 +234,7 @@ mod tests {
 
 	#[test]
 	fn data_is_persisted() {
-		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
+		let store: Arc<DynStore> = wrap_store!(Arc::new(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let primary_namespace = "datastore_test_primary".to_string();
 		let secondary_namespace = "datastore_test_secondary".to_string();
