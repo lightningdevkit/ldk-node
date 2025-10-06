@@ -21,7 +21,9 @@ use std::default::Default;
 use std::str::FromStr;
 
 use crate::common::external_node::{
-	do_ldk_opens_channel_full_cycle_with_external_node, init_bitcoind_client, ExternalLightningNode,
+	do_external_node_opens_channel_simple_transactions_with_ldk,
+	do_ldk_opens_channel_full_cycle_with_external_node, init_bitcoind_client,
+	ExternalLightningNode,
 };
 
 #[test]
@@ -43,6 +45,13 @@ fn test_cln_initiates_force_channel_close() {
 	init_bitcoind_client();
 	let mut client = ClnClient::new();
 	do_ldk_opens_channel_full_cycle_with_external_node(&mut client, None);
+}
+
+#[test]
+fn test_cln_opens_channel_with_ldk() {
+	init_bitcoind_client();
+	let mut client = ClnClient::new();
+	do_external_node_opens_channel_simple_transactions_with_ldk(&mut client);
 }
 
 struct ClnClient {
@@ -138,5 +147,19 @@ impl ExternalLightningNode for ClnClient {
 			response = self.client.close(short_channel_id, None, None).unwrap();
 			assert_eq!(response.type_, "mutual");
 		}
+	}
+	fn create_new_address(&mut self) -> String {
+		let address_info = self.client.newaddr(None).unwrap();
+		address_info.bech32.unwrap()
+	}
+
+	fn open_channel(&mut self, node_id: PublicKey, funding_amount_sat: u64) {
+		self.client
+			.fundchannel(
+				&node_id.to_string(),
+				clightningrpc::requests::AmountOrAll::Amount(funding_amount_sat),
+				None,
+			)
+			.unwrap();
 	}
 }

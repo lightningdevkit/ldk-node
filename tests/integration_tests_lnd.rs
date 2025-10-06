@@ -184,4 +184,33 @@ impl ExternalLightningNode for LndClient {
 			.block_on(self.client.lightning().close_channel(request))
 			.expect("Failed to initiate close channel on LND");
 	}
+
+	fn create_new_address(&mut self) -> String {
+		let address = self
+			.runtime
+			.block_on(self.client.lightning().new_address(
+				lnd_grpc_rust::lnrpc::NewAddressRequest {
+					r#type: 0, // 0 = WITNESS_PUBKEY_HASH (bech32)
+					account: "".to_string(),
+				},
+			))
+			.expect("Failed to create new address")
+			.into_inner();
+
+		address.address
+	}
+
+	fn open_channel(&mut self, node_id: PublicKey, funding_amount_sat: u64) {
+		let open_channel_request = lnd_grpc_rust::lnrpc::OpenChannelRequest {
+			node_pubkey: node_id.to_public_key().to_bytes().to_vec(),
+			local_funding_amount: funding_amount_sat as i64,
+			sat_per_vbyte: 1,
+			..Default::default()
+		};
+
+		let _stream = self
+			.runtime
+			.block_on(self.client.lightning().open_channel_sync(open_channel_request))
+			.expect("Failed to open channel on LND");
+	}
 }

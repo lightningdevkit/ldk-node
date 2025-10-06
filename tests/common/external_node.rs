@@ -42,6 +42,10 @@ pub trait ExternalLightningNode {
 	fn check_receive_payment(&mut self, invoice: Bolt11Invoice);
 
 	fn close_channel(&mut self, channel_id: OutPoint, node_id: PublicKey, force: bool);
+
+	fn create_new_address(&mut self) -> String;
+
+	fn open_channel(&mut self, node_id: PublicKey, funding_amount_sat: u64);
 }
 
 static BITCOIND_CLIENT: OnceLock<BitcoindClient> = OnceLock::new();
@@ -245,6 +249,62 @@ pub(crate) fn do_ldk_opens_channel_full_cycle_with_external_node<E: ExternalLigh
 		external_node_id,
 		&user_channel_id,
 		external_force_close,
+	);
+
+	node.stop().unwrap();
+}
+
+pub(crate) fn do_external_node_opens_channel_simple_transactions_with_ldk<
+	E: ExternalLightningNode,
+>(
+	external_node: &mut E,
+) {
+	// Initialize LDK node and clients
+	let (node, bitcoind_client, electrs_client) = setup_test_node(false);
+
+	// setup external node info
+	let (external_node_id, external_node_address) = external_node.get_node_info();
+
+	let addr_string = external_node.create_new_address();
+	let addr = bitcoin::Address::from_str(&addr_string)
+		.unwrap()
+		.require_network(bitcoin::Network::Regtest)
+		.unwrap();
+	let amount = Amount::from_sat(5_000_000);
+	distribute_funds_unconfirmed(bitcoind_client, &electrs_client, vec![addr], amount);
+	generate_blocks_and_wait(bitcoind_client, &electrs_client, 6);
+
+	node.connect(external_node_id, external_node_address.clone(), true).unwrap();
+
+	// Open the channel
+	external_node.open_channel(node.node_id(), 2_000_000);
+	let funding_txo = expect_channel_pending_event!(node, external_node_id);
+	wait_for_tx(&electrs_client, funding_txo.txid);
+	generate_blocks_and_wait(bitcoind_client, &electrs_client, 6);
+	node.sync_wallets().unwrap();
+	let user_channel_id = expect_channel_ready_event!(node, external_node_id);
+
+	// Send a payment to LDK
+	let amount_msat = 100_000_000;
+	receive_payment_from_external_node(&node, external_node, amount_msat);
+	node.sync_wallets().unwrap();
+
+	// Send a payment to the external node
+	let invoice_amount_sat = node.list_channels().first().unwrap().next_outbound_htlc_limit_msat;
+	let invoice: Bolt11Invoice =
+		send_payment_to_external_node(&node, external_node, invoice_amount_sat);
+	check_send_payment_succeeds(&node, external_node, invoice);
+
+	// Close the channel
+	close_channel(
+		&bitcoind_client,
+		&electrs_client,
+		external_node,
+		&node,
+		funding_txo,
+		external_node_id,
+		&user_channel_id,
+		None,
 	);
 
 	node.stop().unwrap();
