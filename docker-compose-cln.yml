@@ -48,20 +48,24 @@ services:
       - bitcoin-electrs
 
   cln:
-    image: blockstream/lightningd:v23.08
+    image: blockstream/lightningd:v25.05
     platform: linux/amd64
     depends_on:
       bitcoin:
         condition: service_healthy
     command:
       [
+        "--network=regtest",
         "--bitcoin-rpcconnect=bitcoin",
         "--bitcoin-rpcport=18443",
         "--bitcoin-rpcuser=user",
         "--bitcoin-rpcpassword=pass",
         "--regtest",
-        "--experimental-anchors",
+        "--rpc-file=/tmp/lightning-rpc",
+        "--rpc-file-mode=0666",
       ]
+    volumes:
+      - ${CLN_DATA_DIR}:/tmp
     ports:
       - "19846:19846"
       - "9937:9937"

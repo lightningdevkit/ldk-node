@@ -9,18 +9,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y socat
+      - name: Create temporary directory for CLN data
+        id: create-temp-dir
+        run: echo "CLN_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
 
       - name: Start bitcoind, electrs, and lightningd
         run: docker compose -f docker-compose-cln.yml up -d
 
-      - name: Forward lightningd RPC socket
-        run: |
-          docker exec ldk-node-cln-1 sh -c "socat -d -d TCP-LISTEN:9937,fork,reuseaddr UNIX-CONNECT:/root/.lightning/regtest/lightning-rpc&"
-          socat -d -d UNIX-LISTEN:/tmp/lightning-rpc,reuseaddr,fork TCP:127.0.0.1:9937&
-
       - name: Run CLN integration tests
-        run: RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln
+        run: |
+          CLN_SOCK=$CLN_DATA_DIR/lightning-rpc RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln

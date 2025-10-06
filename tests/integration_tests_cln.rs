@@ -9,118 +9,134 @@
 
 mod common;
 
-use std::default::Default;
-use std::str::FromStr;
-
 use clightningrpc::lightningrpc::LightningRPC;
 use clightningrpc::responses::NetworkAddress;
-use electrsd::corepc_client::client_sync::Auth;
-use electrsd::corepc_node::Client as BitcoindClient;
-use electrum_client::Client as ElectrumClient;
 use ldk_node::bitcoin::secp256k1::PublicKey;
-use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
-use ldk_node::{Builder, Event};
-use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
+
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 
+use std::default::Default;
+use std::str::FromStr;
+
+use crate::common::external_node::{
+	do_ldk_opens_channel_full_cycle_with_external_node, init_bitcoind_client, ExternalLightningNode,
+};
+
 #[test]
-fn test_cln() {
-	// Setup bitcoind / electrs clients
-	let bitcoind_client = BitcoindClient::new_with_auth(
-		"http://127.0.0.1:18443",
-		Auth::UserPass("user".to_string(), "pass".to_string()),
-	)
-	.unwrap();
-	let electrs_client = ElectrumClient::new("tcp://127.0.0.1:50001").unwrap();
+fn test_ldk_initiates_channel_close() {
+	init_bitcoind_client();
+	let mut client = ClnClient::new();
+	do_ldk_opens_channel_full_cycle_with_external_node(&mut client, Some(true));
+}
 
-	// Give electrs a kick.
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1);
+#[test]
+fn test_cln_initiates_channel_close() {
+	init_bitcoind_client();
+	let mut client = ClnClient::new();
+	do_ldk_opens_channel_full_cycle_with_external_node(&mut client, Some(false));
+}
 
-	// Setup LDK Node
-	let config = common::random_config(true);
-	let mut builder = Builder::from_config(config.node_config);
-	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
+#[test]
+fn test_cln_initiates_force_channel_close() {
+	init_bitcoind_client();
+	let mut client = ClnClient::new();
+	do_ldk_opens_channel_full_cycle_with_external_node(&mut client, None);
+}
 
-	let node = builder.build().unwrap();
-	node.start().unwrap();
+struct ClnClient {
+	pub client: LightningRPC,
+	pub rng: rand::rngs::ThreadRng,
+}
 
-	// Premine some funds and distribute
-	let address = node.onchain_payment().new_address().unwrap();
-	let premine_amount = Amount::from_sat(5_000_000);
-	common::premine_and_distribute_funds(
-		&bitcoind_client,
-		&electrs_client,
-		vec![address],
-		premine_amount,
-	);
+impl ClnClient {
+	pub fn new() -> Self {
+		let sock = std::env::var("CLN_SOCK").expect("CLN_SOCK must be set");
+		let cln_client = LightningRPC::new(&sock);
 
-	// Setup CLN
-	let sock = "/tmp/lightning-rpc";
-	let cln_client = LightningRPC::new(&sock);
-	let cln_info = {
+		use std::time::{Duration, Instant};
+		let start = Instant::now();
 		loop {
-			let info = cln_client.getinfo().unwrap();
-			// Wait for CLN to sync block height before channel open.
-			// Prevents crash due to unset blockheight (see LDK Node issue #527).
-			if info.blockheight > 0 {
-				break info;
+			match cln_client.getinfo() {
+				Ok(info) => {
+					if info.blockheight > 0 {
+						return Self { client: cln_client, rng: thread_rng() };
+					} else if start.elapsed() > Duration::from_secs(30) {
+						panic!("Timeout waiting for cln to be ready");
+					}
+				},
+				Err(e) => {
+					panic!("Not able to connect to cln: {}", e);
+				},
 			}
-			std::thread::sleep(std::time::Duration::from_millis(250));
 		}
-	};
-	let cln_node_id = PublicKey::from_str(&cln_info.id).unwrap();
-	let cln_address: SocketAddress = match cln_info.binding.first().unwrap() {
-		NetworkAddress::Ipv4 { address, port } => {
-			std::net::SocketAddrV4::new(*address, *port).into()
-		},
-		NetworkAddress::Ipv6 { address, port } => {
-			std::net::SocketAddrV6::new(*address, *port, 0, 0).into()
-		},
-		_ => {
-			panic!()
-		},
-	};
+	}
+}
 
-	node.sync_wallets().unwrap();
+impl ExternalLightningNode for ClnClient {
+	fn get_node_info(&mut self) -> (PublicKey, SocketAddress) {
+		let info = self.client.getinfo().unwrap();
+		let node_id = PublicKey::from_str(&info.id).unwrap();
+		let address: SocketAddress = match info.binding.first().unwrap() {
+			NetworkAddress::Ipv4 { address, port } => {
+				std::net::SocketAddrV4::new(*address, *port).into()
+			},
+			NetworkAddress::Ipv6 { address, port } => {
+				std::net::SocketAddrV6::new(*address, *port, 0, 0).into()
+			},
+			_ => {
+				panic!()
+			},
+		};
+		(node_id, address)
+	}
 
-	// Open the channel
-	let funding_amount_sat = 1_000_000;
+	fn create_invoice(&mut self, amount_msat: u64, _description: Option<String>) -> String {
+		let description = _description
+			.unwrap_or_else(|| (0..7).map(|_| self.rng.sample(Alphanumeric) as char).collect());
+		let rand_label: String = (0..7).map(|_| self.rng.sample(Alphanumeric) as char).collect();
+		let amount = if amount_msat == 0 { None } else { Some(amount_msat) };
+		let cln_invoice =
+			self.client.invoice(amount, &rand_label, &description, None, None, None).unwrap();
 
-	node.open_channel(cln_node_id, cln_address, funding_amount_sat, Some(500_000_000), None)
-		.unwrap();
+		cln_invoice.bolt11
+	}
 
-	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
-	common::wait_for_tx(&electrs_client, funding_txo.txid);
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6);
-	node.sync_wallets().unwrap();
-	let user_channel_id = common::expect_channel_ready_event!(node, cln_node_id);
+	fn check_receive_payment(&mut self, invoice: lightning_invoice::Bolt11Invoice) {
+		let payment_hash = invoice.payment_hash().to_string();
+		let invoices =
+			self.client.listinvoices(None, None, Some(&payment_hash), None).unwrap().invoices;
 
-	// Send a payment to CLN
-	let mut rng = thread_rng();
-	let rand_label: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-	let cln_invoice =
-		cln_client.invoice(Some(10_000_000), &rand_label, &rand_label, None, None, None).unwrap();
-	let parsed_invoice = Bolt11Invoice::from_str(&cln_invoice.bolt11).unwrap();
+		assert_eq!(invoices.len(), 1);
+		assert_eq!(invoices[0].status, "paid");
+	}
 
-	node.bolt11_payment().send(&parsed_invoice, None).unwrap();
-	common::expect_event!(node, PaymentSuccessful);
-	let cln_listed_invoices =
-		cln_client.listinvoices(Some(&rand_label), None, None, None).unwrap().invoices;
-	assert_eq!(cln_listed_invoices.len(), 1);
-	assert_eq!(cln_listed_invoices.first().unwrap().status, "paid");
+	fn pay_invoice(&mut self, invoice: &str) {
+		self.client.pay(invoice, Default::default()).unwrap();
+	}
 
-	// Send a payment to LDK
-	let rand_label: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-	let invoice_description =
-		Bolt11InvoiceDescription::Direct(Description::new(rand_label).unwrap());
-	let ldk_invoice =
-		node.bolt11_payment().receive(10_000_000, &invoice_description, 3600).unwrap();
-	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
-	common::expect_event!(node, PaymentReceived);
+	fn close_channel(&mut self, _out_point: bitcoin::OutPoint, peer_id: PublicKey, force: bool) {
+		// Find the channel to close
+		let response_channels =
+			self.client.listchannels(None, None, Some(&peer_id.to_string())).unwrap();
+		if response_channels.channels.is_empty() && response_channels.channels.len() > 1 {
+			panic!("No channels to close");
+		}
+		let short_channel_id = &response_channels.channels[0].short_channel_id;
 
-	node.close_channel(&user_channel_id, cln_node_id).unwrap();
-	common::expect_event!(node, ChannelClosed);
-	node.stop().unwrap();
+		let response: clightningrpc::responses::Close;
+		if force {
+			let unilateral_timeout = Some(1);
+			let input = serde_json::json!({
+				"id": short_channel_id,
+				"unilateraltimeout": unilateral_timeout,
+			});
+			response = self.client.call("close", input).unwrap();
+			assert_eq!(response.type_, "unilateral");
+		} else {
+			response = self.client.close(short_channel_id, None, None).unwrap();
+			assert_eq!(response.type_, "mutual");
+		}
+	}
 }
