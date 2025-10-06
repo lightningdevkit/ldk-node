@@ -46,6 +46,12 @@ dictionary LSPS2ServiceConfig {
 	u64 max_payment_size_msat;
 };
 
+dictionary RetryConfig {
+	u16 initial_retry_delay_ms;
+	u16 maximum_delay_secs;
+	f32 backoff_multiplier;
+};
+
 enum LogLevel {
 	"Gossip",
 	"Trace",
@@ -65,6 +71,56 @@ dictionary LogRecord {
 [Trait, WithForeign]
 interface LogWriter {
 	void log(LogRecord record);
+};
+
+interface DynStore {
+    [Name=from_store]
+    constructor(SyncAndAsyncKVStore store);
+};
+
+[Trait, WithForeign]
+interface SyncAndAsyncKVStore {
+    // KVStoreSync versions
+    [Throws=IOError]
+    sequence<u8> read_sync(string primary_namespace, string secondary_namespace, string key);
+    [Throws=IOError]
+    void write_sync(string primary_namespace, string secondary_namespace, string key, sequence<u8> buf);
+    [Throws=IOError]
+    void remove_sync(string primary_namespace, string secondary_namespace, string key, boolean lazy);
+    [Throws=IOError]
+    sequence<string> list_sync(string primary_namespace, string secondary_namespace);
+    
+    // KVStore versions
+    [Throws=IOError, Async]
+    sequence<u8> read_async(string primary_namespace, string secondary_namespace, string key);
+    [Throws=IOError, Async]
+    void write_async(string primary_namespace, string secondary_namespace, string key, sequence<u8> buf);
+    [Throws=IOError, Async]
+    void remove_async(string primary_namespace, string secondary_namespace, string key,  boolean lazy);
+    [Throws=IOError, Async]
+    sequence<string> list_async(string primary_namespace, string secondary_namespace);
+};
+
+[Error]
+enum IOError {
+  	"NotFound",
+    "PermissionDenied",
+    "ConnectionRefused",
+    "ConnectionReset",
+    "ConnectionAborted",
+    "NotConnected",
+    "AddrInUse",
+    "AddrNotAvailable",
+    "BrokenPipe",
+    "AlreadyExists",
+    "WouldBlock",
+    "InvalidInput",
+    "InvalidData",
+    "TimedOut",
+    "WriteZero",
+    "Interrupted",
+    "UnexpectedEof",
+    "Other",
 };
 
 interface Builder {
@@ -95,6 +151,9 @@ interface Builder {
 	void set_announcement_addresses(sequence<SocketAddress> announcement_addresses);
 	[Throws=BuildError]
 	void set_node_alias(string node_alias);
+	void set_tier_store_retry_config(RetryConfig retry_config);
+	void set_tier_store_backup(DynStore backup_store);
+	void set_tier_store_ephemeral(DynStore ephemeral_store);
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	[Throws=BuildError]
@@ -107,6 +166,8 @@ interface Builder {
 	Node build_with_vss_store_and_fixed_headers(string vss_url, string store_id, record<string, string> fixed_headers);
 	[Throws=BuildError]
 	Node build_with_vss_store_and_header_provider(string vss_url, string store_id, VssHeaderProvider header_provider);
+	[Throws=BuildError]
+	Node build_with_tier_store(DynStore primary_store);
 };
 
 interface Node {

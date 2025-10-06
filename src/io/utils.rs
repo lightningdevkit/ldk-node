@@ -20,6 +20,7 @@ use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bip39::Mnemonic;
 use bitcoin::Network;
 use lightning::io::Cursor;
+use lightning::io::ErrorKind;
 use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{
@@ -46,9 +47,9 @@ use crate::io::{
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
-use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
+use crate::types::{Broadcaster, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
+use crate::{DynStore, Error, EventQueue, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
@@ -617,6 +618,18 @@ pub(crate) fn read_bdk_wallet_change_set(
 	Ok(Some(change_set))
 }
 
+/// Checks if an error kind is possibly transient.
+pub(crate) fn is_possibly_transient(error: &lightning::io::Error) -> bool {
+	match error.kind() {
+		ErrorKind::ConnectionRefused
+		| ErrorKind::ConnectionAborted
+		| ErrorKind::ConnectionReset
+		| ErrorKind::TimedOut
+		| ErrorKind::Interrupted
+		| ErrorKind::NotConnected => true,
+		_ => false,
+	}
+}
 #[cfg(test)]
 mod tests {
 	use super::*;

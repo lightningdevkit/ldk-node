@@ -28,8 +28,8 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
+use crate::types::{ChainMonitor, ChannelManager, Sweeper, Wallet};
+use crate::{DynStore, Error, NodeMetrics};
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,

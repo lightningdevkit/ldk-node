@@ -11,11 +11,14 @@
 // Make sure to add any re-exported items that need to be used in uniffi below.
 
 use std::convert::TryInto;
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 pub use bip39::Mnemonic;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -31,6 +34,7 @@ use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
 use lightning::offers::refund::Refund as LdkRefund;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
@@ -55,7 +59,329 @@ pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
 pub use crate::payment::QrPaymentResult;
+use crate::types::SyncAndAsyncKVStore as LdkSyncAndAsyncKVStore;
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
+
+#[derive(Debug)]
+pub enum IOError {
+	NotFound,
+	PermissionDenied,
+	ConnectionRefused,
+	ConnectionReset,
+	ConnectionAborted,
+	NotConnected,
+	AddrInUse,
+	AddrNotAvailable,
+	BrokenPipe,
+	AlreadyExists,
+	WouldBlock,
+	InvalidInput,
+	InvalidData,
+	TimedOut,
+	WriteZero,
+	Interrupted,
+	UnexpectedEof,
+	Other,
+}
+
+impl From<lightning::io::Error> for IOError {
+	fn from(error: lightning::io::Error) -> Self {
+		match error.kind() {
+			lightning::io::ErrorKind::NotFound => IOError::NotFound,
+			lightning::io::ErrorKind::PermissionDenied => IOError::PermissionDenied,
+			lightning::io::ErrorKind::ConnectionRefused => IOError::ConnectionRefused,
+			lightning::io::ErrorKind::ConnectionReset => IOError::ConnectionReset,
+			lightning::io::ErrorKind::ConnectionAborted => IOError::ConnectionAborted,
+			lightning::io::ErrorKind::NotConnected => IOError::NotConnected,
+			lightning::io::ErrorKind::AddrInUse => IOError::AddrInUse,
+			lightning::io::ErrorKind::AddrNotAvailable => IOError::AddrNotAvailable,
+			lightning::io::ErrorKind::BrokenPipe => IOError::BrokenPipe,
+			lightning::io::ErrorKind::AlreadyExists => IOError::AlreadyExists,
+			lightning::io::ErrorKind::WouldBlock => IOError::WouldBlock,
+			lightning::io::ErrorKind::InvalidInput => IOError::InvalidInput,
+			lightning::io::ErrorKind::InvalidData => IOError::InvalidData,
+			lightning::io::ErrorKind::TimedOut => IOError::TimedOut,
+			lightning::io::ErrorKind::WriteZero => IOError::WriteZero,
+			lightning::io::ErrorKind::Interrupted => IOError::Interrupted,
+			lightning::io::ErrorKind::UnexpectedEof => IOError::UnexpectedEof,
+			lightning::io::ErrorKind::Other => IOError::Other,
+		}
+	}
+}
+
+impl From<IOError> for lightning::io::Error {
+	fn from(error: IOError) -> Self {
+		match error {
+			IOError::NotFound => lightning::io::ErrorKind::NotFound.into(),
+			IOError::PermissionDenied => lightning::io::ErrorKind::PermissionDenied.into(),
+			IOError::ConnectionRefused => lightning::io::ErrorKind::ConnectionRefused.into(),
+			IOError::ConnectionReset => lightning::io::ErrorKind::ConnectionReset.into(),
+			IOError::ConnectionAborted => lightning::io::ErrorKind::ConnectionAborted.into(),
+			IOError::NotConnected => lightning::io::ErrorKind::NotConnected.into(),
+			IOError::AddrInUse => lightning::io::ErrorKind::AddrInUse.into(),
+			IOError::AddrNotAvailable => lightning::io::ErrorKind::AddrNotAvailable.into(),
+			IOError::BrokenPipe => lightning::io::ErrorKind::BrokenPipe.into(),
+			IOError::AlreadyExists => lightning::io::ErrorKind::AlreadyExists.into(),
+			IOError::WouldBlock => lightning::io::ErrorKind::WouldBlock.into(),
+			IOError::InvalidInput => lightning::io::ErrorKind::InvalidInput.into(),
+			IOError::InvalidData => lightning::io::ErrorKind::InvalidData.into(),
+			IOError::TimedOut => lightning::io::ErrorKind::TimedOut.into(),
+			IOError::WriteZero => lightning::io::ErrorKind::WriteZero.into(),
+			IOError::Interrupted => lightning::io::ErrorKind::Interrupted.into(),
+			IOError::UnexpectedEof => lightning::io::ErrorKind::UnexpectedEof.into(),
+			IOError::Other => lightning::io::ErrorKind::Other.into(),
+		}
+	}
+}
+
+impl std::fmt::Display for IOError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			IOError::NotFound => write!(f, "NotFound"),
+			IOError::PermissionDenied => write!(f, "PermissionDenied"),
+			IOError::ConnectionRefused => write!(f, "ConnectionRefused"),
+			IOError::ConnectionReset => write!(f, "ConnectionReset"),
+			IOError::ConnectionAborted => write!(f, "ConnectionAborted"),
+			IOError::NotConnected => write!(f, "NotConnected"),
+			IOError::AddrInUse => write!(f, "AddrInUse"),
+			IOError::AddrNotAvailable => write!(f, "AddrNotAvailable"),
+			IOError::BrokenPipe => write!(f, "BrokenPipe"),
+			IOError::AlreadyExists => write!(f, "AlreadyExists"),
+			IOError::WouldBlock => write!(f, "WouldBlock"),
+			IOError::InvalidInput => write!(f, "InvalidInput"),
+			IOError::InvalidData => write!(f, "InvalidData"),
+			IOError::TimedOut => write!(f, "TimedOut"),
+			IOError::WriteZero => write!(f, "WriteZero"),
+			IOError::Interrupted => write!(f, "Interrupted"),
+			IOError::UnexpectedEof => write!(f, "UnexpectedEof"),
+			IOError::Other => write!(f, "Other"),
+		}
+	}
+}
+
+#[async_trait]
+pub trait SyncAndAsyncKVStore: Send + Sync {
+	// KVStoreSync methods
+	fn read_sync(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError>;
+	fn write_sync(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError>;
+	fn remove_sync(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError>;
+	fn list_sync(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError>;
+
+	// KVStore methods
+	async fn read_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError>;
+	async fn write_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError>;
+	async fn remove_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError>;
+	async fn list_async(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError>;
+}
+
+pub struct ForeignKVStoreAdapter {
+	pub(crate) inner: Arc<dyn SyncAndAsyncKVStore>,
+}
+
+impl KVStore for ForeignKVStoreAdapter {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, lightning::io::Error>> + Send>> {
+		let inner = self.inner.clone();
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move {
+			inner
+				.read_async(primary_namespace, secondary_namespace, key)
+				.await
+				.map_err(|e| e.into())
+		})
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), lightning::io::Error>> + Send>> {
+		let inner = self.inner.clone();
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move {
+			inner
+				.write_async(primary_namespace, secondary_namespace, key, buf)
+				.await
+				.map_err(|e| e.into())
+		})
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), lightning::io::Error>> + Send>> {
+		let inner = self.inner.clone();
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move {
+			inner
+				.remove_async(primary_namespace, secondary_namespace, key, lazy)
+				.await
+				.map_err(|e| e.into())
+		})
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, lightning::io::Error>> + Send>> {
+		let inner = self.inner.clone();
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+
+		Box::pin(async move {
+			inner.list_async(primary_namespace, secondary_namespace).await.map_err(|e| e.into())
+		})
+	}
+}
+
+impl KVStoreSync for ForeignKVStoreAdapter {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, lightning::io::Error> {
+		self.inner
+			.read_sync(
+				primary_namespace.to_string(),
+				secondary_namespace.to_string(),
+				key.to_string(),
+			)
+			.map_err(|e| e.into())
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), lightning::io::Error> {
+		self.inner
+			.write_sync(
+				primary_namespace.to_string(),
+				secondary_namespace.to_string(),
+				key.to_string(),
+				buf,
+			)
+			.map_err(|e| e.into())
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), lightning::io::Error> {
+		self.inner
+			.remove_sync(
+				primary_namespace.to_string(),
+				secondary_namespace.to_string(),
+				key.to_string(),
+				lazy,
+			)
+			.map_err(|e| e.into())
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, lightning::io::Error> {
+		self.inner
+			.list_sync(primary_namespace.to_string(), secondary_namespace.to_string())
+			.map_err(|e| e.into())
+	}
+}
+
+pub struct DynStore {
+	pub(crate) inner: Arc<dyn LdkSyncAndAsyncKVStore + Send + Sync>,
+}
+
+impl DynStore {
+	pub fn from_store(store: Arc<dyn SyncAndAsyncKVStore>) -> Self {
+		let adapter = ForeignKVStoreAdapter { inner: store };
+		Self { inner: Arc::new(adapter) }
+	}
+
+	pub fn from_ldk_store(store: Arc<dyn LdkSyncAndAsyncKVStore + Send + Sync>) -> Arc<Self> {
+		Arc::new(Self { inner: store })
+	}
+}
+
+impl Deref for DynStore {
+	type Target = Arc<dyn LdkSyncAndAsyncKVStore + Send + Sync>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl KVStore for DynStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, lightning::io::Error>> + Send>> {
+		KVStore::read(self.inner.as_ref(), primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), lightning::io::Error>> + Send>> {
+		KVStore::write(self.inner.as_ref(), primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), lightning::io::Error>> + Send>> {
+		KVStore::remove(self.inner.as_ref(), primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, lightning::io::Error>> + Send>> {
+		KVStore::list(self.inner.as_ref(), primary_namespace, secondary_namespace)
+	}
+}
+
+impl KVStoreSync for DynStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, lightning::io::Error> {
+		KVStoreSync::read(self.inner.as_ref(), primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), lightning::io::Error> {
+		KVStoreSync::write(self.inner.as_ref(), primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), lightning::io::Error> {
+		KVStoreSync::remove(self.inner.as_ref(), primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, lightning::io::Error> {
+		KVStoreSync::list(self.inner.as_ref(), primary_namespace, secondary_namespace)
+	}
+}
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;

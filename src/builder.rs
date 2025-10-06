@@ -52,6 +52,7 @@ use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
+use crate::io::tier_store::{RetryConfig, TierStore};
 use crate::io::utils::{
 	read_external_pathfinding_scores_from_cache, read_node_metrics, write_node_metrics,
 };
@@ -68,13 +69,14 @@ use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
+
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, GossipSync, Graph, KeysManager, MessageRouter,
-	OnionMessenger, PaymentStore, PeerManager, Persister,
+	ChainMonitor, ChannelManager, GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger,
+	PaymentStore, PeerManager, Persister,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
-use crate::{Node, NodeMetrics};
+use crate::{wrap_store, DynStore, Node, NodeMetrics};
 
 const VSS_HARDENED_CHILD_INDEX: u32 = 877;
 const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
@@ -149,6 +151,23 @@ impl std::fmt::Debug for LogWriterConfig {
 				f.debug_tuple("Custom").field(&"<config internal to custom log writer>").finish()
 			},
 		}
+	}
+}
+
+#[derive(Default)]
+struct TierStoreConfig {
+	ephemeral: Option<Arc<DynStore>>,
+	backup: Option<Arc<DynStore>>,
+	retry: Option<RetryConfig>,
+}
+
+impl std::fmt::Debug for TierStoreConfig {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("TierStoreConfig")
+			.field("ephemeral", &self.ephemeral.as_ref().map(|_| "Arc<DynStore>"))
+			.field("backup", &self.backup.as_ref().map(|_| "Arc<DynStore>"))
+			.field("retry", &self.retry)
+			.finish()
 	}
 }
 
@@ -251,6 +270,7 @@ pub struct NodeBuilder {
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	tier_store_config: Option<TierStoreConfig>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 }
@@ -269,6 +289,7 @@ impl NodeBuilder {
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
+		let tier_store_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
 		Self {
@@ -278,6 +299,7 @@ impl NodeBuilder {
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
+			tier_store_config,
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
@@ -582,21 +604,67 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Configures retry behavior for transient errors when accessing the primary store.
+	///
+	/// When building with [`build_with_tier_store`], controls the exponential backoff parameters
+	/// used when retrying failed operations on the primary store due to transient errors
+	/// (network issues, timeouts, etc.).
+	///
+	/// If not set, default retry parameters are used. See [`RetryConfig`] for details.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_retry_config(&mut self, config: RetryConfig) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.retry = Some(config);
+		self
+	}
+
+	/// Configures the backup store for local disaster recovery.
+	///
+	/// When building with [`build_with_tier_store`], this store receives asynchronous copies
+	/// of all critical data written to the primary store. If the primary store becomes
+	/// unavailable, reads will fall back to this backup store.
+	///
+	/// Backup writes are non-blocking and do not affect primary store operation performance.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_backup(&mut self, backup_store: Arc<DynStore>) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.backup = Some(backup_store);
+		self
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with [`build_with_tier_store`], this store is used for data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_ephemeral(&mut self, ephemeral_store: Arc<DynStore>) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.ephemeral = Some(ephemeral_store);
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Result<Node, BuildError> {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
-		let kv_store = Arc::new(
-			SqliteStore::new(
-				storage_dir_path.into(),
-				Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
-				Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
-			)
-			.map_err(|_| BuildError::KVStoreSetupFailed)?,
-		);
-		self.build_with_store(kv_store)
+		let kv_store = SqliteStore::new(
+			storage_dir_path.into(),
+			Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+			Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+		)
+		.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+		let store = wrap_store!(Arc::new(kv_store));
+
+		self.build_with_store(store)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
@@ -607,8 +675,11 @@ impl NodeBuilder {
 
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
-		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path));
-		self.build_with_store(kv_store)
+		let kv_store = FilesystemStore::new(storage_dir_path);
+
+		let store = wrap_store!(Arc::new(kv_store));
+
+		self.build_with_store(store)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -733,6 +804,8 @@ impl NodeBuilder {
 
 		let vss_store =
 			VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider, Arc::clone(&runtime));
+
+		let store = wrap_store!(Arc::new(vss_store));
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
@@ -743,7 +816,101 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(vss_store),
+			store,
+		)
+	}
+
+	/// Builds a [`Node`] instance with tiered storage for managing data across multiple storage layers.
+	///
+	/// This build method enables a three-tier storage architecture optimized for different data types
+	/// and access patterns:
+	///
+	/// ### Storage Tiers
+	///
+	/// - **Primary Store** (required): The authoritative store for critical channel state and payment data.
+	///   Typically a remote/cloud storage service for durability and accessibility across devices.
+	///
+	/// - **Ephemeral Store** (optional): Local storage for non-critical, frequently-accessed data like
+	///   the network graph and scorer. Improves performance by reducing latency for data that can be
+	///   rebuilt if lost. Configure with [`set_tier_store_ephemeral`].
+	///
+	/// - **Backup Store** (optional): Local backup of critical data for disaster recovery scenarios.
+	///   Provides a safety net if the primary store becomes temporarily unavailable. Writes are
+	///   asynchronous to avoid blocking primary operations. Configure with [`set_tier_store_backup`].
+	///
+	/// ## Configuration
+	///
+	/// Use the setter methods to configure optional stores and retry behavior:
+	/// - [`set_tier_store_ephemeral`] - Set local store for network graph and scorer
+	/// - [`set_tier_store_backup`] - Set local backup store for disaster recovery
+	/// - [`set_tier_store_retry_config`] - Configure retry delays and backoff for transient errors
+	///
+	/// ## Example
+	///
+	/// ```ignore
+	/// # use ldk_node::{Builder, Config};
+	/// # use ldk_node::io::tier_store::RetryConfig;
+	/// # use std::sync::Arc;
+	/// let config = Config::default();
+	/// let mut builder = NodeBuilder::from_config(config);
+	///
+	/// let primary = Arc::new(VssStore::new(...));
+	/// let ephemeral = Arc::new(FilesystemStore::new(...));
+	/// let backup = Arc::new(SqliteStore::new(...));
+	///	let retry_config = RetryConfig::default();
+	///
+	/// builder
+	///     .set_tier_store_ephemeral(ephemeral)
+	///     .set_tier_store_backup(backup)
+	/// 	.set_tier_store_retry_config(retry_config);
+	///
+	/// let node = builder.build_with_tier_store(primary)?;
+	/// # Ok::<(), ldk_node::BuildError>(())
+	/// ```
+	///
+	/// [`set_tier_store_ephemeral`]: Self::set_tier_store_ephemeral
+	/// [`set_tier_store_backup`]: Self::set_tier_store_backup
+	/// [`set_tier_store_retry_config`]: Self::set_tier_store_retry_config
+	pub fn build_with_tier_store(&self, primary_store: Arc<DynStore>) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
+			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(&logger)))
+		} else {
+			Arc::new(Runtime::new(Arc::clone(&logger)).map_err(|e| {
+				log_error!(logger, "Failed to setup tokio runtime: {}", e);
+				BuildError::RuntimeSetupFailed
+			})?)
+		};
+		let seed_bytes = seed_bytes_from_config(
+			&self.config,
+			self.entropy_source_config.as_ref(),
+			Arc::clone(&logger),
+		)?;
+		let config = Arc::new(self.config.clone());
+
+		let ts_config = self.tier_store_config.as_ref();
+		let retry_config = ts_config.and_then(|c| c.retry).unwrap_or_default();
+
+		let mut tier_store =
+			TierStore::new(primary_store, Arc::clone(&runtime), Arc::clone(&logger), retry_config);
+
+		if let Some(config) = ts_config {
+			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
+			config.backup.as_ref().map(|s| tier_store.set_backup_store(Arc::clone(s)));
+		}
+
+		let store = wrap_store!(Arc::new(tier_store));
+		build_with_store_internal(
+			config,
+			self.chain_data_source_config.as_ref(),
+			self.gossip_source_config.as_ref(),
+			self.liquidity_source_config.as_ref(),
+			self.pathfinding_scores_sync_config.as_ref(),
+			self.async_payments_role,
+			seed_bytes,
+			runtime,
+			logger,
+			store,
 		)
 	}
 
@@ -1045,6 +1212,45 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_async_payments_role(role).map(|_| ())
 	}
 
+	/// Configures retry behavior for transient errors when accessing the primary store.
+	///
+	/// When building with [`build_with_tier_store`], controls the exponential backoff parameters
+	/// used when retrying failed operations on the primary store due to transient errors
+	/// (network issues, timeouts, etc.).
+	///
+	/// If not set, default retry parameters are used. See [`RetryConfig`] for details.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_retry_config(&self, config: RetryConfig) {
+		self.inner.write().unwrap().set_tier_store_retry_config(config);
+	}
+
+	/// Configures the backup store for local disaster recovery.
+	///
+	/// When building with [`build_with_tier_store`], this store receives asynchronous copies
+	/// of all critical data written to the primary store. If the primary store becomes
+	/// unavailable, reads will fall back to this backup store.
+	///
+	/// Backup writes are non-blocking and do not affect primary store operation performance.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_backup(&self, backup_store: Arc<DynStore>) {
+		self.inner.write().unwrap().set_tier_store_backup(backup_store);
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with [`build_with_tier_store`], this store is used for data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_ephemeral(&self, ephemeral_store: Arc<DynStore>) {
+		self.inner.write().unwrap().set_tier_store_ephemeral(ephemeral_store);
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Result<Arc<Node>, BuildError> {
@@ -1126,6 +1332,12 @@ impl ArcedNodeBuilder {
 			.unwrap()
 			.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
 			.map(Arc::new)
+	}
+
+	pub fn build_with_tier_store(
+		&self, primary_store: Arc<DynStore>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner.read().unwrap().build_with_tier_store(primary_store).map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.

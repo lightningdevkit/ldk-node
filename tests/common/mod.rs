@@ -32,7 +32,8 @@ use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyn
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+	wrap_store, Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
+	PendingSweepBalance,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -381,7 +382,8 @@ pub(crate) fn setup_node_for_async_payments(
 
 	builder.set_async_payments_role(async_payments_role).unwrap();
 
-	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
+	let test_sync_store =
+		wrap_store!(Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into())));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
 	assert!(node.status().is_running);
