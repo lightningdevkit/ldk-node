@@ -29,7 +29,8 @@ use std::sync::OnceLock;
 
 use crate::common::{
 	distribute_funds_unconfirmed, expect_channel_pending_event, expect_channel_ready_event,
-	expect_event, generate_blocks_and_wait, premine_blocks, random_config, wait_for_tx,
+	expect_event, expect_payment_successful_event, generate_blocks_and_wait, premine_blocks,
+	random_config, wait_for_tx,
 };
 
 pub trait ExternalLightningNode {
@@ -46,6 +47,14 @@ pub trait ExternalLightningNode {
 	fn create_new_address(&mut self) -> String;
 
 	fn open_channel(&mut self, node_id: PublicKey, funding_amount_sat: u64);
+
+	fn generate_offer(&mut self, _amount_msat: Option<u64>, _description: &str) -> String {
+		panic!("Not implemented")
+	}
+
+	fn pay_offer(&mut self, _offer: &str, _amount_msat: Option<u64>) -> String {
+		panic!("Not implemented")
+	}
 }
 
 static BITCOIND_CLIENT: OnceLock<BitcoindClient> = OnceLock::new();
@@ -307,5 +316,74 @@ pub(crate) fn do_external_node_opens_channel_simple_transactions_with_ldk<
 		None,
 	);
 
+	node.stop().unwrap();
+}
+
+pub(crate) fn do_bolt12_cycle_with_external_node<E: ExternalLightningNode>(external_node: &mut E) {
+	// Initialize LDK node and clients
+	let (node, bitcoind_client, electrs_client) = setup_test_node(true);
+
+	// setup external node info
+	let (external_node_id, external_node_address) = external_node.get_node_info();
+
+	// Open the channel
+	add_onchain_funds(&bitcoind_client, &electrs_client, &node);
+	let funding_amount_sat = 2_000_000;
+	let push_msat = Some(500_000_000);
+	let (user_channel_id, funding_txo) = open_channel(
+		&bitcoind_client,
+		&electrs_client,
+		&node,
+		external_node_id,
+		external_node_address,
+		funding_amount_sat,
+		push_msat,
+	);
+
+	// Send a payment to the external node, without specifying an amount
+	let mut payer_note = "without specifying an amount";
+	let offer_string = external_node.generate_offer(None, payer_note);
+	let offer = offer::Offer::from_str(&offer_string).unwrap();
+	let mut amount_msat = 100_000_000;
+	let payment_id = node
+		.bolt12_payment()
+		.send_using_amount(&offer, amount_msat, None, Some(payer_note.to_string()))
+		.unwrap();
+	expect_payment_successful_event!(node, Some(payment_id), None);
+
+	// Send a payment to the external node, specifying an amount
+	amount_msat = 100_000_000;
+	payer_note = "specifying an amount";
+	let offer_string = external_node.generate_offer(Some(amount_msat), payer_note);
+	let offer = offer::Offer::from_str(&offer_string).unwrap();
+	let payment_id =
+		node.bolt12_payment().send(&offer, None, Some(payer_note.to_string())).unwrap();
+	expect_payment_successful_event!(node, Some(payment_id), None);
+
+	// Send a payment to LDK, without specifying an amount
+	let offer = node.bolt12_payment().receive(0, "", None, None).unwrap();
+	let offer_string: String = offer.to_string();
+	let amount_msat = 9_000_000;
+	external_node.pay_offer(&offer_string, Some(amount_msat));
+	expect_event!(node, PaymentReceived);
+
+	// Send a payment to LDK, specifying an amount
+	let offer = node.bolt12_payment().receive(0, "", None, None).unwrap();
+	let offer_string: String = offer.to_string();
+	let amount_msat = 9_000_000;
+	external_node.pay_offer(&offer_string, Some(amount_msat));
+	expect_event!(node, PaymentReceived);
+
+	// Close the channel
+	close_channel(
+		&bitcoind_client,
+		&electrs_client,
+		external_node,
+		&node,
+		funding_txo,
+		external_node_id,
+		&user_channel_id,
+		None,
+	);
 	node.stop().unwrap();
 }

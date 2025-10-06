@@ -21,6 +21,7 @@ use std::default::Default;
 use std::str::FromStr;
 
 use crate::common::external_node::{
+	do_bolt12_cycle_with_external_node,
 	do_external_node_opens_channel_simple_transactions_with_ldk,
 	do_ldk_opens_channel_full_cycle_with_external_node, init_bitcoind_client,
 	ExternalLightningNode,
@@ -52,6 +53,13 @@ fn test_cln_opens_channel_with_ldk() {
 	init_bitcoind_client();
 	let mut client = ClnClient::new();
 	do_external_node_opens_channel_simple_transactions_with_ldk(&mut client);
+}
+
+#[test]
+fn test_simple_bolt12() {
+	init_bitcoind_client();
+	let mut client = ClnClient::new();
+	do_bolt12_cycle_with_external_node(&mut client);
 }
 
 struct ClnClient {
@@ -161,5 +169,35 @@ impl ExternalLightningNode for ClnClient {
 				None,
 			)
 			.unwrap();
+	}
+
+	fn generate_offer(&mut self, amount_msat: Option<u64>, description: &str) -> String {
+		let mut input = serde_json::json!({});
+		if let Some(amt) = amount_msat {
+			input["amount"] = amt.to_string().into();
+		} else {
+			input["amount"] = "any".into();
+		}
+		input["description"] = description.into();
+		let offer: serde_json::Value = self.client.call("offer", input).unwrap();
+		offer["bolt12"].as_str().unwrap().to_string()
+	}
+
+	fn pay_offer(&mut self, offer: &str, amount_msat: Option<u64>) -> String {
+		let input = if let Some(amt) = amount_msat {
+			serde_json::json!({
+				"offer": offer,
+				"amount_msat": amt,
+			})
+		} else {
+			serde_json::json!({
+				"offer": offer,
+			})
+		};
+
+		let response: serde_json::Value = self.client.call("fetchinvoice", input).unwrap();
+		self.pay_invoice(response["invoice"].as_str().unwrap());
+
+		response["invoice"].as_str().unwrap().to_string()
 	}
 }
