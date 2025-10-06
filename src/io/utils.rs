@@ -20,6 +20,7 @@ use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bitcoin::Network;
+use lightning::io::ErrorKind;
 use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{
@@ -702,6 +703,19 @@ where
 	debug_assert!(stored_keys.is_empty());
 
 	Ok(res)
+}
+
+/// Checks if an error kind is possibly transient.
+pub(crate) fn is_possibly_transient(error: &lightning::io::Error) -> bool {
+	match error.kind() {
+		ErrorKind::ConnectionRefused
+		| ErrorKind::ConnectionAborted
+		| ErrorKind::ConnectionReset
+		| ErrorKind::TimedOut
+		| ErrorKind::Interrupted
+		| ErrorKind::NotConnected => true,
+		_ => false,
+	}
 }
 
 #[cfg(test)]
