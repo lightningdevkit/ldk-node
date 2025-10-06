@@ -79,6 +79,12 @@ enum WordCount {
 	"Words24",
 };
 
+dictionary RetryConfig {
+	u16 initial_retry_delay_ms;
+	u16 maximum_delay_ms;
+	f32 backoff_multiplier;
+};
+
 enum LogLevel {
 	"Gossip",
 	"Trace",
@@ -101,6 +107,53 @@ dictionary LogRecord {
 [Trait, WithForeign]
 interface LogWriter {
 	void log(LogRecord record);
+};
+
+interface FfiDynStore {
+    [Name=from_store]
+    constructor(ForeignDynStoreTrait store);
+};
+
+[Trait, WithForeign]
+interface ForeignDynStoreTrait {
+    [Throws=IOError]
+    sequence<u8> read(string primary_namespace, string secondary_namespace, string key);
+    [Throws=IOError]
+    void write(string primary_namespace, string secondary_namespace, string key, sequence<u8> buf);
+    [Throws=IOError]
+    void remove(string primary_namespace, string secondary_namespace, string key, boolean lazy);
+    [Throws=IOError]
+    sequence<string> list(string primary_namespace, string secondary_namespace);
+    [Throws=IOError, Async]
+    sequence<u8> read_async(string primary_namespace, string secondary_namespace, string key);
+    [Throws=IOError, Async]
+    void write_async(string primary_namespace, string secondary_namespace, string key, sequence<u8> buf);
+    [Throws=IOError, Async]
+    void remove_async(string primary_namespace, string secondary_namespace, string key,  boolean lazy);
+    [Throws=IOError, Async]
+    sequence<string> list_async(string primary_namespace, string secondary_namespace);
+};
+
+[Error]
+enum IOError {
+  	"NotFound",
+    "PermissionDenied",
+    "ConnectionRefused",
+    "ConnectionReset",
+    "ConnectionAborted",
+    "NotConnected",
+    "AddrInUse",
+    "AddrNotAvailable",
+    "BrokenPipe",
+    "AlreadyExists",
+    "WouldBlock",
+    "InvalidInput",
+    "InvalidData",
+    "TimedOut",
+    "WriteZero",
+    "Interrupted",
+    "UnexpectedEof",
+    "Other",
 };
 
 interface Builder {
@@ -127,6 +180,9 @@ interface Builder {
 	void set_announcement_addresses(sequence<SocketAddress> announcement_addresses);
 	[Throws=BuildError]
 	void set_node_alias(string node_alias);
+	void set_tier_store_retry_config(RetryConfig retry_config);
+	void set_tier_store_backup(FfiDynStore backup_store);
+	void set_tier_store_ephemeral(FfiDynStore ephemeral_store);
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	void set_wallet_recovery_mode();
@@ -140,6 +196,8 @@ interface Builder {
 	Node build_with_vss_store_and_fixed_headers(NodeEntropy node_entropy, string vss_url, string store_id, record<string, string> fixed_headers);
 	[Throws=BuildError]
 	Node build_with_vss_store_and_header_provider(NodeEntropy node_entropy, string vss_url, string store_id, VssHeaderProvider header_provider);
+	[Throws=BuildError]
+	Node build_with_tier_store(NodeEntropy node_entropy, FfiDynStore primary_store);
 };
 
 interface Node {

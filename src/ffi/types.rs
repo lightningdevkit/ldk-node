@@ -11,11 +11,13 @@
 // Make sure to add any re-exported items that need to be used in uniffi below.
 
 use std::convert::TryInto;
+use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 pub use bip39::Mnemonic;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -32,6 +34,7 @@ use lightning::offers::refund::Refund as LdkRefund;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
@@ -58,6 +61,247 @@ pub use crate::payment::store::{
 };
 pub use crate::payment::UnifiedPaymentResult;
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
+
+#[derive(Debug)]
+pub enum IOError {
+	NotFound,
+	PermissionDenied,
+	ConnectionRefused,
+	ConnectionReset,
+	ConnectionAborted,
+	NotConnected,
+	AddrInUse,
+	AddrNotAvailable,
+	BrokenPipe,
+	AlreadyExists,
+	WouldBlock,
+	InvalidInput,
+	InvalidData,
+	TimedOut,
+	WriteZero,
+	Interrupted,
+	UnexpectedEof,
+	Other,
+}
+
+impl From<bitcoin::io::Error> for IOError {
+	fn from(error: bitcoin::io::Error) -> Self {
+		match error.kind() {
+			bitcoin::io::ErrorKind::NotFound => IOError::NotFound,
+			bitcoin::io::ErrorKind::PermissionDenied => IOError::PermissionDenied,
+			bitcoin::io::ErrorKind::ConnectionRefused => IOError::ConnectionRefused,
+			bitcoin::io::ErrorKind::ConnectionReset => IOError::ConnectionReset,
+			bitcoin::io::ErrorKind::ConnectionAborted => IOError::ConnectionAborted,
+			bitcoin::io::ErrorKind::NotConnected => IOError::NotConnected,
+			bitcoin::io::ErrorKind::AddrInUse => IOError::AddrInUse,
+			bitcoin::io::ErrorKind::AddrNotAvailable => IOError::AddrNotAvailable,
+			bitcoin::io::ErrorKind::BrokenPipe => IOError::BrokenPipe,
+			bitcoin::io::ErrorKind::AlreadyExists => IOError::AlreadyExists,
+			bitcoin::io::ErrorKind::WouldBlock => IOError::WouldBlock,
+			bitcoin::io::ErrorKind::InvalidInput => IOError::InvalidInput,
+			bitcoin::io::ErrorKind::InvalidData => IOError::InvalidData,
+			bitcoin::io::ErrorKind::TimedOut => IOError::TimedOut,
+			bitcoin::io::ErrorKind::WriteZero => IOError::WriteZero,
+			bitcoin::io::ErrorKind::Interrupted => IOError::Interrupted,
+			bitcoin::io::ErrorKind::UnexpectedEof => IOError::UnexpectedEof,
+			bitcoin::io::ErrorKind::Other => IOError::Other,
+		}
+	}
+}
+
+impl From<IOError> for bitcoin::io::Error {
+	fn from(error: IOError) -> Self {
+		match error {
+			IOError::NotFound => bitcoin::io::ErrorKind::NotFound.into(),
+			IOError::PermissionDenied => bitcoin::io::ErrorKind::PermissionDenied.into(),
+			IOError::ConnectionRefused => bitcoin::io::ErrorKind::ConnectionRefused.into(),
+			IOError::ConnectionReset => bitcoin::io::ErrorKind::ConnectionReset.into(),
+			IOError::ConnectionAborted => bitcoin::io::ErrorKind::ConnectionAborted.into(),
+			IOError::NotConnected => bitcoin::io::ErrorKind::NotConnected.into(),
+			IOError::AddrInUse => bitcoin::io::ErrorKind::AddrInUse.into(),
+			IOError::AddrNotAvailable => bitcoin::io::ErrorKind::AddrNotAvailable.into(),
+			IOError::BrokenPipe => bitcoin::io::ErrorKind::BrokenPipe.into(),
+			IOError::AlreadyExists => bitcoin::io::ErrorKind::AlreadyExists.into(),
+			IOError::WouldBlock => bitcoin::io::ErrorKind::WouldBlock.into(),
+			IOError::InvalidInput => bitcoin::io::ErrorKind::InvalidInput.into(),
+			IOError::InvalidData => bitcoin::io::ErrorKind::InvalidData.into(),
+			IOError::TimedOut => bitcoin::io::ErrorKind::TimedOut.into(),
+			IOError::WriteZero => bitcoin::io::ErrorKind::WriteZero.into(),
+			IOError::Interrupted => bitcoin::io::ErrorKind::Interrupted.into(),
+			IOError::UnexpectedEof => bitcoin::io::ErrorKind::UnexpectedEof.into(),
+			IOError::Other => bitcoin::io::ErrorKind::Other.into(),
+		}
+	}
+}
+
+impl std::fmt::Display for IOError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			IOError::NotFound => write!(f, "NotFound"),
+			IOError::PermissionDenied => write!(f, "PermissionDenied"),
+			IOError::ConnectionRefused => write!(f, "ConnectionRefused"),
+			IOError::ConnectionReset => write!(f, "ConnectionReset"),
+			IOError::ConnectionAborted => write!(f, "ConnectionAborted"),
+			IOError::NotConnected => write!(f, "NotConnected"),
+			IOError::AddrInUse => write!(f, "AddrInUse"),
+			IOError::AddrNotAvailable => write!(f, "AddrNotAvailable"),
+			IOError::BrokenPipe => write!(f, "BrokenPipe"),
+			IOError::AlreadyExists => write!(f, "AlreadyExists"),
+			IOError::WouldBlock => write!(f, "WouldBlock"),
+			IOError::InvalidInput => write!(f, "InvalidInput"),
+			IOError::InvalidData => write!(f, "InvalidData"),
+			IOError::TimedOut => write!(f, "TimedOut"),
+			IOError::WriteZero => write!(f, "WriteZero"),
+			IOError::Interrupted => write!(f, "Interrupted"),
+			IOError::UnexpectedEof => write!(f, "UnexpectedEof"),
+			IOError::Other => write!(f, "Other"),
+		}
+	}
+}
+
+#[async_trait]
+pub trait ForeignDynStoreTrait: Send + Sync {
+	async fn read_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError>;
+	async fn write_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError>;
+	async fn remove_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError>;
+	async fn list_async(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError>;
+
+	fn read(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError>;
+	fn write(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError>;
+	fn remove(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError>;
+	fn list(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError>;
+}
+
+#[derive(Clone)]
+pub struct FfiDynStore {
+	pub(crate) inner: Arc<dyn ForeignDynStoreTrait>,
+}
+
+impl FfiDynStore {
+	pub fn from_store(store: Arc<dyn ForeignDynStoreTrait>) -> Self {
+		Self { inner: store }
+	}
+}
+
+impl KVStore for FfiDynStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+		let this = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			this.read_async(primary_namespace, secondary_namespace, key).await.map_err(|e| e.into())
+		}
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		let this = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			this.write_async(primary_namespace, secondary_namespace, key, buf)
+				.await
+				.map_err(|e| e.into())
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		let this = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			this.remove_async(primary_namespace, secondary_namespace, key, lazy)
+				.await
+				.map_err(|e| e.into())
+		}
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+		let this = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		async move {
+			this.list_async(primary_namespace, secondary_namespace).await.map_err(|e| e.into())
+		}
+	}
+}
+
+impl KVStoreSync for FfiDynStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, lightning::io::Error> {
+		ForeignDynStoreTrait::read(
+			self.inner.as_ref(),
+			primary_namespace.to_string(),
+			secondary_namespace.to_string(),
+			key.to_string(),
+		)
+		.map_err(|e| e.into())
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), lightning::io::Error> {
+		ForeignDynStoreTrait::write(
+			self.inner.as_ref(),
+			primary_namespace.to_string(),
+			secondary_namespace.to_string(),
+			key.to_string(),
+			buf,
+		)
+		.map_err(|e| e.into())
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), lightning::io::Error> {
+		ForeignDynStoreTrait::remove(
+			self.inner.as_ref(),
+			primary_namespace.to_string(),
+			secondary_namespace.to_string(),
+			key.to_string(),
+			lazy,
+		)
+		.map_err(|e| e.into())
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, lightning::io::Error> {
+		ForeignDynStoreTrait::list(
+			self.inner.as_ref(),
+			primary_namespace.to_string(),
+			secondary_namespace.to_string(),
+		)
+		.map_err(|e| e.into())
+	}
+}
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;
