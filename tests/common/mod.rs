@@ -10,45 +10,38 @@
 
 pub(crate) mod logging;
 
-use logging::TestLogWriter;
-
-use ldk_node::config::{Config, ElectrumSyncConfig, EsploraSyncConfig};
-use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
-};
-
-use lightning::ln::msgs::SocketAddress;
-use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::KVStore;
-use lightning::util::test_utils::TestStore;
-
-use lightning_invoice::{Bolt11InvoiceDescription, Description};
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
-use lightning_persister::fs_store::FilesystemStore;
-
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::{hex::FromHex, Hash};
-use bitcoin::{
-	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
-};
-
-use electrsd::corepc_node::Client as BitcoindClient;
-use electrsd::corepc_node::Node as BitcoinD;
-use electrsd::{corepc_node, ElectrsD};
-use electrum_client::ElectrumApi;
-
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
-use serde_json::{json, Value};
-
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+use bitcoin::hashes::hex::FromHex;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::{
+	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
+};
+use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
+use electrsd::{corepc_node, ElectrsD};
+use electrum_client::ElectrumApi;
+use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
+use ldk_node::io::sqlite_store::SqliteStore;
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+use ldk_node::{
+	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+};
+use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
+use lightning::util::persist::KVStoreSync;
+use lightning::util::test_utils::TestStore;
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lightning_persister::fs_store::FilesystemStore;
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use logging::TestLogWriter;
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
+use serde_json::{json, Value};
 
 macro_rules! expect_event {
 	($node: expr, $event_type: ident) => {{
@@ -202,7 +195,7 @@ pub(crate) fn random_storage_path() -> PathBuf {
 
 pub(crate) fn random_port() -> u16 {
 	let mut rng = thread_rng();
-	rng.gen_range(5000..65535)
+	rng.gen_range(5000..32768)
 }
 
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
@@ -311,6 +304,13 @@ pub(crate) fn setup_two_nodes(
 pub(crate) fn setup_node(
 	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
 ) -> TestNode {
+	setup_node_for_async_payments(chain_source, config, seed_bytes, None)
+}
+
+pub(crate) fn setup_node_for_async_payments(
+	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
+	async_payments_role: Option<AsyncPaymentsRole>,
+) -> TestNode {
 	setup_builder!(builder, config.node_config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
@@ -375,6 +375,8 @@ pub(crate) fn setup_node(
 		}
 	}
 
+	builder.set_async_payments_role(async_payments_role).unwrap();
+
 	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
@@ -437,32 +439,31 @@ pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 }
 
 pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
-	let mut tx_res = electrs.transaction_get(&txid);
-	loop {
-		if tx_res.is_ok() {
-			break;
-		}
-		tx_res = exponential_backoff_poll(|| {
-			electrs.ping().unwrap();
-			Some(electrs.transaction_get(&txid))
-		});
+	if electrs.transaction_get(&txid).is_ok() {
+		return;
 	}
+
+	exponential_backoff_poll(|| {
+		electrs.ping().unwrap();
+		electrs.transaction_get(&txid).ok()
+	});
 }
 
 pub(crate) fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
-	let mut is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
-	loop {
-		if is_spent {
-			break;
-		}
 
-		is_spent = exponential_backoff_poll(|| {
-			electrs.ping().unwrap();
-			Some(!electrs.script_get_history(&txout_script).unwrap().is_empty())
-		});
+	let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+	if is_spent {
+		return;
 	}
+
+	exponential_backoff_poll(|| {
+		electrs.ping().unwrap();
+
+		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+		is_spent.then_some(())
+	});
 }
 
 pub(crate) fn exponential_backoff_poll<T, F>(mut poll: F) -> T
@@ -590,13 +591,20 @@ pub fn open_channel(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
 ) -> OutPoint {
+	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd)
+}
+
+pub fn open_channel_push_amt(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
+	should_announce: bool, electrsd: &ElectrsD,
+) -> OutPoint {
 	if should_announce {
 		node_a
 			.open_announced_channel(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();
@@ -606,7 +614,7 @@ pub fn open_channel(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();
@@ -1236,7 +1244,7 @@ impl TestSyncStore {
 	}
 }
 
-impl KVStore for TestSyncStore {
+impl KVStoreSync for TestSyncStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> lightning::io::Result<Vec<u8>> {
@@ -1263,12 +1271,14 @@ impl KVStore for TestSyncStore {
 	}
 
 	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
-		let fs_res = self.fs_store.write(primary_namespace, secondary_namespace, key, buf);
-		let sqlite_res = self.sqlite_store.write(primary_namespace, secondary_namespace, key, buf);
-		let test_res = self.test_store.write(primary_namespace, secondary_namespace, key, buf);
+		let fs_res = self.fs_store.write(primary_namespace, secondary_namespace, key, buf.clone());
+		let sqlite_res =
+			self.sqlite_store.write(primary_namespace, secondary_namespace, key, buf.clone());
+		let test_res =
+			self.test_store.write(primary_namespace, secondary_namespace, key, buf.clone());
 
 		assert!(self
 			.do_list(primary_namespace, secondary_namespace)

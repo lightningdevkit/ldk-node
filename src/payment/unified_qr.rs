@@ -11,23 +11,22 @@
 //! [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
-use crate::error::Error;
-use crate::ffi::maybe_wrap;
-use crate::logger::{log_error, LdkLogger, Logger};
-use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
-use crate::Config;
-
-use lightning::ln::channelmanager::PaymentId;
-use lightning::offers::offer::Offer;
-use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
+use std::sync::Arc;
+use std::vec::IntoIter;
 
 use bip21::de::ParamKind;
 use bip21::{DeserializationError, DeserializeParams, Param, SerializeParams};
 use bitcoin::address::{NetworkChecked, NetworkUnchecked};
 use bitcoin::{Amount, Txid};
+use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::offer::Offer;
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
-use std::sync::Arc;
-use std::vec::IntoIter;
+use crate::error::Error;
+use crate::ffi::maybe_wrap;
+use crate::logger::{log_error, LdkLogger, Logger};
+use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
+use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
 
@@ -303,10 +302,12 @@ impl DeserializationError for Extras {
 
 #[cfg(test)]
 mod tests {
+	use std::str::FromStr;
+
+	use bitcoin::{Address, Network};
+
 	use super::*;
 	use crate::payment::unified_qr::Extras;
-	use bitcoin::{Address, Network};
-	use std::str::FromStr;
 
 	#[test]
 	fn parse_uri() {

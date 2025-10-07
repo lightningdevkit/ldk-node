@@ -5,17 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::sweep::value_from_descriptor;
-
-use lightning::chain::channelmonitor::Balance as LdkBalance;
-use lightning::chain::channelmonitor::BalanceSource;
-use lightning::ln::types::ChannelId;
-use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
-
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{BlockHash, Txid};
+use bitcoin::{Amount, BlockHash, Txid};
+use lightning::chain::channelmonitor::{Balance as LdkBalance, BalanceSource};
+use lightning::ln::types::ChannelId;
+use lightning::sign::SpendableOutputDescriptor;
+use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 /// Details of the known available balances returned by [`Node::list_balances`].
 ///
@@ -74,7 +70,8 @@ pub struct BalanceDetails {
 pub enum LightningBalance {
 	/// The channel is not yet closed (or the commitment or closing transaction has not yet
 	/// appeared in a block). The given balance is claimable (less on-chain fees) if the channel is
-	/// force-closed now.
+	/// force-closed now. Values do not take into account any pending splices and are only based
+	/// on the confirmed state of the channel.
 	ClaimableOnChannelClose {
 		/// The identifier of the channel this balance belongs to.
 		channel_id: ChannelId,
@@ -225,21 +222,26 @@ impl LightningBalance {
 	) -> Self {
 		match balance {
 			LdkBalance::ClaimableOnChannelClose {
-				amount_satoshis,
-				transaction_fee_satoshis,
+				balance_candidates,
+				confirmed_balance_candidate_index,
 				outbound_payment_htlc_rounded_msat,
 				outbound_forwarded_htlc_rounded_msat,
 				inbound_claiming_htlc_rounded_msat,
 				inbound_htlc_rounded_msat,
-			} => Self::ClaimableOnChannelClose {
-				channel_id,
-				counterparty_node_id,
-				amount_satoshis,
-				transaction_fee_satoshis,
-				outbound_payment_htlc_rounded_msat,
-				outbound_forwarded_htlc_rounded_msat,
-				inbound_claiming_htlc_rounded_msat,
-				inbound_htlc_rounded_msat,
+			} => {
+				// unwrap safety: confirmed_balance_candidate_index is guaranteed to index into balance_candidates
+				let balance = balance_candidates.get(confirmed_balance_candidate_index).unwrap();
+
+				Self::ClaimableOnChannelClose {
+					channel_id,
+					counterparty_node_id,
+					amount_satoshis: balance.amount_satoshis,
+					transaction_fee_satoshis: balance.transaction_fee_satoshis,
+					outbound_payment_htlc_rounded_msat,
+					outbound_forwarded_htlc_rounded_msat,
+					inbound_claiming_htlc_rounded_msat,
+					inbound_htlc_rounded_msat,
+				}
 			},
 			LdkBalance::ClaimableAwaitingConfirmations {
 				amount_satoshis,
@@ -383,5 +385,13 @@ impl PendingSweepBalance {
 				}
 			},
 		}
+	}
+}
+
+fn value_from_descriptor(descriptor: &SpendableOutputDescriptor) -> Amount {
+	match &descriptor {
+		SpendableOutputDescriptor::StaticOutput { output, .. } => output.value,
+		SpendableOutputDescriptor::DelayedPaymentOutput(output) => output.output.value,
+		SpendableOutputDescriptor::StaticPaymentOutput(output) => output.output.value,
 	}
 }

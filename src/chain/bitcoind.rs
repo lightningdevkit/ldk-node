@@ -5,8 +5,30 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use bitcoin::{BlockHash, FeeRate, Network, Transaction, Txid};
+use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
+use lightning::chain::Listen;
+use lightning::util::ser::Writeable;
+use lightning_block_sync::gossip::UtxoSource;
+use lightning_block_sync::http::{HttpEndpoint, JsonResponse};
+use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
+use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
+use lightning_block_sync::rest::RestClient;
+use lightning_block_sync::rpc::{RpcClient, RpcError};
+use lightning_block_sync::{
+	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, BlockSourceErrorKind, Cache,
+	SpvClient,
+};
+use serde::Serialize;
+
+use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
 	BitcoindRestClientConfig, Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
@@ -18,32 +40,6 @@ use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
-
-use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::Listen;
-use lightning::util::ser::Writeable;
-
-use lightning_block_sync::gossip::UtxoSource;
-use lightning_block_sync::http::{HttpEndpoint, JsonResponse};
-use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
-use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
-use lightning_block_sync::rest::RestClient;
-use lightning_block_sync::rpc::{RpcClient, RpcError};
-use lightning_block_sync::{
-	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, Cache,
-};
-use lightning_block_sync::{BlockSourceErrorKind, SpvClient};
-
-use serde::Serialize;
-
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
-use bitcoin::{BlockHash, FeeRate, Network, Transaction, Txid};
-
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 
@@ -173,7 +169,7 @@ impl BitcoindChainSource {
 			if let Some(worst_channel_monitor_block_hash) = chain_monitor
 				.list_monitors()
 				.iter()
-				.flat_map(|(txo, _)| chain_monitor.get_monitor(*txo))
+				.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
 				.map(|m| m.current_best_block())
 				.min_by_key(|b| b.height)
 				.map(|b| b.block_hash)
@@ -1387,11 +1383,11 @@ impl Listen for ChainListener {
 		self.output_sweeper.block_connected(block, height);
 	}
 
-	fn block_disconnected(&self, header: &bitcoin::block::Header, height: u32) {
-		self.onchain_wallet.block_disconnected(header, height);
-		self.channel_manager.block_disconnected(header, height);
-		self.chain_monitor.block_disconnected(header, height);
-		self.output_sweeper.block_disconnected(header, height);
+	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BestBlock) {
+		self.onchain_wallet.blocks_disconnected(fork_point_block);
+		self.channel_manager.blocks_disconnected(fork_point_block);
+		self.chain_monitor.blocks_disconnected(fork_point_block);
+		self.output_sweeper.blocks_disconnected(fork_point_block);
 	}
 }
 
@@ -1423,7 +1419,9 @@ mod tests {
 	use bitcoin::hashes::Hash;
 	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
 	use lightning_block_sync::http::JsonResponse;
-	use proptest::{arbitrary::any, collection::vec, prop_assert_eq, prop_compose, proptest};
+	use proptest::arbitrary::any;
+	use proptest::collection::vec;
+	use proptest::{prop_assert_eq, prop_compose, proptest};
 	use serde_json::json;
 
 	use crate::chain::bitcoind::{

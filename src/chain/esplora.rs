@@ -5,8 +5,18 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bdk_esplora::EsploraAsyncExt;
+use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
+use esplora_client::AsyncClient as EsploraAsyncClient;
+use lightning::chain::{Confirm, Filter, WatchedOutput};
+use lightning::util::ser::Writeable;
+use lightning_transaction_sync::EsploraSyncClient;
+
+use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
 	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS,
@@ -20,21 +30,6 @@ use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
-
-use lightning::chain::{Confirm, Filter, WatchedOutput};
-use lightning::util::ser::Writeable;
-
-use lightning_transaction_sync::EsploraSyncClient;
-
-use bdk_esplora::EsploraAsyncExt;
-
-use esplora_client::AsyncClient as EsploraAsyncClient;
-
-use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
@@ -57,19 +52,6 @@ impl EsploraChainSource {
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
-		// FIXME / TODO: We introduced this to make `bdk_esplora` work separately without updating
-		// `lightning-transaction-sync`. We should revert this as part of of the upgrade to LDK 0.2.
-		let mut client_builder_0_11 = esplora_client_0_11::Builder::new(&server_url);
-		client_builder_0_11 = client_builder_0_11.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
-
-		for (header_name, header_value) in &headers {
-			client_builder_0_11 = client_builder_0_11.header(header_name, header_value);
-		}
-
-		let esplora_client_0_11 = client_builder_0_11.build_async().unwrap();
-		let tx_sync =
-			Arc::new(EsploraSyncClient::from_client(esplora_client_0_11, Arc::clone(&logger)));
-
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
 
@@ -78,6 +60,8 @@ impl EsploraChainSource {
 		}
 
 		let esplora_client = client_builder.build_async().unwrap();
+		let tx_sync =
+			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
 
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
@@ -155,12 +139,22 @@ impl EsploraChainSource {
 						},
 						Err(e) => match *e {
 							esplora_client::Error::Reqwest(he) => {
-								log_error!(
-									self.logger,
-									"{} of on-chain wallet failed due to HTTP connection error: {}",
-									if incremental_sync { "Incremental sync" } else { "Sync" },
-									he
-								);
+								if let Some(status_code) = he.status() {
+									log_error!(
+										self.logger,
+										"{} of on-chain wallet failed due to HTTP {} error: {}",
+										if incremental_sync { "Incremental sync" } else { "Sync" },
+										status_code,
+										he,
+									);
+								} else {
+									log_error!(
+										self.logger,
+										"{} of on-chain wallet failed due to HTTP error: {}",
+										if incremental_sync { "Incremental sync" } else { "Sync" },
+										he,
+									);
+								}
 								Err(Error::WalletOperationFailed)
 							},
 							_ => {

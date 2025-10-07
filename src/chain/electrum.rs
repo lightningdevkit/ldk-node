@@ -5,8 +5,25 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bdk_chain::bdk_core::spk_client::{
+	FullScanRequest as BdkFullScanRequest, FullScanResponse as BdkFullScanResponse,
+	SyncRequest as BdkSyncRequest, SyncResponse as BdkSyncResponse,
+};
+use bdk_electrum::BdkElectrumClient;
+use bdk_wallet::{KeychainKind as BdkKeyChainKind, Update as BdkUpdate};
+use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
+use electrum_client::{
+	Batch, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
+};
+use lightning::chain::{Confirm, Filter, WatchedOutput};
+use lightning::util::ser::Writeable;
+use lightning_transaction_sync::ElectrumSyncClient;
+
+use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
 	Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
 	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
@@ -21,29 +38,6 @@ use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
-
-use lightning::chain::{Confirm, Filter, WatchedOutput};
-use lightning::util::ser::Writeable;
-use lightning_transaction_sync::ElectrumSyncClient;
-
-use bdk_chain::bdk_core::spk_client::FullScanRequest as BdkFullScanRequest;
-use bdk_chain::bdk_core::spk_client::FullScanResponse as BdkFullScanResponse;
-use bdk_chain::bdk_core::spk_client::SyncRequest as BdkSyncRequest;
-use bdk_chain::bdk_core::spk_client::SyncResponse as BdkSyncResponse;
-use bdk_wallet::KeychainKind as BdkKeyChainKind;
-use bdk_wallet::Update as BdkUpdate;
-
-use bdk_electrum::BdkElectrumClient;
-
-use electrum_client::Client as ElectrumClient;
-use electrum_client::ConfigBuilder as ElectrumConfigBuilder;
-use electrum_client::{Batch, ElectrumApi};
-
-use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
@@ -402,7 +396,7 @@ impl ElectrumRuntimeStatus {
 
 struct ElectrumRuntimeClient {
 	electrum_client: Arc<ElectrumClient>,
-	bdk_electrum_client: Arc<BdkElectrumClient<ElectrumClient>>,
+	bdk_electrum_client: Arc<BdkElectrumClient<Arc<ElectrumClient>>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
 	runtime: Arc<Runtime>,
 	config: Arc<Config>,
@@ -424,12 +418,7 @@ impl ElectrumRuntimeClient {
 				Error::ConnectionFailed
 			})?,
 		);
-		let electrum_client_2 =
-			ElectrumClient::from_config(&server_url, electrum_config).map_err(|e| {
-				log_error!(logger, "Failed to connect to electrum server: {}", e);
-				Error::ConnectionFailed
-			})?;
-		let bdk_electrum_client = Arc::new(BdkElectrumClient::new(electrum_client_2));
+		let bdk_electrum_client = Arc::new(BdkElectrumClient::new(Arc::clone(&electrum_client)));
 		let tx_sync = Arc::new(
 			ElectrumSyncClient::new(server_url.clone(), Arc::clone(&logger)).map_err(|e| {
 				log_error!(logger, "Failed to connect to electrum server: {}", e);

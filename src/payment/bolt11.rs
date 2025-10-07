@@ -9,6 +9,19 @@
 //!
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 
+use std::sync::{Arc, RwLock};
+
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use lightning::ln::channelmanager::{
+	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
+};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning_invoice::{
+	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
+};
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -20,26 +33,9 @@ use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus,
 };
-use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, PaymentStore};
-
-use lightning::ln::bolt11_payment;
-use lightning::ln::channelmanager::{
-	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry, RetryableSendFailure,
-};
-use lightning::routing::router::{PaymentParameters, RouteParameters};
-
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
-use lightning_invoice::Bolt11Invoice as LdkBolt11Invoice;
-use lightning_invoice::Bolt11InvoiceDescription as LdkBolt11InvoiceDescription;
-
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
-
-use std::sync::{Arc, RwLock};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
@@ -92,22 +88,17 @@ impl Bolt11Payment {
 
 	/// Send a payment given an invoice.
 	///
-	/// If `sending_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::sending_parameters`] on a per-field basis.
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send(
-		&self, invoice: &Bolt11Invoice, sending_parameters: Option<SendingParameters>,
+		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
 		let invoice = maybe_deref(invoice);
-
-		let (payment_hash, recipient_onion, mut route_params) = bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
-			log_error!(self.logger, "Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead.");
-			Error::InvalidInvoice
-		})?;
-
+		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
 		if let Some(payment) = self.payment_store.get(&payment_id) {
 			if payment.status == PaymentStatus::Pending
@@ -118,29 +109,16 @@ impl Bolt11Payment {
 			}
 		}
 
-		let override_params =
-			sending_parameters.as_ref().or(self.config.sending_parameters.as_ref());
-		if let Some(override_params) = override_params {
-			override_params
-				.max_total_routing_fee_msat
-				.map(|f| route_params.max_total_routing_fee_msat = f.into());
-			override_params
-				.max_total_cltv_expiry_delta
-				.map(|d| route_params.payment_params.max_total_cltv_expiry_delta = d);
-			override_params.max_path_count.map(|p| route_params.payment_params.max_path_count = p);
-			override_params
-				.max_channel_saturation_power_of_half
-				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
-		};
-
-		let payment_secret = Some(*invoice.payment_secret());
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let payment_secret = Some(*invoice.payment_secret());
 
-		match self.channel_manager.send_payment(
-			payment_hash,
-			recipient_onion,
+		match self.channel_manager.pay_for_bolt11_invoice(
+			invoice,
 			payment_id,
-			route_params,
+			None,
+			route_parameters,
 			retry_strategy,
 		) {
 			Ok(()) => {
@@ -166,7 +144,13 @@ impl Bolt11Payment {
 
 				Ok(payment_id)
 			},
-			Err(e) => {
+			Err(Bolt11PaymentError::InvalidAmount) => {
+				log_error!(self.logger,
+					"Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead."
+				);
+				return Err(Error::InvalidInvoice);
+			},
+			Err(Bolt11PaymentError::SendingFailed(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
@@ -200,18 +184,17 @@ impl Bolt11Payment {
 	/// This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
 	/// amount paid to be determined by the user.
 	///
-	/// If `sending_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::sending_parameters`] on a per-field basis.
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
-		sending_parameters: Option<SendingParameters>,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
 		let invoice = maybe_deref(invoice);
-
 		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
 			if amount_msat < invoice_amount_msat {
 				log_error!(
@@ -232,46 +215,16 @@ impl Bolt11Payment {
 			}
 		}
 
-		let payment_secret = invoice.payment_secret();
-		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
-		let mut payment_params = PaymentParameters::from_node_id(
-			invoice.recover_payee_pub_key(),
-			invoice.min_final_cltv_expiry_delta() as u32,
-		)
-		.with_expiry_time(expiry_time.as_secs())
-		.with_route_hints(invoice.route_hints())
-		.map_err(|_| Error::InvalidInvoice)?;
-		if let Some(features) = invoice.features() {
-			payment_params = payment_params
-				.with_bolt11_features(features.clone())
-				.map_err(|_| Error::InvalidInvoice)?;
-		}
-		let mut route_params =
-			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
-
-		let override_params =
-			sending_parameters.as_ref().or(self.config.sending_parameters.as_ref());
-		if let Some(override_params) = override_params {
-			override_params
-				.max_total_routing_fee_msat
-				.map(|f| route_params.max_total_routing_fee_msat = f.into());
-			override_params
-				.max_total_cltv_expiry_delta
-				.map(|d| route_params.payment_params.max_total_cltv_expiry_delta = d);
-			override_params.max_path_count.map(|p| route_params.payment_params.max_path_count = p);
-			override_params
-				.max_channel_saturation_power_of_half
-				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
-		};
-
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let recipient_fields = RecipientOnionFields::secret_only(*payment_secret);
+		let payment_secret = Some(*invoice.payment_secret());
 
-		match self.channel_manager.send_payment(
-			payment_hash,
-			recipient_fields,
+		match self.channel_manager.pay_for_bolt11_invoice(
+			invoice,
 			payment_id,
-			route_params,
+			Some(amount_msat),
+			route_parameters,
 			retry_strategy,
 		) {
 			Ok(()) => {
@@ -286,7 +239,7 @@ impl Bolt11Payment {
 				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
 					preimage: None,
-					secret: Some(*payment_secret),
+					secret: payment_secret,
 				};
 
 				let payment = PaymentDetails::new(
@@ -301,16 +254,22 @@ impl Bolt11Payment {
 
 				Ok(payment_id)
 			},
-			Err(e) => {
+			Err(Bolt11PaymentError::InvalidAmount) => {
+				log_error!(
+					self.logger,
+					"Failed to send payment due to amount given being insufficient."
+				);
+				return Err(Error::InvalidInvoice);
+			},
+			Err(Bolt11PaymentError::SendingFailed(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
-
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
 							preimage: None,
-							secret: Some(*payment_secret),
+							secret: payment_secret,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -320,8 +279,8 @@ impl Bolt11Payment {
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
-						self.payment_store.insert(payment)?;
 
+						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -798,17 +757,40 @@ impl Bolt11Payment {
 	/// payment. To mitigate this issue, channels with available liquidity less than the required
 	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
 	/// pre-flight probes.
-	pub fn send_probes(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	pub fn send_probes(
+		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
+	) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
 		let invoice = maybe_deref(invoice);
+		let payment_params = PaymentParameters::from_bolt11_invoice(invoice);
 
-		let (_payment_hash, _recipient_onion, route_params) = bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
+		let amount_msat = invoice.amount_milli_satoshis().ok_or_else(|| {
 			log_error!(self.logger, "Failed to send probes due to the given invoice being \"zero-amount\". Please use send_probes_using_amount instead.");
 			Error::InvalidInvoice
 		})?;
+
+		let mut route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		if let Some(RouteParametersConfig {
+			max_total_routing_fee_msat,
+			max_total_cltv_expiry_delta,
+			max_path_count,
+			max_channel_saturation_power_of_half,
+		}) = route_parameters.as_ref().or(self.config.route_parameters.as_ref())
+		{
+			route_params.max_total_routing_fee_msat = *max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta = *max_total_cltv_expiry_delta;
+			route_params.payment_params.max_path_count = *max_path_count;
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				*max_channel_saturation_power_of_half;
+		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
 
@@ -828,36 +810,49 @@ impl Bolt11Payment {
 	/// This can be used to send pre-flight probes for a so-called "zero-amount" invoice, i.e., an
 	/// invoice that leaves the amount paid to be determined by the user.
 	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	///
 	/// See [`Self::send_probes`] for more information.
 	pub fn send_probes_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
 		let invoice = maybe_deref(invoice);
+		let payment_params = PaymentParameters::from_bolt11_invoice(invoice);
 
-		let (_payment_hash, _recipient_onion, route_params) = if let Some(invoice_amount_msat) =
-			invoice.amount_milli_satoshis()
-		{
+		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
 			if amount_msat < invoice_amount_msat {
 				log_error!(
 					self.logger,
-					"Failed to send probes as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.", invoice_amount_msat, amount_msat);
+					"Failed to send probes as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.",
+					invoice_amount_msat,
+					amount_msat
+				);
 				return Err(Error::InvalidAmount);
 			}
+		}
 
-			bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
-				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being \"zero-amount\".");
-				Error::InvalidInvoice
-			})?
-		} else {
-			bolt11_payment::payment_parameters_from_variable_amount_invoice(&invoice, amount_msat).map_err(|_| {
-				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being not \"zero-amount\".");
-				Error::InvalidInvoice
-			})?
-		};
+		let mut route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		if let Some(RouteParametersConfig {
+			max_total_routing_fee_msat,
+			max_total_cltv_expiry_delta,
+			max_path_count,
+			max_channel_saturation_power_of_half,
+		}) = route_parameters.as_ref().or(self.config.route_parameters.as_ref())
+		{
+			route_params.max_total_routing_fee_msat = *max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta = *max_total_cltv_expiry_delta;
+			route_params.payment_params.max_path_count = *max_path_count;
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				*max_channel_saturation_power_of_half;
+		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
 

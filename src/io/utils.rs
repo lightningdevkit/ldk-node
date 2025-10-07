@@ -5,21 +5,20 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use super::*;
-use crate::config::WALLET_KEYS_SEED_LEN;
+use std::fs;
+use std::io::Write;
+use std::ops::Deref;
+use std::path::Path;
+use std::sync::Arc;
 
-use crate::chain::ChainSource;
-use crate::fee_estimator::OnchainFeeEstimator;
-use crate::io::{
-	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
-};
-use crate::logger::{log_error, LdkLogger, Logger};
-use crate::peer_store::PeerStore;
-use crate::sweep::DeprecatedSpendableOutputInfo;
-use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
-use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
-
+use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
+use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
+use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
+use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
+use bdk_chain::ConfirmationBlockTime;
+use bdk_wallet::ChangeSet as BdkWalletChangeSet;
+use bip39::Mnemonic;
+use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
@@ -32,25 +31,22 @@ use lightning::util::persist::{
 	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
-use lightning::util::string::PrintableString;
-use lightning::util::sweep::{OutputSpendStatus, OutputSweeper};
-
-use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
-use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
-use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
-use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
-use bdk_chain::ConfirmationBlockTime;
-use bdk_wallet::ChangeSet as BdkWalletChangeSet;
-
-use bip39::Mnemonic;
-use bitcoin::Network;
+use lightning::util::sweep::OutputSweeper;
+use lightning_types::string::PrintableString;
 use rand::{thread_rng, RngCore};
 
-use std::fs;
-use std::io::Write;
-use std::ops::Deref;
-use std::path::Path;
-use std::sync::Arc;
+use super::*;
+use crate::chain::ChainSource;
+use crate::config::WALLET_KEYS_SEED_LEN;
+use crate::fee_estimator::OnchainFeeEstimator;
+use crate::io::{
+	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+};
+use crate::logger::{log_error, LdkLogger, Logger};
+use crate::peer_store::PeerStore;
+use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
+use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
+use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 /// Generates a random [BIP 39] mnemonic.
 ///
@@ -252,107 +248,10 @@ pub(crate) fn read_output_sweeper(
 		kv_store,
 		logger.clone(),
 	);
-	OutputSweeper::read(&mut reader, args).map_err(|e| {
+	OutputSweeper::read_with_kv_store_sync(&mut reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize OutputSweeper: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize OutputSweeper")
 	})
-}
-
-/// Read previously persisted spendable output information from the store and migrate to the
-/// upstreamed `OutputSweeper`.
-///
-/// We first iterate all `DeprecatedSpendableOutputInfo`s and have them tracked by the new
-/// `OutputSweeper`. In order to be certain the initial output spends will happen in a single
-/// transaction (and safe on-chain fees), we batch them to happen at current height plus two
-/// blocks. Lastly, we remove the previously persisted data once we checked they are tracked and
-/// awaiting their initial spend at the correct height.
-///
-/// Note that this migration will be run in the `Builder`, i.e., at the time when the migration is
-/// happening no background sync is ongoing, so we shouldn't have a risk of interleaving block
-/// connections during the migration.
-pub(crate) fn migrate_deprecated_spendable_outputs<L: Deref>(
-	sweeper: Arc<Sweeper>, kv_store: Arc<DynStore>, logger: L,
-) -> Result<(), std::io::Error>
-where
-	L::Target: LdkLogger,
-{
-	let best_block = sweeper.current_best_block();
-
-	for stored_key in kv_store.list(
-		DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-		DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-	)? {
-		let mut reader = Cursor::new(kv_store.read(
-			DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-			DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-			&stored_key,
-		)?);
-		let output = DeprecatedSpendableOutputInfo::read(&mut reader).map_err(|e| {
-			log_error!(logger, "Failed to deserialize SpendableOutputInfo: {}", e);
-			std::io::Error::new(
-				std::io::ErrorKind::InvalidData,
-				"Failed to deserialize SpendableOutputInfo",
-			)
-		})?;
-		let descriptors = vec![output.descriptor.clone()];
-		let spend_delay = Some(best_block.height + 2);
-		sweeper
-			.track_spendable_outputs(descriptors, output.channel_id, true, spend_delay)
-			.map_err(|_| {
-				log_error!(logger, "Failed to track spendable outputs. Aborting migration, will retry in the future.");
-				std::io::Error::new(
-					std::io::ErrorKind::InvalidData,
-					"Failed to track spendable outputs. Aborting migration, will retry in the future.",
-				)
-			})?;
-
-		if let Some(tracked_spendable_output) =
-			sweeper.tracked_spendable_outputs().iter().find(|o| o.descriptor == output.descriptor)
-		{
-			match tracked_spendable_output.status {
-				OutputSpendStatus::PendingInitialBroadcast { delayed_until_height } => {
-					if delayed_until_height == spend_delay {
-						kv_store.remove(
-							DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-							DEPRECATED_SPENDABLE_OUTPUT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-							&stored_key,
-							false,
-						)?;
-					} else {
-						debug_assert!(false, "Unexpected status in OutputSweeper migration.");
-						log_error!(logger, "Unexpected status in OutputSweeper migration.");
-						return Err(std::io::Error::new(
-							std::io::ErrorKind::Other,
-							"Failed to migrate OutputSweeper state.",
-						));
-					}
-				},
-				_ => {
-					debug_assert!(false, "Unexpected status in OutputSweeper migration.");
-					log_error!(logger, "Unexpected status in OutputSweeper migration.");
-					return Err(std::io::Error::new(
-						std::io::ErrorKind::Other,
-						"Failed to migrate OutputSweeper state.",
-					));
-				},
-			}
-		} else {
-			debug_assert!(
-				false,
-				"OutputSweeper failed to track and persist outputs during migration."
-			);
-			log_error!(
-				logger,
-				"OutputSweeper failed to track and persist outputs during migration."
-			);
-			return Err(std::io::Error::new(
-				std::io::ErrorKind::Other,
-				"Failed to migrate OutputSweeper state.",
-			));
-		}
-	}
-
-	Ok(())
 }
 
 pub(crate) fn read_node_metrics<L: Deref>(
@@ -384,7 +283,7 @@ where
 			NODE_METRICS_PRIMARY_NAMESPACE,
 			NODE_METRICS_SECONDARY_NAMESPACE,
 			NODE_METRICS_KEY,
-			&data,
+			data,
 		)
 		.map_err(|e| {
 			log_error!(
@@ -539,7 +438,7 @@ macro_rules! impl_read_write_change_set_type {
 			L::Target: LdkLogger,
 		{
 			let data = ChangeSetSerWrapper(value).encode();
-			kv_store.write($primary_namespace, $secondary_namespace, $key, &data).map_err(|e| {
+			kv_store.write($primary_namespace, $secondary_namespace, $key, data).map_err(|e| {
 				log_error!(
 					logger,
 					"Writing data to key {}/{}/{} failed due to: {}",

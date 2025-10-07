@@ -1,11 +1,10 @@
+use std::sync::{Arc, Mutex};
+
 use chrono::Utc;
-#[cfg(not(feature = "uniffi"))]
-use ldk_node::logger::LogRecord;
-use ldk_node::logger::{LogLevel, LogWriter};
+use ldk_node::logger::{LogLevel, LogRecord, LogWriter};
 #[cfg(not(feature = "uniffi"))]
 use log::Record as LogFacadeRecord;
 use log::{Level as LogFacadeLevel, LevelFilter as LogFacadeLevelFilter, Log as LogFacadeLog};
-use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub(crate) enum TestLogWriter {
@@ -142,4 +141,30 @@ pub(crate) fn validate_log_entry(entry: &String) {
 	let msg_start_index = path_and_msg.find(']').unwrap() + 1;
 	let msg = &path_and_msg[msg_start_index..];
 	assert!(!msg.is_empty());
+}
+
+pub(crate) struct MultiNodeLogger {
+	node_id: String,
+}
+
+impl MultiNodeLogger {
+	pub(crate) fn new(node_id: String) -> Self {
+		Self { node_id }
+	}
+}
+
+impl LogWriter for MultiNodeLogger {
+	fn log(&self, record: LogRecord) {
+		let log = format!(
+			"[{}] {} {:<5} [{}:{}] {}\n",
+			self.node_id,
+			Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+			record.level.to_string(),
+			record.module_path,
+			record.line,
+			record.args
+		);
+
+		print!("{}", log);
+	}
 }

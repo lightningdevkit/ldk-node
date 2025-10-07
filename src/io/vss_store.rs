@@ -5,18 +5,16 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::io::utils::check_namespace_key_validity;
-use crate::runtime::Runtime;
-
-use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
-use lightning::io::{self, Error, ErrorKind};
-use lightning::util::persist::KVStore;
-use prost::Message;
-use rand::RngCore;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
+
+use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+use lightning::io::{self, Error, ErrorKind};
+use lightning::util::persist::KVStoreSync;
+use prost::Message;
+use rand::RngCore;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
 use vss_client::headers::VssHeaderProvider;
@@ -31,6 +29,9 @@ use vss_client::util::retry::{
 };
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 
+use crate::io::utils::check_namespace_key_validity;
+use crate::runtime::Runtime;
+
 type CustomRetryPolicy = FilteredRetryPolicy<
 	JitteredRetryPolicy<
 		MaxTotalDelayRetryPolicy<MaxAttemptsRetryPolicy<ExponentialBackoffRetryPolicy<VssError>>>,
@@ -38,7 +39,7 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
-/// A [`KVStore`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
+/// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
 	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
@@ -127,7 +128,7 @@ impl VssStore {
 	}
 }
 
-impl KVStore for VssStore {
+impl KVStoreSync for VssStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
@@ -160,11 +161,11 @@ impl KVStore for VssStore {
 	}
 
 	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
 		let version = -1;
-		let storable = self.storable_builder.build(buf.to_vec(), version);
+		let storable = self.storable_builder.build(buf, version);
 		let request = PutObjectRequest {
 			store_id: self.store_id.clone(),
 			global_version: None,
@@ -256,13 +257,15 @@ impl RefUnwindSafe for VssStore {}
 #[cfg(test)]
 #[cfg(vss_test)]
 mod tests {
-	use super::*;
-	use crate::io::test_utils::do_read_write_remove_list_persist;
+	use std::collections::HashMap;
+
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng, RngCore};
-	use std::collections::HashMap;
 	use tokio::runtime;
 	use vss_client::headers::FixedHeaders;
+
+	use super::*;
+	use crate::io::test_utils::do_read_write_remove_list_persist;
 
 	#[test]
 	fn vss_read_write_remove_list_persist() {

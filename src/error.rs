@@ -5,13 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::fmt;
+
 use bdk_chain::bitcoin::psbt::ExtractTxError as BdkExtractTxError;
 use bdk_chain::local_chain::CannotConnectError as BdkChainConnectionError;
 use bdk_chain::tx_graph::CalculateFeeError as BdkChainCalculateFeeError;
 use bdk_wallet::error::CreateTxError as BdkCreateTxError;
 use bdk_wallet::signer::SignerError as BdkSignerError;
-
-use std::fmt;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// An error that possibly needs to be handled by the user.
@@ -120,6 +120,10 @@ pub enum Error {
 	LiquiditySourceUnavailable,
 	/// The given operation failed due to the LSP's required opening fee being too high.
 	LiquidityFeeTooHigh,
+	/// The given blinded paths are invalid.
+	InvalidBlindedPaths,
+	/// Asynchronous payment services are disabled.
+	AsyncPaymentServicesDisabled,
 }
 
 impl fmt::Display for Error {
@@ -192,6 +196,10 @@ impl fmt::Display for Error {
 			},
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
+			},
+			Self::InvalidBlindedPaths => write!(f, "The given blinded paths are invalid."),
+			Self::AsyncPaymentServicesDisabled => {
+				write!(f, "Asynchronous payment services are disabled.")
 			},
 		}
 	}

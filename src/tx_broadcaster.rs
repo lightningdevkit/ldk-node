@@ -5,16 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::{log_error, LdkLogger};
-
-use lightning::chain::chaininterface::BroadcasterInterface;
+use std::ops::Deref;
 
 use bitcoin::Transaction;
+use lightning::chain::chaininterface::BroadcasterInterface;
+use tokio::sync::{mpsc, Mutex, MutexGuard};
 
-use tokio::sync::mpsc;
-use tokio::sync::{Mutex, MutexGuard};
-
-use std::ops::Deref;
+use crate::logger::{log_error, LdkLogger};
 
 const BCAST_PACKAGE_QUEUE_SIZE: usize = 50;
 

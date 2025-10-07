@@ -6,17 +6,16 @@
 // accordance with one or both of these licenses.
 
 //! Objects related to [`SqliteStore`] live here.
-use crate::io::utils::check_namespace_key_validity;
-
-use lightning::io;
-use lightning::util::persist::KVStore;
-use lightning::util::string::PrintableString;
-
-use rusqlite::{named_params, Connection};
-
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+use lightning::io;
+use lightning::util::persist::KVStoreSync;
+use lightning_types::string::PrintableString;
+use rusqlite::{named_params, Connection};
+
+use crate::io::utils::check_namespace_key_validity;
 
 mod migrations;
 
@@ -34,7 +33,7 @@ pub const DEFAULT_KV_TABLE_NAME: &str = "ldk_data";
 // The current SQLite `user_version`, which we can use if we'd ever need to do a schema migration.
 const SCHEMA_USER_VERSION: u16 = 2;
 
-/// A [`KVStore`] implementation that writes to and reads from an [SQLite] database.
+/// A [`KVStoreSync`] implementation that writes to and reads from an [SQLite] database.
 ///
 /// [SQLite]: https://sqlite.org
 pub struct SqliteStore {
@@ -129,7 +128,7 @@ impl SqliteStore {
 	}
 }
 
-impl KVStore for SqliteStore {
+impl KVStoreSync for SqliteStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
@@ -179,7 +178,7 @@ impl KVStore for SqliteStore {
 	}
 
 	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
 

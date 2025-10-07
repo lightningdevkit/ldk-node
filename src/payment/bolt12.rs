@@ -9,23 +9,26 @@
 //!
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 
-use crate::config::LDK_PAYMENT_RETRY_TIMEOUT;
+use std::num::NonZeroU64;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
+use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
+use lightning::offers::parse::Bolt12SemanticError;
+use lightning::routing::router::RouteParametersConfig;
+#[cfg(feature = "uniffi")]
+use lightning::util::ser::{Readable, Writeable};
+use lightning_types::string::UntrustedString;
+use rand::RngCore;
+
+use crate::config::{AsyncPaymentsRole, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, PaymentStore};
-
-use lightning::ln::channelmanager::{PaymentId, Retry};
-use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
-use lightning::offers::parse::Bolt12SemanticError;
-use lightning::util::string::UntrustedString;
-
-use rand::RngCore;
-
-use std::num::NonZeroU64;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt12Invoice = lightning::offers::invoice::Bolt12Invoice;
@@ -53,14 +56,16 @@ pub struct Bolt12Payment {
 	payment_store: Arc<PaymentStore>,
 	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
+	async_payments_role: Option<AsyncPaymentsRole>,
 }
 
 impl Bolt12Payment {
 	pub(crate) fn new(
 		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
 		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
-		Self { channel_manager, payment_store, is_running, logger }
+		Self { channel_manager, payment_store, is_running, logger, async_payments_role }
 	}
 
 	/// Send a payment given an offer.
@@ -82,7 +87,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -96,15 +101,19 @@ impl Bolt12Payment {
 			},
 		};
 
-		match self.channel_manager.pay_for_offer(
-			&offer,
-			quantity,
-			None,
-			payer_note.clone(),
-			payment_id,
+		let params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
 			retry_strategy,
-			max_total_routing_fee_msat,
-		) {
+			route_params_config,
+		};
+		let res = if let Some(quantity) = quantity {
+			self.channel_manager
+				.pay_for_offer_with_quantity(&offer, None, payment_id, params, quantity)
+		} else {
+			self.channel_manager.pay_for_offer(&offer, None, payment_id, params)
+		};
+
+		match res {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
 				log_info!(
@@ -185,7 +194,7 @@ impl Bolt12Payment {
 		rand::thread_rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -203,15 +212,24 @@ impl Bolt12Payment {
 			return Err(Error::InvalidAmount);
 		}
 
-		match self.channel_manager.pay_for_offer(
-			&offer,
-			quantity,
-			Some(amount_msat),
-			payer_note.clone(),
-			payment_id,
+		let params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
 			retry_strategy,
-			max_total_routing_fee_msat,
-		) {
+			route_params_config,
+		};
+		let res = if let Some(quantity) = quantity {
+			self.channel_manager.pay_for_offer_with_quantity(
+				&offer,
+				Some(amount_msat),
+				payment_id,
+				params,
+				quantity,
+			)
+		} else {
+			self.channel_manager.pay_for_offer(&offer, Some(amount_msat), payment_id, params)
+		};
+
+		match res {
 			Ok(()) => {
 				let payee_pubkey = offer.issuer_signing_pubkey();
 				log_info!(
@@ -273,17 +291,17 @@ impl Bolt12Payment {
 	pub(crate) fn receive_inner(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<LdkOffer, Error> {
-		let absolute_expiry = expiry_secs.map(|secs| {
-			(SystemTime::now() + Duration::from_secs(secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.unwrap()
-		});
+		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+			Error::OfferCreationFailed
+		})?;
 
-		let offer_builder =
-			self.channel_manager.create_offer_builder(absolute_expiry).map_err(|e| {
-				log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-				Error::OfferCreationFailed
-			})?;
+		if let Some(expiry_secs) = expiry_secs {
+			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.unwrap();
+			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
+		}
 
 		let mut offer =
 			offer_builder.amount_msats(amount_msat).description(description.to_string());
@@ -319,17 +337,18 @@ impl Bolt12Payment {
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
-		let absolute_expiry = expiry_secs.map(|secs| {
-			(SystemTime::now() + Duration::from_secs(secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.unwrap()
-		});
+		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+			Error::OfferCreationFailed
+		})?;
 
-		let offer_builder =
-			self.channel_manager.create_offer_builder(absolute_expiry).map_err(|e| {
-				log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-				Error::OfferCreationFailed
-			})?;
+		if let Some(expiry_secs) = expiry_secs {
+			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.unwrap();
+			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
+		}
+
 		let offer = offer_builder.description(description.to_string()).build().map_err(|e| {
 			log_error!(self.logger, "Failed to create offer: {:?}", e);
 			Error::OfferCreationFailed
@@ -396,7 +415,7 @@ impl Bolt12Payment {
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let max_total_routing_fee_msat = None;
+		let route_params_config = RouteParametersConfig::default();
 
 		let mut refund_builder = self
 			.channel_manager
@@ -405,7 +424,7 @@ impl Bolt12Payment {
 				absolute_expiry,
 				payment_id,
 				retry_strategy,
-				max_total_routing_fee_msat,
+				route_params_config,
 			)
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to create refund builder: {:?}", e);
@@ -446,5 +465,103 @@ impl Bolt12Payment {
 		self.payment_store.insert(payment)?;
 
 		Ok(maybe_wrap(refund))
+	}
+
+	/// Retrieve an [`Offer`] for receiving async payments as an often-offline recipient.
+	///
+	/// Will only return an offer if [`Bolt12Payment::set_paths_to_static_invoice_server`] was called and we succeeded
+	/// in interactively building a [`StaticInvoice`] with the static invoice server.
+	///
+	/// Useful for posting offers to receive payments later, such as posting an offer on a website.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	/// [`Offer`]: lightning::offers::offer::Offer
+	pub fn receive_async(&self) -> Result<Offer, Error> {
+		self.channel_manager
+			.get_async_receive_offer()
+			.map(maybe_wrap)
+			.or(Err(Error::OfferCreationFailed))
+	}
+
+	/// Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
+	/// static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(not(feature = "uniffi"))]
+	pub fn set_paths_to_static_invoice_server(
+		&self, paths: Vec<BlindedMessagePath>,
+	) -> Result<(), Error> {
+		self.channel_manager
+			.set_paths_to_static_invoice_server(paths)
+			.or(Err(Error::InvalidBlindedPaths))
+	}
+
+	/// Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
+	/// static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(feature = "uniffi")]
+	pub fn set_paths_to_static_invoice_server(&self, paths: Vec<u8>) -> Result<(), Error> {
+		let decoded_paths = <Vec<BlindedMessagePath> as Readable>::read(&mut &paths[..])
+			.or(Err(Error::InvalidBlindedPaths))?;
+
+		self.channel_manager
+			.set_paths_to_static_invoice_server(decoded_paths)
+			.or(Err(Error::InvalidBlindedPaths))
+	}
+
+	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
+	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(not(feature = "uniffi"))]
+	pub fn blinded_paths_for_async_recipient(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<BlindedMessagePath>, Error> {
+		self.blinded_paths_for_async_recipient_internal(recipient_id)
+	}
+
+	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
+	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	#[cfg(feature = "uniffi")]
+	pub fn blinded_paths_for_async_recipient(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<u8>, Error> {
+		let paths = self.blinded_paths_for_async_recipient_internal(recipient_id)?;
+
+		let mut bytes = Vec::new();
+		paths.write(&mut bytes).or(Err(Error::InvalidBlindedPaths))?;
+		Ok(bytes)
+	}
+
+	fn blinded_paths_for_async_recipient_internal(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<BlindedMessagePath>, Error> {
+		match self.async_payments_role {
+			Some(AsyncPaymentsRole::Server) => {},
+			_ => {
+				return Err(Error::AsyncPaymentServicesDisabled);
+			},
+		}
+
+		self.channel_manager
+			.blinded_paths_for_async_recipient(recipient_id, None)
+			.or(Err(Error::InvalidBlindedPaths))
 	}
 }

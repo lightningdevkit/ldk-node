@@ -7,20 +7,19 @@
 
 //! Objects for configuring the node.
 
-use crate::logger::LogLevel;
-use crate::payment::SendingParameters;
-
-use lightning::ln::msgs::SocketAddress;
-use lightning::routing::gossip::NodeAlias;
-use lightning::util::config::ChannelConfig as LdkChannelConfig;
-use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
-use lightning::util::config::UserConfig;
+use std::fmt;
+use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
+use lightning::routing::router::RouteParametersConfig;
+use lightning::util::config::{
+	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
+};
 
-use std::fmt;
-use std::time::Duration;
+use crate::logger::LogLevel;
 
 // Config defaults
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
@@ -114,9 +113,9 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `sending_parameters`                   | None               |
+/// | `route_parameters`                   | None               |
 ///
-/// See [`AnchorChannelsConfig`] and [`SendingParameters`] for more information regarding their
+/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
 ///
 /// [`Node`]: crate::Node
@@ -173,12 +172,12 @@ pub struct Config {
 	pub anchor_channels_config: Option<AnchorChannelsConfig>,
 	/// Configuration options for payment routing and pathfinding.
 	///
-	/// Setting the `SendingParameters` provides flexibility to customize how payments are routed,
+	/// Setting the [`RouteParametersConfig`] provides flexibility to customize how payments are routed,
 	/// including setting limits on routing fees, CLTV expiry, and channel utilization.
 	///
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
-	pub sending_parameters: Option<SendingParameters>,
+	pub route_parameters: Option<RouteParametersConfig>,
 }
 
 impl Default for Config {
@@ -191,7 +190,7 @@ impl Default for Config {
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
-			sending_parameters: None,
+			route_parameters: None,
 			node_alias: None,
 		}
 	}
@@ -534,15 +533,24 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 	}
 }
 
+#[derive(Debug, Clone, Copy)]
+/// The role of the node in an asynchronous payments context.
+///
+/// See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.
+pub enum AsyncPaymentsRole {
+	/// Node acts a client in an async payments context. This means that if possible, it will instruct its peers to hold
+	/// HTLCs for it, so that it can go offline.
+	Client,
+	/// Node acts as a server in an async payments context. This means that it will hold async payments HTLCs and onion
+	/// messages for its peers.
+	Server,
+}
+
 #[cfg(test)]
 mod tests {
 	use std::str::FromStr;
 
-	use super::may_announce_channel;
-	use super::AnnounceError;
-	use super::Config;
-	use super::NodeAlias;
-	use super::SocketAddress;
+	use super::{may_announce_channel, AnnounceError, Config, NodeAlias, SocketAddress};
 
 	#[test]
 	fn node_announce_channel() {

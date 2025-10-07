@@ -5,26 +5,23 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use lightning::ln::msgs::DecodeError;
-use lightning::util::ser::{BigSize, Readable, RequiredWrapper, Writeable, Writer};
-use lightning::{decode_tlv_stream, encode_tlv_stream, read_tlv_fields, write_tlv_fields};
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use bdk_chain::bdk_core::{BlockId, ConfirmationBlockTime};
 use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
 use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
 use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::DescriptorId;
-
 use bdk_wallet::descriptor::Descriptor;
 use bdk_wallet::keys::DescriptorPublicKey;
-
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::p2p::Magic;
 use bitcoin::{BlockHash, Network, OutPoint, Transaction, TxOut, Txid};
-
-use std::collections::{BTreeMap, BTreeSet};
-use std::str::FromStr;
-use std::sync::Arc;
+use lightning::ln::msgs::DecodeError;
+use lightning::util::ser::{BigSize, Readable, RequiredWrapper, Writeable, Writer};
+use lightning::{decode_tlv_stream, encode_tlv_stream, read_tlv_fields, write_tlv_fields};
 
 const CHANGESET_SERIALIZATION_VERSION: u8 = 1;
 

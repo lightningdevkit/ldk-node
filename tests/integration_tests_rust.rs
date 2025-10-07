@@ -7,41 +7,38 @@
 
 mod common;
 
-use common::{
-	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
-	expect_channel_pending_event, expect_channel_ready_event, expect_event,
-	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
-	generate_blocks_and_wait,
-	logging::{init_log_logger, validate_log_entry, TestLogWriter},
-	open_channel, premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
-	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
-};
-
-use ldk_node::config::EsploraSyncConfig;
-use ldk_node::liquidity::LSPS2ServiceConfig;
-use ldk_node::payment::{
-	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
-	QrPaymentResult, SendingParameters,
-};
-use ldk_node::{Builder, Event, NodeError};
-
-use lightning::ln::channelmanager::PaymentId;
-use lightning::routing::gossip::{NodeAlias, NodeId};
-use lightning::util::persist::KVStore;
-
-use lightning_invoice::{Bolt11InvoiceDescription, Description};
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use std::collections::HashSet;
+use std::str::FromStr;
+use std::sync::Arc;
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf};
+use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
+use common::{
+	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
+	expect_channel_pending_event, expect_channel_ready_event, expect_event,
+	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
+	generate_blocks_and_wait, open_channel, open_channel_push_amt, premine_and_distribute_funds,
+	premine_blocks, prepare_rbf, random_config, random_listening_addresses,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_for_async_payments,
+	setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+};
+use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
+use ldk_node::liquidity::LSPS2ServiceConfig;
+use ldk_node::payment::{
+	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
+	QrPaymentResult,
+};
+use ldk_node::{Builder, Event, NodeError};
+use lightning::ln::channelmanager::PaymentId;
+use lightning::routing::gossip::{NodeAlias, NodeId};
+use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::KVStoreSync;
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
-
-use std::collections::HashSet;
-use std::str::FromStr;
-use std::sync::Arc;
 
 #[test]
 fn channel_full_cycle() {
@@ -212,11 +209,11 @@ fn multi_hop_sending() {
 	// Sleep a bit for gossip to propagate.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
-	let sending_params = SendingParameters {
-		max_total_routing_fee_msat: Some(Some(75_000).into()),
-		max_total_cltv_expiry_delta: Some(1000),
-		max_path_count: Some(10),
-		max_channel_saturation_power_of_half: Some(2),
+	let route_params = RouteParametersConfig {
+		max_total_routing_fee_msat: Some(75_000),
+		max_total_cltv_expiry_delta: 1000,
+		max_path_count: 10,
+		max_channel_saturation_power_of_half: 2,
 	};
 
 	let invoice_description =
@@ -225,7 +222,7 @@ fn multi_hop_sending() {
 		.bolt11_payment()
 		.receive(2_500_000, &invoice_description.clone().into(), 9217)
 		.unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(sending_params)).unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
 
@@ -246,7 +243,7 @@ fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store: Arc<dyn KVStore + Sync + Send> =
+	let test_sync_store: Arc<dyn KVStoreSync + Sync + Send> =
 		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };
@@ -821,6 +818,21 @@ fn sign_verify_msg() {
 }
 
 #[test]
+fn connection_multi_listen() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+
+	let node_id_b = node_b.node_id();
+
+	let node_addrs_b = node_b.listening_addresses().unwrap();
+	for node_addr_b in &node_addrs_b {
+		node_a.connect(node_id_b, node_addr_b.clone(), false).unwrap();
+		node_a.disconnect(node_id_b).unwrap();
+	}
+}
+
+#[test]
 fn connection_restart_behavior() {
 	do_connection_restart_behavior(true);
 	do_connection_restart_behavior(false);
@@ -835,11 +847,6 @@ fn do_connection_restart_behavior(persist: bool) {
 	let node_id_b = node_b.node_id();
 
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-
-	while !node_b.status().is_listening {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
-
 	node_a.connect(node_id_b, node_addr_b, persist).unwrap();
 
 	let peer_details_a = node_a.list_peers().first().unwrap().clone();
@@ -888,10 +895,6 @@ fn concurrent_connections_succeed() {
 
 	let node_id_b = node_b.node_id();
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-
-	while !node_b.status().is_listening {
-		std::thread::sleep(std::time::Duration::from_millis(10));
-	}
 
 	let mut handles = Vec::new();
 	for _ in 0..10 {
@@ -1127,6 +1130,142 @@ fn simple_bolt12_send_receive() {
 		},
 	}
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(overpaid_amount));
+}
+
+#[test]
+fn async_payment() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config_sender = random_config(true);
+	config_sender.node_config.listening_addresses = None;
+	config_sender.node_config.node_alias = None;
+	config_sender.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender      ".to_string())));
+	let node_sender = setup_node_for_async_payments(
+		&chain_source,
+		config_sender,
+		None,
+		Some(AsyncPaymentsRole::Client),
+	);
+
+	let mut config_sender_lsp = random_config(true);
+	config_sender_lsp.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender_lsp  ".to_string())));
+	let node_sender_lsp = setup_node_for_async_payments(
+		&chain_source,
+		config_sender_lsp,
+		None,
+		Some(AsyncPaymentsRole::Server),
+	);
+
+	let mut config_receiver_lsp = random_config(true);
+	config_receiver_lsp.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver_lsp".to_string())));
+
+	let node_receiver_lsp = setup_node_for_async_payments(
+		&chain_source,
+		config_receiver_lsp,
+		None,
+		Some(AsyncPaymentsRole::Server),
+	);
+
+	let mut config_receiver = random_config(true);
+	config_receiver.node_config.listening_addresses = None;
+	config_receiver.node_config.node_alias = None;
+	config_receiver.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
+	let node_receiver = setup_node(&chain_source, config_receiver, None);
+
+	let address_sender = node_sender.onchain_payment().new_address().unwrap();
+	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().unwrap();
+	let address_receiver_lsp = node_receiver_lsp.onchain_payment().new_address().unwrap();
+	let address_receiver = node_receiver.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 4_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_sender, address_sender_lsp, address_receiver_lsp, address_receiver],
+		Amount::from_sat(premine_amount_sat),
+	);
+
+	node_sender.sync_wallets().unwrap();
+	node_sender_lsp.sync_wallets().unwrap();
+	node_receiver_lsp.sync_wallets().unwrap();
+	node_receiver.sync_wallets().unwrap();
+
+	open_channel(&node_sender, &node_sender_lsp, 400_000, false, &electrsd);
+	open_channel(&node_sender_lsp, &node_receiver_lsp, 400_000, true, &electrsd);
+	open_channel_push_amt(
+		&node_receiver,
+		&node_receiver_lsp,
+		400_000,
+		Some(200_000_000),
+		false,
+		&electrsd,
+	);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+
+	node_sender.sync_wallets().unwrap();
+	node_sender_lsp.sync_wallets().unwrap();
+	node_receiver_lsp.sync_wallets().unwrap();
+	node_receiver.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_sender, node_sender_lsp.node_id());
+	expect_channel_ready_event!(node_sender_lsp, node_sender.node_id());
+	expect_channel_ready_event!(node_sender_lsp, node_receiver_lsp.node_id());
+	expect_channel_ready_event!(node_receiver_lsp, node_sender_lsp.node_id());
+	expect_channel_ready_event!(node_receiver_lsp, node_receiver.node_id());
+	expect_channel_ready_event!(node_receiver, node_receiver_lsp.node_id());
+
+	let has_node_announcements = |node: &ldk_node::Node| {
+		node.network_graph()
+			.list_nodes()
+			.iter()
+			.filter(|n| {
+				node.network_graph().node(n).map_or(false, |info| info.announcement_info.is_some())
+			})
+			.count() >= 2
+	};
+
+	// Wait for everyone to see all channels and node announcements.
+	while node_sender.network_graph().list_channels().len() < 1
+		|| node_sender_lsp.network_graph().list_channels().len() < 1
+		|| node_receiver_lsp.network_graph().list_channels().len() < 1
+		|| node_receiver.network_graph().list_channels().len() < 1
+		|| !has_node_announcements(&node_sender)
+		|| !has_node_announcements(&node_sender_lsp)
+		|| !has_node_announcements(&node_receiver_lsp)
+		|| !has_node_announcements(&node_receiver)
+	{
+		std::thread::sleep(std::time::Duration::from_millis(100));
+	}
+
+	let recipient_id = vec![1, 2, 3];
+	let blinded_paths =
+		node_receiver_lsp.bolt12_payment().blinded_paths_for_async_recipient(recipient_id).unwrap();
+	node_receiver.bolt12_payment().set_paths_to_static_invoice_server(blinded_paths).unwrap();
+
+	let offer = loop {
+		if let Ok(offer) = node_receiver.bolt12_payment().receive_async() {
+			break offer;
+		}
+
+		std::thread::sleep(std::time::Duration::from_millis(100));
+	};
+
+	node_receiver.stop().unwrap();
+
+	let payment_id =
+		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None).unwrap();
+
+	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
+	std::thread::sleep(std::time::Duration::from_millis(3000));
+
+	node_receiver.start().unwrap();
+
+	expect_payment_successful_event!(node_sender, Some(payment_id), None);
 }
 
 #[test]
