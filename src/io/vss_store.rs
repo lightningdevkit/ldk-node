@@ -20,7 +20,6 @@ use lightning::io::{self, Error, ErrorKind};
 use lightning::util::persist::{KVStore, KVStoreSync};
 use prost::Message;
 use rand::RngCore;
-use tokio::sync::RwLock;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
 use vss_client::headers::VssHeaderProvider;
@@ -75,7 +74,9 @@ impl VssStore {
 		}
 	}
 
-	fn get_new_version_and_lock_ref(&self, locking_key: String) -> (Arc<RwLock<u64>>, u64) {
+	fn get_new_version_and_lock_ref(
+		&self, locking_key: String,
+	) -> (Arc<tokio::sync::Mutex<u64>>, u64) {
 		let version = self.next_version.fetch_add(1, Ordering::Relaxed);
 		if version == u64::MAX {
 			panic!("VssStore version counter overflowed");
@@ -212,7 +213,7 @@ struct VssStoreInner {
 	key_obfuscator: KeyObfuscator,
 	// Per-key locks that ensures that we don't have concurrent writes to the same namespace/key.
 	// The lock also encapsulates the latest written version per key.
-	locks: Mutex<HashMap<String, Arc<RwLock<u64>>>>,
+	locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
 }
 
 impl VssStoreInner {
@@ -242,7 +243,7 @@ impl VssStoreInner {
 		Self { client, store_id, storable_builder, key_obfuscator, locks }
 	}
 
-	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<RwLock<u64>> {
+	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
 		let mut outer_lock = self.locks.lock().unwrap();
 		Arc::clone(&outer_lock.entry(locking_key).or_default())
 	}
@@ -332,7 +333,7 @@ impl VssStoreInner {
 	}
 
 	async fn write_internal(
-		&self, inner_lock_ref: Arc<RwLock<u64>>, locking_key: String, version: u64,
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
 		primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
@@ -367,7 +368,7 @@ impl VssStoreInner {
 	}
 
 	async fn remove_internal(
-		&self, inner_lock_ref: Arc<RwLock<u64>>, locking_key: String, version: u64,
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
 		primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
@@ -414,10 +415,11 @@ impl VssStoreInner {
 		F: Future<Output = Result<(), lightning::io::Error>>,
 		FN: FnOnce() -> F,
 	>(
-		&self, inner_lock_ref: Arc<RwLock<u64>>, locking_key: String, version: u64, callback: FN,
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
+		callback: FN,
 	) -> Result<(), lightning::io::Error> {
 		let res = {
-			let mut last_written_version = inner_lock_ref.write().await;
+			let mut last_written_version = inner_lock_ref.lock().await;
 
 			// Check if we already have a newer version written/removed. This is used in async contexts to realize eventual
 			// consistency.
@@ -438,7 +440,7 @@ impl VssStoreInner {
 		res
 	}
 
-	fn clean_locks(&self, inner_lock_ref: &Arc<RwLock<u64>>, locking_key: String) {
+	fn clean_locks(&self, inner_lock_ref: &Arc<tokio::sync::Mutex<u64>>, locking_key: String) {
 		// If there no arcs in use elsewhere, this means that there are no in-flight writes. We can remove the map entry
 		// to prevent leaking memory. The two arcs that are expected are the one in the map and the one held here in
 		// inner_lock_ref. The outer lock is obtained first, to avoid a new arc being cloned after we've already
