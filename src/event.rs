@@ -26,6 +26,7 @@ use lightning::util::config::{
 	ChannelConfigOverrides, ChannelConfigUpdate, ChannelHandshakeConfigUpdate,
 };
 use lightning::util::errors::APIError;
+use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -348,24 +349,24 @@ where
 
 	fn persist_queue(&self, locked_queue: &VecDeque<Event>) -> Result<(), Error> {
 		let data = EventQueueSerWrapper(locked_queue).encode();
-		self.kv_store
-			.write(
+		KVStoreSync::write(
+			&*self.kv_store,
+			EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_KEY,
+			data,
+		)
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Write for key {}/{}/{} failed due to: {}",
 				EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 				EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 				EVENT_QUEUE_PERSISTENCE_KEY,
-				data,
-			)
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Write for key {}/{}/{} failed due to: {}",
-					EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
-					EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
-					EVENT_QUEUE_PERSISTENCE_KEY,
-					e
-				);
-				Error::PersistenceFailed
-			})?;
+				e
+			);
+			Error::PersistenceFailed
+		})?;
 		Ok(())
 	}
 }
@@ -1620,13 +1621,13 @@ mod tests {
 		}
 
 		// Check we can read back what we persisted.
-		let persisted_bytes = store
-			.read(
-				EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
-				EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
-				EVENT_QUEUE_PERSISTENCE_KEY,
-			)
-			.unwrap();
+		let persisted_bytes = KVStoreSync::read(
+			&*store,
+			EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_KEY,
+		)
+		.unwrap();
 		let deser_event_queue =
 			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
 		assert_eq!(deser_event_queue.wait_next_event(), expected_event);

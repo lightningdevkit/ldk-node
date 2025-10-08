@@ -32,7 +32,7 @@ default = []
 #lightning-types = { version = "0.2.0" }
 #lightning-invoice = { version = "0.33.0", features = ["std"] }
 #lightning-net-tokio = { version = "0.1.0" }
-#lightning-persister = { version = "0.1.0" }
+#lightning-persister = { version = "0.1.0", features = ["tokio"] }
 #lightning-background-processor = { version = "0.1.0" }
 #lightning-rapid-gossip-sync = { version = "0.1.0" }
 #lightning-block-sync = { version = "0.1.0", features = ["rest-client", "rpc-client", "tokio"] }
@@ -44,7 +44,7 @@ default = []
 #lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["std"] }
 #lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
-#lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
+#lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["tokio"] }
 #lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["rest-client", "rpc-client", "tokio"] }
@@ -56,7 +56,7 @@ lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "
 lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994" }
 lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994", features = ["std"] }
 lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994" }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994" }
+lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994", features = ["tokio"] }
 lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994" }
 lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994" }
 lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3e21ba37a133977d4247e86f25df983b39326994", features = ["rest-client", "rpc-client", "tokio"] }
@@ -68,7 +68,7 @@ lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", 
 #lightning-types = { path = "../rust-lightning/lightning-types" }
 #lightning-invoice = { path = "../rust-lightning/lightning-invoice", features = ["std"] }
 #lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
-#lightning-persister = { path = "../rust-lightning/lightning-persister" }
+#lightning-persister = { path = "../rust-lightning/lightning-persister", features = ["tokio"] }
 #lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-block-sync = { path = "../rust-lightning/lightning-block-sync", features = ["rest-client", "rpc-client", "tokio"] }
