@@ -11,7 +11,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
-use bdk_wallet::{Balance, KeychainKind, PersistedWallet, SignOptions, Update};
+#[allow(deprecated)]
+use bdk_wallet::SignOptions;
+use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -222,6 +224,7 @@ impl Wallet {
 		Ok(())
 	}
 
+	#[allow(deprecated)]
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,
@@ -338,6 +341,7 @@ impl Wallet {
 			.map_err(|_| Error::InvalidAddress)
 	}
 
+	#[allow(deprecated)]
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
 		fee_rate: Option<FeeRate>,
@@ -647,6 +651,7 @@ impl Wallet {
 		Ok(utxos)
 	}
 
+	#[allow(deprecated)]
 	fn get_change_script_inner(&self) -> Result<ScriptBuf, ()> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut locked_persister = self.persister.lock().unwrap();
@@ -659,6 +664,7 @@ impl Wallet {
 		Ok(address_info.address.script_pubkey())
 	}
 
+	#[allow(deprecated)]
 	fn sign_psbt_inner(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 
