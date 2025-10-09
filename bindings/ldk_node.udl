@@ -420,7 +420,7 @@ interface ClosureReason {
 
 [Enum]
 interface PaymentKind {
-	Onchain(Txid txid, ConfirmationStatus status);
+	Onchain(Txid txid, ConfirmationStatus status, sequence<Txid> conflicting_txids);
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, u64? counterparty_skimmed_fee_msat, LSPFeeLimits lsp_fee_limits);
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
