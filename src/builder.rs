@@ -628,10 +628,9 @@ impl NodeBuilder {
 			derive_xprv(config, &seed_bytes, VSS_HARDENED_CHILD_INDEX, Arc::clone(&logger))?;
 
 		let lnurl_auth_xprv = vss_xprv
-			.derive_priv(
-				&Secp256k1::new(),
-				&[ChildNumber::Hardened { index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX }],
-			)
+			.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened {
+				index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX,
+			}])
 			.map_err(|e| {
 				log_error!(logger, "Failed to derive VSS secret: {}", e);
 				BuildError::KVStoreSetupFailed

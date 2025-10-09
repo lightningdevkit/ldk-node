@@ -38,7 +38,6 @@ jobs:
       - name: Install Rust ${{ matrix.toolchain }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
-          rustup override set ${{ matrix.toolchain }}
       - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check

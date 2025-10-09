@@ -48,7 +48,7 @@ use rand::{thread_rng, Rng};
 use serde_json::{json, Value};
 
 macro_rules! expect_event {
-	($node: expr, $event_type: ident) => {{
+	($node:expr, $event_type:ident) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
@@ -64,7 +64,7 @@ macro_rules! expect_event {
 pub(crate) use expect_event;
 
 macro_rules! expect_channel_pending_event {
-	($node: expr, $counterparty_node_id: expr) => {{
+	($node:expr, $counterparty_node_id:expr) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
@@ -82,7 +82,7 @@ macro_rules! expect_channel_pending_event {
 pub(crate) use expect_channel_pending_event;
 
 macro_rules! expect_channel_ready_event {
-	($node: expr, $counterparty_node_id: expr) => {{
+	($node:expr, $counterparty_node_id:expr) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
@@ -100,7 +100,7 @@ macro_rules! expect_channel_ready_event {
 pub(crate) use expect_channel_ready_event;
 
 macro_rules! expect_payment_received_event {
-	($node: expr, $amount_msat: expr) => {{
+	($node:expr, $amount_msat:expr) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
@@ -122,7 +122,7 @@ macro_rules! expect_payment_received_event {
 pub(crate) use expect_payment_received_event;
 
 macro_rules! expect_payment_claimable_event {
-	($node: expr, $payment_id: expr, $payment_hash: expr, $claimable_amount_msat: expr) => {{
+	($node:expr, $payment_id:expr, $payment_hash:expr, $claimable_amount_msat:expr) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::PaymentClaimable {
 				payment_id,
@@ -147,7 +147,7 @@ macro_rules! expect_payment_claimable_event {
 pub(crate) use expect_payment_claimable_event;
 
 macro_rules! expect_payment_successful_event {
-	($node: expr, $payment_id: expr, $fee_paid_msat: expr) => {{
+	($node:expr, $payment_id:expr, $fee_paid_msat:expr) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
@@ -269,7 +269,7 @@ pub(crate) struct TestConfig {
 }
 
 macro_rules! setup_builder {
-	($builder: ident, $config: expr) => {
+	($builder:ident, $config:expr) => {
 		#[cfg(feature = "uniffi")]
 		let $builder = Builder::from_config($config.clone());
 		#[cfg(not(feature = "uniffi"))]

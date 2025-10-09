@@ -687,7 +687,7 @@ fn run_rbf_test(is_insert_block: bool) {
 	let chain_source_esplora = TestChainSource::Esplora(&electrsd);
 
 	macro_rules! config_node {
-		($chain_source: expr, $anchor_channels: expr) => {{
+		($chain_source:expr, $anchor_channels:expr) => {{
 			let config_a = random_config($anchor_channels);
 			let node = setup_node(&$chain_source, config_a, None);
 			node
@@ -719,7 +719,7 @@ fn run_rbf_test(is_insert_block: bool) {
 		};
 	}
 	macro_rules! validate_balances {
-		($expected_balance_sat: expr, $is_spendable: expr) => {
+		($expected_balance_sat:expr, $is_spendable:expr) => {
 			let spend_balance = if $is_spendable { $expected_balance_sat } else { 0 };
 			for node in &nodes {
 				node.sync_wallets().unwrap();
@@ -972,8 +972,8 @@ fn simple_bolt12_send_receive() {
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
-			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
-			//API currently doesn't allow to do that.
+			// TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+			// API currently doesn't allow to do that.
 		},
 		_ => {
 			panic!("Unexpected payment kind");
@@ -1038,8 +1038,8 @@ fn simple_bolt12_send_receive() {
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
-			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
-			//API currently doesn't allow to do that.
+			// TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+			// API currently doesn't allow to do that.
 			hash.unwrap()
 		},
 		_ => {
@@ -1104,8 +1104,8 @@ fn simple_bolt12_send_receive() {
 			assert!(preimage.is_some());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0)
-			//TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
-			//API currently doesn't allow to do that.
+			// TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
+			// API currently doesn't allow to do that.
 		},
 		_ => {
 			panic!("Unexpected payment kind");
