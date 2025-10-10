@@ -9,6 +9,8 @@ buildscript {
 }
 
 plugins {
+    kotlin("android") version "1.9.20" apply false
+    kotlin("plugin.serialization") version "1.9.20" apply false
 }
 
 // library version is defined in gradle.properties

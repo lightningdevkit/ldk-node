@@ -3,7 +3,8 @@ val libraryVersion: String by project
 
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android") version "1.6.10"
+    kotlin("android")
+    kotlin("plugin.serialization")
 
     id("maven-publish")
     id("signing")
@@ -46,6 +47,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4")
     implementation("androidx.appcompat:appcompat:1.4.0")
     implementation("androidx.core:core-ktx:1.7.0")
+    implementation("org.jetbrains.kotlinx:atomicfu:0.23.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
     api("org.slf4j:slf4j-api:1.7.30")
 
     androidTestImplementation("com.github.tony19:logback-android:2.0.0")
