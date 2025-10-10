@@ -103,7 +103,6 @@ where
 				&self.primary_namespace,
 				&self.secondary_namespace,
 				&store_key,
-				false,
 			)
 			.map_err(|e| {
 				log_error!(

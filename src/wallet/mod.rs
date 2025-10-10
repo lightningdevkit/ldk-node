@@ -916,7 +916,7 @@ impl SignerProvider for WalletKeysManager {
 
 impl ChangeDestinationSource for WalletKeysManager {
 	fn get_change_destination_script<'a>(
-		&self,
+		&'a self,
 	) -> Pin<Box<dyn Future<Output = Result<ScriptBuf, ()>> + Send + 'a>> {
 		let wallet = Arc::clone(&self.wallet);
 		let logger = Arc::clone(&self.logger);

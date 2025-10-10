@@ -43,7 +43,9 @@ use crate::chain::ChainSource;
 use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet};
+use crate::types::{
+	Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet,
+};
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -141,6 +143,7 @@ where
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	chain_source: Arc<ChainSource>,
+	tx_broadcaster: Arc<Broadcaster>,
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: L,
@@ -152,7 +155,8 @@ where
 {
 	pub(crate) fn new(
 		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		chain_source: Arc<ChainSource>, kv_store: Arc<DynStore>, config: Arc<Config>, logger: L,
+		chain_source: Arc<ChainSource>, tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>,
+		config: Arc<Config>, logger: L,
 	) -> Self {
 		let lsps1_client = None;
 		let lsps2_client = None;
@@ -165,6 +169,7 @@ where
 			channel_manager,
 			keys_manager,
 			chain_source,
+			tx_broadcaster,
 			kv_store,
 			config,
 			logger,
@@ -241,6 +246,7 @@ where
 				Some(Arc::clone(&self.chain_source)),
 				None,
 				Arc::clone(&self.kv_store),
+				Arc::clone(&self.tx_broadcaster),
 				liquidity_service_config,
 				liquidity_client_config,
 			)
@@ -1302,10 +1308,14 @@ where
 		}
 	}
 
-	pub(crate) async fn handle_payment_forwarded(&self, next_channel_id: Option<ChannelId>) {
+	pub(crate) async fn handle_payment_forwarded(
+		&self, next_channel_id: Option<ChannelId>, skimmed_fee_msat: u64,
+	) {
 		if let Some(next_channel_id) = next_channel_id {
 			if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
-				if let Err(e) = lsps2_service_handler.payment_forwarded(next_channel_id).await {
+				if let Err(e) =
+					lsps2_service_handler.payment_forwarded(next_channel_id, skimmed_fee_msat).await
+				{
 					log_error!(
 						self.logger,
 						"LSPS2 service failed to handle PaymentForwarded: {:?}",

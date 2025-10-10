@@ -137,7 +137,7 @@ impl KVStore for SqliteStore {
 	}
 
 	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
@@ -153,7 +153,6 @@ impl KVStore for SqliteStore {
 				&primary_namespace,
 				&secondary_namespace,
 				&key,
-				lazy,
 			)
 		});
 		Box::pin(async move {
@@ -206,7 +205,7 @@ impl KVStoreSync for SqliteStore {
 	}
 
 	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<()> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
@@ -217,7 +216,6 @@ impl KVStoreSync for SqliteStore {
 			primary_namespace,
 			secondary_namespace,
 			key,
-			lazy,
 		)
 	}
 
@@ -402,7 +400,7 @@ impl SqliteStoreInner {
 
 	fn remove_internal(
 		&self, inner_lock_ref: Arc<Mutex<u64>>, locking_key: String, version: u64,
-		primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
+		primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<()> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
 
