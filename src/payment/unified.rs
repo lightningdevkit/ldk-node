@@ -14,14 +14,14 @@
 //! [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
-use std::sync::Arc;
-use std::vec::IntoIter;
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
 use crate::types::HRNResolver;
 use crate::Config;
+use std::sync::Arc;
+use std::vec::IntoIter;
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;

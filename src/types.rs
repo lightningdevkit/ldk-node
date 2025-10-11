@@ -48,6 +48,7 @@ where
 
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 
+/// A type alias for [`SyncAndAsyncKVStore`] with `Sync`/`Send` markers;
 pub type DynStore = dyn SyncAndAsyncKVStore + Sync + Send;
 
 pub type Persister = MonitorUpdatingPersister<

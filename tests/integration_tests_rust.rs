@@ -6,10 +6,10 @@
 // accordance with one or both of these licenses.
 
 mod common;
+use lightning::util::persist::KVStoreSync;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
-use lightning::util::persist::KVStoreSync;
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
