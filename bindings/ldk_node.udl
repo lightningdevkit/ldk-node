@@ -18,6 +18,7 @@ dictionary Config {
 dictionary AnchorChannelsConfig {
 	sequence<PublicKey> trusted_peers_no_reserve;
 	u64 per_channel_reserve_sats;
+	boolean enable_zero_fee_commitments;
 };
 
 dictionary BackgroundSyncConfig {
