@@ -1601,6 +1601,18 @@ where
 			LdkEvent::FundingTransactionReadyForSigning { .. } => {
 				debug_assert!(false, "We currently don't support interactive-tx, so this event should never be emitted.");
 			},
+			LdkEvent::SplicePending { .. } => {
+				debug_assert!(
+					false,
+					"We currently don't support splicing, so this event should never be emitted."
+				);
+			},
+			LdkEvent::SpliceFailed { .. } => {
+				debug_assert!(
+					false,
+					"We currently don't support splicing, so this event should never be emitted."
+				);
+			},
 		}
 		Ok(())
 	}

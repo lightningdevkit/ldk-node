@@ -792,7 +792,7 @@ impl WalletKeysManager {
 		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32, wallet: Arc<Wallet>,
 		logger: Arc<Logger>,
 	) -> Self {
-		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos);
+		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos, true);
 		Self { inner, wallet, logger }
 	}
 
