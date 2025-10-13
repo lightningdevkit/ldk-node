@@ -5,11 +5,9 @@ TARGET_DIR="target"
 PROJECT_DIR="ldk-node-android"
 ANDROID_LIB_DIR="$BINDINGS_DIR/$PROJECT_DIR"
 
-# Ensure gobley-uniffi-bindgen is installed from fork
-if ! command -v gobley-uniffi-bindgen &> /dev/null; then
-    echo "Installing gobley-uniffi-bindgen fork..."
-    cargo install --git https://github.com/ovitrif/gobley.git --branch main gobley-uniffi-bindgen
-fi
+# Install gobley-uniffi-bindgen from fork with patched version
+echo "Installing gobley-uniffi-bindgen fork..."
+cargo install --git https://github.com/ovitrif/gobley.git --branch fix-v0.2.0 gobley-uniffi-bindgen --force
 UNIFFI_BINDGEN_BIN="gobley-uniffi-bindgen"
 
 export_variable_if_not_present() {
