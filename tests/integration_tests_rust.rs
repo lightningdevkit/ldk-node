@@ -1440,17 +1440,12 @@ async fn splice_channel() {
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let opening_transaction_fee_sat = 156;
-	let closing_transaction_fee_sat = 614;
-	let anchor_output_sat = 330;
 
 	assert_eq!(
 		node_a.list_balances().total_onchain_balance_sats,
 		premine_amount_sat - 4_000_000 - opening_transaction_fee_sat
 	);
-	assert_eq!(
-		node_a.list_balances().total_lightning_balance_sats,
-		4_000_000 - closing_transaction_fee_sat - anchor_output_sat
-	);
+	assert_eq!(node_a.list_balances().total_lightning_balance_sats, 4_000_000);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 0);
 
 	let address = node_a.onchain_payment().new_address().unwrap();
@@ -1532,10 +1527,7 @@ async fn splice_channel() {
 	// Mine a block to give time for the HTLC to resolve
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
 
-	assert_eq!(
-		node_a.list_balances().total_lightning_balance_sats,
-		4_000_000 - closing_transaction_fee_sat - anchor_output_sat + amount_msat / 1000
-	);
+	assert_eq!(node_a.list_balances().total_lightning_balance_sats, 4_000_000 + amount_msat / 1000);
 	assert_eq!(
 		node_b.list_balances().total_lightning_balance_sats,
 		expected_splice_in_lightning_balance_sat - amount_msat / 1000
@@ -1585,7 +1577,7 @@ async fn splice_channel() {
 	);
 	assert_eq!(
 		node_a.list_balances().total_lightning_balance_sats,
-		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - expected_splice_out_fee_sat
+		4_000_000 - expected_splice_out_fee_sat
 	);
 }
 
