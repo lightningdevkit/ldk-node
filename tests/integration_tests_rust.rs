@@ -20,10 +20,11 @@ use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
-	generate_blocks_and_wait, open_channel, open_channel_push_amt, premine_and_distribute_funds,
-	premine_blocks, prepare_rbf, random_config, random_listening_addresses,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_for_async_payments,
-	setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	generate_block_and_insert_transactions, generate_blocks_and_wait, open_channel,
+	open_channel_push_amt, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	random_config, random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder,
+	setup_node, setup_node_for_async_payments, setup_node_from_config, setup_two_nodes,
+	wait_for_tx, TestChainSource, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -596,7 +597,8 @@ fn onchain_wallet_recovery() {
 	let seed_bytes = vec![42u8; 64];
 
 	let original_config = random_config(true);
-	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
+	let original_node =
+		setup_node_from_config(&chain_source, original_config, Some(seed_bytes.clone()));
 
 	let premine_amount_sat = 100_000;
 
@@ -635,7 +637,7 @@ fn onchain_wallet_recovery() {
 
 	// Now we start from scratch, only the seed remains the same.
 	let recovered_config = random_config(true);
-	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
+	let recovered_node = setup_node_from_config(&chain_source, recovered_config, Some(seed_bytes));
 
 	recovered_node.sync_wallets().unwrap();
 	assert_eq!(
@@ -668,36 +670,34 @@ fn onchain_wallet_recovery() {
 }
 
 #[test]
-fn test_rbf_via_mempool() {
-	run_rbf_test(false);
+fn test_rbf_only_in_mempool() {
+	run_rbf_test(false, false);
 }
 
 #[test]
-fn test_rbf_via_direct_block_insertion() {
-	run_rbf_test(true);
+fn test_rbf_direct_block_insertion_rbf_tx() {
+	run_rbf_test(true, false);
+}
+
+#[test]
+fn test_rbf_direct_block_insertion_original_tx() {
+	run_rbf_test(false, true);
 }
 
 // `is_insert_block`:
 // - `true`: transaction is mined immediately (no mempool), testing confirmed-Tx handling.
 // - `false`: transaction stays in mempool until confirmation, testing unconfirmed-Tx handling.
-fn run_rbf_test(is_insert_block: bool) {
+fn run_rbf_test(is_insert_block: bool, is_insertion_original_tx: bool) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source_bitcoind = TestChainSource::BitcoindRpcSync(&bitcoind);
 	let chain_source_electrsd = TestChainSource::Electrum(&electrsd);
 	let chain_source_esplora = TestChainSource::Esplora(&electrsd);
 
-	macro_rules! config_node {
-		($chain_source: expr, $anchor_channels: expr) => {{
-			let config_a = random_config($anchor_channels);
-			let node = setup_node(&$chain_source, config_a, None);
-			node
-		}};
-	}
 	let anchor_channels = false;
 	let nodes = vec![
-		config_node!(chain_source_electrsd, anchor_channels),
-		config_node!(chain_source_bitcoind, anchor_channels),
-		config_node!(chain_source_esplora, anchor_channels),
+		setup_node(&chain_source_bitcoind, anchor_channels),
+		setup_node(&chain_source_electrsd, anchor_channels),
+		setup_node(&chain_source_esplora, anchor_channels),
 	];
 
 	let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
@@ -730,15 +730,29 @@ fn run_rbf_test(is_insert_block: bool) {
 		};
 	}
 
+	macro_rules! validate_total_onchain_balance {
+		($expected_balance_sat: expr) => {
+			for node in &nodes {
+				node.sync_wallets().unwrap();
+				let balances = node.list_balances();
+				assert_eq!(balances.total_onchain_balance_sats, $expected_balance_sat);
+			}
+		};
+	}
+
 	let scripts_buf: HashSet<ScriptBuf> =
 		all_addrs.iter().map(|addr| addr.script_pubkey()).collect();
 	let mut tx;
 	let mut fee_output_index;
 
-	// Modify the output to the nodes
+	let mut final_amount_sat = 0;
+	let mut original_tx;
+
+	// Step 1: Bump fee and change output address
 	distribute_funds_all_nodes!();
 	validate_balances!(amount_sat, false);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	tx.output.iter_mut().for_each(|output| {
 		if scripts_buf.contains(&output.script_pubkey) {
 			let new_addr = bitcoind.new_address().unwrap();
@@ -746,42 +760,68 @@ fn run_rbf_test(is_insert_block: bool) {
 		}
 	});
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	validate_balances!(0, is_insert_block);
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
+	if is_insertion_original_tx {
+		final_amount_sat += amount_sat;
+	}
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
 
-	// Not modifying the output scripts, but still bumping the fee.
+	// Step 2: Bump fee only
 	distribute_funds_all_nodes!();
-	validate_balances!(amount_sat, false);
+	validate_total_onchain_balance!(amount_sat + final_amount_sat);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	validate_balances!(amount_sat, is_insert_block);
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
+	final_amount_sat += amount_sat;
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
 
-	let mut final_amount_sat = amount_sat * 2;
+	// Step 3: Increase output value
 	let value_sat = 21_000;
-
-	// Increase the value of the nodes' outputs
 	distribute_funds_all_nodes!();
+	validate_total_onchain_balance!(amount_sat + final_amount_sat);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	tx.output.iter_mut().for_each(|output| {
 		if scripts_buf.contains(&output.script_pubkey) {
 			output.value = Amount::from_sat(output.value.to_sat() + value_sat);
 		}
 	});
+	tx.output[fee_output_index].value -= Amount::from_sat(scripts_buf.len() as u64 * value_sat);
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	final_amount_sat += value_sat;
-	validate_balances!(final_amount_sat, is_insert_block);
-
-	// Decreases the value of the nodes' outputs
-	distribute_funds_all_nodes!();
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
 	final_amount_sat += amount_sat;
+	if !is_insertion_original_tx {
+		final_amount_sat += value_sat;
+	}
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
+
+	// Step 4: Decrease output value
+	distribute_funds_all_nodes!();
+	validate_total_onchain_balance!(amount_sat + final_amount_sat);
 	(tx, fee_output_index) = prepare_rbf(electrs, txid, &scripts_buf);
+	original_tx = tx.clone();
 	tx.output.iter_mut().for_each(|output| {
 		if scripts_buf.contains(&output.script_pubkey) {
 			output.value = Amount::from_sat(output.value.to_sat() - value_sat);
 		}
 	});
+	tx.output[fee_output_index].value += Amount::from_sat(scripts_buf.len() as u64 * value_sat);
 	bump_fee_and_broadcast(bitcoind, electrs, tx, fee_output_index, is_insert_block);
-	final_amount_sat -= value_sat;
-	validate_balances!(final_amount_sat, is_insert_block);
+	if is_insertion_original_tx {
+		generate_block_and_insert_transactions(bitcoind, electrs, &[original_tx.clone()]);
+	}
+	final_amount_sat += amount_sat;
+	if !is_insertion_original_tx {
+		final_amount_sat -= value_sat;
+	}
+	validate_balances!(final_amount_sat, is_insert_block || is_insertion_original_tx);
 
 	if !is_insert_block {
 		generate_blocks_and_wait(bitcoind, electrs, 1);
@@ -807,7 +847,7 @@ fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, config, None);
+	let node = setup_node_from_config(&chain_source, config, None);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
@@ -1174,7 +1214,7 @@ fn async_payment() {
 	config_receiver.node_config.node_alias = None;
 	config_receiver.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
-	let node_receiver = setup_node(&chain_source, config_receiver, None);
+	let node_receiver = setup_node_from_config(&chain_source, config_receiver, None);
 
 	let address_sender = node_sender.onchain_payment().new_address().unwrap();
 	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().unwrap();
@@ -1296,8 +1336,8 @@ fn test_node_announcement_propagation() {
 	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
 	config_b.node_config.announcement_addresses = None;
 
-	let node_a = setup_node(&chain_source, config_a, None);
-	let node_b = setup_node(&chain_source, config_b, None);
+	let node_a = setup_node_from_config(&chain_source, config_a, None);
+	let node_b = setup_node_from_config(&chain_source, config_b, None);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -1753,7 +1793,7 @@ fn facade_logging() {
 	config.log_writer = TestLogWriter::LogFacade;
 
 	println!("== Facade logging starts ==");
-	let _node = setup_node(&chain_source, config, None);
+	let _node = setup_node_from_config(&chain_source, config, None);
 
 	assert!(!logger.retrieve_logs().is_empty());
 	for (_, entry) in logger.retrieve_logs().iter().enumerate() {
@@ -1834,6 +1874,6 @@ async fn drop_in_async_context() {
 	let seed_bytes = vec![42u8; 64];
 
 	let config = random_config(true);
-	let node = setup_node(&chain_source, config, Some(seed_bytes));
+	let node = setup_node_from_config(&chain_source, config, Some(seed_bytes));
 	node.stop().unwrap();
 }
