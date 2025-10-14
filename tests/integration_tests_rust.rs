@@ -820,7 +820,7 @@ fn sign_verify_msg() {
 fn connection_multi_listen() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, false);
 
 	let node_id_b = node_b.node_id();
 
