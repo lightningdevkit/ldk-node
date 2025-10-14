@@ -8,6 +8,7 @@
 #![cfg(any(test, cln_test, lnd_test, vss_test))]
 #![allow(dead_code)]
 
+pub(crate) mod external_node;
 pub(crate) mod logging;
 
 use std::boxed::Box;
