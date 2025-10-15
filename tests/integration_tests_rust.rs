@@ -10,6 +10,7 @@ mod common;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
@@ -23,7 +24,7 @@ use common::{
 	generate_blocks_and_wait, open_channel, open_channel_push_amt, premine_and_distribute_funds,
 	premine_blocks, prepare_rbf, random_config, random_listening_addresses,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_for_async_payments,
-	setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	setup_two_nodes, setup_two_nodes_with_store, wait_for_tx, TestChainSource, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -31,13 +32,16 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, DynStore, Event, NodeError};
+use ldk_node::{Builder, DynStore, Event, Node, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::util::hash_tables::new_hash_map;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
+use tokio::sync::Mutex;
+use tokio::task::{self, JoinSet};
 
 #[test]
 fn channel_full_cycle() {
@@ -1759,6 +1763,128 @@ fn facade_logging() {
 	for (_, entry) in logger.retrieve_logs().iter().enumerate() {
 		validate_log_entry(entry);
 	}
+}
+
+fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, cur_id: u32) {
+	let mut preimage_bytes = [0u8; 32];
+
+	preimage_bytes[0..4].copy_from_slice(&cur_id.to_le_bytes());
+
+	// Spawn each payment as a separate async task
+	task::spawn(async move {
+		println!("Starting payment {}", cur_id);
+		let custom_preimage = PaymentPreimage(preimage_bytes);
+		let amount_msat = 10_000_000;
+
+		loop {
+			// Pre-check the HTLC slots to try to avoid the performance impact of a failed payment.
+			while node_a.list_channels()[0].next_outbound_htlc_limit_msat == 0 {
+				println!("Waiting for HTLC slots to free up... ({})", cur_id);
+				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			}
+
+			let payment_id = node_a.spontaneous_payment().send_with_preimage(
+				amount_msat,
+				node_b.node_id(),
+				custom_preimage,
+				None,
+			);
+
+			match payment_id {
+				Ok(payment_id) => {
+					println!("Awaiting payment {} ({})", payment_id, cur_id);
+					break;
+				},
+				Err(e) => {
+					println!("Payment attempt failed: {:?}, retrying... ({})", e, cur_id);
+
+					tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+				},
+			}
+		}
+	});
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn payment_benchmark() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes_with_store(
+		&chain_source,
+		false,
+		true,
+		false,
+		common::TestStoreType::Sqlite,
+	);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_sat = 25_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_sat),
+	);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 16_000_000, true, &electrsd);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6);
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let start = Instant::now();
+
+	let node_a = Arc::new(node_a);
+	let node_b = Arc::new(node_b);
+
+	let total_payments = 1000;
+	let max_in_flight = 20;
+
+	let mut cur_id = 0u32;
+	let mut in_flight = 0;
+	let mut success_count = 0;
+
+	while success_count < total_payments {
+		// Spawn new payments if we aren't at max in-flight and haven't sent all payments yet.
+		let to_spawn =
+			std::cmp::min(max_in_flight - in_flight, total_payments - (in_flight + success_count));
+
+		println!(
+			"Spawning {} new payments ({} in flight, {} successes)",
+			to_spawn, in_flight, success_count
+		);
+		for _ in 0..to_spawn {
+			spawn_payment(node_a.clone(), node_b.clone(), cur_id);
+			cur_id += 1;
+			in_flight += 1;
+		}
+
+		match node_a.next_event_async().await {
+			Event::PaymentSuccessful { payment_id, .. } => {
+				if let Some(id) = payment_id {
+					success_count += 1;
+					in_flight -= 1;
+					println!("Payment {:?} completed", id);
+				} else {
+					println!("Payment completed (no payment_id)");
+				}
+			},
+			Event::PaymentFailed { payment_id, .. } => {
+				in_flight -= 1;
+				println!("Payment {:?} failed", payment_id);
+			},
+			ref e => {
+				println!("Received non-payment event: {:?}", e);
+			},
+		}
+
+		node_a.event_handled().unwrap();
+	}
+
+	let duration = start.elapsed();
+	println!("Time elapsed: {:?}", duration);
 }
 
 #[test]
