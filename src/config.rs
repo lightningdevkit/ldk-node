@@ -7,20 +7,20 @@
 
 //! Objects for configuring the node.
 
-use crate::logger::LogLevel;
-use crate::payment::SendingParameters;
-use crate::prober::ProbabilisticScoringParameters;
-
-use lightning::ln::msgs::SocketAddress;
-use lightning::routing::gossip::NodeAlias;
-use lightning::util::config::ChannelConfig as LdkChannelConfig;
-use lightning::util::config::MaxDustHTLCExposure as LdkMaxDustHTLCExposure;
-use lightning::util::config::UserConfig;
+use std::fmt;
+use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use lightning::ln::msgs::SocketAddress;
+use lightning::routing::gossip::NodeAlias;
+use lightning::routing::router::RouteParametersConfig;
+use lightning::util::config::{
+	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
+};
 
-use std::time::Duration;
+use crate::logger::LogLevel;
+use crate::prober::ProbabilisticScoringParameters;
 
 // Config defaults
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
@@ -38,6 +38,12 @@ pub const DEFAULT_LOG_FILENAME: &'static str = "ldk_node.log";
 
 /// The default storage directory.
 pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
+
+// The default Esplora server we're using.
+pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
+
+// The default Esplora client timeout we're using.
+pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
@@ -65,10 +71,16 @@ pub(crate) const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60
 pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
 
 // The timeout after which we abort a wallet syncing operation.
-pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 90;
+pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 20;
 
 // The timeout after which we abort a wallet syncing operation.
-pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 30;
+pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 10;
+
+// The timeout after which we give up waiting on LDK's event handler to exit on shutdown.
+pub(crate) const LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
+// The timeout after which we give up waiting on a background task to exit on shutdown.
+pub(crate) const BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 
 // The timeout after which we abort a fee rate cache update operation.
 pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
@@ -79,8 +91,8 @@ pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort a RGS sync operation.
 pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
 
-// The length in bytes of our wallets' keys seed.
-pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
+/// The length in bytes of our wallets' keys seed.
+pub const WALLET_KEYS_SEED_LEN: usize = 64;
 
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
@@ -102,9 +114,9 @@ pub(crate) const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `sending_parameters`                   | None               |
+/// | `route_parameters`                   | None               |
 ///
-/// See [`AnchorChannelsConfig`] and [`SendingParameters`] for more information regarding their
+/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
 ///
 /// [`Node`]: crate::Node
@@ -118,6 +130,12 @@ pub struct Config {
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
+	/// The addresses which the node will announce to the gossip network that it accepts connections on.
+	///
+	/// **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+	///
+	/// [`listening_addresses`]: Config::listening_addresses
+	pub announcement_addresses: Option<Vec<SocketAddress>>,
 	/// The node alias that will be used when broadcasting announcements to the gossip network.
 	///
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
@@ -155,13 +173,12 @@ pub struct Config {
 	pub anchor_channels_config: Option<AnchorChannelsConfig>,
 	/// Configuration options for payment routing and pathfinding.
 	///
-	/// Setting the `SendingParameters` provides flexibility to customize how payments are routed,
+	/// Setting the [`RouteParametersConfig`] provides flexibility to customize how payments are routed,
 	/// including setting limits on routing fees, CLTV expiry, and channel utilization.
 	///
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
-	pub sending_parameters: Option<SendingParameters>,
-
+	pub route_parameters: Option<RouteParametersConfig>,
 	/// The parameters used to configure the [`lightning::routing::scoring::ProbabilisticScorer`]
 	/// used by the node.
 	pub scoring_parameters: ProbabilisticScoringParameters,
@@ -173,10 +190,11 @@ impl Default for Config {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
+			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
-			sending_parameters: None,
+			route_parameters: None,
 			node_alias: None,
 			scoring_parameters: ProbabilisticScoringParameters::default(),
 		}
@@ -262,9 +280,37 @@ pub fn default_config() -> Config {
 	Config::default()
 }
 
-pub(crate) fn may_announce_channel(config: &Config) -> bool {
-	config.node_alias.is_some()
-		&& config.listening_addresses.as_ref().map_or(false, |addrs| !addrs.is_empty())
+#[derive(Debug, PartialEq)]
+pub(crate) enum AnnounceError {
+	MissingNodeAlias,
+	MissingListeningAddresses,
+	MissingAliasAndAddresses,
+}
+
+impl fmt::Display for AnnounceError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			AnnounceError::MissingNodeAlias => write!(f, "Node alias is not configured"),
+			AnnounceError::MissingListeningAddresses => {
+				write!(f, "Listening addresses are not configured")
+			},
+			AnnounceError::MissingAliasAndAddresses => {
+				write!(f, "Node alias and listening addresses are not configured")
+			},
+		}
+	}
+}
+
+pub(crate) fn may_announce_channel(config: &Config) -> Result<(), AnnounceError> {
+	let has_listening_addresses =
+		config.listening_addresses.as_ref().map_or(false, |addrs| !addrs.is_empty());
+
+	match (config.node_alias.is_some(), has_listening_addresses) {
+		(true, true) => Ok(()),
+		(true, false) => Err(AnnounceError::MissingListeningAddresses),
+		(false, true) => Err(AnnounceError::MissingNodeAlias),
+		(false, false) => Err(AnnounceError::MissingAliasAndAddresses),
+	}
 }
 
 pub(crate) fn default_user_config(config: &Config) -> UserConfig {
@@ -279,7 +325,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 
-	if !may_announce_channel(config) {
+	if may_announce_channel(config).is_err() {
 		user_config.accept_forwards_to_priv_channels = false;
 		user_config.channel_handshake_config.announce_for_forwarding = false;
 		user_config.channel_handshake_limits.force_announced_channel_preference = true;
@@ -288,7 +334,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config
 }
 
-/// Options related to syncing the Lightning and on-chain wallets via an Esplora backend.
+/// Options related to background syncing the Lightning and on-chain wallets.
 ///
 /// ### Defaults
 ///
@@ -298,22 +344,24 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 /// | `lightning_wallet_sync_interval_secs`  | 30                 |
 /// | `fee_rate_cache_update_interval_secs`  | 600                |
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct EsploraSyncConfig {
+pub struct BackgroundSyncConfig {
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
+	/// **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
 	pub onchain_wallet_sync_interval_secs: u64,
+
 	/// The time in-between background sync attempts of the LDK wallet, in seconds.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
+	/// **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
 	pub lightning_wallet_sync_interval_secs: u64,
+
 	/// The time in-between background update attempts to our fee rate cache, in seconds.
 	///
-	/// **Note:** A minimum of 10 seconds is always enforced.
+	/// **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
 	pub fee_rate_cache_update_interval_secs: u64,
 }
 
-impl Default for EsploraSyncConfig {
+impl Default for BackgroundSyncConfig {
 	fn default() -> Self {
 		Self {
 			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
@@ -321,6 +369,57 @@ impl Default for EsploraSyncConfig {
 			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
 		}
 	}
+}
+
+/// Configuration for syncing with an Esplora backend.
+///
+/// Background syncing is enabled by default, using the default values specified in
+/// [`BackgroundSyncConfig`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct EsploraSyncConfig {
+	/// Background sync configuration.
+	///
+	/// If set to `None`, background syncing will be disabled. Users will need to manually
+	/// sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+	///
+	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
+	pub background_sync_config: Option<BackgroundSyncConfig>,
+}
+
+impl Default for EsploraSyncConfig {
+	fn default() -> Self {
+		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }
+	}
+}
+
+/// Configuration for syncing with an Electrum backend.
+///
+/// Background syncing is enabled by default, using the default values specified in
+/// [`BackgroundSyncConfig`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ElectrumSyncConfig {
+	/// Background sync configuration.
+	///
+	/// If set to `None`, background syncing will be disabled. Users will need to manually
+	/// sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+	///
+	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
+	pub background_sync_config: Option<BackgroundSyncConfig>,
+}
+
+impl Default for ElectrumSyncConfig {
+	fn default() -> Self {
+		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }
+	}
+}
+
+/// Configuration for syncing with Bitcoin Core backend via REST.
+#[derive(Debug, Clone)]
+pub struct BitcoindRestClientConfig {
+	/// Host URL.
+	pub rest_host: String,
+	/// Host port.
+	pub rest_port: u16,
 }
 
 /// Options which apply on a per-channel basis and may change at runtime or based on negotiation
@@ -439,20 +538,33 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 	}
 }
 
+#[derive(Debug, Clone, Copy)]
+/// The role of the node in an asynchronous payments context.
+///
+/// See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.
+pub enum AsyncPaymentsRole {
+	/// Node acts a client in an async payments context. This means that if possible, it will instruct its peers to hold
+	/// HTLCs for it, so that it can go offline.
+	Client,
+	/// Node acts as a server in an async payments context. This means that it will hold async payments HTLCs and onion
+	/// messages for its peers.
+	Server,
+}
+
 #[cfg(test)]
 mod tests {
 	use std::str::FromStr;
 
-	use super::may_announce_channel;
-	use super::Config;
-	use super::NodeAlias;
-	use super::SocketAddress;
+	use super::{may_announce_channel, AnnounceError, Config, NodeAlias, SocketAddress};
 
 	#[test]
 	fn node_announce_channel() {
 		// Default configuration with node alias and listening addresses unset
 		let mut node_config = Config::default();
-		assert!(!may_announce_channel(&node_config));
+		assert_eq!(
+			may_announce_channel(&node_config),
+			Err(AnnounceError::MissingAliasAndAddresses)
+		);
 
 		// Set node alias with listening addresses unset
 		let alias_frm_str = |alias: &str| {
@@ -461,11 +573,26 @@ mod tests {
 			NodeAlias(bytes)
 		};
 		node_config.node_alias = Some(alias_frm_str("LDK_Node"));
-		assert!(!may_announce_channel(&node_config));
+		assert_eq!(
+			may_announce_channel(&node_config),
+			Err(AnnounceError::MissingListeningAddresses)
+		);
+
+		// Set announcement addresses with listening addresses unset
+		let announcement_address = SocketAddress::from_str("123.45.67.89:9735")
+			.expect("Socket address conversion failed.");
+		node_config.announcement_addresses = Some(vec![announcement_address]);
+		assert_eq!(
+			may_announce_channel(&node_config),
+			Err(AnnounceError::MissingListeningAddresses)
+		);
 
 		// Set node alias with an empty list of listening addresses
 		node_config.listening_addresses = Some(vec![]);
-		assert!(!may_announce_channel(&node_config));
+		assert_eq!(
+			may_announce_channel(&node_config),
+			Err(AnnounceError::MissingListeningAddresses)
+		);
 
 		// Set node alias with a non-empty list of listening addresses
 		let socket_address =
@@ -473,6 +600,6 @@ mod tests {
 		if let Some(ref mut addresses) = node_config.listening_addresses {
 			addresses.push(socket_address);
 		}
-		assert!(may_announce_channel(&node_config));
+		assert!(may_announce_channel(&node_config).is_ok());
 	}
 }

@@ -31,3 +31,7 @@ swift.swiftdoc
 .build/arm64-apple-macosx/debug/index/db/v13/p69904--d2c184/data.mdb
 .build/arm64-apple-macosx/debug/index/db/v13/p69904--d2c184/lock.mdb
 .build/arm64-apple-macosx/debug/LDKNode.build/module.modulemap
+
+# Hermit
+.hermit/
+bin/

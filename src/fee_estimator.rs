@@ -5,14 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::chaininterface::FeeEstimator as LdkFeeEstimator;
-use lightning::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
-
-use bitcoin::FeeRate;
-
 use std::collections::HashMap;
 use std::sync::RwLock;
+
+use bitcoin::FeeRate;
+use lightning::chain::chaininterface::{
+	ConfirmationTarget as LdkConfirmationTarget, FeeEstimator as LdkFeeEstimator,
+	FEERATE_FLOOR_SATS_PER_KW,
+};
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ConfirmationTarget {
@@ -149,6 +149,17 @@ pub(crate) fn apply_post_estimation_adjustments(
 				.saturating_sub(250)
 				.max(FEERATE_FLOOR_SATS_PER_KW as u64);
 			FeeRate::from_sat_per_kwu(slightly_less_than_background)
+		},
+		ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate) => {
+			// MaximumFeeEstimate is mostly used for protection against fee-inflation attacks. As
+			// users were previously impacted by this limit being too restrictive (read: too low),
+			// we bump it here a bit to give them some leeway.
+			let slightly_bump = estimated_rate
+				.to_sat_per_kwu()
+				.saturating_mul(11)
+				.saturating_div(10)
+				.saturating_add(2500);
+			FeeRate::from_sat_per_kwu(slightly_bump)
 		},
 		_ => estimated_rate,
 	}

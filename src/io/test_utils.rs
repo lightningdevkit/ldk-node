@@ -5,21 +5,19 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::panic::RefUnwindSafe;
+use std::path::PathBuf;
+
+use lightning::events::ClosureReason;
 use lightning::ln::functional_test_utils::{
 	connect_block, create_announced_chan_between_nodes, create_chanmon_cfgs, create_dummy_block,
 	create_network, create_node_cfgs, create_node_chanmgrs, send_payment,
 };
-use lightning::util::persist::{read_channel_monitors, KVStore, KVSTORE_NAMESPACE_KEY_MAX_LEN};
-
-use lightning::events::ClosureReason;
+use lightning::util::persist::{read_channel_monitors, KVStoreSync, KVSTORE_NAMESPACE_KEY_MAX_LEN};
 use lightning::util::test_utils;
 use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
-
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-
-use std::panic::RefUnwindSafe;
-use std::path::PathBuf;
 
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
@@ -29,23 +27,24 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-pub(crate) fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_store: &K) {
-	let data = [42u8; 32];
+pub(crate) fn do_read_write_remove_list_persist<K: KVStoreSync + RefUnwindSafe>(kv_store: &K) {
+	let data = vec![42u8; 32];
 
 	let primary_namespace = "testspace";
 	let secondary_namespace = "testsubspace";
 	let key = "testkey";
 
 	// Test the basic KVStore operations.
-	kv_store.write(primary_namespace, secondary_namespace, key, &data).unwrap();
+	kv_store.write(primary_namespace, secondary_namespace, key, data.clone()).unwrap();
 
 	// Test empty primary/secondary namespaces are allowed, but not empty primary namespace and non-empty
 	// secondary primary_namespace, and not empty key.
-	kv_store.write("", "", key, &data).unwrap();
-	let res = std::panic::catch_unwind(|| kv_store.write("", secondary_namespace, key, &data));
+	kv_store.write("", "", key, data.clone()).unwrap();
+	let res =
+		std::panic::catch_unwind(|| kv_store.write("", secondary_namespace, key, data.clone()));
 	assert!(res.is_err());
 	let res = std::panic::catch_unwind(|| {
-		kv_store.write(primary_namespace, secondary_namespace, "", &data)
+		kv_store.write(primary_namespace, secondary_namespace, "", data.clone())
 	});
 	assert!(res.is_err());
 
@@ -56,14 +55,14 @@ pub(crate) fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_s
 	let read_data = kv_store.read(primary_namespace, secondary_namespace, key).unwrap();
 	assert_eq!(data, &*read_data);
 
-	kv_store.remove(primary_namespace, secondary_namespace, key, false).unwrap();
+	kv_store.remove(primary_namespace, secondary_namespace, key).unwrap();
 
 	let listed_keys = kv_store.list(primary_namespace, secondary_namespace).unwrap();
 	assert_eq!(listed_keys.len(), 0);
 
 	// Ensure we have no issue operating with primary_namespace/secondary_namespace/key being KVSTORE_NAMESPACE_KEY_MAX_LEN
 	let max_chars: String = std::iter::repeat('A').take(KVSTORE_NAMESPACE_KEY_MAX_LEN).collect();
-	kv_store.write(&max_chars, &max_chars, &max_chars, &data).unwrap();
+	kv_store.write(&max_chars, &max_chars, &max_chars, data.clone()).unwrap();
 
 	let listed_keys = kv_store.list(&max_chars, &max_chars).unwrap();
 	assert_eq!(listed_keys.len(), 1);
@@ -72,7 +71,7 @@ pub(crate) fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_s
 	let read_data = kv_store.read(&max_chars, &max_chars, &max_chars).unwrap();
 	assert_eq!(data, &*read_data);
 
-	kv_store.remove(&max_chars, &max_chars, &max_chars, false).unwrap();
+	kv_store.remove(&max_chars, &max_chars, &max_chars).unwrap();
 
 	let listed_keys = kv_store.list(&max_chars, &max_chars).unwrap();
 	assert_eq!(listed_keys.len(), 0);
@@ -80,7 +79,7 @@ pub(crate) fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_s
 
 // Integration-test the given KVStore implementation. Test relaying a few payments and check that
 // the persisted data is updated the appropriate number of times.
-pub(crate) fn do_test_store<K: KVStore>(store_0: &K, store_1: &K) {
+pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let chain_mon_0 = test_utils::TestChainMonitor::new(
@@ -145,18 +144,19 @@ pub(crate) fn do_test_store<K: KVStore>(store_0: &K, store_1: &K) {
 
 	// Force close because cooperative close doesn't result in any persisted
 	// updates.
+	let message = "Channel force-closed".to_owned();
 	nodes[0]
 		.node
 		.force_close_broadcasting_latest_txn(
 			&nodes[0].node.list_channels()[0].channel_id,
 			&nodes[1].node.get_our_node_id(),
-			"whoops".to_string(),
+			message.clone(),
 		)
 		.unwrap();
 	check_closed_event!(
 		nodes[0],
 		1,
-		ClosureReason::HolderForceClosed { broadcasted_latest_txn: Some(true) },
+		ClosureReason::HolderForceClosed { broadcasted_latest_txn: Some(true), message },
 		[nodes[1].node.get_our_node_id()],
 		100000
 	);

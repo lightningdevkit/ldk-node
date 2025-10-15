@@ -18,9 +18,8 @@ use crate::{
 };
 use bitcoin::secp256k1::PublicKey;
 use lightning::{
-	chain::transaction::OutPoint,
 	io::Cursor,
-	ln::{channel_state::ChannelDetails, channelmanager::PaymentId},
+	ln::{channel_state::ChannelDetails, channelmanager::PaymentId, types::ChannelId},
 	log_error,
 	routing::{
 		router::{Path, PaymentParameters, Route, RouteParameters, Router as _},
@@ -92,14 +91,14 @@ impl Prober {
 	}
 
 	/// Returns the latest update ids of the channel monitors. At some point after many updates the probes will start to get slow.
-	pub fn channel_monitor_update_ids(&self) -> Vec<(OutPoint, u64)> {
+	pub fn channel_monitor_update_ids(&self) -> Vec<(ChannelId, u64)> {
 		self.chain_monitor
 			.list_monitors()
 			.iter()
-			.filter_map(|(outpoint, _)| {
+			.filter_map(|channel_id| {
 				self.chain_monitor
-					.get_monitor(*outpoint)
-					.map(|monitor| (*outpoint, monitor.get_latest_update_id()))
+					.get_monitor(*channel_id)
+					.map(|monitor| (*channel_id, monitor.get_latest_update_id()))
 					.ok()
 			})
 			.collect()

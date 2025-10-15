@@ -9,32 +9,27 @@
 
 mod common;
 
+use std::default::Default;
+use std::str::FromStr;
+
+use clightningrpc::lightningrpc::LightningRPC;
+use clightningrpc::responses::NetworkAddress;
+use electrsd::corepc_client::client_sync::Auth;
+use electrsd::corepc_node::Client as BitcoindClient;
+use electrum_client::Client as ElectrumClient;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event};
-use lightning_invoice::{Bolt11InvoiceDescription, Description};
-
-use clightningrpc::lightningrpc::LightningRPC;
-use clightningrpc::responses::NetworkAddress;
-
-use bitcoincore_rpc::Auth;
-use bitcoincore_rpc::Client as BitcoindClient;
-
-use electrum_client::Client as ElectrumClient;
-use lightning_invoice::Bolt11Invoice;
-
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-
-use std::default::Default;
-use std::str::FromStr;
 
 #[test]
 fn test_cln() {
 	// Setup bitcoind / electrs clients
-	let bitcoind_client = BitcoindClient::new(
-		"127.0.0.1:18443",
+	let bitcoind_client = BitcoindClient::new_with_auth(
+		"http://127.0.0.1:18443",
 		Auth::UserPass("user".to_string(), "pass".to_string()),
 	)
 	.unwrap();
@@ -45,7 +40,7 @@ fn test_cln() {
 
 	// Setup LDK Node
 	let config = common::random_config(true);
-	let mut builder = Builder::from_config(config);
+	let mut builder = Builder::from_config(config.node_config);
 	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
 
 	let node = builder.build().unwrap();
@@ -64,7 +59,17 @@ fn test_cln() {
 	// Setup CLN
 	let sock = "/tmp/lightning-rpc";
 	let cln_client = LightningRPC::new(&sock);
-	let cln_info = cln_client.getinfo().unwrap();
+	let cln_info = {
+		loop {
+			let info = cln_client.getinfo().unwrap();
+			// Wait for CLN to sync block height before channel open.
+			// Prevents crash due to unset blockheight (see LDK Node issue #527).
+			if info.blockheight > 0 {
+				break info;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(250));
+		}
+	};
 	let cln_node_id = PublicKey::from_str(&cln_info.id).unwrap();
 	let cln_address: SocketAddress = match cln_info.binding.first().unwrap() {
 		NetworkAddress::Ipv4 { address, port } => {

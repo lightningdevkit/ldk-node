@@ -18,7 +18,7 @@ jobs:
         toolchain: [
           stable,
           beta,
-          1.75.0, # Our MSRV
+          1.85.0, # Our MSRV
           ]
         include:
           - toolchain: stable
@@ -29,7 +29,7 @@ jobs:
             platform: macos-latest
           - toolchain: stable
             platform: windows-latest
-          - toolchain: 1.75.0
+          - toolchain: 1.85.0
             msrv: true
     runs-on: ${{ matrix.platform }}
     steps:
@@ -42,10 +42,6 @@ jobs:
       - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check
-      - name: Pin packages to allow for MSRV
-        if: matrix.msrv
-        run: |
-          cargo update -p home --precise "0.5.9" --verbose # home v0.5.11 requires rustc 1.81 or newer
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
@@ -78,7 +74,7 @@ jobs:
         if: matrix.build-uniffi
         run: cargo build --features uniffi --verbose --color always
       - name: Build documentation on Rust ${{ matrix.toolchain }}
-        if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.75.0'"
+        if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.85.0'"
         run: |
           cargo doc --release --verbose --color always
           cargo doc --document-private-items --verbose --color always

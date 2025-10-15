@@ -23,6 +23,8 @@
 //! controlled via commands such as [`start`], [`stop`], [`open_channel`], [`send`], etc.:
 //!
 //! ```no_run
+//! # #[cfg(not(feature = "uniffi"))]
+//! # {
 //! use ldk_node::Builder;
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
@@ -57,6 +59,7 @@
 //!
 //! 	node.stop().unwrap();
 //! }
+//! # }
 //! ```
 //!
 //! [`build`]: Builder::build
@@ -77,9 +80,11 @@ mod builder;
 mod chain;
 pub mod config;
 mod connection;
+mod data_store;
 mod error;
 mod event;
 mod fee_estimator;
+mod ffi;
 mod gossip;
 pub mod graph;
 mod hex_utils;
@@ -90,65 +95,39 @@ mod message_handler;
 pub mod payment;
 mod peer_store;
 pub mod prober;
-mod sweep;
+mod runtime;
 mod tx_broadcaster;
 mod types;
-#[cfg(feature = "uniffi")]
-mod uniffi_types;
 mod wallet;
 
-pub use bip39;
-pub use bitcoin;
-pub use lightning;
-pub use lightning_invoice;
-pub use lightning_liquidity;
-pub use lightning_types;
-pub use vss_client;
+use std::default::Default;
+use std::net::ToSocketAddrs;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
-pub use error::Error as NodeError;
-use error::Error;
-
-pub use event::Event;
-
-pub use io::utils::generate_entropy_mnemonic;
-
-#[cfg(feature = "uniffi")]
-use uniffi_types::*;
-
+use bitcoin::secp256k1::PublicKey;
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
-
 use chain::ChainSource;
 use config::{
-	default_user_config, may_announce_channel, ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
+	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
+pub use error::Error as NodeError;
+use error::Error;
+pub use event::Event;
 use event::{EventHandler, EventQueue};
+#[cfg(feature = "uniffi")]
+use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
+pub use io::utils::generate_entropy_mnemonic;
 use io::utils::write_node_metrics;
-use liquidity::{LSPS1Liquidity, LiquiditySource};
-use payment::store::PaymentStore;
-use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedQrPayment,
-};
-use peer_store::{PeerInfo, PeerStore};
-use prober::Prober;
-use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	KeysManager, OnionMessenger, PeerManager, Router, Scorer, Sweeper, Wallet,
-};
-
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
-
-use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::impl_writeable_tlv_based;
@@ -156,18 +135,32 @@ use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-
+use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
-
-use bitcoin::secp256k1::PublicKey;
-
+use liquidity::{LSPS1Liquidity, LiquiditySource};
+use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use payment::{
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
+	UnifiedQrPayment,
+};
+use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
+use runtime::Runtime;
+use types::{
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, KeysManager,
+	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+};
+pub use types::{
+	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
+};
+use crate::prober::Prober;
 
-use std::default::Default;
-use std::net::ToSocketAddrs;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use {
+	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
+	vss_client,
+};
 
 #[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
@@ -176,9 +169,9 @@ uniffi::include_scaffolding!("ldk_node");
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
 pub struct Node {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	runtime: Arc<Runtime>,
 	stop_sender: tokio::sync::watch::Sender<()>,
-	event_handling_stopped_sender: tokio::sync::watch::Sender<()>,
+	background_processor_stop_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
@@ -199,36 +192,26 @@ pub struct Node {
 	router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
-	payment_store: Arc<PaymentStore<Arc<Logger>>>,
-	is_listening: Arc<AtomicBool>,
+	payment_store: Arc<PaymentStore>,
+	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
+	om_mailbox: Option<Arc<OnionMessageMailbox>>,
+	async_payments_role: Option<AsyncPaymentsRole>,
 }
 
 impl Node {
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
+	/// This will try to auto-detect an outer pre-existing runtime, e.g., to avoid stacking Tokio
+	/// runtime contexts. Note we require the outer runtime to be of the `multithreaded` flavor.
+	///
 	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
 	/// a thread-safe manner.
 	pub fn start(&self) -> Result<(), Error> {
-		let runtime =
-			Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
-		self.start_with_runtime(runtime)
-	}
-
-	/// Starts the necessary background tasks (such as handling events coming from user input,
-	/// LDK/BDK, and the peer-to-peer network) on the the given `runtime`.
-	///
-	/// This allows to have LDK Node reuse an outer pre-existing runtime, e.g., to avoid stacking Tokio
-	/// runtime contexts.
-	///
-	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
-	/// a thread-safe manner.
-	pub fn start_with_runtime(&self, runtime: Arc<tokio::runtime::Runtime>) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
-		let mut runtime_lock = self.runtime.write().unwrap();
-		if runtime_lock.is_some() {
-			// We're already running.
+		let mut is_running_lock = self.is_running.write().unwrap();
+		if *is_running_lock {
 			return Err(Error::AlreadyRunning);
 		}
 
@@ -239,12 +222,15 @@ impl Node {
 			self.config.network
 		);
 
+		// Start up any runtime-dependant chain sources (e.g. Electrum)
+		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
+			log_error!(self.logger, "Failed to start chain syncing: {}", e);
+			e
+		})?;
+
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
-		let runtime_ref = &runtime;
-		tokio::task::block_in_place(move || {
-			runtime_ref.block_on(async move { chain_source.update_fee_rate_estimates().await })
-		})?;
+		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -252,7 +238,7 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		runtime.spawn(async move {
+		self.runtime.spawn_background_task(async move {
 			chain_source
 				.continuously_sync_wallets(stop_sync_receiver, sync_cman, sync_cmon, sync_sweeper)
 				.await;
@@ -264,7 +250,7 @@ impl Node {
 			let gossip_sync_logger = Arc::clone(&self.logger);
 			let gossip_node_metrics = Arc::clone(&self.node_metrics);
 			let mut stop_gossip_sync = self.stop_sender.subscribe();
-			runtime.spawn(async move {
+			self.runtime.spawn_cancellable_background_task(async move {
 				let mut interval = tokio::time::interval(RGS_SYNC_INTERVAL);
 				loop {
 					tokio::select! {
@@ -280,7 +266,7 @@ impl Node {
 							let now = Instant::now();
 							match gossip_source.update_rgs_snapshot(false).await {
 								Ok(updated_timestamp) => {
-									log_trace!(
+									log_info!(
 										gossip_sync_logger,
 										"Background sync of RGS gossip data finished in {}ms.",
 										now.elapsed().as_millis()
@@ -311,9 +297,7 @@ impl Node {
 		if let Some(listening_addresses) = &self.config.listening_addresses {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
-			let mut stop_listen = self.stop_sender.subscribe();
 			let listening_logger = Arc::clone(&self.logger);
-			let listening_indicator = Arc::clone(&self.is_listening);
 
 			let mut bind_addrs = Vec::with_capacity(listening_addresses.len());
 
@@ -331,45 +315,62 @@ impl Node {
 				bind_addrs.extend(resolved_address);
 			}
 
-			runtime.spawn(async move {
-				{
-				let listener =
-					tokio::net::TcpListener::bind(&*bind_addrs).await
-										.unwrap_or_else(|e| {
-											log_error!(listening_logger, "Failed to bind to listen addresses/ports - is something else already listening on it?: {}", e);
-											panic!(
-												"Failed to bind to listen address/port - is something else already listening on it?",
-												);
-										});
+			let logger = Arc::clone(&listening_logger);
+			let listeners = self.runtime.block_on(async move {
+				let mut listeners = Vec::new();
 
-				listening_indicator.store(true, Ordering::Release);
-
-				loop {
-					let peer_mgr = Arc::clone(&peer_manager_connection_handler);
-					tokio::select! {
-						_ = stop_listen.changed() => {
-							log_debug!(
-								listening_logger,
-								"Stopping listening to inbound connections.",
+				// Try to bind to all addresses
+				for addr in &*bind_addrs {
+					match tokio::net::TcpListener::bind(addr).await {
+						Ok(listener) => {
+							log_trace!(logger, "Listener bound to {}", addr);
+							listeners.push(listener);
+						},
+						Err(e) => {
+							log_error!(
+								logger,
+								"Failed to bind to {}: {} - is something else already listening?",
+								addr,
+								e
 							);
-							break;
-						}
-						res = listener.accept() => {
-							let tcp_stream = res.unwrap().0;
-							tokio::spawn(async move {
-								lightning_net_tokio::setup_inbound(
-									Arc::clone(&peer_mgr),
-									tcp_stream.into_std().unwrap(),
-									)
-									.await;
-							});
-						}
+							return Err(Error::InvalidSocketAddress);
+						},
 					}
 				}
-				}
 
-				listening_indicator.store(false, Ordering::Release);
-			});
+				Ok(listeners)
+			})?;
+
+			for listener in listeners {
+				let logger = Arc::clone(&listening_logger);
+				let peer_mgr = Arc::clone(&peer_manager_connection_handler);
+				let mut stop_listen = self.stop_sender.subscribe();
+				let runtime = Arc::clone(&self.runtime);
+				self.runtime.spawn_cancellable_background_task(async move {
+					loop {
+						tokio::select! {
+							_ = stop_listen.changed() => {
+								log_debug!(
+									logger,
+									"Stopping listening to inbound connections."
+								);
+								break;
+							}
+							res = listener.accept() => {
+								let tcp_stream = res.unwrap().0;
+								let peer_mgr = Arc::clone(&peer_mgr);
+								runtime.spawn_cancellable_background_task(async move {
+									lightning_net_tokio::setup_inbound(
+										Arc::clone(&peer_mgr),
+										tcp_stream.into_std().unwrap(),
+										)
+										.await;
+								});
+							}
+						}
+					}
+				});
+			}
 		}
 
 		// Regularly reconnect to persisted peers.
@@ -378,7 +379,7 @@ impl Node {
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
 		let mut stop_connect = self.stop_sender.subscribe();
-		runtime.spawn(async move {
+		self.runtime.spawn_cancellable_background_task(async move {
 			let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
 			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 			loop {
@@ -386,7 +387,7 @@ impl Node {
 						_ = stop_connect.changed() => {
 							log_debug!(
 								connect_logger,
-								"Stopping reconnecting known peers.",
+								"Stopping reconnecting known peers."
 							);
 							return;
 						}
@@ -417,8 +418,8 @@ impl Node {
 		let bcast_node_metrics = Arc::clone(&self.node_metrics);
 		let mut stop_bcast = self.stop_sender.subscribe();
 		let node_alias = self.config.node_alias.clone();
-		if may_announce_channel(&self.config) {
-			runtime.spawn(async move {
+		if may_announce_channel(&self.config).is_ok() {
+			self.runtime.spawn_cancellable_background_task(async move {
 				// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 				#[cfg(not(test))]
 				let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -460,8 +461,10 @@ impl Node {
 								continue;
 							}
 
-							let addresses = if let Some(addresses) = bcast_config.listening_addresses.clone() {
-								addresses
+							let addresses = if let Some(announcement_addresses) = bcast_config.announcement_addresses.clone() {
+								announcement_addresses
+							} else if let Some(listening_addresses) = bcast_config.listening_addresses.clone() {
+								listening_addresses
 							} else {
 								debug_assert!(false, "We checked whether the node may announce, so listening addresses should always be set");
 								continue;
@@ -490,27 +493,10 @@ impl Node {
 			});
 		}
 
-		let mut stop_tx_bcast = self.stop_sender.subscribe();
+		let stop_tx_bcast = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
-		let tx_bcast_logger = Arc::clone(&self.logger);
-		runtime.spawn(async move {
-			// Every second we try to clear our broadcasting queue.
-			let mut interval = tokio::time::interval(Duration::from_secs(1));
-			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-						_ = stop_tx_bcast.changed() => {
-							log_debug!(
-								tx_bcast_logger,
-								"Stopping broadcasting transactions.",
-							);
-							return;
-						}
-						_ = interval.tick() => {
-							chain_source.process_broadcast_queue().await;
-						}
-				}
-			}
+		self.runtime.spawn_cancellable_background_task(async move {
+			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
 		});
 
 		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
@@ -520,6 +506,13 @@ impl Node {
 			Arc::clone(&self.logger),
 		));
 
+		let static_invoice_store = if let Some(AsyncPaymentsRole::Server) = self.async_payments_role
+		{
+			Some(StaticInvoiceStore::new(Arc::clone(&self.kv_store)))
+		} else {
+			None
+		};
+
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
@@ -528,8 +521,12 @@ impl Node {
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
+			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
+			static_invoice_store,
+			Arc::clone(&self.onion_messenger),
+			self.om_mailbox.clone(),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
@@ -542,11 +539,14 @@ impl Node {
 		let background_chan_man = Arc::clone(&self.channel_manager);
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
+		let background_liquidity_man_opt =
+			self.liquidity_source.as_ref().map(|ls| ls.liquidity_manager());
+		let background_sweeper = Arc::clone(&self.output_sweeper);
 		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
 		let background_scorer = Arc::clone(&self.scorer);
-		let stop_bp = self.stop_sender.subscribe();
+		let stop_bp = self.background_processor_stop_sender.subscribe();
 		let sleeper_logger = Arc::clone(&self.logger);
 		let sleeper = move |d| {
 			let mut stop = stop_bp.clone();
@@ -567,9 +567,7 @@ impl Node {
 			})
 		};
 
-		let background_stop_logger = Arc::clone(&self.logger);
-		let event_handling_stopped_sender = self.event_handling_stopped_sender.clone();
-		runtime.spawn(async move {
+		self.runtime.spawn_background_processor_task(async move {
 			process_events_async(
 				background_persister,
 				|e| background_event_handler.handle_event(e),
@@ -578,6 +576,8 @@ impl Node {
 				Some(background_onion_messenger),
 				background_gossip_sync,
 				background_peer_man,
+				background_liquidity_man_opt,
+				Some(background_sweeper),
 				background_logger,
 				Some(background_scorer),
 				sleeper,
@@ -589,26 +589,13 @@ impl Node {
 				log_error!(background_error_logger, "Failed to process events: {}", e);
 				panic!("Failed to process events");
 			});
-			log_debug!(background_stop_logger, "Events processing stopped.",);
-
-			match event_handling_stopped_sender.send(()) {
-				Ok(_) => (),
-				Err(e) => {
-					log_error!(
-						background_stop_logger,
-						"Failed to send 'events handling stopped' signal. This should never happen: {}",
-						e
-						);
-					debug_assert!(false);
-				},
-			}
 		});
 
 		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 			let mut stop_liquidity_handler = self.stop_sender.subscribe();
 			let liquidity_handler = Arc::clone(&liquidity_source);
 			let liquidity_logger = Arc::clone(&self.logger);
-			runtime.spawn(async move {
+			self.runtime.spawn_background_task(async move {
 				loop {
 					tokio::select! {
 						_ = stop_liquidity_handler.changed() => {
@@ -624,9 +611,8 @@ impl Node {
 			});
 		}
 
-		*runtime_lock = Some(runtime);
-
 		log_info!(self.logger, "Startup complete.");
+		*is_running_lock = true;
 		Ok(())
 	}
 
@@ -634,83 +620,71 @@ impl Node {
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
-		let runtime = self.runtime.write().unwrap().take().ok_or(Error::NotRunning)?;
-		#[cfg(tokio_unstable)]
-		let metrics_runtime = Arc::clone(&runtime);
+		let mut is_running_lock = self.is_running.write().unwrap();
+		if !*is_running_lock {
+			return Err(Error::NotRunning);
+		}
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
-		// Stop the runtime.
-		match self.stop_sender.send(()) {
-			Ok(_) => (),
-			Err(e) => {
+		// Stop background tasks.
+		self.stop_sender
+			.send(())
+			.map(|_| {
+				log_trace!(self.logger, "Sent shutdown signal to background tasks.");
+			})
+			.unwrap_or_else(|e| {
 				log_error!(
 					self.logger,
 					"Failed to send shutdown signal. This should never happen: {}",
 					e
 				);
 				debug_assert!(false);
-			},
-		}
+			});
+
+		// Cancel cancellable background tasks
+		self.runtime.abort_cancellable_background_tasks();
 
 		// Disconnect all peers.
 		self.peer_manager.disconnect_all_peers();
+		log_debug!(self.logger, "Disconnected all network peers.");
 
-		// Wait until event handling stopped, at least until a timeout is reached.
-		let event_handling_stopped_logger = Arc::clone(&self.logger);
-		let mut event_handling_stopped_receiver = self.event_handling_stopped_sender.subscribe();
+		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
+		self.runtime.wait_on_background_tasks();
 
-		// FIXME: For now, we wait up to 100 secs (BDK_WALLET_SYNC_TIMEOUT_SECS + 10) to allow
-		// event handling to exit gracefully even if it was blocked on the BDK wallet syncing. We
-		// should drop this considerably post upgrading to BDK 1.0.
-		let timeout_res = tokio::task::block_in_place(move || {
-			runtime.block_on(async {
-				tokio::time::timeout(
-					Duration::from_secs(100),
-					event_handling_stopped_receiver.changed(),
-				)
-				.await
+		// Stop any runtime-dependant chain sources.
+		self.chain_source.stop();
+		log_debug!(self.logger, "Stopped chain sources.");
+
+		// Stop the background processor.
+		self.background_processor_stop_sender
+			.send(())
+			.map(|_| {
+				log_trace!(self.logger, "Sent shutdown signal to background processor.");
 			})
-		});
-
-		match timeout_res {
-			Ok(stop_res) => match stop_res {
-				Ok(()) => {},
-				Err(e) => {
-					log_error!(
-						event_handling_stopped_logger,
-						"Stopping event handling failed. This should never happen: {}",
-						e
-					);
-					panic!("Stopping event handling failed. This should never happen.");
-				},
-			},
-			Err(e) => {
+			.unwrap_or_else(|e| {
 				log_error!(
-					event_handling_stopped_logger,
-					"Stopping event handling timed out: {}",
+					self.logger,
+					"Failed to send shutdown signal. This should never happen: {}",
 					e
 				);
-			},
-		}
+				debug_assert!(false);
+			});
+
+		// Finally, wait until background processing stopped, at least until a timeout is reached.
+		self.runtime.wait_on_background_processor_task();
 
 		#[cfg(tokio_unstable)]
-		{
-			log_trace!(
-				self.logger,
-				"Active runtime tasks left prior to shutdown: {}",
-				metrics_runtime.metrics().active_tasks_count()
-			);
-		}
+		self.runtime.log_metrics();
 
 		log_info!(self.logger, "Shutdown complete.");
+		*is_running_lock = false;
 		Ok(())
 	}
 
 	/// Returns the status of the [`Node`].
 	pub fn status(&self) -> NodeStatus {
-		let is_running = self.runtime.read().unwrap().is_some();
-		let is_listening = self.is_listening.load(Ordering::Acquire);
+		let is_running = *self.is_running.read().unwrap();
 		let current_best_block = self.channel_manager.current_best_block().into();
 		let locked_node_metrics = self.node_metrics.read().unwrap();
 		let latest_lightning_wallet_sync_timestamp =
@@ -728,7 +702,6 @@ impl Node {
 
 		NodeStatus {
 			is_running,
-			is_listening,
 			current_best_block,
 			latest_lightning_wallet_sync_timestamp,
 			latest_onchain_wallet_sync_timestamp,
@@ -783,15 +756,15 @@ impl Node {
 	/// Confirm the last retrieved event handled.
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
-	pub fn event_handled(&self) {
-		self.event_queue.event_handled().unwrap_or_else(|e| {
+	pub fn event_handled(&self) -> Result<(), Error> {
+		self.event_queue.event_handled().map_err(|e| {
 			log_error!(
 				self.logger,
 				"Couldn't mark event handled due to persistence failure: {}",
 				e
 			);
-			panic!("Couldn't mark event handled due to persistence failure");
-		});
+			e
+		})
 	}
 
 	/// Returns our own node id
@@ -802,6 +775,14 @@ impl Node {
 	/// Returns our own listening addresses.
 	pub fn listening_addresses(&self) -> Option<Vec<SocketAddress>> {
 		self.config.listening_addresses.clone()
+	}
+
+	/// Returns the addresses that the node will announce to the network.
+	pub fn announcement_addresses(&self) -> Option<Vec<SocketAddress>> {
+		self.config
+			.announcement_addresses
+			.clone()
+			.or_else(|| self.config.listening_addresses.clone())
 	}
 
 	/// Returns our node alias.
@@ -822,6 +803,7 @@ impl Node {
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -839,6 +821,7 @@ impl Node {
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -849,10 +832,11 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn bolt12_payment(&self) -> Bolt12Payment {
 		Bolt12Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			self.async_payments_role,
 		)
 	}
 
@@ -862,10 +846,11 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
 		Arc::new(Bolt12Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			self.async_payments_role,
 		))
 	}
 
@@ -873,11 +858,11 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn spontaneous_payment(&self) -> SpontaneousPayment {
 		SpontaneousPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -886,11 +871,11 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn spontaneous_payment(&self) -> Arc<SpontaneousPayment> {
 		Arc::new(SpontaneousPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -899,10 +884,10 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn onchain_payment(&self) -> OnchainPayment {
 		OnchainPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -911,10 +896,10 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn onchain_payment(&self) -> Arc<OnchainPayment> {
 		Arc::new(OnchainPayment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -1005,11 +990,9 @@ impl Node {
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
-		let runtime = rt_lock.as_ref().unwrap();
 
 		let peer_info = PeerInfo { node_id, address };
 
@@ -1019,10 +1002,8 @@ impl Node {
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
@@ -1039,8 +1020,7 @@ impl Node {
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
 	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -1062,11 +1042,9 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool,
 	) -> Result<UserChannelId, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
-		let runtime = rt_lock.as_ref().unwrap();
 
 		let peer_info = PeerInfo { node_id, address };
 
@@ -1090,10 +1068,8 @@ impl Node {
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		// Fail if we have less than the channel value + anchor reserve available (if applicable).
@@ -1216,35 +1192,33 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
-		if may_announce_channel(&self.config) {
-			self.open_channel_inner(
-				node_id,
-				address,
-				channel_amount_sats,
-				push_to_counterparty_msat,
-				channel_config,
-				true,
-			)
-		} else {
-			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node. Please make sure to configure listening addreesses and node alias");
+		if let Err(err) = may_announce_channel(&self.config) {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed);
 		}
+
+		self.open_channel_inner(
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			true,
+		)
 	}
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate
 	/// cache.
 	///
-	/// **Note:** The wallets are regularly synced in the background, which is configurable via the
-	/// respective config object, e.g., via
-	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`] and
-	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]. Therefore, using this blocking
-	/// sync method is almost always redundant and should be avoided where possible.
+	/// **Note:** The wallets are regularly synced in the background if background syncing is enabled
+	/// via [`EsploraSyncConfig::background_sync_config`]. Therefore, using this blocking sync method
+	/// is almost always redundant when background syncing is enabled and should be avoided where possible.
+	/// However, if background syncing is disabled (i.e., `background_sync_config` is set to `None`),
+	/// this method must be called manually to keep wallets in sync with the chain state.
 	///
-	/// [`EsploraSyncConfig::onchain_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::onchain_wallet_sync_interval_secs
-	/// [`EsploraSyncConfig::lightning_wallet_sync_interval_secs`]: crate::config::EsploraSyncConfig::lightning_wallet_sync_interval_secs
+	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -1252,27 +1226,21 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		tokio::task::block_in_place(move || {
-			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
-				async move {
-					match chain_source.as_ref() {
-						ChainSource::Esplora { .. } => {
-							chain_source.update_fee_rate_estimates().await?;
-							chain_source
-								.sync_lightning_wallet(sync_cman, sync_cmon, sync_sweeper)
-								.await?;
-							chain_source.sync_onchain_wallet().await?;
-						},
-						ChainSource::BitcoindRpc { .. } => {
-							chain_source.update_fee_rate_estimates().await?;
-							chain_source
-								.poll_and_update_listeners(sync_cman, sync_cmon, sync_sweeper)
-								.await?;
-						},
-					}
-					Ok(())
-				},
-			)
+		self.runtime.block_on(async move {
+			if chain_source.is_transaction_based() {
+				chain_source.update_fee_rate_estimates().await?;
+				chain_source
+					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.await?;
+				chain_source.sync_onchain_wallet().await?;
+			} else {
+				chain_source.update_fee_rate_estimates().await?;
+				chain_source
+					.poll_and_update_listeners(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.await?;
+			}
+			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
+			Ok(())
 		})
 	}
 
@@ -1328,35 +1296,16 @@ impl Node {
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
 			if force {
-				if self.config.anchor_channels_config.as_ref().map_or(false, |acc| {
-					acc.trusted_peers_no_reserve.contains(&counterparty_node_id)
-				}) {
-					self.channel_manager
-						.force_close_without_broadcasting_txn(
-							&channel_details.channel_id,
-							&counterparty_node_id,
-							force_close_reason.unwrap_or_default(),
-						)
-						.map_err(|e| {
-							log_error!(
-								self.logger,
-								"Failed to force-close channel to trusted peer: {:?}",
-								e
-							);
-							Error::ChannelClosingFailed
-						})?;
-				} else {
-					self.channel_manager
-						.force_close_broadcasting_latest_txn(
-							&channel_details.channel_id,
-							&counterparty_node_id,
-							force_close_reason.unwrap_or_default(),
-						)
-						.map_err(|e| {
-							log_error!(self.logger, "Failed to force-close channel: {:?}", e);
-							Error::ChannelClosingFailed
-						})?;
-				}
+				self.channel_manager
+					.force_close_broadcasting_latest_txn(
+						&channel_details.channel_id,
+						&counterparty_node_id,
+						force_close_reason.unwrap_or_default(),
+					)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to force-close channel: {:?}", e);
+						Error::ChannelClosingFailed
+					})?;
 			} else {
 				self.channel_manager
 					.close_channel(&channel_details.channel_id, &counterparty_node_id)
@@ -1421,12 +1370,10 @@ impl Node {
 
 		let mut total_lightning_balance_sats = 0;
 		let mut lightning_balances = Vec::new();
-		for (funding_txo, channel_id) in self.chain_monitor.list_monitors() {
-			match self.chain_monitor.get_monitor(funding_txo) {
+		for channel_id in self.chain_monitor.list_monitors() {
+			match self.chain_monitor.get_monitor(channel_id) {
 				Ok(monitor) => {
-					// unwrap safety: `get_counterparty_node_id` will always be `Some` after 0.0.110 and
-					// LDK Node 0.1 depended on 0.0.115 already.
-					let counterparty_node_id = monitor.get_counterparty_node_id().unwrap();
+					let counterparty_node_id = monitor.get_counterparty_node_id();
 					for ldk_balance in monitor.get_claimable_balances() {
 						total_lightning_balance_sats += ldk_balance.claimable_amount_satoshis();
 						lightning_balances.push(LightningBalance::from_ldk_balance(
@@ -1558,20 +1505,20 @@ impl Node {
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
 	/// a limited view of the network.
 	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
-		self.kv_store
-			.read(
-				lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-				lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-				lightning::util::persist::SCORER_PERSISTENCE_KEY,
-			)
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Failed to access store while exporting pathfinding scores: {}",
-					e
-				);
-				Error::PersistenceFailed
-			})
+		KVStoreSync::read(
+			&*self.kv_store,
+			lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+			lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+			lightning::util::persist::SCORER_PERSISTENCE_KEY,
+		)
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Failed to access store while exporting pathfinding scores: {}",
+				e
+			);
+			Error::PersistenceFailed
+		})
 	}
 }
 
@@ -1586,9 +1533,6 @@ impl Drop for Node {
 pub struct NodeStatus {
 	/// Indicates whether the [`Node`] is running.
 	pub is_running: bool,
-	/// Indicates whether the [`Node`] is listening for incoming connections on the addresses
-	/// configured via [`Config::listening_addresses`].
-	pub is_listening: bool,
 	/// The best block to which our Lightning wallet is currently synced.
 	pub current_best_block: BestBlock,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced

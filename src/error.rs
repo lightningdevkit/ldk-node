@@ -5,13 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::fmt;
+
 use bdk_chain::bitcoin::psbt::ExtractTxError as BdkExtractTxError;
 use bdk_chain::local_chain::CannotConnectError as BdkChainConnectionError;
 use bdk_chain::tx_graph::CalculateFeeError as BdkChainCalculateFeeError;
 use bdk_wallet::error::CreateTxError as BdkCreateTxError;
+#[allow(deprecated)]
 use bdk_wallet::signer::SignerError as BdkSignerError;
-
-use std::fmt;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// An error that possibly needs to be handled by the user.
@@ -122,6 +123,10 @@ pub enum Error {
 	LiquidityFeeTooHigh,
 	/// The router failed to find a route to the given destination.
 	RouteNotFound,
+	/// The given blinded paths are invalid.
+	InvalidBlindedPaths,
+	/// Asynchronous payment services are disabled.
+	AsyncPaymentServicesDisabled,
 }
 
 impl fmt::Display for Error {
@@ -195,6 +200,10 @@ impl fmt::Display for Error {
 			Self::LiquidityFeeTooHigh => {
 				write!(f, "The given operation failed due to the LSP's required opening fee being too high.")
 			},
+			Self::InvalidBlindedPaths => write!(f, "The given blinded paths are invalid."),
+			Self::AsyncPaymentServicesDisabled => {
+				write!(f, "Asynchronous payment services are disabled.")
+			},
 			Self::RouteNotFound => {
 				write!(f, "The router failed to find a route to the given destination.")
 			},
@@ -204,6 +213,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+#[allow(deprecated)]
 impl From<BdkSignerError> for Error {
 	fn from(_: BdkSignerError) -> Self {
 		Self::OnchainTxSigningFailed

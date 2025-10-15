@@ -11,22 +11,22 @@
 //! [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
-use crate::error::Error;
-use crate::logger::{log_error, LdkLogger, Logger};
-use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
-use crate::Config;
-
-use lightning::ln::channelmanager::PaymentId;
-use lightning::offers::offer::Offer;
-use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
+use std::sync::Arc;
+use std::vec::IntoIter;
 
 use bip21::de::ParamKind;
 use bip21::{DeserializationError, DeserializeParams, Param, SerializeParams};
 use bitcoin::address::{NetworkChecked, NetworkUnchecked};
 use bitcoin::{Amount, Txid};
+use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::offer::Offer;
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
-use std::sync::Arc;
-use std::vec::IntoIter;
+use crate::error::Error;
+use crate::ffi::maybe_wrap;
+use crate::logger::{log_error, LdkLogger, Logger};
+use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
+use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
 
@@ -68,6 +68,10 @@ impl UnifiedQrPayment {
 	/// can always pay using the provided on-chain address, while newer wallets will
 	/// typically opt to use the provided BOLT11 invoice or BOLT12 offer.
 	///
+	/// The URI will always include an on-chain address. A BOLT11 invoice will be included
+	/// unless invoice generation fails, while a BOLT12 offer will only be included when
+	/// the node has suitable channels for routing.
+	///
 	/// # Parameters
 	/// - `amount_sats`: The amount to be received, specified in satoshis.
 	/// - `description`: A description or note associated with the payment.
@@ -75,9 +79,9 @@ impl UnifiedQrPayment {
 	/// - `expiry_sec`: The expiration time for the payment, specified in seconds.
 	///
 	/// Returns a payable URI that can be used to request and receive a payment of the amount
-	/// given. In case of an error, the function returns `Error::WalletOperationFailed`for on-chain
-	/// address issues, `Error::InvoiceCreationFailed` for BOLT11 invoice issues, or
-	/// `Error::OfferCreationFailed` for BOLT12 offer issues.
+	/// given. Failure to generate the on-chain address will result in an error return
+	/// (`Error::WalletOperationFailed`), while failures in invoice or offer generation will
+	/// result in those components being omitted from the URI.
 	///
 	/// The generated URI can then be given to a QR code library.
 	///
@@ -90,14 +94,14 @@ impl UnifiedQrPayment {
 
 		let amount_msats = amount_sats * 1_000;
 
-		let bolt12_offer = match self.bolt12_payment.receive(amount_msats, description, None, None)
-		{
-			Ok(offer) => Some(offer),
-			Err(e) => {
-				log_error!(self.logger, "Failed to create offer: {}", e);
-				return Err(Error::OfferCreationFailed);
-			},
-		};
+		let bolt12_offer =
+			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
+				Ok(offer) => Some(offer),
+				Err(e) => {
+					log_error!(self.logger, "Failed to create offer: {}", e);
+					None
+				},
+			};
 
 		let invoice_description = Bolt11InvoiceDescription::Direct(
 			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
@@ -111,7 +115,7 @@ impl UnifiedQrPayment {
 			Ok(invoice) => Some(invoice),
 			Err(e) => {
 				log_error!(self.logger, "Failed to create invoice {}", e);
-				return Err(Error::InvoiceCreationFailed);
+				None
 			},
 		};
 
@@ -142,6 +146,7 @@ impl UnifiedQrPayment {
 			uri.clone().require_network(self.config.network).map_err(|_| Error::InvalidNetwork)?;
 
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
+			let offer = maybe_wrap(offer);
 			match self.bolt12_payment.send(&offer, None, None) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
@@ -149,6 +154,7 @@ impl UnifiedQrPayment {
 		}
 
 		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
+			let invoice = maybe_wrap(invoice);
 			match self.bolt11_invoice.send(&invoice, None) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
@@ -181,6 +187,7 @@ impl UnifiedQrPayment {
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 /// [`PaymentId`]: lightning::ln::channelmanager::PaymentId
 /// [`Txid`]: bitcoin::hash_types::Txid
+#[derive(Debug)]
 pub enum QrPaymentResult {
 	/// An on-chain payment.
 	Onchain {
@@ -295,10 +302,12 @@ impl DeserializationError for Extras {
 
 #[cfg(test)]
 mod tests {
+	use std::str::FromStr;
+
+	use bitcoin::{Address, Network};
+
 	use super::*;
 	use crate::payment::unified_qr::Extras;
-	use bitcoin::{Address, Network};
-	use std::str::FromStr;
 
 	#[test]
 	fn parse_uri() {

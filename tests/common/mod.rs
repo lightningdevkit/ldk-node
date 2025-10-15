@@ -5,52 +5,54 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-#![cfg(any(test, cln_test, vss_test))]
+#![cfg(any(test, cln_test, lnd_test, vss_test))]
 #![allow(dead_code)]
 
-use ldk_node::config::{Config, EsploraSyncConfig};
+pub(crate) mod logging;
+
+use std::boxed::Box;
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use bitcoin::hashes::hex::FromHex;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::{
+	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
+};
+use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
+use electrsd::{corepc_node, ElectrsD};
+use electrum_client::ElectrumApi;
+use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::logger::LogLevel;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
 };
-
+use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning::util::test_utils::TestStore;
-
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
 use lightning_persister::fs_store::FilesystemStore;
-
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, Network, OutPoint, Txid};
-
-use bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
-use bitcoincore_rpc::Client as BitcoindClient;
-use bitcoincore_rpc::RpcApi;
-
-use electrsd::{bitcoind, bitcoind::BitcoinD, ElectrsD};
-use electrum_client::ElectrumApi;
-
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use logging::TestLogWriter;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-
-use std::env;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use serde_json::{json, Value};
 
 macro_rules! expect_event {
 	($node: expr, $event_type: ident) => {{
 		match $node.wait_next_event() {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
@@ -67,7 +69,7 @@ macro_rules! expect_channel_pending_event {
 			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				funding_txo
 			},
 			ref e => {
@@ -85,7 +87,7 @@ macro_rules! expect_channel_ready_event {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				user_channel_id
 			},
 			ref e => {
@@ -103,7 +105,11 @@ macro_rules! expect_payment_received_event {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
-				$node.event_handled();
+				let payment = $node.payment(&payment_id.unwrap()).unwrap();
+				if !matches!(payment.kind, PaymentKind::Onchain { .. }) {
+					assert_eq!(payment.fee_paid_msat, None);
+				}
+				$node.event_handled().unwrap();
 				payment_id
 			},
 			ref e => {
@@ -128,7 +134,7 @@ macro_rules! expect_payment_claimable_event {
 				assert_eq!(payment_hash, $payment_hash);
 				assert_eq!(payment_id, $payment_id);
 				assert_eq!(claimable_amount_msat, $claimable_amount_msat);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 				claimable_amount_msat
 			},
 			ref e => {
@@ -148,8 +154,10 @@ macro_rules! expect_payment_successful_event {
 				if let Some(fee_msat) = $fee_paid_msat {
 					assert_eq!(fee_paid_msat, fee_msat);
 				}
+				let payment = $node.payment(&$payment_id.unwrap()).unwrap();
+				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
-				$node.event_handled();
+				$node.event_handled().unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
@@ -162,11 +170,12 @@ pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe =
-		env::var("BITCOIND_EXE").ok().or_else(|| bitcoind::downloaded_exe_path().ok()).expect(
+		env::var("BITCOIND_EXE").ok().or_else(|| corepc_node::downloaded_exe_path().ok()).expect(
 			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
 		);
-	let mut bitcoind_conf = bitcoind::Conf::default();
+	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
+	bitcoind_conf.args.push("-rest");
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
@@ -190,7 +199,7 @@ pub(crate) fn random_storage_path() -> PathBuf {
 
 pub(crate) fn random_port() -> u16 {
 	let mut rng = thread_rng();
-	rng.gen_range(5000..65535)
+	rng.gen_range(5000..32768)
 }
 
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
@@ -215,29 +224,29 @@ pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	Some(NodeAlias(bytes))
 }
 
-pub(crate) fn random_config(anchor_channels: bool) -> Config {
-	let mut config = Config::default();
+pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
+	let mut node_config = Config::default();
 
 	if !anchor_channels {
-		config.anchor_channels_config = None;
+		node_config.anchor_channels_config = None;
 	}
 
-	config.network = Network::Regtest;
-	println!("Setting network: {}", config.network);
+	node_config.network = Network::Regtest;
+	println!("Setting network: {}", node_config.network);
 
 	let rand_dir = random_storage_path();
 	println!("Setting random LDK storage dir: {}", rand_dir.display());
-	config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
+	node_config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
 
 	let rand_listening_addresses = random_listening_addresses();
 	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
-	config.listening_addresses = Some(rand_listening_addresses);
+	node_config.listening_addresses = Some(rand_listening_addresses);
 
 	let alias = random_node_alias();
 	println!("Setting random LDK node alias: {:?}", alias);
-	config.node_alias = alias;
+	node_config.node_alias = alias;
 
-	config
+	TestConfig { node_config, ..Default::default() }
 }
 
 #[cfg(feature = "uniffi")]
@@ -248,7 +257,15 @@ type TestNode = Node;
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
 	Esplora(&'a ElectrsD),
-	BitcoindRpc(&'a BitcoinD),
+	Electrum(&'a ElectrsD),
+	BitcoindRpcSync(&'a BitcoinD),
+	BitcoindRestSync(&'a BitcoinD),
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct TestConfig {
+	pub node_config: Config,
+	pub log_writer: TestLogWriter,
 }
 
 macro_rules! setup_builder {
@@ -273,10 +290,11 @@ pub(crate) fn setup_two_nodes(
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	if allow_0conf {
-		config_b.trusted_peers_0conf.push(node_a.node_id());
+		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
 	if anchor_channels && anchors_trusted_no_reserve {
 		config_b
+			.node_config
 			.anchor_channels_config
 			.as_mut()
 			.unwrap()
@@ -288,18 +306,28 @@ pub(crate) fn setup_two_nodes(
 }
 
 pub(crate) fn setup_node(
-	chain_source: &TestChainSource, config: Config, seed_bytes: Option<Vec<u8>>,
+	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
 ) -> TestNode {
-	setup_builder!(builder, config);
+	setup_node_for_async_payments(chain_source, config, seed_bytes, None)
+}
+
+pub(crate) fn setup_node_for_async_payments(
+	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
+	async_payments_role: Option<AsyncPaymentsRole>,
+) -> TestNode {
+	setup_builder!(builder, config.node_config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let mut sync_config = EsploraSyncConfig::default();
-			sync_config.onchain_wallet_sync_interval_secs = 100000;
-			sync_config.lightning_wallet_sync_interval_secs = 100000;
+			let sync_config = EsploraSyncConfig { background_sync_config: None };
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		},
-		TestChainSource::BitcoindRpc(bitcoind) => {
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let sync_config = ElectrumSyncConfig { background_sync_config: None };
+			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
+		},
+		TestChainSource::BitcoindRpcSync(bitcoind) => {
 			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
 			let rpc_port = bitcoind.params.rpc_socket.port();
 			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
@@ -307,16 +335,53 @@ pub(crate) fn setup_node(
 			let rpc_password = values.password;
 			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
 		},
+		TestChainSource::BitcoindRestSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rest_port = bitcoind.params.rpc_socket.port();
+			builder.set_chain_source_bitcoind_rest(
+				rest_host,
+				rest_port,
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password,
+			);
+		},
 	}
 
-	let log_file_path = format!("{}/{}", config.storage_dir_path, "ldk_node.log");
-	builder.set_filesystem_logger(Some(log_file_path), Some(LogLevel::Gossip));
+	match &config.log_writer {
+		TestLogWriter::FileWriter => {
+			builder.set_filesystem_logger(None, None);
+		},
+		TestLogWriter::LogFacade => {
+			builder.set_log_facade_logger();
+		},
+		TestLogWriter::Custom(custom_log_writer) => {
+			builder.set_custom_logger(Arc::clone(custom_log_writer));
+		},
+	}
 
 	if let Some(seed) = seed_bytes {
-		builder.set_entropy_seed_bytes(seed).unwrap();
+		#[cfg(feature = "uniffi")]
+		{
+			builder.set_entropy_seed_bytes(seed).unwrap();
+		}
+		#[cfg(not(feature = "uniffi"))]
+		{
+			let mut bytes = [0u8; 64];
+			bytes.copy_from_slice(&seed);
+			builder.set_entropy_seed_bytes(bytes);
+		}
 	}
 
-	let test_sync_store = Arc::new(TestSyncStore::new(config.storage_dir_path.into()));
+	builder.set_async_payments_role(async_payments_role).unwrap();
+
+	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
 	let node = builder.build_with_store(test_sync_store).unwrap();
 	node.start().unwrap();
 	assert!(node.status().is_running);
@@ -327,20 +392,32 @@ pub(crate) fn setup_node(
 pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
-	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
+	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	print!("Generating {} blocks...", num);
-	let cur_height = bitcoind.get_block_count().expect("failed to get current block height");
-	let address = bitcoind
-		.get_new_address(Some("test"), Some(AddressType::Legacy))
-		.expect("failed to get new address")
-		.require_network(bitcoin::Network::Regtest)
-		.expect("failed to get new address");
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let cur_height = blockchain_info.blocks;
+	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
-	let _block_hashes_res = bitcoind.generate_to_address(num as u64, &address);
+	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
 	wait_for_block(electrs, cur_height as usize + num);
 	print!(" Done!");
 	println!("\n");
+}
+
+pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let cur_height = blockchain_info.blocks as usize;
+	let target_height = cur_height - num_blocks + 1;
+	let block_hash = bitcoind
+		.get_block_hash(target_height as u64)
+		.expect("failed to get block hash")
+		.block_hash()
+		.expect("block hash should be present");
+	bitcoind.invalidate_block(block_hash).expect("failed to invalidate block");
+	let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+	let new_cur_height = blockchain_info.blocks as usize;
+	assert!(new_cur_height + num_blocks == cur_height);
 }
 
 pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
@@ -366,32 +443,31 @@ pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 }
 
 pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
-	let mut tx_res = electrs.transaction_get(&txid);
-	loop {
-		if tx_res.is_ok() {
-			break;
-		}
-		tx_res = exponential_backoff_poll(|| {
-			electrs.ping().unwrap();
-			Some(electrs.transaction_get(&txid))
-		});
+	if electrs.transaction_get(&txid).is_ok() {
+		return;
 	}
+
+	exponential_backoff_poll(|| {
+		electrs.ping().unwrap();
+		electrs.transaction_get(&txid).ok()
+	});
 }
 
 pub(crate) fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
-	let mut is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
-	loop {
-		if is_spent {
-			break;
-		}
 
-		is_spent = exponential_backoff_poll(|| {
-			electrs.ping().unwrap();
-			Some(!electrs.script_get_history(&txout_script).unwrap().is_empty())
-		});
+	let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+	if is_spent {
+		return;
 	}
+
+	exponential_backoff_poll(|| {
+		electrs.ping().unwrap();
+
+		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+		is_spent.then_some(())
+	});
 }
 
 pub(crate) fn exponential_backoff_poll<T, F>(mut poll: F) -> T
@@ -418,30 +494,121 @@ where
 pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
-	let _ = bitcoind.create_wallet("ldk_node_test", None, None, None, None);
+	premine_blocks(bitcoind, electrs);
+
+	distribute_funds_unconfirmed(bitcoind, electrs, addrs, amount);
+	generate_blocks_and_wait(bitcoind, electrs, 1);
+}
+
+pub(crate) fn premine_blocks<E: ElectrumApi>(bitcoind: &BitcoindClient, electrs: &E) {
+	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	generate_blocks_and_wait(bitcoind, electrs, 101);
+}
 
-	for addr in addrs {
-		let txid =
-			bitcoind.send_to_address(&addr, amount, None, None, None, None, None, None).unwrap();
-		wait_for_tx(electrs, txid);
+pub(crate) fn distribute_funds_unconfirmed<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
+) -> Txid {
+	let mut amounts = HashMap::<String, f64>::new();
+	for addr in &addrs {
+		amounts.insert(addr.to_string(), amount.to_btc());
 	}
 
-	generate_blocks_and_wait(bitcoind, electrs, 1);
+	let empty_account = json!("");
+	let amounts_json = json!(amounts);
+	let txid = bitcoind
+		.call::<Value>("sendmany", &[empty_account, amounts_json])
+		.unwrap()
+		.as_str()
+		.unwrap()
+		.parse()
+		.unwrap();
+
+	wait_for_tx(electrs, txid);
+
+	txid
+}
+
+pub(crate) fn prepare_rbf<E: ElectrumApi>(
+	electrs: &E, txid: Txid, scripts_buf: &HashSet<ScriptBuf>,
+) -> (Transaction, usize) {
+	let tx = electrs.transaction_get(&txid).unwrap();
+
+	let fee_output_index = tx
+		.output
+		.iter()
+		.position(|output| !scripts_buf.contains(&output.script_pubkey))
+		.expect("No output available for fee bumping");
+
+	(tx, fee_output_index)
+}
+
+pub(crate) fn bump_fee_and_broadcast<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, mut tx: Transaction, fee_output_index: usize,
+	is_insert_block: bool,
+) -> Transaction {
+	let mut bump_fee_amount_sat = tx.vsize() as u64;
+	let attempts = 5;
+
+	for _ in 0..attempts {
+		let fee_output = &mut tx.output[fee_output_index];
+		let new_fee_value = fee_output.value.to_sat().saturating_sub(bump_fee_amount_sat);
+		if new_fee_value < 546 {
+			panic!("Warning: Fee output approaching dust limit ({} sats)", new_fee_value);
+		}
+		fee_output.value = Amount::from_sat(new_fee_value);
+
+		for input in &mut tx.input {
+			input.sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+			input.script_sig = ScriptBuf::new();
+			input.witness = Witness::new();
+		}
+
+		let signed_result = bitcoind.sign_raw_transaction_with_wallet(&tx).unwrap();
+		assert!(signed_result.complete, "Failed to sign RBF transaction");
+
+		let tx_bytes = Vec::<u8>::from_hex(&signed_result.hex).unwrap();
+		tx = bitcoin::consensus::encode::deserialize::<Transaction>(&tx_bytes).unwrap();
+
+		match bitcoind.send_raw_transaction(&tx) {
+			Ok(res) => {
+				if is_insert_block {
+					generate_blocks_and_wait(bitcoind, electrs, 1);
+				}
+				let new_txid: Txid = res.0.parse().unwrap();
+				wait_for_tx(electrs, new_txid);
+				return tx;
+			},
+			Err(_) => {
+				bump_fee_amount_sat += bump_fee_amount_sat * 5;
+				if tx.output[fee_output_index].value.to_sat() < bump_fee_amount_sat {
+					panic!("Insufficient funds to increase fee");
+				}
+			},
+		}
+	}
+
+	panic!("Failed to bump fee after {} attempts", attempts);
 }
 
 pub fn open_channel(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
-) {
+) -> OutPoint {
+	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd)
+}
+
+pub fn open_channel_push_amt(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
+	should_announce: bool, electrsd: &ElectrsD,
+) -> OutPoint {
 	if should_announce {
 		node_a
 			.open_announced_channel(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();
@@ -451,7 +618,7 @@ pub fn open_channel(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();
@@ -462,6 +629,8 @@ pub fn open_channel(
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
 	wait_for_tx(&electrsd.client, funding_txo_a.txid);
+
+	funding_txo_a
 }
 
 pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
@@ -673,7 +842,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -711,7 +880,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.wait_next_event() {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -834,7 +1003,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let (received_keysend_amount, received_custom_records) = match next_event {
 		ref e @ Event::PaymentReceived { amount_msat, ref custom_records, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled();
+			node_b.event_handled().unwrap();
 			(amount_msat, custom_records)
 		},
 		ref e => {
@@ -1025,14 +1194,121 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 // A `KVStore` impl for testing purposes that wraps all our `KVStore`s and asserts their synchronicity.
 pub(crate) struct TestSyncStore {
+	inner: Arc<TestSyncStoreInner>,
+}
+
+impl TestSyncStore {
+	pub(crate) fn new(dest_dir: PathBuf) -> Self {
+		let inner = Arc::new(TestSyncStoreInner::new(dest_dir));
+		Self { inner }
+	}
+}
+
+impl KVStore for TestSyncStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		let fut = tokio::task::spawn_blocking(move || {
+			inner.read_internal(&primary_namespace, &secondary_namespace, &key)
+		});
+		Box::pin(async move {
+			fut.await.unwrap_or_else(|e| {
+				let msg = format!("Failed to IO operation due join error: {}", e);
+				Err(io::Error::new(io::ErrorKind::Other, msg))
+			})
+		})
+	}
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		let fut = tokio::task::spawn_blocking(move || {
+			inner.write_internal(&primary_namespace, &secondary_namespace, &key, buf)
+		});
+		Box::pin(async move {
+			fut.await.unwrap_or_else(|e| {
+				let msg = format!("Failed to IO operation due join error: {}", e);
+				Err(io::Error::new(io::ErrorKind::Other, msg))
+			})
+		})
+	}
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		let fut = tokio::task::spawn_blocking(move || {
+			inner.remove_internal(&primary_namespace, &secondary_namespace, &key)
+		});
+		Box::pin(async move {
+			fut.await.unwrap_or_else(|e| {
+				let msg = format!("Failed to IO operation due join error: {}", e);
+				Err(io::Error::new(io::ErrorKind::Other, msg))
+			})
+		})
+	}
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let inner = Arc::clone(&self.inner);
+		let fut = tokio::task::spawn_blocking(move || {
+			inner.list_internal(&primary_namespace, &secondary_namespace)
+		});
+		Box::pin(async move {
+			fut.await.unwrap_or_else(|e| {
+				let msg = format!("Failed to IO operation due join error: {}", e);
+				Err(io::Error::new(io::ErrorKind::Other, msg))
+			})
+		})
+	}
+}
+
+impl KVStoreSync for TestSyncStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> lightning::io::Result<Vec<u8>> {
+		self.inner.read_internal(primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> lightning::io::Result<()> {
+		self.inner.write_internal(primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> lightning::io::Result<()> {
+		self.inner.remove_internal(primary_namespace, secondary_namespace, key)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> lightning::io::Result<Vec<String>> {
+		self.inner.list_internal(primary_namespace, secondary_namespace)
+	}
+}
+
+struct TestSyncStoreInner {
 	serializer: RwLock<()>,
 	test_store: TestStore,
 	fs_store: FilesystemStore,
 	sqlite_store: SqliteStore,
 }
 
-impl TestSyncStore {
-	pub(crate) fn new(dest_dir: PathBuf) -> Self {
+impl TestSyncStoreInner {
+	fn new(dest_dir: PathBuf) -> Self {
 		let serializer = RwLock::new(());
 		let mut fs_dir = dest_dir.clone();
 		fs_dir.push("fs_store");
@@ -1052,9 +1328,10 @@ impl TestSyncStore {
 	fn do_list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> lightning::io::Result<Vec<String>> {
-		let fs_res = self.fs_store.list(primary_namespace, secondary_namespace);
-		let sqlite_res = self.sqlite_store.list(primary_namespace, secondary_namespace);
-		let test_res = self.test_store.list(primary_namespace, secondary_namespace);
+		let fs_res = KVStoreSync::list(&self.fs_store, primary_namespace, secondary_namespace);
+		let sqlite_res =
+			KVStoreSync::list(&self.sqlite_store, primary_namespace, secondary_namespace);
+		let test_res = KVStoreSync::list(&self.test_store, primary_namespace, secondary_namespace);
 
 		match fs_res {
 			Ok(mut list) => {
@@ -1077,17 +1354,17 @@ impl TestSyncStore {
 			},
 		}
 	}
-}
 
-impl KVStore for TestSyncStore {
-	fn read(
+	fn read_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> lightning::io::Result<Vec<u8>> {
 		let _guard = self.serializer.read().unwrap();
 
-		let fs_res = self.fs_store.read(primary_namespace, secondary_namespace, key);
-		let sqlite_res = self.sqlite_store.read(primary_namespace, secondary_namespace, key);
-		let test_res = self.test_store.read(primary_namespace, secondary_namespace, key);
+		let fs_res = KVStoreSync::read(&self.fs_store, primary_namespace, secondary_namespace, key);
+		let sqlite_res =
+			KVStoreSync::read(&self.sqlite_store, primary_namespace, secondary_namespace, key);
+		let test_res =
+			KVStoreSync::read(&self.test_store, primary_namespace, secondary_namespace, key);
 
 		match fs_res {
 			Ok(read) => {
@@ -1105,13 +1382,31 @@ impl KVStore for TestSyncStore {
 		}
 	}
 
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+	fn write_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
-		let fs_res = self.fs_store.write(primary_namespace, secondary_namespace, key, buf);
-		let sqlite_res = self.sqlite_store.write(primary_namespace, secondary_namespace, key, buf);
-		let test_res = self.test_store.write(primary_namespace, secondary_namespace, key, buf);
+		let fs_res = KVStoreSync::write(
+			&self.fs_store,
+			primary_namespace,
+			secondary_namespace,
+			key,
+			buf.clone(),
+		);
+		let sqlite_res = KVStoreSync::write(
+			&self.sqlite_store,
+			primary_namespace,
+			secondary_namespace,
+			key,
+			buf.clone(),
+		);
+		let test_res = KVStoreSync::write(
+			&self.test_store,
+			primary_namespace,
+			secondary_namespace,
+			key,
+			buf.clone(),
+		);
 
 		assert!(self
 			.do_list(primary_namespace, secondary_namespace)
@@ -1132,14 +1427,16 @@ impl KVStore for TestSyncStore {
 		}
 	}
 
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	fn remove_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
-		let fs_res = self.fs_store.remove(primary_namespace, secondary_namespace, key, lazy);
+		let fs_res =
+			KVStoreSync::remove(&self.fs_store, primary_namespace, secondary_namespace, key);
 		let sqlite_res =
-			self.sqlite_store.remove(primary_namespace, secondary_namespace, key, lazy);
-		let test_res = self.test_store.remove(primary_namespace, secondary_namespace, key, lazy);
+			KVStoreSync::remove(&self.sqlite_store, primary_namespace, secondary_namespace, key);
+		let test_res =
+			KVStoreSync::remove(&self.test_store, primary_namespace, secondary_namespace, key);
 
 		assert!(!self
 			.do_list(primary_namespace, secondary_namespace)
@@ -1160,7 +1457,7 @@ impl KVStore for TestSyncStore {
 		}
 	}
 
-	fn list(
+	fn list_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().unwrap();

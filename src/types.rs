@@ -5,38 +5,49 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::chain::ChainSource;
-use crate::config::ChannelConfig;
-use crate::fee_estimator::OnchainFeeEstimator;
-use crate::gossip::RuntimeSpawner;
-use crate::logger::Logger;
-use crate::message_handler::NodeCustomMessageHandler;
+use std::sync::{Arc, Mutex};
 
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::OutPoint;
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
-use lightning::ln::msgs::RoutingMessageHandler;
-use lightning::ln::msgs::SocketAddress;
+use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
-
 use lightning_block_sync::gossip::{GossipVerifier, UtxoSource};
-
+use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::OutPoint;
+use crate::chain::ChainSource;
+use crate::config::ChannelConfig;
+use crate::data_store::DataStore;
+use crate::fee_estimator::OnchainFeeEstimator;
+use crate::gossip::RuntimeSpawner;
+use crate::logger::Logger;
+use crate::message_handler::NodeCustomMessageHandler;
+use crate::payment::PaymentDetails;
 
-use std::sync::{Arc, Mutex};
+/// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
+/// same time.
+pub trait SyncAndAsyncKVStore: KVStore + KVStoreSync {}
 
-pub(crate) type DynStore = dyn KVStore + Sync + Send;
+impl<T> SyncAndAsyncKVStore for T
+where
+	T: KVStore,
+	T: KVStoreSync,
+{
+}
+
+/// A type alias for [`SyncAndAsyncKVStore`] with `Sync`/`Send` markers;
+pub type DynStore = dyn SyncAndAsyncKVStore + Sync + Send;
 
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -45,6 +56,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<OnchainFeeEstimator>,
 	Arc<Logger>,
 	Arc<DynStore>,
+	Arc<KeysManager>,
 >;
 
 pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
@@ -55,10 +67,18 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<Logger>,
 	Arc<NodeCustomMessageHandler<Arc<Logger>>>,
 	Arc<KeysManager>,
+	Arc<ChainMonitor>,
 >;
 
-pub(crate) type LiquidityManager =
-	lightning_liquidity::LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<ChainSource>>;
+pub(crate) type LiquidityManager = lightning_liquidity::LiquidityManager<
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<ChannelManager>,
+	Arc<ChainSource>,
+	Arc<DynStore>,
+	DefaultTimeProvider,
+	Arc<Broadcaster>,
+>;
 
 pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<ChainMonitor>,
@@ -74,11 +94,8 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 
 pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<Logger>>;
 
-pub(crate) type Wallet =
-	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
-
-pub(crate) type KeysManager =
-	crate::wallet::WalletKeysManager<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<Logger>>;
+pub(crate) type Wallet = crate::wallet::Wallet;
+pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
 pub(crate) type Router = DefaultRouter<
 	Arc<Graph>,
@@ -114,7 +131,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
-	IgnoringMessageHandler,
+	Arc<ChannelManager>,
 	IgnoringMessageHandler,
 	IgnoringMessageHandler,
 >;
@@ -142,6 +159,8 @@ pub(crate) type BumpTransactionEventHandler =
 		Arc<KeysManager>,
 		Arc<Logger>,
 	>;
+
+pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///

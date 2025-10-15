@@ -5,6 +5,15 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::{Arc, RwLock};
+
+use bitcoin::secp256k1::PublicKey;
+use lightning::impl_writeable_tlv_based;
+use lightning::util::persist::KVStoreSync;
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+
 use crate::io::{
 	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -12,15 +21,6 @@ use crate::io::{
 use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::{Error, SocketAddress};
-
-use lightning::impl_writeable_tlv_based;
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-
-use bitcoin::secp256k1::PublicKey;
-
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::{Arc, RwLock};
 
 pub struct PeerStore<L: Deref>
 where
@@ -68,24 +68,24 @@ where
 
 	fn persist_peers(&self, locked_peers: &HashMap<PublicKey, PeerInfo>) -> Result<(), Error> {
 		let data = PeerStoreSerWrapper(&*locked_peers).encode();
-		self.kv_store
-			.write(
+		KVStoreSync::write(
+			&*self.kv_store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+			data,
+		)
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Write for key {}/{}/{} failed due to: {}",
 				PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 				PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 				PEER_INFO_PERSISTENCE_KEY,
-				&data,
-			)
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Write for key {}/{}/{} failed due to: {}",
-					PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					PEER_INFO_PERSISTENCE_KEY,
-					e
-				);
-				Error::PersistenceFailed
-			})?;
+				e
+			);
+			Error::PersistenceFailed
+		})?;
 		Ok(())
 	}
 }
@@ -149,11 +149,12 @@ impl_writeable_tlv_based!(PeerInfo, {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use lightning::util::test_utils::{TestLogger, TestStore};
-
 	use std::str::FromStr;
 	use std::sync::Arc;
+
+	use lightning::util::test_utils::{TestLogger, TestStore};
+
+	use super::*;
 
 	#[test]
 	fn peer_info_persistence() {
@@ -167,23 +168,23 @@ mod tests {
 		.unwrap();
 		let address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
 		let expected_peer_info = PeerInfo { node_id, address };
-		assert!(store
-			.read(
-				PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				PEER_INFO_PERSISTENCE_KEY,
-			)
-			.is_err());
+		assert!(KVStoreSync::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.is_err());
 		peer_store.add_peer(expected_peer_info.clone()).unwrap();
 
 		// Check we can read back what we persisted.
-		let persisted_bytes = store
-			.read(
-				PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				PEER_INFO_PERSISTENCE_KEY,
-			)
-			.unwrap();
+		let persisted_bytes = KVStoreSync::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.unwrap();
 		let deser_peer_store =
 			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
 

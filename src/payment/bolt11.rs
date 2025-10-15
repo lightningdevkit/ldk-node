@@ -9,52 +9,43 @@
 //!
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 
+use std::sync::{Arc, RwLock};
+
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use lightning::ln::channelmanager::{
+	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
+};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning_invoice::{
+	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
+};
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
+use crate::data_store::DataStoreUpdateResult;
 use crate::error::Error;
+use crate::ffi::{maybe_deref, maybe_try_convert_enum, maybe_wrap};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
-	PaymentStatus, PaymentStore,
+	PaymentStatus,
 };
-use crate::payment::SendingParameters;
 use crate::peer_store::{PeerInfo, PeerStore};
-use crate::types::ChannelManager;
+use crate::runtime::Runtime;
+use crate::types::{ChannelManager, PaymentStore};
 
-use lightning::ln::bolt11_payment;
-use lightning::ln::channelmanager::{
-	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry, RetryableSendFailure,
-};
-use lightning::routing::router::{PaymentParameters, RouteParameters};
-
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
-
-use lightning_invoice::Bolt11Invoice;
-use lightning_invoice::Bolt11InvoiceDescription as LdkBolt11InvoiceDescription;
-
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
-
-use std::sync::{Arc, RwLock};
+#[cfg(not(feature = "uniffi"))]
+type Bolt11Invoice = LdkBolt11Invoice;
+#[cfg(feature = "uniffi")]
+type Bolt11Invoice = Arc<crate::ffi::Bolt11Invoice>;
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 #[cfg(feature = "uniffi")]
-type Bolt11InvoiceDescription = crate::uniffi_types::Bolt11InvoiceDescription;
-
-macro_rules! maybe_convert_description {
-	($description: expr) => {{
-		#[cfg(not(feature = "uniffi"))]
-		{
-			$description
-		}
-		#[cfg(feature = "uniffi")]
-		{
-			&LdkBolt11InvoiceDescription::try_from($description)?
-		}
-	}};
-}
+type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
@@ -63,24 +54,24 @@ macro_rules! maybe_convert_description {
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [`Node::bolt11_payment`]: crate::Node::bolt11_payment
 pub struct Bolt11Payment {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-	payment_store: Arc<PaymentStore<Arc<Logger>>>,
+	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
+	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 }
 
 impl Bolt11Payment {
 	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
-		channel_manager: Arc<ChannelManager>,
+		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore<Arc<Logger>>>, peer_store: Arc<PeerStore<Arc<Logger>>>,
-		config: Arc<Config>, logger: Arc<Logger>,
+		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
+		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
 			runtime,
@@ -90,27 +81,24 @@ impl Bolt11Payment {
 			payment_store,
 			peer_store,
 			config,
+			is_running,
 			logger,
 		}
 	}
 
 	/// Send a payment given an invoice.
 	///
-	/// If `sending_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::sending_parameters`] on a per-field basis.
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send(
-		&self, invoice: &Bolt11Invoice, sending_parameters: Option<SendingParameters>,
+		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
-		let (payment_hash, recipient_onion, mut route_params) = bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
-			log_error!(self.logger, "Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead.");
-			Error::InvalidInvoice
-		})?;
-
+		let invoice = maybe_deref(invoice);
+		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
 		if let Some(payment) = self.payment_store.get(&payment_id) {
 			if payment.status == PaymentStatus::Pending
@@ -121,29 +109,16 @@ impl Bolt11Payment {
 			}
 		}
 
-		let override_params =
-			sending_parameters.as_ref().or(self.config.sending_parameters.as_ref());
-		if let Some(override_params) = override_params {
-			override_params
-				.max_total_routing_fee_msat
-				.map(|f| route_params.max_total_routing_fee_msat = f.into());
-			override_params
-				.max_total_cltv_expiry_delta
-				.map(|d| route_params.payment_params.max_total_cltv_expiry_delta = d);
-			override_params.max_path_count.map(|p| route_params.payment_params.max_path_count = p);
-			override_params
-				.max_channel_saturation_power_of_half
-				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
-		};
-
-		let payment_secret = Some(*invoice.payment_secret());
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let payment_secret = Some(*invoice.payment_secret());
 
-		match self.channel_manager.send_payment(
-			payment_hash,
-			recipient_onion,
+		match self.channel_manager.pay_for_bolt11_invoice(
+			invoice,
 			payment_id,
-			route_params,
+			None,
+			route_parameters,
 			retry_strategy,
 		) {
 			Ok(()) => {
@@ -160,6 +135,7 @@ impl Bolt11Payment {
 					payment_id,
 					kind,
 					invoice.amount_milli_satoshis(),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -168,7 +144,13 @@ impl Bolt11Payment {
 
 				Ok(payment_id)
 			},
-			Err(e) => {
+			Err(Bolt11PaymentError::InvalidAmount) => {
+				log_error!(self.logger,
+					"Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead."
+				);
+				return Err(Error::InvalidInvoice);
+			},
+			Err(Bolt11PaymentError::SendingFailed(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
@@ -182,6 +164,7 @@ impl Bolt11Payment {
 							payment_id,
 							kind,
 							invoice.amount_milli_satoshis(),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
@@ -201,17 +184,17 @@ impl Bolt11Payment {
 	/// This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
 	/// amount paid to be determined by the user.
 	///
-	/// If `sending_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::sending_parameters`] on a per-field basis.
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
-		sending_parameters: Option<SendingParameters>,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
+		let invoice = maybe_deref(invoice);
 		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
 			if amount_msat < invoice_amount_msat {
 				log_error!(
@@ -232,46 +215,16 @@ impl Bolt11Payment {
 			}
 		}
 
-		let payment_secret = invoice.payment_secret();
-		let expiry_time = invoice.duration_since_epoch().saturating_add(invoice.expiry_time());
-		let mut payment_params = PaymentParameters::from_node_id(
-			invoice.recover_payee_pub_key(),
-			invoice.min_final_cltv_expiry_delta() as u32,
-		)
-		.with_expiry_time(expiry_time.as_secs())
-		.with_route_hints(invoice.route_hints())
-		.map_err(|_| Error::InvalidInvoice)?;
-		if let Some(features) = invoice.features() {
-			payment_params = payment_params
-				.with_bolt11_features(features.clone())
-				.map_err(|_| Error::InvalidInvoice)?;
-		}
-		let mut route_params =
-			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
-
-		let override_params =
-			sending_parameters.as_ref().or(self.config.sending_parameters.as_ref());
-		if let Some(override_params) = override_params {
-			override_params
-				.max_total_routing_fee_msat
-				.map(|f| route_params.max_total_routing_fee_msat = f.into());
-			override_params
-				.max_total_cltv_expiry_delta
-				.map(|d| route_params.payment_params.max_total_cltv_expiry_delta = d);
-			override_params.max_path_count.map(|p| route_params.payment_params.max_path_count = p);
-			override_params
-				.max_channel_saturation_power_of_half
-				.map(|s| route_params.payment_params.max_channel_saturation_power_of_half = s);
-		};
-
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let recipient_fields = RecipientOnionFields::secret_only(*payment_secret);
+		let payment_secret = Some(*invoice.payment_secret());
 
-		match self.channel_manager.send_payment(
-			payment_hash,
-			recipient_fields,
+		match self.channel_manager.pay_for_bolt11_invoice(
+			invoice,
 			payment_id,
-			route_params,
+			Some(amount_msat),
+			route_parameters,
 			retry_strategy,
 		) {
 			Ok(()) => {
@@ -286,13 +239,14 @@ impl Bolt11Payment {
 				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
 					preimage: None,
-					secret: Some(*payment_secret),
+					secret: payment_secret,
 				};
 
 				let payment = PaymentDetails::new(
 					payment_id,
 					kind,
 					Some(amount_msat),
+					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
@@ -300,26 +254,33 @@ impl Bolt11Payment {
 
 				Ok(payment_id)
 			},
-			Err(e) => {
+			Err(Bolt11PaymentError::InvalidAmount) => {
+				log_error!(
+					self.logger,
+					"Failed to send payment due to amount given being insufficient."
+				);
+				return Err(Error::InvalidInvoice);
+			},
+			Err(Bolt11PaymentError::SendingFailed(e)) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
-
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
 					_ => {
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
 							preimage: None,
-							secret: Some(*payment_secret),
+							secret: payment_secret,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
 							Some(amount_msat),
+							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
-						self.payment_store.insert(payment)?;
 
+						self.payment_store.insert(payment)?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -360,8 +321,17 @@ impl Bolt11Payment {
 		}
 
 		if let Some(details) = self.payment_store.get(&payment_id) {
-			if let Some(expected_amount_msat) = details.amount_msat {
-				if claimable_amount_msat < expected_amount_msat {
+			// For payments requested via `receive*_via_jit_channel_for_hash()`
+			// `skimmed_fee_msat` held by LSP must be taken into account.
+			let skimmed_fee_msat = match details.kind {
+				PaymentKind::Bolt11Jit {
+					counterparty_skimmed_fee_msat: Some(skimmed_fee_msat),
+					..
+				} => skimmed_fee_msat,
+				_ => 0,
+			};
+			if let Some(invoice_amount_msat) = details.amount_msat {
+				if claimable_amount_msat < invoice_amount_msat - skimmed_fee_msat {
 					log_error!(
 						self.logger,
 						"Failed to manually claim payment {} as the claimable amount is less than expected",
@@ -404,13 +374,25 @@ impl Bolt11Payment {
 			..PaymentDetailsUpdate::new(payment_id)
 		};
 
-		if !self.payment_store.update(&update)? {
-			log_error!(
-				self.logger,
-				"Failed to manually fail unknown payment with hash: {}",
-				payment_hash
-			);
-			return Err(Error::InvalidPaymentHash);
+		match self.payment_store.update(&update) {
+			Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (),
+			Ok(DataStoreUpdateResult::NotFound) => {
+				log_error!(
+					self.logger,
+					"Failed to manually fail unknown payment with hash {}",
+					payment_hash,
+				);
+				return Err(Error::InvalidPaymentHash);
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to manually fail payment with hash {}: {}",
+					payment_hash,
+					e
+				);
+				return Err(e);
+			},
 		}
 
 		self.channel_manager.fail_htlc_backwards(&payment_hash);
@@ -424,8 +406,9 @@ impl Bolt11Payment {
 	pub fn receive(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		self.receive_inner(Some(amount_msat), description, expiry_secs, None)
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(Some(amount_msat), &description, expiry_secs, None)?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request a payment of the amount
@@ -446,8 +429,10 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		self.receive_inner(Some(amount_msat), description, expiry_secs, Some(payment_hash))
+		let description = maybe_try_convert_enum(description)?;
+		let invoice =
+			self.receive_inner(Some(amount_msat), &description, expiry_secs, Some(payment_hash))?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request and receive a payment for which the
@@ -457,8 +442,9 @@ impl Bolt11Payment {
 	pub fn receive_variable_amount(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		self.receive_inner(None, description, expiry_secs, None)
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(None, &description, expiry_secs, None)?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request a payment for the given payment hash
@@ -478,14 +464,15 @@ impl Bolt11Payment {
 	pub fn receive_variable_amount_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		self.receive_inner(None, description, expiry_secs, Some(payment_hash))
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(None, &description, expiry_secs, Some(payment_hash))?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	pub(crate) fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
-	) -> Result<Bolt11Invoice, Error> {
+	) -> Result<LdkBolt11Invoice, Error> {
 		let invoice = {
 			let invoice_params = Bolt11InvoiceParameters {
 				amount_msats: amount_msat,
@@ -531,6 +518,7 @@ impl Bolt11Payment {
 			id,
 			kind,
 			amount_msat,
+			None,
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
@@ -553,14 +541,55 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		self.receive_via_jit_channel_inner(
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
-			description,
+			&description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
-		)
+			None,
+		)?;
+		Ok(maybe_wrap(invoice))
+	}
+
+	/// Returns a payable invoice that can be used to request a payment of the amount given and
+	/// receive it via a newly created just-in-time (JIT) channel.
+	///
+	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+	/// to us, supplying just-in-time inbound liquidity.
+	///
+	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
+	/// channel to us. We'll use its cheapest offer otherwise.
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
+	/// the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+	/// is performed *before* emitting the event.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
+	pub fn receive_via_jit_channel_for_hash(
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_via_jit_channel_inner(
+			Some(amount_msat),
+			&description,
+			expiry_secs,
+			max_total_lsp_fee_limit_msat,
+			None,
+			Some(payment_hash),
+		)?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	/// Returns a payable invoice that can be used to request a variable amount payment (also known
@@ -578,30 +607,68 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_convert_description!(description);
-		self.receive_via_jit_channel_inner(
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_via_jit_channel_inner(
 			None,
-			description,
+			&description,
 			expiry_secs,
 			None,
 			max_proportional_lsp_fee_limit_ppm_msat,
-		)
+			None,
+		)?;
+		Ok(maybe_wrap(invoice))
+	}
+
+	/// Returns a payable invoice that can be used to request a variable amount payment (also known
+	/// as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+	///
+	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+	/// to us, supplying just-in-time inbound liquidity.
+	///
+	/// If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
+	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
+	/// We'll use its cheapest offer otherwise.
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
+	/// the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+	/// is performed *before* emitting the event.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
+	pub fn receive_variable_amount_via_jit_channel_for_hash(
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_via_jit_channel_inner(
+			None,
+			&description,
+			expiry_secs,
+			None,
+			max_proportional_lsp_fee_limit_ppm_msat,
+			Some(payment_hash),
+		)?;
+		Ok(maybe_wrap(invoice))
 	}
 
 	fn receive_via_jit_channel_inner(
 		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
-	) -> Result<Bolt11Invoice, Error> {
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
+	) -> Result<LdkBolt11Invoice, Error> {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let (node_id, address) = liquidity_source
-			.get_lsps2_service_details()
-			.ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let rt_lock = self.runtime.read().unwrap();
-		let runtime = rt_lock.as_ref().unwrap();
+		let (node_id, address) =
+			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let peer_info = PeerInfo { node_id, address };
 
@@ -611,39 +678,37 @@ impl Bolt11Payment {
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
-		tokio::task::block_in_place(move || {
-			runtime.block_on(async move {
-				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-			})
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
 		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
 
 		let liquidity_source = Arc::clone(&liquidity_source);
 		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
-			tokio::task::block_in_place(move || {
-				runtime.block_on(async move {
-					if let Some(amount_msat) = amount_msat {
-						liquidity_source
-							.lsps2_receive_to_jit_channel(
-								amount_msat,
-								description,
-								expiry_secs,
-								max_total_lsp_fee_limit_msat,
-							)
-							.await
-							.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
-					} else {
-						liquidity_source
-							.lsps2_receive_variable_amount_to_jit_channel(
-								description,
-								expiry_secs,
-								max_proportional_lsp_fee_limit_ppm_msat,
-							)
-							.await
-							.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
-					}
-				})
+			self.runtime.block_on(async move {
+				if let Some(amount_msat) = amount_msat {
+					liquidity_source
+						.lsps2_receive_to_jit_channel(
+							amount_msat,
+							description,
+							expiry_secs,
+							max_total_lsp_fee_limit_msat,
+							payment_hash,
+						)
+						.await
+						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
+				} else {
+					liquidity_source
+						.lsps2_receive_variable_amount_to_jit_channel(
+							description,
+							expiry_secs,
+							max_proportional_lsp_fee_limit_ppm_msat,
+							payment_hash,
+						)
+						.await
+						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
+				}
 			})?;
 
 		// Register payment in payment store.
@@ -660,12 +725,14 @@ impl Bolt11Payment {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
+			counterparty_skimmed_fee_msat: None,
 			lsp_fee_limits,
 		};
 		let payment = PaymentDetails::new(
 			id,
 			kind,
 			amount_msat,
+			None,
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
@@ -690,16 +757,40 @@ impl Bolt11Payment {
 	/// payment. To mitigate this issue, channels with available liquidity less than the required
 	/// amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
 	/// pre-flight probes.
-	pub fn send_probes(&self, invoice: &Bolt11Invoice) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	pub fn send_probes(
+		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
+	) -> Result<(), Error> {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
-		let (_payment_hash, _recipient_onion, route_params) = bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
+		let invoice = maybe_deref(invoice);
+		let payment_params = PaymentParameters::from_bolt11_invoice(invoice);
+
+		let amount_msat = invoice.amount_milli_satoshis().ok_or_else(|| {
 			log_error!(self.logger, "Failed to send probes due to the given invoice being \"zero-amount\". Please use send_probes_using_amount instead.");
 			Error::InvalidInvoice
 		})?;
+
+		let mut route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		if let Some(RouteParametersConfig {
+			max_total_routing_fee_msat,
+			max_total_cltv_expiry_delta,
+			max_path_count,
+			max_channel_saturation_power_of_half,
+		}) = route_parameters.as_ref().or(self.config.route_parameters.as_ref())
+		{
+			route_params.max_total_routing_fee_msat = *max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta = *max_total_cltv_expiry_delta;
+			route_params.payment_params.max_path_count = *max_path_count;
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				*max_channel_saturation_power_of_half;
+		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
 
@@ -719,35 +810,49 @@ impl Bolt11Payment {
 	/// This can be used to send pre-flight probes for a so-called "zero-amount" invoice, i.e., an
 	/// invoice that leaves the amount paid to be determined by the user.
 	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	///
 	/// See [`Self::send_probes`] for more information.
 	pub fn send_probes_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<(), Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
-		let (_payment_hash, _recipient_onion, route_params) = if let Some(invoice_amount_msat) =
-			invoice.amount_milli_satoshis()
-		{
+		let invoice = maybe_deref(invoice);
+		let payment_params = PaymentParameters::from_bolt11_invoice(invoice);
+
+		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
 			if amount_msat < invoice_amount_msat {
 				log_error!(
 					self.logger,
-					"Failed to send probes as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.", invoice_amount_msat, amount_msat);
+					"Failed to send probes as the given amount needs to be at least the invoice amount: required {}msat, gave {}msat.",
+					invoice_amount_msat,
+					amount_msat
+				);
 				return Err(Error::InvalidAmount);
 			}
+		}
 
-			bolt11_payment::payment_parameters_from_invoice(&invoice).map_err(|_| {
-				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being \"zero-amount\".");
-				Error::InvalidInvoice
-			})?
-		} else {
-			bolt11_payment::payment_parameters_from_variable_amount_invoice(&invoice, amount_msat).map_err(|_| {
-				log_error!(self.logger, "Failed to send probes due to the given invoice unexpectedly being not \"zero-amount\".");
-				Error::InvalidInvoice
-			})?
-		};
+		let mut route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		if let Some(RouteParametersConfig {
+			max_total_routing_fee_msat,
+			max_total_cltv_expiry_delta,
+			max_path_count,
+			max_channel_saturation_power_of_half,
+		}) = route_parameters.as_ref().or(self.config.route_parameters.as_ref())
+		{
+			route_params.max_total_routing_fee_msat = *max_total_routing_fee_msat;
+			route_params.payment_params.max_total_cltv_expiry_delta = *max_total_cltv_expiry_delta;
+			route_params.payment_params.max_path_count = *max_path_count;
+			route_params.payment_params.max_channel_saturation_power_of_half =
+				*max_channel_saturation_power_of_half;
+		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
 

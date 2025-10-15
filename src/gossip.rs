@@ -5,23 +5,24 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::chain::ChainSource;
-use crate::config::RGS_SYNC_TIMEOUT_SECS;
-use crate::logger::{log_error, log_trace, LdkLogger, Logger};
-use crate::types::{GossipSync, Graph, P2PGossipSync, PeerManager, RapidGossipSync, UtxoLookup};
-use crate::Error;
-
-use lightning_block_sync::gossip::{FutureSpawner, GossipVerifier};
-
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
+
+use lightning::util::native_async::FutureSpawner;
+use lightning_block_sync::gossip::GossipVerifier;
+
+use crate::chain::ChainSource;
+use crate::config::RGS_SYNC_TIMEOUT_SECS;
+use crate::logger::{log_trace, LdkLogger, Logger};
+use crate::runtime::Runtime;
+use crate::types::{GossipSync, Graph, P2PGossipSync, PeerManager, RapidGossipSync, UtxoLookup};
+use crate::Error;
 
 pub(crate) enum GossipSource {
 	P2PNetwork {
 		gossip_sync: Arc<P2PGossipSync>,
-		logger: Arc<Logger>,
 	},
 	RapidGossipSync {
 		gossip_sync: Arc<RapidGossipSync>,
@@ -38,7 +39,7 @@ impl GossipSource {
 			None::<Arc<UtxoLookup>>,
 			Arc::clone(&logger),
 		));
-		Self::P2PNetwork { gossip_sync, logger }
+		Self::P2PNetwork { gossip_sync }
 	}
 
 	pub fn new_rgs(
@@ -63,12 +64,12 @@ impl GossipSource {
 
 	pub(crate) fn set_gossip_verifier(
 		&self, chain_source: Arc<ChainSource>, peer_manager: Arc<PeerManager>,
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+		runtime: Arc<Runtime>,
 	) {
 		match self {
-			Self::P2PNetwork { gossip_sync, logger } => {
+			Self::P2PNetwork { gossip_sync } => {
 				if let Some(utxo_source) = chain_source.as_utxo_source() {
-					let spawner = RuntimeSpawner::new(Arc::clone(&runtime), Arc::clone(&logger));
+					let spawner = RuntimeSpawner::new(Arc::clone(&runtime));
 					let gossip_verifier = Arc::new(GossipVerifier::new(
 						utxo_source,
 						spawner,
@@ -134,28 +135,17 @@ impl GossipSource {
 }
 
 pub(crate) struct RuntimeSpawner {
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
-	logger: Arc<Logger>,
+	runtime: Arc<Runtime>,
 }
 
 impl RuntimeSpawner {
-	pub(crate) fn new(
-		runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>, logger: Arc<Logger>,
-	) -> Self {
-		Self { runtime, logger }
+	pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
+		Self { runtime }
 	}
 }
 
 impl FutureSpawner for RuntimeSpawner {
 	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
-			log_error!(self.logger, "Tried spawing a future while the runtime wasn't available. This should never happen.");
-			debug_assert!(false, "Tried spawing a future while the runtime wasn't available. This should never happen.");
-			return;
-		}
-
-		let runtime = rt_lock.as_ref().unwrap();
-		runtime.spawn(future);
+		self.runtime.spawn_cancellable_background_task(future);
 	}
 }

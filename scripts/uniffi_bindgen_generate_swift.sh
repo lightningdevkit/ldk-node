@@ -1,4 +1,6 @@
 #!/bin/bash
+set -eox pipefail
+
 BINDINGS_DIR="./bindings/swift"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
 
@@ -8,11 +10,11 @@ $UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language swift -o "$BINDING
 mkdir -p $BINDINGS_DIR
 
 # Install rust target toolchains
-rustup install 1.73.0
-rustup component add rust-src --toolchain 1.73.0
-rustup target add aarch64-apple-ios x86_64-apple-ios --toolchain 1.73.0
-rustup target add aarch64-apple-ios-sim --toolchain 1.73.0
-rustup target add aarch64-apple-darwin x86_64-apple-darwin --toolchain 1.73.0
+rustup upgrade stable
+rustup component add rust-src --toolchain stable
+rustup target add aarch64-apple-ios x86_64-apple-ios --toolchain stable
+rustup target add aarch64-apple-ios-sim --toolchain stable
+rustup target add aarch64-apple-darwin x86_64-apple-darwin --toolchain stable
 
 # Build rust target libs
 cargo build --profile release-smaller --features uniffi || exit 1
@@ -20,7 +22,7 @@ cargo build --profile release-smaller --features uniffi --target x86_64-apple-da
 cargo build --profile release-smaller --features uniffi --target aarch64-apple-darwin || exit 1
 cargo build --profile release-smaller --features uniffi --target x86_64-apple-ios || exit 1
 cargo build --profile release-smaller --features uniffi --target aarch64-apple-ios || exit 1
-cargo +1.73.0 build --release --features uniffi --target aarch64-apple-ios-sim || exit 1
+cargo +stable build --release --features uniffi --target aarch64-apple-ios-sim || exit 1
 
 # Combine ios-sim and apple-darwin (macos) libs for x86_64 and aarch64 (m1)
 mkdir -p target/lipo-ios-sim/release-smaller || exit 1
