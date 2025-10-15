@@ -29,10 +29,11 @@ use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
-use ldk_node::io::sqlite_store::SqliteStore;
+use ldk_node::io::sqlite_store::{SqliteStore, KV_TABLE_NAME, SQLITE_DB_FILE_NAME};
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+	Builder, CustomTlvRecord, DynStore, Event, LightningBalance, Node, NodeError,
+	PendingSweepBalance,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -262,10 +263,23 @@ pub(crate) enum TestChainSource<'a> {
 	BitcoindRestSync(&'a BitcoinD),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum TestStoreType {
+	TestSyncStore,
+	Sqlite,
+}
+
+impl Default for TestStoreType {
+	fn default() -> Self {
+		TestStoreType::TestSyncStore
+	}
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct TestConfig {
 	pub node_config: Config,
 	pub log_writer: TestLogWriter,
+	pub store_type: TestStoreType,
 }
 
 macro_rules! setup_builder {
@@ -283,12 +297,27 @@ pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
+	setup_two_nodes_with_store(
+		chain_source,
+		allow_0conf,
+		anchor_channels,
+		anchors_trusted_no_reserve,
+		TestStoreType::TestSyncStore,
+	)
+}
+
+pub(crate) fn setup_two_nodes_with_store(
+	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
+	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
+) -> (TestNode, TestNode) {
 	println!("== Node A ==");
-	let config_a = random_config(anchor_channels);
+	let mut config_a = random_config(anchor_channels);
+	config_a.store_type = store_type;
 	let node_a = setup_node(chain_source, config_a, None);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
+	config_b.store_type = store_type;
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -381,8 +410,14 @@ pub(crate) fn setup_node_for_async_payments(
 
 	builder.set_async_payments_role(async_payments_role).unwrap();
 
-	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
-	let node = builder.build_with_store(test_sync_store).unwrap();
+	let node = match config.store_type {
+		TestStoreType::TestSyncStore => {
+			let kv_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
+			builder.build_with_store(kv_store).unwrap()
+		},
+		TestStoreType::Sqlite => builder.build().unwrap(),
+	};
+
 	node.start().unwrap();
 	assert!(node.status().is_running);
 	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
