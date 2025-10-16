@@ -265,6 +265,10 @@ dictionary RouteParametersConfig {
 	u8 max_channel_saturation_power_of_half;
 };
 
+typedef interface HRNResolverConfig;
+
+typedef dictionary HumanReadableNamesConfig;
+
 [Remote]
 dictionary LSPS1OrderStatus {
 	LSPS1OrderId order_id;
