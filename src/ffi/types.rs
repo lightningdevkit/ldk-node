@@ -45,7 +45,7 @@ pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
 use crate::builder::sanitize_alias;
 pub use crate::config::{
 	default_config, AnchorChannelsConfig, BackgroundSyncConfig, ElectrumSyncConfig,
-	EsploraSyncConfig, MaxDustHTLCExposure,
+	EsploraSyncConfig, HumanReadableNamesConfig, MaxDustHTLCExposure,
 };
 use crate::error::Error;
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
