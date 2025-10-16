@@ -25,8 +25,8 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 
-#[test]
-fn test_cln() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln() {
 	// Setup bitcoind / electrs clients
 	let bitcoind_client = BitcoindClient::new_with_auth(
 		"http://127.0.0.1:18443",
@@ -36,7 +36,7 @@ fn test_cln() {
 	let electrs_client = ElectrumClient::new("tcp://127.0.0.1:50001").unwrap();
 
 	// Give electrs a kick.
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1);
+	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1).await;
 
 	// Setup LDK Node
 	let config = common::random_config(true);
@@ -54,7 +54,8 @@ fn test_cln() {
 		&electrs_client,
 		vec![address],
 		premine_amount,
-	);
+	)
+	.await;
 
 	// Setup CLN
 	let sock = "/tmp/lightning-rpc";
@@ -67,7 +68,7 @@ fn test_cln() {
 			if info.blockheight > 0 {
 				break info;
 			}
-			std::thread::sleep(std::time::Duration::from_millis(250));
+			tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 		}
 	};
 	let cln_node_id = PublicKey::from_str(&cln_info.id).unwrap();
@@ -92,8 +93,8 @@ fn test_cln() {
 		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
-	common::wait_for_tx(&electrs_client, funding_txo.txid);
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6);
+	common::wait_for_tx(&electrs_client, funding_txo.txid).await;
+	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6).await;
 	node.sync_wallets().unwrap();
 	let user_channel_id = common::expect_channel_ready_event!(node, cln_node_id);
 
