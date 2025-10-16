@@ -13,6 +13,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
+	HumanReadableNamesConfig? hrn_config;
 };
 
 dictionary AnchorChannelsConfig {
@@ -515,6 +516,16 @@ dictionary RouteParametersConfig {
 	u32 max_total_cltv_expiry_delta;
 	u8 max_path_count;
 	u8 max_channel_saturation_power_of_half;
+};
+
+[Enum]
+interface HRNResolverConfig {
+    Blip32();
+    Dns(string dns_server_address, boolean enable_hrn_resolution_service);
+};
+
+dictionary HumanReadableNamesConfig {
+    HRNResolverConfig resolution_config;
 };
 
 dictionary CustomTlvRecord {
