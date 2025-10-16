@@ -325,6 +325,7 @@ enum NodeError {
 	"AsyncPaymentServicesDisabled",
 	"HrnParsingFailed",
 	"HrnResolverNotConfigured",
+	"TimeoutOccurred",
 };
 
 dictionary NodeStatus {

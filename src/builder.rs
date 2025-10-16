@@ -1549,11 +1549,20 @@ fn build_with_store_internal(
 		})?;
 	}
 
-	let resolver = if config.is_hrn_resolver {
-		Resolver::DNS(Arc::new(OMDomainResolver::ignoring_incoming_proofs(
-			"8.8.8.8:53".parse().map_err(|_| BuildError::DNSResolverSetupFailed)?,
-		)))
+	let resolver = if let Some(hrn_config) = &config.hrn_config {
+		if hrn_config.is_hrn_resolver {
+			let dns_addr = hrn_config.dns_server_address.as_str();
+
+			Resolver::DNS(Arc::new(OMDomainResolver::ignoring_incoming_proofs(
+				dns_addr.parse().map_err(|_| BuildError::DNSResolverSetupFailed)?,
+			)))
+		} else {
+			Resolver::HRN(Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(
+				&network_graph,
+			))))
+		}
 	} else {
+		// hrn_config is None, default to the HRN resolver.
 		Resolver::HRN(Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph))))
 	};
 

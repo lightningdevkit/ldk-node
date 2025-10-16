@@ -21,6 +21,7 @@ use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
 use crate::types::HRNResolver;
 use crate::Config;
 use std::sync::Arc;
+use std::time::Duration;
 use std::vec::IntoIter;
 
 use lightning::ln::channelmanager::PaymentId;
@@ -35,6 +36,7 @@ use bitcoin::{Amount, Txid};
 use bitcoin_payment_instructions::{
 	amount::Amount as BPIAmount, PaymentInstructions, PaymentMethod,
 };
+use tokio::time::timeout;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
 
