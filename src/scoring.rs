@@ -63,24 +63,28 @@ async fn sync_external_scores(
 	)
 	.await;
 
-	if let Err(e) = response {
-		log_error!(logger, "Retrieving external scores timed out: {}", e);
-		return;
-	}
-	let response = response.unwrap();
-
-	if let Err(e) = response {
-		log_error!(logger, "Failed to retrieve external scores update: {}", e);
-		return;
-	}
-
-	let body = response.unwrap().bytes().await;
-	if let Err(e) = body {
-		log_error!(logger, "Failed to read external scores update: {}", e);
-		return;
-	}
-
-	let mut reader = Cursor::new(body.unwrap());
+	let response = match response {
+		Ok(resp) => resp,
+		Err(e) => {
+			log_error!(logger, "Retrieving external scores timed out: {}", e);
+			return;
+		},
+	};
+	let response = match response {
+		Ok(resp) => resp,
+		Err(e) => {
+			log_error!(logger, "Failed to retrieve external scores update: {}", e);
+			return;
+		},
+	};
+	let body = match response.bytes().await {
+		Ok(bytes) => bytes,
+		Err(e) => {
+			log_error!(logger, "Failed to read external scores update: {}", e);
+			return;
+		},
+	};
+	let mut reader = Cursor::new(body);
 	match ChannelLiquidities::read(&mut reader) {
 		Ok(liquidities) => {
 			if let Err(e) = write_external_pathfinding_scores_to_cache(
