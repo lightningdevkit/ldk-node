@@ -9,7 +9,7 @@ use core::future::Future;
 use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
@@ -287,7 +287,6 @@ where
 {
 	queue: Arc<Mutex<VecDeque<Event>>>,
 	waker: Arc<Mutex<Option<Waker>>>,
-	notifier: Condvar,
 	kv_store: Arc<DynStore>,
 	logger: L,
 }
@@ -299,8 +298,7 @@ where
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let queue = Arc::new(Mutex::new(VecDeque::new()));
 		let waker = Arc::new(Mutex::new(None));
-		let notifier = Condvar::new();
-		Self { queue, waker, notifier, kv_store, logger }
+		Self { queue, waker, kv_store, logger }
 	}
 
 	pub(crate) fn add_event(&self, event: Event) -> Result<(), Error> {
@@ -309,8 +307,6 @@ where
 			locked_queue.push_back(event);
 			self.persist_queue(&locked_queue)?;
 		}
-
-		self.notifier.notify_one();
 
 		if let Some(waker) = self.waker.lock().unwrap().take() {
 			waker.wake();
@@ -327,19 +323,12 @@ where
 		EventFuture { event_queue: Arc::clone(&self.queue), waker: Arc::clone(&self.waker) }.await
 	}
 
-	pub(crate) fn wait_next_event(&self) -> Event {
-		let locked_queue =
-			self.notifier.wait_while(self.queue.lock().unwrap(), |queue| queue.is_empty()).unwrap();
-		locked_queue.front().unwrap().clone()
-	}
-
 	pub(crate) fn event_handled(&self) -> Result<(), Error> {
 		{
 			let mut locked_queue = self.queue.lock().unwrap();
 			locked_queue.pop_front();
 			self.persist_queue(&locked_queue)?;
 		}
-		self.notifier.notify_one();
 
 		if let Some(waker) = self.waker.lock().unwrap().take() {
 			waker.wake();
@@ -383,8 +372,7 @@ where
 		let read_queue: EventQueueDeserWrapper = Readable::read(reader)?;
 		let queue = Arc::new(Mutex::new(read_queue.0));
 		let waker = Arc::new(Mutex::new(None));
-		let notifier = Condvar::new();
-		Ok(Self { queue, waker, notifier, kv_store, logger })
+		Ok(Self { queue, waker, kv_store, logger })
 	}
 }
 

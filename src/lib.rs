@@ -749,7 +749,10 @@ impl Node {
 	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
 	/// which can increase the memory footprint of [`Node`].
 	pub fn wait_next_event(&self) -> Event {
-		self.event_queue.wait_next_event()
+		let fut = self.event_queue.next_event_async();
+		// We use our runtime for the sync variant to ensure `tokio::task::block_in_place` is
+		// always called if we'd ever hit this in an outer runtime context.
+		self.runtime.block_on(fut)
 	}
 
 	/// Confirm the last retrieved event handled.
