@@ -16,6 +16,7 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf};
+use chrono::Utc;
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
@@ -1779,7 +1780,11 @@ fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, cur_id: u32) {
 		loop {
 			// Pre-check the HTLC slots to try to avoid the performance impact of a failed payment.
 			while node_a.list_channels()[0].next_outbound_htlc_limit_msat == 0 {
-				println!("Waiting for HTLC slots to free up... ({})", cur_id);
+				println!(
+					"{} Waiting for HTLC slots to free up... ({})",
+					Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+					cur_id
+				);
 				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 			}
 
@@ -1840,7 +1845,7 @@ async fn payment_benchmark() {
 	let node_b = Arc::new(node_b);
 
 	let total_payments = 1000;
-	let max_in_flight = 20;
+	let max_in_flight = 1000;
 
 	let mut cur_id = 0u32;
 	let mut in_flight = 0;

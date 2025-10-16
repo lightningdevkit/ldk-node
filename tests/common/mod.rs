@@ -30,6 +30,7 @@ use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::io::sqlite_store::{SqliteStore, KV_TABLE_NAME, SQLITE_DB_FILE_NAME};
+use ldk_node::logger::LogLevel;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, DynStore, Event, LightningBalance, Node, NodeError,
@@ -43,6 +44,7 @@ use lightning::util::test_utils::TestStore;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_persister::fs_store::FilesystemStore;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use log::Level;
 use logging::TestLogWriter;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -385,7 +387,7 @@ pub(crate) fn setup_node_for_async_payments(
 
 	match &config.log_writer {
 		TestLogWriter::FileWriter => {
-			builder.set_filesystem_logger(None, None);
+			builder.set_filesystem_logger(None, Some(LogLevel::Trace));
 		},
 		TestLogWriter::LogFacade => {
 			builder.set_log_facade_logger();
