@@ -6,7 +6,6 @@
 // accordance with one or both of these licenses.
 
 mod common;
-use lightning::util::persist::KVStoreSync;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;

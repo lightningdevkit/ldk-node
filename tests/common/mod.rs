@@ -28,7 +28,9 @@ use bitcoin::{
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
-use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
+use ldk_node::config::{
+	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HumanReadableNamesConfig,
+};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
@@ -290,7 +292,11 @@ pub(crate) fn setup_two_nodes(
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	if second_node_is_hrn_resolver {
-		config_b.node_config.is_hrn_resolver = true;
+		config_b.node_config.hrn_config = Some(HumanReadableNamesConfig {
+			default_dns_resolvers: Vec::new(),
+			is_hrn_resolver: true,
+			dns_server_address: "8.8.8.8:53".to_string(),
+		});
 	}
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());

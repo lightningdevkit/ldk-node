@@ -114,7 +114,7 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                     | None               |
-/// | `is_hrn_resolver`                      | false              |
+/// | `hrn_config`                           | None               |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -179,8 +179,10 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
-	/// This allows us to use our node as a DNS resolver for 3rd party HRN resolutions.
-	pub is_hrn_resolver: bool,
+	/// Configuration options for Human-Readable Names ([BIP 353]).
+	///
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	pub hrn_config: Option<HumanReadableNamesConfig>,
 }
 
 impl Default for Config {
@@ -195,9 +197,26 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
-			is_hrn_resolver: false,
+			hrn_config: None,
 		}
 	}
+}
+
+/// Configuration options for Human-Readable Names ([BIP 353]).
+///
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+#[derive(Debug, Clone)]
+pub struct HumanReadableNamesConfig {
+	/// The Default DNS resolvers to be used for resolving Human-Readable Names.
+	///
+	/// If not empty, the values set will be used as DNS resolvers when sending to HRNs.
+	///
+	/// **Note:** If empty, DNS resolvers would be selected from the network graph.
+	pub default_dns_resolvers: Vec<PublicKey>,
+	/// This allows us to use our node as a DNS resolver for 3rd party HRN resolutions.
+	pub is_hrn_resolver: bool,
+	/// The DNS Server which will be used for resolving HRNs.
+	pub dns_server_address: String,
 }
 
 /// Configuration options pertaining to 'Anchor' channels, i.e., channels for which the
