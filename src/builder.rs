@@ -26,12 +26,10 @@ use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::{
-	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
-};
+use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::persist::{
-	read_channel_monitors, KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	read_channel_monitors, KVStoreSync, MonitorUpdatingPersister, CHANNEL_MANAGER_PERSISTENCE_KEY,
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
@@ -76,6 +74,7 @@ use crate::{Node, NodeMetrics};
 const VSS_HARDENED_CHILD_INDEX: u32 = 877;
 const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
+const MAXIMUM_PENDING_CHANNEL_UPDATES: u64 = 100;
 
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
@@ -1327,13 +1326,23 @@ fn build_with_store_internal(
 
 	let peer_storage_key = keys_manager.get_peer_storage_key();
 
-	// Initialize the ChainMonitor
+	// Initialize the ChainMonitor with MonitorUpdatingPersister
+	let persister = Arc::new(MonitorUpdatingPersister::new(
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+		MAXIMUM_PENDING_CHANNEL_UPDATES,
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
+	));
+
 	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
 		Some(Arc::clone(&chain_source)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
 		Arc::clone(&fee_estimator),
-		Arc::clone(&kv_store),
+		persister,
 		Arc::clone(&keys_manager),
 		peer_storage_key,
 	));

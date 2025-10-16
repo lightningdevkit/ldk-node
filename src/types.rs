@@ -19,7 +19,7 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersister};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::{GossipVerifier, UtxoSource};
@@ -55,7 +55,14 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<Broadcaster>,
 	Arc<OnchainFeeEstimator>,
 	Arc<Logger>,
-	Arc<DynStore>,
+	Arc<MonitorUpdatingPersister<
+		Arc<DynStore>,
+		Arc<Logger>,
+		Arc<KeysManager>,
+		Arc<KeysManager>,
+		Arc<Broadcaster>,
+		Arc<OnchainFeeEstimator>,
+	>>,
 	Arc<KeysManager>,
 >;
 
