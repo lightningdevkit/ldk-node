@@ -46,7 +46,7 @@ pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
 use crate::builder::sanitize_alias;
 pub use crate::config::{
 	default_config, AnchorChannelsConfig, BackgroundSyncConfig, ElectrumSyncConfig,
-	EsploraSyncConfig, MaxDustHTLCExposure,
+	EsploraSyncConfig, HumanReadableNamesConfig, MaxDustHTLCExposure,
 };
 pub use crate::entropy::{generate_entropy_mnemonic, EntropyError, NodeEntropy, WordCount};
 use crate::error::Error;
