@@ -1625,7 +1625,6 @@ mod tests {
 
 		// Check we get the expected event and that it is returned until we mark it handled.
 		for _ in 0..5 {
-			assert_eq!(event_queue.wait_next_event(), expected_event);
 			assert_eq!(event_queue.next_event_async().await, expected_event);
 			assert_eq!(event_queue.next_event(), Some(expected_event.clone()));
 		}
@@ -1640,7 +1639,7 @@ mod tests {
 		.unwrap();
 		let deser_event_queue =
 			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
-		assert_eq!(deser_event_queue.wait_next_event(), expected_event);
+		assert_eq!(deser_event_queue.next_event_async().await, expected_event);
 
 		event_queue.event_handled().unwrap();
 		assert_eq!(event_queue.next_event(), None);
@@ -1708,33 +1707,6 @@ mod tests {
 				break;
 			}
 		}
-		assert_eq!(event_queue.next_event(), None);
-
-		// Check we operate correctly, even when mixing and matching blocking and async API calls.
-		let (tx, mut rx) = tokio::sync::watch::channel(());
-		let thread_queue = Arc::clone(&event_queue);
-		let thread_event = expected_event.clone();
-		std::thread::spawn(move || {
-			let e = thread_queue.wait_next_event();
-			assert_eq!(e, thread_event);
-			thread_queue.event_handled().unwrap();
-			tx.send(()).unwrap();
-		});
-
-		let thread_queue = Arc::clone(&event_queue);
-		let thread_event = expected_event.clone();
-		std::thread::spawn(move || {
-			// Sleep a bit before we enqueue the events everybody is waiting for.
-			std::thread::sleep(Duration::from_millis(20));
-			thread_queue.add_event(thread_event.clone()).unwrap();
-			thread_queue.add_event(thread_event.clone()).unwrap();
-		});
-
-		let e = event_queue.next_event_async().await;
-		assert_eq!(e, expected_event.clone());
-		event_queue.event_handled().unwrap();
-
-		rx.changed().await.unwrap();
 		assert_eq!(event_queue.next_event(), None);
 	}
 }

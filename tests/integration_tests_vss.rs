@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use ldk_node::Builder;
 
-#[test]
-fn channel_full_cycle_with_vss_store() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_full_cycle_with_vss_store() {
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
@@ -52,5 +52,6 @@ fn channel_full_cycle_with_vss_store() {
 		false,
 		true,
 		false,
-	);
+	)
+	.await;
 }
