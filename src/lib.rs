@@ -1604,3 +1604,33 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			* anchor_channels_config.per_channel_reserve_sats
 	})
 }
+
+/// Testing utils for DNSSEC proof resolution of offers associated with the given HRN.
+pub mod dnssec_testing_utils {
+	use lightning::offers::offer::Offer;
+	use lightning::onion_message::dns_resolution::HumanReadableName;
+
+	use std::collections::HashMap;
+	use std::sync::{LazyLock, Mutex};
+
+	static OFFER_OVERRIDE_MAP: LazyLock<Mutex<HashMap<HumanReadableName, Offer>>> =
+		LazyLock::new(|| Mutex::new(HashMap::new()));
+
+	/// Sets a testing override for DNSSEC proof resolution of offers associated with the given HRN
+	pub fn set_testing_dnssec_proof_offer_resolution_override(hrn: &str, offer: Offer) {
+		OFFER_OVERRIDE_MAP
+			.lock()
+			.unwrap()
+			.insert(HumanReadableName::from_encoded(hrn).unwrap(), offer);
+	}
+
+	/// Retrieves a testing override for DNSSEC proof resolution of offers associated with the given HRN.
+	pub fn get_testing_offer_override(hrn: Option<HumanReadableName>) -> Option<Offer> {
+		OFFER_OVERRIDE_MAP.lock().unwrap().get(&hrn?).cloned()
+	}
+
+	/// Clears all testing overrides for DNSSEC proof resolution of offers.
+	pub fn clear_testing_overrides() {
+		OFFER_OVERRIDE_MAP.lock().unwrap().clear();
+	}
+}

@@ -30,7 +30,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
-use ldk_node::{Builder, DynStore, Event, NodeError};
+use ldk_node::{dnssec_testing_utils, Builder, DynStore, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -1554,13 +1554,15 @@ async fn unified_send_to_hrn() {
 		std::thread::sleep(std::time::Duration::from_millis(10));
 	}
 
-	//let offer = node_b.bolt12_payment().receive(1000000, "test offer", None, None).unwrap();
-	//println!("offer! {:?}", offer.to_string());
+	let test_offer = node_b.bolt12_payment().receive(1000000, "test offer", None, None).unwrap();
 
 	// Sleep one more sec to make sure the node announcement propagates.
 	std::thread::sleep(std::time::Duration::from_secs(1));
 
 	let hrn = "matt@mattcorallo.com";
+
+	dnssec_testing_utils::set_testing_dnssec_proof_offer_resolution_override(hrn, test_offer);
+
 	let offer_payment_id: PaymentId = match node_a.unified_payment().send(&hrn, None).await {
 		Ok(UnifiedPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);

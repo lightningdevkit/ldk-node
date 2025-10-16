@@ -194,6 +194,18 @@ impl Bolt12Payment {
 			return Err(Error::NotRunning);
 		}
 
+		let owned_override_storage: Option<Offer> =
+			crate::dnssec_testing_utils::get_testing_offer_override(hrn.clone());
+
+		let offer: &Offer = match &owned_override_storage {
+			#[cfg(test)]
+			Some(overridden_offer) => {
+				log_info!(self.logger, "Using test-specific Offer override.");
+				overridden_offer
+			},
+			_ => offer,
+		};
+
 		let offer = maybe_deref(offer);
 
 		let mut random_bytes = [0u8; 32];
