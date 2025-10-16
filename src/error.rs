@@ -129,6 +129,8 @@ pub enum Error {
 	HrnParsingFailed,
 	/// A HRN resolver was not configured
 	HrnResolverNotConfigured,
+	/// A Timeout occurred during an operation.
+	TimeoutOccurred,
 }
 
 impl fmt::Display for Error {
@@ -211,6 +213,9 @@ impl fmt::Display for Error {
 			},
 			Self::HrnResolverNotConfigured => {
 				write!(f, "A HRN resolver was not configured.")
+			},
+			Self::TimeoutOccurred => {
+				write!(f, "A Timeout occured during an operation.")
 			},
 		}
 	}

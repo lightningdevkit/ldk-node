@@ -21,6 +21,7 @@ use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
 use crate::types::HRNResolver;
 use crate::Config;
 use std::sync::Arc;
+use std::time::Duration;
 use std::vec::IntoIter;
 
 use lightning::ln::channelmanager::PaymentId;
@@ -35,6 +36,7 @@ use bitcoin::{Amount, Txid};
 use bitcoin_payment_instructions::{
 	amount::Amount as BPIAmount, PaymentInstructions, PaymentMethod,
 };
+use tokio::time::timeout;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
 
@@ -160,13 +162,25 @@ impl UnifiedPayment {
 			Error::HrnResolverNotConfigured
 		})?;
 
-		let instructions =
-			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false)
-				.await
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
-					Error::UriParameterParsingFailed
-				})?;
+		const TIMEOUT_DURATION: Duration = Duration::from_secs(30);
+
+		let instructions = timeout(
+			TIMEOUT_DURATION,
+			PaymentInstructions::parse(uri_str, self.config.network, resolver.as_ref(), false),
+		)
+		.await
+		.map_err(|_| {
+			log_error!(
+				self.logger,
+				"Payment instruction parsing timed out after {:?}",
+				TIMEOUT_DURATION
+			);
+			Error::TimeoutOccurred
+		})?
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
+			Error::UriParameterParsingFailed
+		})?;
 
 		let resolved = match instructions {
 			PaymentInstructions::ConfigurableAmount(instr) => {
