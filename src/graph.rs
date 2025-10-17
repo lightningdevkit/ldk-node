@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 #[cfg(feature = "uniffi")]
 use lightning::ln::msgs::SocketAddress;
-use lightning::{routing::gossip::NodeId, util::ser::Writeable as _};
 #[cfg(feature = "uniffi")]
 use lightning::routing::gossip::RoutingFees;
 #[cfg(not(feature = "uniffi"))]
 use lightning::routing::gossip::{ChannelInfo, NodeInfo};
+use lightning::{routing::gossip::NodeId, util::ser::Writeable as _};
 
 use crate::types::Graph;
 
