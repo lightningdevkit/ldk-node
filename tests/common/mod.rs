@@ -295,6 +295,8 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
+use crate::common::logging::MultiNodeLogger;
+
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
@@ -315,11 +317,15 @@ pub(crate) fn setup_two_nodes_with_store(
 	println!("== Node A ==");
 	let mut config_a = random_config(anchor_channels);
 	config_a.store_type = store_type;
+	config_a.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("node a ".to_string())));
 	let node_a = setup_node(chain_source, config_a, None);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	config_b.store_type = store_type;
+	config_b.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("node b ".to_string())));
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
