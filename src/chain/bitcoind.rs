@@ -701,10 +701,10 @@ impl BitcoindClient {
 		let num_blocks_json = serde_json::json!(num_blocks);
 		let estimation_mode_json = serde_json::json!(estimation_mode);
 		rpc_client
-			.call_method::<FeeResponse>("estimatesmartfee", &[
-				num_blocks_json,
-				estimation_mode_json,
-			])
+			.call_method::<FeeResponse>(
+				"estimatesmartfee",
+				&[num_blocks_json, estimation_mode_json],
+			)
 			.await
 			.map(|resp| resp.0)
 	}
