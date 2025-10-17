@@ -631,7 +631,7 @@ impl Wallet {
 							script_pubkey: ScriptBuf::new_witness_program(&witness_program),
 						},
 						satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
-							1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
+							1 /* witness items */ + 1 /* schnorr sig len */ + 64, // schnorr sig
 					};
 					utxos.push(utxo);
 				},

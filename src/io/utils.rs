@@ -399,7 +399,14 @@ pub(crate) fn check_namespace_key_validity(
 }
 
 macro_rules! impl_read_write_change_set_type {
-	( $read_name: ident, $write_name: ident, $change_set_type:ty, $primary_namespace: expr, $secondary_namespace: expr, $key: expr ) => {
+	(
+		$read_name:ident,
+		$write_name:ident,
+		$change_set_type:ty,
+		$primary_namespace:expr,
+		$secondary_namespace:expr,
+		$key:expr
+	) => {
 		pub(crate) fn $read_name<L: Deref>(
 			kv_store: Arc<DynStore>, logger: L,
 		) -> Result<Option<$change_set_type>, std::io::Error>

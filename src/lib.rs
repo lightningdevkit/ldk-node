@@ -25,18 +25,21 @@
 //! ```no_run
 //! # #[cfg(not(feature = "uniffi"))]
 //! # {
-//! use ldk_node::Builder;
-//! use ldk_node::lightning_invoice::Bolt11Invoice;
-//! use ldk_node::lightning::ln::msgs::SocketAddress;
-//! use ldk_node::bitcoin::Network;
-//! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use std::str::FromStr;
+//!
+//! use ldk_node::bitcoin::secp256k1::PublicKey;
+//! use ldk_node::bitcoin::Network;
+//! use ldk_node::lightning::ln::msgs::SocketAddress;
+//! use ldk_node::lightning_invoice::Bolt11Invoice;
+//! use ldk_node::Builder;
 //!
 //! fn main() {
 //! 	let mut builder = Builder::new();
 //! 	builder.set_network(Network::Testnet);
 //! 	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
-//! 	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
+//! 	builder.set_gossip_source_rgs(
+//! 		"https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string(),
+//! 	);
 //!
 //! 	let node = builder.build().unwrap();
 //!
@@ -67,7 +70,6 @@
 //! [`stop`]: Node::stop
 //! [`open_channel`]: Node::open_channel
 //! [`send`]: Bolt11Payment::send
-//!
 #![cfg_attr(not(feature = "uniffi"), deny(missing_docs))]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(rustdoc::private_intra_doc_links)]

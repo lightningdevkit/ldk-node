@@ -271,14 +271,10 @@ mod tests {
 	}
 
 	fn blinded_path() -> BlindedMessagePath {
-		BlindedMessagePath::from_blinded_path(
-			pubkey(40),
-			pubkey(41),
-			vec![
-				BlindedHop { blinded_node_id: pubkey(42), encrypted_payload: vec![0; 43] },
-				BlindedHop { blinded_node_id: pubkey(43), encrypted_payload: vec![0; 44] },
-			],
-		)
+		BlindedMessagePath::from_blinded_path(pubkey(40), pubkey(41), vec![
+			BlindedHop { blinded_node_id: pubkey(42), encrypted_payload: vec![0; 43] },
+			BlindedHop { blinded_node_id: pubkey(43), encrypted_payload: vec![0; 44] },
+		])
 	}
 
 	fn pubkey(byte: u8) -> PublicKey {

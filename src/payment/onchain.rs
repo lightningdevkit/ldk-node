@@ -23,7 +23,7 @@ type FeeRate = bitcoin::FeeRate;
 type FeeRate = Arc<bitcoin::FeeRate>;
 
 macro_rules! maybe_map_fee_rate_opt {
-	($fee_rate_opt: expr) => {{
+	($fee_rate_opt:expr) => {{
 		#[cfg(not(feature = "uniffi"))]
 		{
 			$fee_rate_opt

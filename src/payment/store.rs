@@ -179,7 +179,7 @@ impl StorableObject for PaymentDetails {
 		let mut updated = false;
 
 		macro_rules! update_if_necessary {
-			($val: expr, $update: expr) => {
+			($val:expr, $update:expr) => {
 				if $val != $update {
 					$val = $update;
 					updated = true;
