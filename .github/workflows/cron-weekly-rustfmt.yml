@@ -1,0 +1,28 @@
+name: Nightly rustfmt
+on:
+  schedule:
+    - cron: "0 0 * * 0" # runs weekly on Sunday at 00:00
+  workflow_dispatch: # allows manual triggering
+jobs:
+  format:
+    name: Nightly rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Run Nightly rustfmt
+        # Run the formatter and manually remove trailing whitespace.
+        run: cargo +nightly fmt && git ls-files -- '*.rs' -z | xargs sed -E -i'' -e 's/[[:space:]]+$//'
+      - name: Get the current date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          author: Fmt Bot <bot@example.com>
+          title: Automated nightly rustfmt (${{ env.date }})
+          body: |
+           Automated nightly `rustfmt` changes by [create-pull-request](https://github.com/peter-evans/create-pull-request) GitHub action
+          commit-message: ${{ env.date }} automated rustfmt nightly 
+          labels: rustfmt
