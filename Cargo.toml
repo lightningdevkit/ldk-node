@@ -5,6 +5,7 @@ authors = ["Elias Rohrer <dev@tnull.de>"]
 homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
 edition = "2021"
+rust-version = "1.85"
 description = "A ready-to-go node implementation built using LDK."
 repository = "https://github.com/lightningdevkit/ldk-node/"
 readme = "README.md"
