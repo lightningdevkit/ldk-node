@@ -34,7 +34,7 @@ async fn test_lnd() {
 	let electrs_client = ElectrumClient::new("tcp://127.0.0.1:50001").unwrap();
 
 	// Give electrs a kick.
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1);
+	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1).await;
 
 	// Setup LDK Node
 	let config = common::random_config(true);
@@ -52,7 +52,8 @@ async fn test_lnd() {
 		&electrs_client,
 		vec![address],
 		premine_amount,
-	);
+	)
+	.await;
 
 	// Setup LND
 	let endpoint = "127.0.0.1:8081";
@@ -73,8 +74,8 @@ async fn test_lnd() {
 		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, lnd_node_id);
-	common::wait_for_tx(&electrs_client, funding_txo.txid);
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6);
+	common::wait_for_tx(&electrs_client, funding_txo.txid).await;
+	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6).await;
 	node.sync_wallets().unwrap();
 	let user_channel_id = common::expect_channel_ready_event!(node, lnd_node_id);
 
