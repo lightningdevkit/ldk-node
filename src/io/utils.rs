@@ -22,9 +22,11 @@ use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
-use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
+use lightning::routing::scoring::{
+	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
+};
 use lightning::util::persist::{
-	KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
 	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_KEY,
 	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -47,6 +49,8 @@ use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
 use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
+
+pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
 /// Generates a random [BIP 39] mnemonic.
 ///
@@ -161,6 +165,53 @@ where
 	ProbabilisticScorer::read(&mut reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize scorer: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize Scorer")
+	})
+}
+
+/// Read previously persisted external pathfinding scores from the cache.
+pub(crate) fn read_external_pathfinding_scores_from_cache<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<ChannelLiquidities, std::io::Error>
+where
+	L::Target: LdkLogger,
+{
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
+		SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+		SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+		EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+	)?);
+	ChannelLiquidities::read(&mut reader).map_err(|e| {
+		log_error!(logger, "Failed to deserialize scorer: {}", e);
+		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize Scorer")
+	})
+}
+
+/// Persist external pathfinding scores to the cache.
+pub(crate) async fn write_external_pathfinding_scores_to_cache<L: Deref>(
+	kv_store: Arc<DynStore>, data: &ChannelLiquidities, logger: L,
+) -> Result<(), Error>
+where
+	L::Target: LdkLogger,
+{
+	KVStore::write(
+		&*kv_store,
+		SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+		SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+		EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+		data.encode(),
+	)
+	.await
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Writing data to key {}/{}/{} failed due to: {}",
+			NODE_METRICS_PRIMARY_NAMESPACE,
+			NODE_METRICS_SECONDARY_NAMESPACE,
+			EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+			e
+		);
+		Error::PersistenceFailed
 	})
 }
 

@@ -97,6 +97,7 @@ mod message_handler;
 pub mod payment;
 mod peer_store;
 mod runtime;
+mod scoring;
 mod tx_broadcaster;
 mod types;
 mod wallet;
@@ -106,6 +107,7 @@ use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::scoring::setup_background_pathfinding_scores_sync;
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
 #[cfg(feature = "uniffi")]
@@ -156,6 +158,7 @@ use types::{
 pub use types::{
 	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
 };
+
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -185,6 +188,7 @@ pub struct Node {
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
+	pathfinding_scores_sync_url: Option<String>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	kv_store: Arc<DynStore>,
 	logger: Arc<Logger>,
@@ -261,7 +265,6 @@ impl Node {
 							return;
 						}
 						_ = interval.tick() => {
-							let gossip_sync_logger = Arc::clone(&gossip_sync_logger);
 							let now = Instant::now();
 							match gossip_source.update_rgs_snapshot().await {
 								Ok(updated_timestamp) => {
@@ -291,6 +294,18 @@ impl Node {
 					}
 				}
 			});
+		}
+
+		if let Some(pathfinding_scores_sync_url) = self.pathfinding_scores_sync_url.as_ref() {
+			setup_background_pathfinding_scores_sync(
+				pathfinding_scores_sync_url.clone(),
+				Arc::clone(&self.scorer),
+				Arc::clone(&self.node_metrics),
+				Arc::clone(&self.kv_store),
+				Arc::clone(&self.logger),
+				Arc::clone(&self.runtime),
+				self.stop_sender.subscribe(),
+			);
 		}
 
 		if let Some(listening_addresses) = &self.config.listening_addresses {
@@ -694,6 +709,8 @@ impl Node {
 			locked_node_metrics.latest_fee_rate_cache_update_timestamp;
 		let latest_rgs_snapshot_timestamp =
 			locked_node_metrics.latest_rgs_snapshot_timestamp.map(|val| val as u64);
+		let latest_pathfinding_scores_sync_timestamp =
+			locked_node_metrics.latest_pathfinding_scores_sync_timestamp;
 		let latest_node_announcement_broadcast_timestamp =
 			locked_node_metrics.latest_node_announcement_broadcast_timestamp;
 		let latest_channel_monitor_archival_height =
@@ -706,6 +723,7 @@ impl Node {
 			latest_onchain_wallet_sync_timestamp,
 			latest_fee_rate_cache_update_timestamp,
 			latest_rgs_snapshot_timestamp,
+			latest_pathfinding_scores_sync_timestamp,
 			latest_node_announcement_broadcast_timestamp,
 			latest_channel_monitor_archival_height,
 		}
@@ -1533,6 +1551,8 @@ pub struct NodeStatus {
 	///
 	/// Will be `None` if RGS isn't configured or the snapshot hasn't been updated yet.
 	pub latest_rgs_snapshot_timestamp: Option<u64>,
+	/// The timestamp, in seconds since start of the UNIX epoch, when we last successfully merged external scores.
+	pub latest_pathfinding_scores_sync_timestamp: Option<u64>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node
 	/// announcement.
 	///
@@ -1551,6 +1571,7 @@ pub(crate) struct NodeMetrics {
 	latest_onchain_wallet_sync_timestamp: Option<u64>,
 	latest_fee_rate_cache_update_timestamp: Option<u64>,
 	latest_rgs_snapshot_timestamp: Option<u32>,
+	latest_pathfinding_scores_sync_timestamp: Option<u64>,
 	latest_node_announcement_broadcast_timestamp: Option<u64>,
 	latest_channel_monitor_archival_height: Option<u32>,
 }
@@ -1562,6 +1583,7 @@ impl Default for NodeMetrics {
 			latest_onchain_wallet_sync_timestamp: None,
 			latest_fee_rate_cache_update_timestamp: None,
 			latest_rgs_snapshot_timestamp: None,
+			latest_pathfinding_scores_sync_timestamp: None,
 			latest_node_announcement_broadcast_timestamp: None,
 			latest_channel_monitor_archival_height: None,
 		}
@@ -1570,6 +1592,7 @@ impl Default for NodeMetrics {
 
 impl_writeable_tlv_based!(NodeMetrics, {
 	(0, latest_lightning_wallet_sync_timestamp, option),
+	(1, latest_pathfinding_scores_sync_timestamp, option),
 	(2, latest_onchain_wallet_sync_timestamp, option),
 	(4, latest_fee_rate_cache_update_timestamp, option),
 	(6, latest_rgs_snapshot_timestamp, option),

@@ -63,6 +63,9 @@ pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(60);
 // The time in-between RGS sync attempts.
 pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+// The time in-between external scores sync attempts.
+pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
 // The time in-between node announcement broadcast attempts.
 pub(crate) const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -92,6 +95,9 @@ pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
 
 /// The length in bytes of our wallets' keys seed.
 pub const WALLET_KEYS_SEED_LEN: usize = 64;
+
+// The timeout after which we abort a external scores sync operation.
+pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
