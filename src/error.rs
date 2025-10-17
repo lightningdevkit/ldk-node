@@ -125,6 +125,12 @@ pub enum Error {
 	InvalidBlindedPaths,
 	/// Asynchronous payment services are disabled.
 	AsyncPaymentServicesDisabled,
+	/// Parsing a Human-Readable Name has failed.
+	HrnParsingFailed,
+	/// A HRN resolver was not configured
+	HrnResolverNotConfigured,
+	/// A Timeout occurred during an operation.
+	TimeoutOccurred,
 }
 
 impl fmt::Display for Error {
@@ -201,6 +207,15 @@ impl fmt::Display for Error {
 			Self::InvalidBlindedPaths => write!(f, "The given blinded paths are invalid."),
 			Self::AsyncPaymentServicesDisabled => {
 				write!(f, "Asynchronous payment services are disabled.")
+			},
+			Self::HrnParsingFailed => {
+				write!(f, "Failed to parse a human-readable name.")
+			},
+			Self::HrnResolverNotConfigured => {
+				write!(f, "A HRN resolver was not configured.")
+			},
+			Self::TimeoutOccurred => {
+				write!(f, "A Timeout occured during an operation.")
 			},
 		}
 	}
