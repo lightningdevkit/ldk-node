@@ -216,10 +216,11 @@ impl Default for Config {
 ///
 /// ### Defaults
 ///
-/// | Parameter                  | Value  |
-/// |----------------------------|--------|
-/// | `trusted_peers_no_reserve` | []     |
-/// | `per_channel_reserve_sats` | 25000  |
+/// | Parameter                     | Value  |
+/// |-------------------------------|--------|
+/// | `trusted_peers_no_reserve`    | []     |
+/// | `per_channel_reserve_sats`    | 25000  |
+/// | `enable_zero_fee_commitments` | false  |
 ///
 ///
 /// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
@@ -254,6 +255,11 @@ pub struct AnchorChannelsConfig {
 	/// might not suffice to successfully spend the Anchor output and have the HTLC transactions
 	/// confirmed on-chain, i.e., you may want to adjust this value accordingly.
 	pub per_channel_reserve_sats: u64,
+	/// In addition to `option_anchors_zero_fee_htlc_tx`, we will also attempt to negotiate
+	/// `option_anchor_zero_fee_commitments`. All the caveats and warnings in
+	/// [`AnchorChannelsConfig`] still apply.
+	/// [`AnchorChannelsConfig`]: Config::anchor_channels_config
+	pub enable_zero_fee_commitments: bool,
 }
 
 impl Default for AnchorChannelsConfig {
@@ -261,6 +267,7 @@ impl Default for AnchorChannelsConfig {
 		Self {
 			trusted_peers_no_reserve: Vec::new(),
 			per_channel_reserve_sats: DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS,
+			enable_zero_fee_commitments: false,
 		}
 	}
 }
@@ -319,6 +326,11 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.manually_accept_inbound_channels = true;
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
+	user_config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = config
+		.anchor_channels_config
+		.as_ref()
+		.map(|config| config.enable_zero_fee_commitments)
+		.unwrap_or(false);
 
 	if may_announce_channel(config).is_err() {
 		user_config.accept_forwards_to_priv_channels = false;
