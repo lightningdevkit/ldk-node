@@ -46,6 +46,8 @@ where
 {
 }
 
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
+
 /// A type alias for [`SyncAndAsyncKVStore`] with `Sync`/`Send` markers;
 pub type DynStore = dyn SyncAndAsyncKVStore + Sync + Send;
 
@@ -141,9 +143,11 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
 	Arc<ChannelManager>,
-	IgnoringMessageHandler,
+	Arc<HRNResolver>,
 	IgnoringMessageHandler,
 >;
+
+pub(crate) type HRNResolver = LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
