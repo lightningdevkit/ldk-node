@@ -40,6 +40,7 @@ lightning-block-sync = { version = "0.2.0-beta1", features = ["rest-client", "rp
 lightning-transaction-sync = { version = "0.2.0-beta1", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
 lightning-liquidity = { version = "0.2.0-beta1", features = ["std"] }
 lightning-macros = { version = "0.2.0-beta1" }
+lightning-dns-resolver = { version = "0.3.0-beta1" }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["std"] }
 #lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
@@ -52,6 +53,7 @@ lightning-macros = { version = "0.2.0-beta1" }
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
+#lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03", features = ["std"] }
 #lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
@@ -64,6 +66,7 @@ lightning-macros = { version = "0.2.0-beta1" }
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
+#lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
 
 #lightning = { path = "../rust-lightning/lightning", features = ["std"] }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
@@ -76,6 +79,7 @@ lightning-macros = { version = "0.2.0-beta1" }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async-https", "electrum-rustls-ring", "time"] }
 #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity", features = ["std"] }
 #lightning-macros = { path = "../rust-lightning/lightning-macros" }
+#lightning-dns-resolver = { path = "../rust-lightning/lightning-dns-resolvers" }
 
 bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
@@ -103,6 +107,8 @@ log = { version = "0.4.22", default-features = false, features = ["std"]}
 
 vss-client = "0.3"
 prost = { version = "0.11.6", default-features = false}
+#bitcoin-payment-instructions = { version = "0.5" }
+bitcoin-payment-instructions = { git = "https://github.com/chuksys/bitcoin-payment-instructions", branch = "bump-ldk-deps" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }

@@ -13,6 +13,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
+	boolean is_hrn_resolver;
 };
 
 dictionary AnchorChannelsConfig {
@@ -129,7 +130,7 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
-	UnifiedQrPayment unified_qr_payment();
+	UnifiedPayment unified_payment();
 	LSPS1Liquidity lsps1_liquidity();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
@@ -202,7 +203,7 @@ interface Bolt12Payment {
 	[Throws=NodeError]
 	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note);
+	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, HumanReadableName? hrn);
 	[Throws=NodeError]
 	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
@@ -251,11 +252,11 @@ interface FeeRate {
 	u64 to_sat_per_vb_ceil();
 };
 
-interface UnifiedQrPayment {
+interface UnifiedPayment {
 	[Throws=NodeError]
 	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
-	[Throws=NodeError]
-	QrPaymentResult send([ByRef]string uri_str);
+	[Throws=NodeError, Async]
+	UnifiedPaymentResult send([ByRef]string uri_str, u64? amount_msat);
 };
 
 interface LSPS1Liquidity {
@@ -321,6 +322,8 @@ enum NodeError {
 	"LiquidityFeeTooHigh",
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
+	"HrnParsingFailed",
+	"HrnResolverNotConfigured",
 };
 
 dictionary NodeStatus {
@@ -357,6 +360,7 @@ enum BuildError {
 	"LoggerSetupFailed",
 	"NetworkMismatch",
 	"AsyncPaymentsConfigMismatch",
+	"DNSResolverSetupFailed",
 };
 
 [Trait]
@@ -429,7 +433,7 @@ interface PaymentKind {
 };
 
 [Enum]
-interface QrPaymentResult {
+interface UnifiedPaymentResult {
 	Onchain(Txid txid);
 	Bolt11(PaymentId payment_id);
 	Bolt12(PaymentId payment_id);
@@ -779,6 +783,13 @@ interface Offer {
 	sequence<u8>? metadata();
 	u64? absolute_expiry_seconds();
 	PublicKey? issuer_signing_pubkey();
+};
+
+interface HumanReadableName {
+	[Throws=NodeError, Name=from_encoded]
+	constructor([ByRef] string encoded);
+	string user();
+	string domain();
 };
 
 [Traits=(Debug, Display, Eq)]
