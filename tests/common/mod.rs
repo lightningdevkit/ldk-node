@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+#[cfg(feature = "uniffi")]
+use async_trait::async_trait;
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -31,8 +33,11 @@ use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+	Builder, CustomTlvRecord, DynStore, DynStoreWrapper, Event, LightningBalance, Node, NodeError,
+	PendingSweepBalance, RetryConfig,
 };
+#[cfg(feature = "uniffi")]
+use ldk_node::{FfiDynStore, ForeignDynStoreTrait, IOError};
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
@@ -299,10 +304,20 @@ pub(crate) enum TestChainSource<'a> {
 	BitcoindRestSync(&'a BitcoinD),
 }
 
-#[derive(Clone, Copy)]
+#[cfg(feature = "uniffi")]
+type TestDynStore = Arc<FfiDynStore>;
+#[cfg(not(feature = "uniffi"))]
+type TestDynStore = Arc<DynStore>;
+
+#[derive(Clone)]
 pub(crate) enum TestStoreType {
 	TestSyncStore,
 	Sqlite,
+	TierStore {
+		primary: TestDynStore,
+		backup: Option<TestDynStore>,
+		ephemeral: Option<TestDynStore>,
+	},
 }
 
 impl Default for TestStoreType {
@@ -353,6 +368,93 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
+#[cfg(feature = "uniffi")]
+struct TestForeignDynStoreAdapter(Arc<DynStore>);
+
+#[cfg(feature = "uniffi")]
+#[async_trait]
+impl ForeignDynStoreTrait for TestForeignDynStoreAdapter {
+	async fn read_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError> {
+		self.0.read_async(&primary_namespace, &secondary_namespace, &key).await.map_err(Into::into)
+	}
+
+	async fn write_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError> {
+		self.0
+			.write_async(&primary_namespace, &secondary_namespace, &key, buf)
+			.await
+			.map_err(Into::into)
+	}
+
+	async fn remove_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError> {
+		self.0
+			.remove_async(&primary_namespace, &secondary_namespace, &key, lazy)
+			.await
+			.map_err(Into::into)
+	}
+
+	async fn list_async(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError> {
+		self.0.list_async(&primary_namespace, &secondary_namespace).await.map_err(Into::into)
+	}
+
+	fn read(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError> {
+		self.0.read(&primary_namespace, &secondary_namespace, &key).map_err(Into::into)
+	}
+
+	fn write(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError> {
+		self.0.write(&primary_namespace, &secondary_namespace, &key, buf).map_err(Into::into)
+	}
+
+	fn remove(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError> {
+		self.0.remove(&primary_namespace, &secondary_namespace, &key, lazy).map_err(Into::into)
+	}
+
+	fn list(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError> {
+		self.0.list(&primary_namespace, &secondary_namespace).map_err(Into::into)
+	}
+}
+
+pub(crate) fn create_tier_stores(base_path: PathBuf) -> (TestDynStore, TestDynStore, TestDynStore) {
+	let primary = Arc::new(DynStoreWrapper(
+		SqliteStore::new(
+			base_path.join("primary"),
+			Some("primary_db".to_string()),
+			Some("primary_kv".to_string()),
+		)
+		.unwrap(),
+	));
+	let backup = Arc::new(DynStoreWrapper(FilesystemStore::new(base_path.join("backup"))));
+	let ephemeral = Arc::new(DynStoreWrapper(TestStore::new(false)));
+
+	#[cfg(feature = "uniffi")]
+	{
+		(
+			Arc::new(FfiDynStore::from_store(Arc::new(TestForeignDynStoreAdapter(primary)))),
+			Arc::new(FfiDynStore::from_store(Arc::new(TestForeignDynStoreAdapter(backup)))),
+			Arc::new(FfiDynStore::from_store(Arc::new(TestForeignDynStoreAdapter(ephemeral)))),
+		)
+	}
+	#[cfg(not(feature = "uniffi"))]
+	{
+		(primary, backup, ephemeral)
+	}
+}
+
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
@@ -363,21 +465,22 @@ pub(crate) fn setup_two_nodes(
 		anchor_channels,
 		anchors_trusted_no_reserve,
 		TestStoreType::TestSyncStore,
+		TestStoreType::TestSyncStore,
 	)
 }
 
 pub(crate) fn setup_two_nodes_with_store(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
+	anchors_trusted_no_reserve: bool, store_type_a: TestStoreType, store_type_b: TestStoreType,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let mut config_a = random_config(anchor_channels);
-	config_a.store_type = store_type;
+	config_a.store_type = store_type_a;
 	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
-	config_b.store_type = store_type;
+	config_b.store_type = store_type_b;
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -460,6 +563,16 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
+		TestStoreType::TierStore { primary, backup, ephemeral } => {
+			if let Some(backup) = backup {
+				builder.set_tier_store_backup(backup);
+			}
+			if let Some(ephemeral) = ephemeral {
+				builder.set_tier_store_ephemeral(ephemeral);
+			}
+			builder.set_tier_store_retry_config(RetryConfig::default());
+			builder.build_with_tier_store(config.node_entropy.into(), primary).unwrap()
+		},
 	};
 
 	if config.recovery_mode {
