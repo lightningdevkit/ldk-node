@@ -606,38 +606,40 @@ mod tests {
 
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng, RngCore};
-	use tokio::runtime;
 	use vss_client::headers::FixedHeaders;
 
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
+	use crate::logger::Logger;
 
 	#[test]
 	fn vss_read_write_remove_list_persist() {
-		let runtime = Arc::new(Runtime::new().unwrap());
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = thread_rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		let runtime = Arc::new(Runtime::new(logger).unwrap());
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime).unwrap();
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
 
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 	async fn vss_read_write_remove_list_persist_in_runtime_context() {
-		let runtime = Arc::new(Runtime::new().unwrap());
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = thread_rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		let runtime = Arc::new(Runtime::new(logger).unwrap());
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime).unwrap();
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
 
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
