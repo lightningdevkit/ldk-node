@@ -48,7 +48,7 @@ dictionary LSPS2ServiceConfig {
 
 dictionary RetryConfig {
 	u16 initial_retry_delay_ms;
-	u16 maximum_delay_secs;
+	u16 maximum_delay_ms;
 	f32 backoff_multiplier;
 };
 

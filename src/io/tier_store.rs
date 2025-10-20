@@ -31,8 +31,8 @@ use std::time::Duration;
 // configuring.
 const BACKUP_QUEUE_CAPACITY: usize = 100;
 
-const DEFAULT_INITIAL_RETRY_DELAY_MS: u16 = 50;
-const DEFAULT_MAXIMUM_RETRY_DELAY_SECS: u16 = 5;
+const DEFAULT_INITIAL_RETRY_DELAY_MS: u16 = 10;
+const DEFAULT_MAXIMUM_RETRY_DELAY_MS: u16 = 500;
 const DEFAULT_BACKOFF_MULTIPLIER: f32 = 1.5;
 
 /// Configuration for exponential backoff retry behavior.
@@ -40,8 +40,8 @@ const DEFAULT_BACKOFF_MULTIPLIER: f32 = 1.5;
 pub struct RetryConfig {
 	/// The initial delay before the first retry attempt, in milliseconds.
 	pub initial_retry_delay_ms: u16,
-	/// The maximum delay between retry attempts, in seconds.
-	pub maximum_delay_secs: u16,
+	/// The maximum delay between retry attempts, in milliseconds.
+	pub maximum_delay_ms: u16,
 	/// The multiplier applied to the delay after each retry attempt.
 	///
 	/// For example, a value of `2.0` doubles the delay after each failed retry.
@@ -52,7 +52,7 @@ impl Default for RetryConfig {
 	fn default() -> Self {
 		Self {
 			initial_retry_delay_ms: DEFAULT_INITIAL_RETRY_DELAY_MS,
-			maximum_delay_secs: DEFAULT_MAXIMUM_RETRY_DELAY_SECS,
+			maximum_delay_ms: DEFAULT_MAXIMUM_RETRY_DELAY_MS,
 			backoff_multiplier: DEFAULT_BACKOFF_MULTIPLIER,
 		}
 	}
@@ -515,7 +515,7 @@ impl TierStoreInner {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
 		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_secs(self.retry_config.maximum_delay_secs as u64);
+		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
 		let mut tries = 0_u16;
 
 		loop {
@@ -575,7 +575,7 @@ impl TierStoreInner {
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<Vec<String>> {
 		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_secs(self.retry_config.maximum_delay_secs as u64);
+		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
 		let mut tries = 0_u16;
 
 		loop {
@@ -625,7 +625,7 @@ impl TierStoreInner {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_secs(self.retry_config.maximum_delay_secs as u64);
+		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
 		let mut tries = 0_u16;
 
 		loop {
@@ -689,7 +689,7 @@ impl TierStoreInner {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
 		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_secs(self.retry_config.maximum_delay_secs as u64);
+		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
 		let mut tries = 0_u16;
 
 		loop {
