@@ -33,8 +33,8 @@ use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	wrap_store, Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
-	PendingSweepBalance,
+	wrap_store, Builder, CustomTlvRecord, DynStore, Event, LightningBalance, Node, NodeError,
+	PendingSweepBalance, RetryConfig,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -277,10 +277,15 @@ pub(crate) enum TestChainSource<'a> {
 	BitcoindRestSync(&'a BitcoinD),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum TestStoreType {
 	TestSyncStore,
 	Sqlite,
+	TierStore {
+		primary: Arc<DynStore>,
+		backup: Option<Arc<DynStore>>,
+		ephemeral: Option<Arc<DynStore>>,
+	},
 }
 
 impl Default for TestStoreType {
@@ -320,6 +325,22 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
+pub(crate) fn create_tier_stores(
+	base_path: PathBuf,
+) -> (Arc<DynStore>, Arc<DynStore>, Arc<DynStore>) {
+	let primary = wrap_store!(Arc::new(
+		SqliteStore::new(
+			base_path.join("primary"),
+			Some("primary_db".to_string()),
+			Some("primary_kv".to_string()),
+		)
+		.unwrap(),
+	));
+	let backup = wrap_store!(Arc::new(FilesystemStore::new(base_path.join("backup"))));
+	let ephemeral = wrap_store!(Arc::new(TestStore::new(false)));
+	(primary, backup, ephemeral)
+}
+
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
@@ -330,21 +351,22 @@ pub(crate) fn setup_two_nodes(
 		anchor_channels,
 		anchors_trusted_no_reserve,
 		TestStoreType::TestSyncStore,
+		TestStoreType::TestSyncStore,
 	)
 }
 
 pub(crate) fn setup_two_nodes_with_store(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
+	anchors_trusted_no_reserve: bool, store_type_a: TestStoreType, store_type_b: TestStoreType,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let mut config_a = random_config(anchor_channels);
-	config_a.store_type = store_type;
+	config_a.store_type = store_type_a;
 	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
-	config_b.store_type = store_type;
+	config_b.store_type = store_type_b;
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -430,6 +452,16 @@ pub(crate) fn setup_node_for_async_payments(
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
+		TestStoreType::TierStore { primary, backup, ephemeral } => {
+			if let Some(backup) = backup {
+				builder.set_tier_store_backup(backup);
+			}
+			if let Some(ephemeral) = ephemeral {
+				builder.set_tier_store_ephemeral(ephemeral);
+			}
+			builder.set_tier_store_retry_config(RetryConfig::default());
+			builder.build_with_tier_store(config.node_entropy.into(), primary).unwrap()
+		},
 	};
 
 	node.start().unwrap();
