@@ -67,7 +67,10 @@ impl Runtime {
 	{
 		let mut background_tasks = self.background_tasks.lock().unwrap();
 		let runtime_handle = self.handle();
-		background_tasks.spawn_on(future, runtime_handle);
+		// Since it seems to make a difference to `tokio` (see
+		// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
+		// are always put in an `async` / `.await` closure.
+		background_tasks.spawn_on(async { future.await }, runtime_handle);
 	}
 
 	pub fn spawn_cancellable_background_task<F>(&self, future: F)
@@ -76,7 +79,10 @@ impl Runtime {
 	{
 		let mut cancellable_background_tasks = self.cancellable_background_tasks.lock().unwrap();
 		let runtime_handle = self.handle();
-		cancellable_background_tasks.spawn_on(future, runtime_handle);
+		// Since it seems to make a difference to `tokio` (see
+		// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
+		// are always put in an `async` / `.await` closure.
+		cancellable_background_tasks.spawn_on(async { future.await }, runtime_handle);
 	}
 
 	pub fn spawn_background_processor_task<F>(&self, future: F)
@@ -107,7 +113,10 @@ impl Runtime {
 		// to detect the outer context here, and otherwise use whatever was set during
 		// initialization.
 		let handle = tokio::runtime::Handle::try_current().unwrap_or(self.handle().clone());
-		tokio::task::block_in_place(move || handle.block_on(future))
+		// Since it seems to make a difference to `tokio` (see
+		// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
+		// are always put in an `async` / `.await` closure.
+		tokio::task::block_in_place(move || handle.block_on(async { future.await }))
 	}
 
 	pub fn abort_cancellable_background_tasks(&self) {
@@ -154,6 +163,9 @@ impl Runtime {
 			self.background_processor_task.lock().unwrap().take()
 		{
 			let abort_handle = background_processor_task.abort_handle();
+			// Since it seems to make a difference to `tokio` (see
+			// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
+			// are always put in an `async` / `.await` closure.
 			let timeout_res = self.block_on(async {
 				tokio::time::timeout(
 					Duration::from_secs(LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS),
