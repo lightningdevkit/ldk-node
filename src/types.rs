@@ -136,7 +136,8 @@ impl<'a> KVStoreSync for dyn DynStoreTrait + 'a {
 /// Type alias for any store that implements DynStoreTrait.
 pub type DynStore = dyn DynStoreTrait;
 
-pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub(crate) T);
+/// A wrapper that allows using any [`SyncAndAsyncKVStore`] implementor as a trait object.
+pub struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub T);
 
 impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 	fn read_async(

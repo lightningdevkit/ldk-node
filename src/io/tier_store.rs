@@ -28,7 +28,10 @@ use std::time::Duration;
 
 // todo(enigbe): Uncertain about appropriate queue size and if this would need
 // configuring.
+#[cfg(not(test))]
 const BACKUP_QUEUE_CAPACITY: usize = 100;
+#[cfg(test)]
+const BACKUP_QUEUE_CAPACITY: usize = 5;
 
 const DEFAULT_INITIAL_RETRY_DELAY_MS: u16 = 10;
 const DEFAULT_MAXIMUM_RETRY_DELAY_MS: u16 = 500;
@@ -1125,143 +1128,294 @@ impl BackupOp {
 
 #[cfg(test)]
 mod tests {
-	use crate::io::test_utils::random_storage_path;
+	use std::panic::RefUnwindSafe;
+	use std::path::PathBuf;
+	use std::sync::Arc;
+	use std::thread;
+
+	use lightning::util::logger::Level;
+	use lightning::util::persist::{
+		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+	use lightning_persister::fs_store::FilesystemStore;
+
+	use crate::io::test_utils::{
+		do_read_write_remove_list_persist, random_storage_path, DelayedStore,
+	};
 	use crate::io::tier_store::{RetryConfig, TierStore};
 	use crate::logger::Logger;
 	use crate::runtime::Runtime;
 	#[cfg(not(feature = "uniffi"))]
 	use crate::types::DynStore;
 	use crate::types::DynStoreWrapper;
-	#[cfg(feature = "uniffi")]
-	use crate::DynStore;
 
-	use lightning::util::logger::Level;
-	use lightning::util::persist::{
-		KVStoreSync, NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	};
-	use lightning_persister::fs_store::FilesystemStore;
+	use super::*;
 
-	use std::path::PathBuf;
-	use std::sync::Arc;
-	// use std::time::Duration;
+	impl RefUnwindSafe for TierStore {}
 
-	struct StorageFixture {
-		tier: TierStore,
-		primary: Arc<DynStore>,
-		ephemeral: Option<Arc<DynStore>>,
-		backup: Option<Arc<DynStore>>,
-		base_dir: PathBuf,
-	}
-
-	impl Drop for StorageFixture {
+	struct CleanupDir(PathBuf);
+	impl Drop for CleanupDir {
 		fn drop(&mut self) {
-			drop(self.backup.take());
-			drop(self.ephemeral.take());
-
-			if let Err(e) = std::fs::remove_dir_all(&self.base_dir) {
-				eprintln!("Failed to clean up test directory {:?}: {}", self.base_dir, e);
-			}
+			let _ = std::fs::remove_dir_all(&self.0);
 		}
 	}
 
-	fn setup_tier_store(ephemeral: bool, backup: bool) -> StorageFixture {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-
-		let primary: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary_store"))));
-		let logger = Arc::new(
-			Logger::new_fs_writer(log_path, Level::Debug)
-				.expect("Failed to create filesystem logger"),
-		);
-		let runtime =
-			Arc::new(Runtime::new(Arc::clone(&logger)).expect("Failed to create new runtime."));
+	fn setup_tier_store(
+		primary_store: Arc<DynStore>, logger: Arc<Logger>, runtime: Arc<Runtime>,
+	) -> TierStore {
 		let retry_config = RetryConfig::default();
-		let mut tier =
-			TierStore::new(Arc::clone(&primary), Arc::clone(&runtime), logger, retry_config);
-
-		let ephemeral = if ephemeral {
-			let eph_store: Arc<DynStore> =
-				Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("eph_store"))));
-			tier.set_ephemeral_store(Arc::clone(&eph_store));
-			Some(eph_store)
-		} else {
-			None
-		};
-
-		let backup = if backup {
-			let backup: Arc<DynStore> =
-				Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup_store"))));
-			tier.set_backup_store(Arc::clone(&backup));
-			Some(backup)
-		} else {
-			None
-		};
-
-		StorageFixture { tier, primary, ephemeral, backup, base_dir }
+		TierStore::new(primary_store, runtime, logger, retry_config)
 	}
 
 	#[test]
-	fn writes_to_ephemeral_if_configured() {
-		let tier = setup_tier_store(true, false);
-		assert!(tier.ephemeral.is_some());
+	fn write_read_list_remove() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
 
-		let primary_namespace = NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE;
-		let secondary_namespace = NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE;
-		let data = [42u8; 32].to_vec();
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+		let _cleanup = CleanupDir(base_dir.clone());
 
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let tier = setup_tier_store(primary_store, logger, runtime);
+
+		do_read_write_remove_list_persist(&tier);
+	}
+
+	#[test]
+	fn ephemeral_routing() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger, runtime);
+
+		let ephemeral_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("ephemeral"))));
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		let data = vec![42u8; 32];
+
+		// Non-critical
 		KVStoreSync::write(
-			&tier.tier,
-			primary_namespace,
-			secondary_namespace,
+			&tier,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_KEY,
 			data.clone(),
 		)
 		.unwrap();
 
+		// Critical
 		KVStoreSync::write(
-			&tier.tier,
-			primary_namespace,
-			secondary_namespace,
-			SCORER_PERSISTENCE_KEY,
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
 			data.clone(),
 		)
 		.unwrap();
 
-		let eph_store = tier.ephemeral.clone().unwrap();
-		let ng_read = KVStoreSync::read(
-			&*eph_store,
-			primary_namespace,
-			secondary_namespace,
+		let primary_read_ng = KVStoreSync::read(
+			&*primary_store,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_KEY,
+		);
+		let ephemeral_read_ng = KVStoreSync::read(
+			&*ephemeral_store,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+		);
+
+		let primary_read_cm = KVStoreSync::read(
+			&*primary_store,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+		let ephemeral_read_cm = KVStoreSync::read(
+			&*ephemeral_store,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+
+		assert!(primary_read_ng.is_err());
+		assert_eq!(ephemeral_read_ng.unwrap(), data);
+
+		assert!(ephemeral_read_cm.is_err());
+		assert_eq!(primary_read_cm.unwrap(), data);
+	}
+
+	#[test]
+	fn lazy_backup() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger, runtime);
+
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
+		tier.set_backup_store(Arc::clone(&backup_store));
+
+		let data = vec![42u8; 32];
+
+		KVStoreSync::write(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			data.clone(),
 		)
 		.unwrap();
 
-		let sc_read = KVStoreSync::read(
-			&*eph_store,
-			primary_namespace,
-			secondary_namespace,
-			SCORER_PERSISTENCE_KEY,
+		// Immediate read from backup should fail
+		let backup_read_cm = KVStoreSync::read(
+			&*backup_store,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+		assert!(backup_read_cm.is_err());
+
+		// Primary not blocked by backup hence immediate read should succeed
+		let primary_read_cm = KVStoreSync::read(
+			&*primary_store,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+		assert_eq!(primary_read_cm.unwrap(), data);
+
+		// Delayed read  from backup should succeed
+		thread::sleep(Duration::from_millis(50));
+		let backup_read_cm = KVStoreSync::read(
+			&*backup_store,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+		assert_eq!(backup_read_cm.unwrap(), data);
+	}
+
+	#[test]
+	fn backup_overflow_doesnt_fail_writes() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path.clone(), Level::Trace).unwrap());
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let mut tier =
+			setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger), Arc::clone(&runtime));
+
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(DelayedStore::new(100, runtime)));
+		tier.set_backup_store(Arc::clone(&backup_store));
+
+		let data = vec![42u8; 32];
+
+		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
+		for i in 0..=10 {
+			let result = KVStoreSync::write(
+				&tier,
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				&format!("{}_{}", key, i),
+				data.clone(),
+			);
+
+			assert!(result.is_ok(), "Write {} should succeed", i);
+		}
+
+		// Check logs for backup queue overflow message
+		let log_contents = std::fs::read_to_string(&log_path).unwrap();
+		assert!(
+			log_contents.contains("Backup queue is full"),
+			"Logs should contain backup queue overflow message"
+		);
+	}
+
+	#[test]
+	fn lazy_removal() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path.clone(), Level::Trace).unwrap());
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let mut tier =
+			setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger), Arc::clone(&runtime));
+
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(DelayedStore::new(100, runtime)));
+		tier.set_backup_store(Arc::clone(&backup_store));
+
+		let data = vec![42u8; 32];
+
+		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
+		let write_result = KVStoreSync::write(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			data.clone(),
+		);
+		assert!(write_result.is_ok(), "Write should succeed");
+
+		thread::sleep(Duration::from_millis(10));
+
+		assert_eq!(
+			KVStoreSync::read(
+				&*backup_store,
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				key,
+			)
+			.unwrap(),
+			data
+		);
+
+		KVStoreSync::remove(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			true,
 		)
 		.unwrap();
 
-		assert_eq!(ng_read, data);
-		assert!(KVStoreSync::read(
-			&*tier.primary,
-			primary_namespace,
-			secondary_namespace,
-			NETWORK_GRAPH_PERSISTENCE_KEY
-		)
-		.is_err());
+		thread::sleep(Duration::from_millis(10));
 
-		assert_eq!(sc_read, data);
-		assert!(KVStoreSync::read(
-			&*tier.primary,
-			primary_namespace,
-			secondary_namespace,
-			SCORER_PERSISTENCE_KEY
-		)
-		.is_err());
+		let res = KVStoreSync::read(
+			&*backup_store,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+		);
+
+		assert!(res.is_err());
 	}
 }
