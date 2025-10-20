@@ -67,7 +67,7 @@ impl Runtime {
 	{
 		let mut background_tasks = self.background_tasks.lock().unwrap();
 		let runtime_handle = self.handle();
-		background_tasks.spawn_on(future, runtime_handle);
+		background_tasks.spawn_on(async { future.await }, runtime_handle);
 	}
 
 	pub fn spawn_cancellable_background_task<F>(&self, future: F)
@@ -76,7 +76,7 @@ impl Runtime {
 	{
 		let mut cancellable_background_tasks = self.cancellable_background_tasks.lock().unwrap();
 		let runtime_handle = self.handle();
-		cancellable_background_tasks.spawn_on(future, runtime_handle);
+		cancellable_background_tasks.spawn_on(async { future.await }, runtime_handle);
 	}
 
 	pub fn spawn_background_processor_task<F>(&self, future: F)
@@ -107,7 +107,7 @@ impl Runtime {
 		// to detect the outer context here, and otherwise use whatever was set during
 		// initialization.
 		let handle = tokio::runtime::Handle::try_current().unwrap_or(self.handle().clone());
-		tokio::task::block_in_place(move || handle.block_on(future))
+		tokio::task::block_in_place(move || handle.block_on(async { future.await }))
 	}
 
 	pub fn abort_cancellable_background_tasks(&self) {
