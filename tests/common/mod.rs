@@ -49,7 +49,7 @@ use serde_json::{json, Value};
 
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
-		match $node.wait_next_event() {
+		match $node.next_event_async().await {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				$node.event_handled().unwrap();
@@ -65,7 +65,7 @@ pub(crate) use expect_event;
 
 macro_rules! expect_channel_pending_event {
 	($node:expr, $counterparty_node_id:expr) => {{
-		match $node.wait_next_event() {
+		match $node.next_event_async().await {
 			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
@@ -83,7 +83,7 @@ pub(crate) use expect_channel_pending_event;
 
 macro_rules! expect_channel_ready_event {
 	($node:expr, $counterparty_node_id:expr) => {{
-		match $node.wait_next_event() {
+		match $node.next_event_async().await {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
@@ -101,7 +101,7 @@ pub(crate) use expect_channel_ready_event;
 
 macro_rules! expect_payment_received_event {
 	($node:expr, $amount_msat:expr) => {{
-		match $node.wait_next_event() {
+		match $node.next_event_async().await {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
@@ -123,7 +123,7 @@ pub(crate) use expect_payment_received_event;
 
 macro_rules! expect_payment_claimable_event {
 	($node:expr, $payment_id:expr, $payment_hash:expr, $claimable_amount_msat:expr) => {{
-		match $node.wait_next_event() {
+		match $node.next_event_async().await {
 			ref e @ Event::PaymentClaimable {
 				payment_id,
 				payment_hash,
@@ -148,7 +148,7 @@ pub(crate) use expect_payment_claimable_event;
 
 macro_rules! expect_payment_successful_event {
 	($node:expr, $payment_id:expr, $fee_paid_msat:expr) => {{
-		match $node.wait_next_event() {
+		match $node.next_event_async().await {
 			ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				if let Some(fee_msat) = $fee_paid_msat {
@@ -389,7 +389,7 @@ pub(crate) fn setup_node_for_async_payments(
 	node
 }
 
-pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
+pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
 ) {
 	let _ = bitcoind.create_wallet("ldk_node_test");
@@ -400,7 +400,7 @@ pub(crate) fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
-	wait_for_block(electrs, cur_height as usize + num);
+	wait_for_block(electrs, cur_height as usize + num).await;
 	print!(" Done!");
 	println!("\n");
 }
@@ -420,14 +420,14 @@ pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
 	assert!(new_cur_height + num_blocks == cur_height);
 }
 
-pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
+pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 	let mut header = match electrs.block_headers_subscribe() {
 		Ok(header) => header,
 		Err(_) => {
 			// While subscribing should succeed the first time around, we ran into some cases where
 			// it didn't. Since we can't proceed without subscribing, we try again after a delay
 			// and panic if it still fails.
-			std::thread::sleep(Duration::from_secs(3));
+			tokio::time::sleep(Duration::from_secs(3)).await;
 			electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
 		},
 	};
@@ -438,11 +438,12 @@ pub(crate) fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 		header = exponential_backoff_poll(|| {
 			electrs.ping().expect("failed to ping electrs");
 			electrs.block_headers_pop().expect("failed to pop block header")
-		});
+		})
+		.await;
 	}
 }
 
-pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
+pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	if electrs.transaction_get(&txid).is_ok() {
 		return;
 	}
@@ -450,10 +451,11 @@ pub(crate) fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	exponential_backoff_poll(|| {
 		electrs.ping().unwrap();
 		electrs.transaction_get(&txid).ok()
-	});
+	})
+	.await;
 }
 
-pub(crate) fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
+pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
 
@@ -467,10 +469,11 @@ pub(crate) fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: Out
 
 		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
 		is_spent.then_some(())
-	});
+	})
+	.await;
 }
 
-pub(crate) fn exponential_backoff_poll<T, F>(mut poll: F) -> T
+pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
 where
 	F: FnMut() -> Option<T>,
 {
@@ -487,26 +490,26 @@ where
 		}
 		assert!(tries < 20, "Reached max tries.");
 		tries += 1;
-		std::thread::sleep(delay);
+		tokio::time::sleep(delay).await;
 	}
 }
 
-pub(crate) fn premine_and_distribute_funds<E: ElectrumApi>(
+pub(crate) async fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
-	premine_blocks(bitcoind, electrs);
+	premine_blocks(bitcoind, electrs).await;
 
-	distribute_funds_unconfirmed(bitcoind, electrs, addrs, amount);
-	generate_blocks_and_wait(bitcoind, electrs, 1);
+	distribute_funds_unconfirmed(bitcoind, electrs, addrs, amount).await;
+	generate_blocks_and_wait(bitcoind, electrs, 1).await;
 }
 
-pub(crate) fn premine_blocks<E: ElectrumApi>(bitcoind: &BitcoindClient, electrs: &E) {
+pub(crate) async fn premine_blocks<E: ElectrumApi>(bitcoind: &BitcoindClient, electrs: &E) {
 	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
-	generate_blocks_and_wait(bitcoind, electrs, 101);
+	generate_blocks_and_wait(bitcoind, electrs, 101).await;
 }
 
-pub(crate) fn distribute_funds_unconfirmed<E: ElectrumApi>(
+pub(crate) async fn distribute_funds_unconfirmed<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) -> Txid {
 	let mut amounts = HashMap::<String, f64>::new();
@@ -524,7 +527,7 @@ pub(crate) fn distribute_funds_unconfirmed<E: ElectrumApi>(
 		.parse()
 		.unwrap();
 
-	wait_for_tx(electrs, txid);
+	wait_for_tx(electrs, txid).await;
 
 	txid
 }
@@ -543,7 +546,7 @@ pub(crate) fn prepare_rbf<E: ElectrumApi>(
 	(tx, fee_output_index)
 }
 
-pub(crate) fn bump_fee_and_broadcast<E: ElectrumApi>(
+pub(crate) async fn bump_fee_and_broadcast<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, mut tx: Transaction, fee_output_index: usize,
 	is_insert_block: bool,
 ) -> Transaction {
@@ -573,10 +576,10 @@ pub(crate) fn bump_fee_and_broadcast<E: ElectrumApi>(
 		match bitcoind.send_raw_transaction(&tx) {
 			Ok(res) => {
 				if is_insert_block {
-					generate_blocks_and_wait(bitcoind, electrs, 1);
+					generate_blocks_and_wait(bitcoind, electrs, 1).await;
 				}
 				let new_txid: Txid = res.0.parse().unwrap();
-				wait_for_tx(electrs, new_txid);
+				wait_for_tx(electrs, new_txid).await;
 				return tx;
 			},
 			Err(_) => {
@@ -591,14 +594,14 @@ pub(crate) fn bump_fee_and_broadcast<E: ElectrumApi>(
 	panic!("Failed to bump fee after {} attempts", attempts);
 }
 
-pub fn open_channel(
+pub async fn open_channel(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
 ) -> OutPoint {
-	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd)
+	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd).await
 }
 
-pub fn open_channel_push_amt(
+pub async fn open_channel_push_amt(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
 	should_announce: bool, electrsd: &ElectrsD,
 ) -> OutPoint {
@@ -628,12 +631,12 @@ pub fn open_channel_push_amt(
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
-	wait_for_tx(&electrsd.client, funding_txo_a.txid);
+	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
 
 	funding_txo_a
 }
 
-pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
+pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 	expect_anchor_channel: bool, force_close: bool,
 ) {
@@ -647,7 +650,8 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		electrsd,
 		vec![addr_a, addr_b],
 		Amount::from_sat(premine_amount_sat),
-	);
+	)
+	.await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
@@ -706,10 +710,10 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
 
-	wait_for_tx(electrsd, funding_txo_a.txid);
+	wait_for_tx(electrsd, funding_txo_a.txid).await;
 
 	if !allow_0conf {
-		generate_blocks_and_wait(&bitcoind, electrsd, 6);
+		generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	}
 
 	node_a.sync_wallets().unwrap();
@@ -839,7 +843,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	let payment_id =
 		node_a.bolt11_payment().send_using_amount(&invoice, overpaid_amount_msat, None).unwrap();
 	expect_event!(node_a, PaymentSuccessful);
-	let received_amount = match node_b.wait_next_event() {
+	let received_amount = match node_b.next_event_async().await {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled().unwrap();
@@ -877,7 +881,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		.unwrap();
 
 	expect_event!(node_a, PaymentSuccessful);
-	let received_amount = match node_b.wait_next_event() {
+	let received_amount = match node_b.next_event_async().await {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
 			node_b.event_handled().unwrap();
@@ -999,7 +1003,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 		.send_with_custom_tlvs(keysend_amount_msat, node_b.node_id(), None, custom_tlvs.clone())
 		.unwrap();
 	expect_event!(node_a, PaymentSuccessful);
-	let next_event = node_b.wait_next_event();
+	let next_event = node_b.next_event_async().await;
 	let (received_keysend_amount, received_custom_records) = match next_event {
 		ref e @ Event::PaymentReceived { amount_msat, ref custom_records, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
@@ -1049,7 +1053,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
-		std::thread::sleep(Duration::from_secs(1));
+		tokio::time::sleep(Duration::from_secs(1)).await;
 		node_a.force_close_channel(&user_channel_id, node_b.node_id(), None).unwrap();
 	} else {
 		node_a.close_channel(&user_channel_id, node_b.node_id()).unwrap();
@@ -1058,9 +1062,9 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(electrsd, funding_txo_b);
+	wait_for_outpoint_spend(electrsd, funding_txo_b).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 1);
+	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1076,7 +1080,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 				assert_eq!(counterparty_node_id, node_a.node_id());
 				let cur_height = node_b.status().current_best_block.height;
 				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize);
+				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
 				node_b.sync_wallets().unwrap();
 				node_a.sync_wallets().unwrap();
 			},
@@ -1089,7 +1093,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 1);
+		generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 		node_b.sync_wallets().unwrap();
 		node_a.sync_wallets().unwrap();
 
@@ -1099,7 +1103,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 5);
+		generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
 		node_b.sync_wallets().unwrap();
 		node_a.sync_wallets().unwrap();
 
@@ -1117,7 +1121,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 				assert_eq!(counterparty_node_id, node_b.node_id());
 				let cur_height = node_a.status().current_best_block.height;
 				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize);
+				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
 				node_a.sync_wallets().unwrap();
 				node_b.sync_wallets().unwrap();
 			},
@@ -1130,7 +1134,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 1);
+		generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
 
@@ -1140,7 +1144,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 5);
+		generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
 	}
