@@ -22,6 +22,9 @@ use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
+use lightning::util::anchor_channel_reserves::{
+	get_reserve_per_channel, AnchorChannelReserveContext,
+};
 use lightning::util::config::{
 	ChannelConfigOverrides, ChannelConfigUpdate, ChannelHandshakeConfigUpdate,
 };
@@ -1177,7 +1180,8 @@ where
 						{
 							0
 						} else {
-							anchor_channels_config.per_channel_reserve_sats
+							get_reserve_per_channel(&AnchorChannelReserveContext::default())
+								.to_sat()
 						};
 
 						if spendable_amount_sats < required_amount_sats {

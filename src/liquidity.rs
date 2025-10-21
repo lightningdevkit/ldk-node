@@ -21,6 +21,9 @@ use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::routing::router::{RouteHint, RouteHintHop};
+use lightning::util::anchor_channel_reserves::{
+	get_reserve_per_channel, AnchorChannelReserveContext,
+};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::ser::{LSPSDateTime, LSPSRequestId};
@@ -752,7 +755,8 @@ where
 						if init_features.requires_anchors_zero_fee_htlc_tx()
 							&& !c.trusted_peers_no_reserve.contains(&their_network_key)
 						{
-							c.per_channel_reserve_sats
+							get_reserve_per_channel(&AnchorChannelReserveContext::default())
+								.to_sat()
 						} else {
 							0
 						}

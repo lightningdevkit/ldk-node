@@ -687,8 +687,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
-	let premine_amount_sat = if expect_anchor_channel { 2_125_000 } else { 2_100_000 };
+	let anchor_reserve = if expect_anchor_channel { get_anchor_reserve_per_channel() } else { 0 };
 
+	let premine_amount_sat = 2_100_000 + anchor_reserve;
 	premine_and_distribute_funds(
 		&bitcoind,
 		electrsd,
@@ -773,7 +774,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	let onchain_fee_buffer_sat = 5000;
-	let node_a_anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
+	let node_a_anchor_reserve_sat =
+		if expect_anchor_channel { get_anchor_reserve_per_channel() } else { 0 };
 	let node_a_upper_bound_sat =
 		premine_amount_sat - node_a_anchor_reserve_sat - funding_amount_sat;
 	let node_a_lower_bound_sat = premine_amount_sat
@@ -794,7 +796,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	{
 		0
 	} else {
-		25_000
+		get_anchor_reserve_per_channel()
 	};
 	assert_eq!(
 		node_b.list_balances().spendable_onchain_balance_sats,

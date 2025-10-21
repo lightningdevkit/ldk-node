@@ -27,7 +27,6 @@ const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
-const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 
 /// The default log level.
 pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
@@ -233,7 +232,6 @@ impl Default for Config {
 /// | Parameter                  | Value  |
 /// |----------------------------|--------|
 /// | `trusted_peers_no_reserve` | []     |
-/// | `per_channel_reserve_sats` | 25000  |
 ///
 ///
 /// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
@@ -249,33 +247,11 @@ pub struct AnchorChannelsConfig {
 	/// required Anchor spending transactions confirmed on-chain is potentially insecure
 	/// as the channel may not be closed if they refuse to do so.
 	pub trusted_peers_no_reserve: Vec<PublicKey>,
-	/// The amount of satoshis per anchors-negotiated channel with an untrusted peer that we keep
-	/// as an emergency reserve in our on-chain wallet.
-	///
-	/// This allows for having the required Anchor output spending and HTLC transactions confirmed
-	/// when the channel is closed.
-	///
-	/// If the channel peer is not marked as trusted via
-	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`], we will always try to spend the Anchor
-	/// outputs with *any* on-chain funds available, i.e., the total reserve value as well as any
-	/// spendable funds available in the on-chain wallet. Therefore, this per-channel multiplier is
-	/// really a emergency reserve that we maintain at all time to reduce reduce the risk of
-	/// insufficient funds at time of a channel closure. To this end, we will refuse to open
-	/// outbound or accept inbound channels if we don't have sufficient on-chain funds available to
-	/// cover the additional reserve requirement.
-	///
-	/// **Note:** Depending on the fee market at the time of closure, this reserve amount might or
-	/// might not suffice to successfully spend the Anchor output and have the HTLC transactions
-	/// confirmed on-chain, i.e., you may want to adjust this value accordingly.
-	pub per_channel_reserve_sats: u64,
 }
 
 impl Default for AnchorChannelsConfig {
 	fn default() -> Self {
-		Self {
-			trusted_peers_no_reserve: Vec::new(),
-			per_channel_reserve_sats: DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS,
-		}
+		Self { trusted_peers_no_reserve: Vec::new() }
 	}
 }
 

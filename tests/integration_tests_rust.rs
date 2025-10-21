@@ -33,7 +33,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{get_anchor_reserve_per_channel, Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -331,7 +331,7 @@ async fn onchain_send_receive() {
 	let unchecked_address = Address::<NetworkUnchecked>::from_str(static_address).unwrap();
 	let addr_c = unchecked_address.assume_checked();
 
-	let premine_amount_sat = 1_100_000;
+	let premine_amount_sat = 2_100_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
@@ -364,7 +364,7 @@ async fn onchain_send_receive() {
 	}
 
 	let channel_amount_sat = 1_000_000;
-	let reserve_amount_sat = 25_000;
+	let reserve_amount_sat = get_anchor_reserve_per_channel();
 	open_channel(&node_b, &node_a, channel_amount_sat, true, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -529,8 +529,8 @@ async fn onchain_send_all_retains_reserve() {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
 
-	let premine_amount_sat = 1_000_000;
-	let reserve_amount_sat = 25_000;
+	let premine_amount_sat = 2_000_000;
+	let reserve_amount_sat = get_anchor_reserve_per_channel();
 	let onchain_fee_buffer_sat = 1000;
 	premine_and_distribute_funds(
 		&bitcoind.client,

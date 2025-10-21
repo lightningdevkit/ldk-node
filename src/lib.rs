@@ -146,6 +146,9 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
+use lightning::util::anchor_channel_reserves::{
+	get_reserve_per_channel, AnchorChannelReserveContext,
+};
 use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
@@ -1181,7 +1184,7 @@ impl Node {
 				if init_features.requires_anchors_zero_fee_htlc_tx()
 					&& !c.trusted_peers_no_reserve.contains(peer_node_id)
 				{
-					c.per_channel_reserve_sats
+					get_reserve_per_channel(&AnchorChannelReserveContext::default()).to_sat()
 				} else {
 					0
 				}
@@ -1208,13 +1211,11 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
-	/// If Anchor channels are enabled, this will ensure the configured
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
-	/// opening the channel.
+	/// If Anchor channels are enabled, this will ensure the reserved amount per
+	/// channel is available and will be retained before opening the channel.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1243,13 +1244,11 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
-	/// If Anchor channels are enabled, this will ensure the configured
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
-	/// opening the channel.
+	/// If Anchor channels are enabled, this will ensure the reserved amount per
+	/// channel is available and will be retained before opening the channel.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1862,6 +1861,8 @@ impl_writeable_tlv_based!(NodeMetrics, {
 pub(crate) fn total_anchor_channels_reserve_sats(
 	channel_manager: &ChannelManager, config: &Config,
 ) -> u64 {
+	let reserve_sat_per_channel = get_anchor_reserve_per_channel();
+
 	config.anchor_channels_config.as_ref().map_or(0, |anchor_channels_config| {
 		channel_manager
 			.list_channels()
@@ -1875,6 +1876,12 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 						.map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
 			})
 			.count() as u64
-			* anchor_channels_config.per_channel_reserve_sats
+			* reserve_sat_per_channel
 	})
+}
+
+/// Returns the configured anchor channel reserve per channel in satoshis.
+pub fn get_anchor_reserve_per_channel() -> u64 {
+	let context = AnchorChannelReserveContext::default();
+	get_reserve_per_channel(&context).to_sat()
 }
