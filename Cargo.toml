@@ -103,6 +103,7 @@ log = { version = "0.4.22", default-features = false, features = ["std"]}
 
 vss-client = "0.3"
 prost = { version = "0.11.6", default-features = false}
+criterion = { version = "0.7.0", features = ["async_tokio"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
@@ -148,3 +149,8 @@ check-cfg = [
 	"cfg(cln_test)",
 	"cfg(lnd_test)",
 ]
+
+[[bench]]
+name = "payments"
+path = "tests/benchmarks.rs"
+harness = false
