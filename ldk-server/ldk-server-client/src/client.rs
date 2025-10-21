@@ -11,13 +11,14 @@ use ldk_server_protos::api::{
 	GetBalancesRequest, GetBalancesResponse, GetNodeInfoRequest, GetNodeInfoResponse,
 	ListChannelsRequest, ListChannelsResponse, ListPaymentsRequest, ListPaymentsResponse,
 	OnchainReceiveRequest, OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse,
-	OpenChannelRequest, OpenChannelResponse,
+	OpenChannelRequest, OpenChannelResponse, SpliceInRequest, SpliceInResponse, SpliceOutRequest,
+	SpliceOutResponse,
 };
 use ldk_server_protos::endpoints::{
 	BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
 	CLOSE_CHANNEL_PATH, FORCE_CLOSE_CHANNEL_PATH, GET_BALANCES_PATH, GET_NODE_INFO_PATH,
 	LIST_CHANNELS_PATH, LIST_PAYMENTS_PATH, ONCHAIN_RECEIVE_PATH, ONCHAIN_SEND_PATH,
-	OPEN_CHANNEL_PATH,
+	OPEN_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
 };
 use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use reqwest::header::CONTENT_TYPE;
@@ -116,6 +117,24 @@ impl LdkServerClient {
 		&self, request: OpenChannelRequest,
 	) -> Result<OpenChannelResponse, LdkServerError> {
 		let url = format!("http://{}/{OPEN_CHANNEL_PATH}", self.base_url);
+		self.post_request(&request, &url).await
+	}
+
+	/// Splices funds into the channel specified by given request.
+	/// For API contract/usage, refer to docs for [`SpliceInRequest`] and [`SpliceInResponse`].
+	pub async fn splice_in(
+		&self, request: SpliceInRequest,
+	) -> Result<SpliceInResponse, LdkServerError> {
+		let url = format!("http://{}/{SPLICE_IN_PATH}", self.base_url);
+		self.post_request(&request, &url).await
+	}
+
+	/// Splices funds out of the channel specified by given request.
+	/// For API contract/usage, refer to docs for [`SpliceOutRequest`] and [`SpliceOutResponse`].
+	pub async fn splice_out(
+		&self, request: SpliceOutRequest,
+	) -> Result<SpliceOutResponse, LdkServerError> {
+		let url = format!("http://{}/{SPLICE_OUT_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 

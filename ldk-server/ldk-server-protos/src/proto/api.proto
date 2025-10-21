@@ -241,6 +241,51 @@ message OpenChannelResponse {
   string user_channel_id = 1;
 }
 
+// Increases the channel balance by the given amount.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.splice_in
+message SpliceInRequest {
+
+  // The local `user_channel_id` of the channel.
+  string user_channel_id = 1;
+
+  // The hex-encoded public key of the channel's counterparty node.
+  string counterparty_node_id = 2;
+
+  // The amount of sats to splice into the channel.
+  uint64 splice_amount_sats = 3;
+}
+
+// The response `content` for the `SpliceIn` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message SpliceInResponse {}
+
+// Decreases the channel balance by the given amount.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.splice_out
+message SpliceOutRequest {
+
+  // The local `user_channel_id` of this channel.
+  string user_channel_id = 1;
+
+  // The hex-encoded public key of the channel's counterparty node.
+  string counterparty_node_id = 2;
+
+  // A Bitcoin on-chain address to send the spliced-out funds.
+  //
+  // If not set, an address from the node's on-chain wallet will be used.
+  optional string address = 3;
+
+  // The amount of sats to splice out of the channel.
+  uint64 splice_amount_sats = 4;
+}
+
+// The response `content` for the `SpliceOut` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message SpliceOutResponse {
+
+  // The Bitcoin on-chain address where the funds will be sent.
+  string address = 1;
+}
+
 // Update the config for a previously opened channel.
 // See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.update_channel_config
 message UpdateChannelConfigRequest {

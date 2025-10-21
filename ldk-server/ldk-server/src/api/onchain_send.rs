@@ -14,7 +14,7 @@ pub(crate) fn handle_onchain_send_request(
 		.map_err(|_| {
 			LdkServerError::new(
 				InvalidRequestError,
-				"Address is not valid for LdkServer's configured network.".to_string(),
+				"Address is not valid for the configured network.".to_string(),
 			)
 		})?;
 
