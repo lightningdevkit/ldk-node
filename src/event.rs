@@ -234,6 +234,28 @@ pub enum Event {
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
+	/// A channel splice is pending confirmation on-chain.
+	SplicePending {
+		/// The `channel_id` of the channel.
+		channel_id: ChannelId,
+		/// The `user_channel_id` of the channel.
+		user_channel_id: UserChannelId,
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The outpoint of the channel's splice funding transaction.
+		new_funding_txo: OutPoint,
+	},
+	/// A channel splice has failed.
+	SpliceFailed {
+		/// The `channel_id` of the channel.
+		channel_id: ChannelId,
+		/// The `user_channel_id` of the channel.
+		user_channel_id: UserChannelId,
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The outpoint of the channel's splice funding transaction.
+		abandoned_funding_txo: Option<OutPoint>,
+	},
 }
 
 impl_writeable_tlv_based_enum!(Event,
@@ -291,7 +313,19 @@ impl_writeable_tlv_based_enum!(Event,
 		(10, skimmed_fee_msat, option),
 		(12, claim_from_onchain_tx, required),
 		(14, outbound_amount_forwarded_msat, option),
-	}
+	},
+	(8, SplicePending) => {
+		(1, channel_id, required),
+		(3, counterparty_node_id, required),
+		(5, user_channel_id, required),
+		(7, new_funding_txo, required),
+	},
+	(9, SpliceFailed) => {
+		(1, channel_id, required),
+		(3, counterparty_node_id, required),
+		(5, user_channel_id, required),
+		(7, abandoned_funding_txo, option),
+	},
 );
 
 pub struct EventQueue<L: Deref>
@@ -1611,17 +1645,74 @@ where
 			LdkEvent::FundingTransactionReadyForSigning { .. } => {
 				debug_assert!(false, "We currently don't support interactive-tx, so this event should never be emitted.");
 			},
-			LdkEvent::SplicePending { .. } => {
-				debug_assert!(
-					false,
-					"We currently don't support splicing, so this event should never be emitted."
+			LdkEvent::SplicePending {
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+				new_funding_txo,
+				..
+			} => {
+				log_info!(
+					self.logger,
+					"Channel {} with counterparty {} pending splice with funding_txo {}",
+					channel_id,
+					counterparty_node_id,
+					new_funding_txo,
 				);
+
+				let event = Event::SplicePending {
+					channel_id,
+					user_channel_id: UserChannelId(user_channel_id),
+					counterparty_node_id,
+					new_funding_txo,
+				};
+
+				match self.event_queue.add_event(event) {
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
 			},
-			LdkEvent::SpliceFailed { .. } => {
-				debug_assert!(
-					false,
-					"We currently don't support splicing, so this event should never be emitted."
-				);
+			LdkEvent::SpliceFailed {
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+				abandoned_funding_txo,
+				..
+			} => {
+				if let Some(funding_txo) = abandoned_funding_txo {
+					log_info!(
+						self.logger,
+						"Channel {} with counterparty {} failed splice with funding_txo {}",
+						channel_id,
+						counterparty_node_id,
+						funding_txo,
+					);
+				} else {
+					log_info!(
+						self.logger,
+						"Channel {} with counterparty {} failed splice",
+						channel_id,
+						counterparty_node_id,
+					);
+				}
+
+				let event = Event::SpliceFailed {
+					channel_id,
+					user_channel_id: UserChannelId(user_channel_id),
+					counterparty_node_id,
+					abandoned_funding_txo,
+				};
+
+				match self.event_queue.add_event(event) {
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
 			},
 		}
 		Ok(())
