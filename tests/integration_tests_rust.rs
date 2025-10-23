@@ -926,6 +926,148 @@ async fn concurrent_connections_succeed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_channel() {
+	macro_rules! expect_splice_pending_event {
+		($node: expr, $counterparty_node_id: expr) => {{
+			match $node.next_event_async().await {
+				ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					assert_eq!(counterparty_node_id, $counterparty_node_id);
+					$node.event_handled().unwrap();
+					new_funding_txo
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+				},
+			}
+		}};
+	}
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	assert_eq!(node_a.list_balances().total_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().total_onchain_balance_sats, premine_amount_sat);
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	// Open a channel with Node A contributing the funding
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let opening_transaction_fee_sat = 156;
+	let closing_transaction_fee_sat = 614;
+	let anchor_output_sat = 330;
+
+	assert_eq!(
+		node_a.list_balances().total_onchain_balance_sats,
+		premine_amount_sat - 4_000_000 - opening_transaction_fee_sat
+	);
+	assert_eq!(
+		node_a.list_balances().total_lightning_balance_sats,
+		4_000_000 - closing_transaction_fee_sat - anchor_output_sat
+	);
+	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 0);
+
+	// Test that splicing and payments fail when there are insufficient funds
+	let address = node_b.onchain_payment().new_address().unwrap();
+	let amount_msat = 400_000_000;
+
+	assert_eq!(
+		node_b.splice_in(&user_channel_id_a, node_b.node_id(), 5_000_000),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+	assert_eq!(
+		node_b.splice_out(&user_channel_id_a, node_b.node_id(), address, amount_msat / 1000),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+	assert_eq!(
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None),
+		Err(NodeError::PaymentSendingFailed)
+	);
+
+	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
+
+	expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let splice_in_fee_sat = 253;
+
+	assert_eq!(
+		node_b.list_balances().total_onchain_balance_sats,
+		premine_amount_sat - 4_000_000 - splice_in_fee_sat
+	);
+	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000);
+
+	let payment_id =
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).unwrap();
+
+	expect_payment_successful_event!(node_b, Some(payment_id), None);
+	expect_payment_received_event!(node_a, amount_msat);
+
+	assert_eq!(
+		node_a.list_balances().total_lightning_balance_sats,
+		4_000_000 - closing_transaction_fee_sat - anchor_output_sat + amount_msat / 1000
+	);
+	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000 - amount_msat / 1000);
+
+	// Splice-out funds for Node A from the payment sent by Node B
+	let address = node_a.onchain_payment().new_address().unwrap();
+	node_a.splice_out(&user_channel_id_a, node_b.node_id(), address, amount_msat / 1000).unwrap();
+
+	expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let splice_out_fee_sat = 184;
+
+	assert_eq!(
+		node_a.list_balances().total_onchain_balance_sats,
+		premine_amount_sat - 4_000_000 - opening_transaction_fee_sat + amount_msat / 1000
+	);
+	assert_eq!(
+		node_a.list_balances().total_lightning_balance_sats,
+		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - splice_out_fee_sat
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
