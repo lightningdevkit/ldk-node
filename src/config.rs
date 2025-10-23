@@ -119,7 +119,8 @@ pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `route_parameters`                   | None               |
+/// | `route_parameters`                     | None               |
+/// | `reject_inbound_splices`               | true               |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -184,6 +185,15 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// If this is set to `true`, then inbound channel splice requests will be rejected. This
+	/// ensures backwards compatibility is not broken with LDK Node v0.6 or prior while a splice is
+	/// pending.
+	///
+	/// Outbound channel splice requests (via [`Node`] methods, an opt-in API) are still allowed as
+	/// users should be aware of the backwards compatibility risk prior to using the functionality.
+	///
+	/// [`Node`]: crate::Node
+	pub reject_inbound_splices: bool,
 }
 
 impl Default for Config {
@@ -198,6 +208,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			reject_inbound_splices: true,
 		}
 	}
 }
@@ -325,6 +336,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.manually_accept_inbound_channels = true;
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
+	user_config.reject_inbound_splices = config.reject_inbound_splices;
 
 	if may_announce_channel(config).is_err() {
 		user_config.accept_forwards_to_priv_channels = false;

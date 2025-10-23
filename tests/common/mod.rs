@@ -226,6 +226,7 @@ pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 
 pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 	let mut node_config = Config::default();
+	node_config.reject_inbound_splices = false;
 
 	if !anchor_channels {
 		node_config.anchor_channels_config = None;
