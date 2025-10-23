@@ -24,10 +24,12 @@ use lightning::io::Cursor;
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::log_trace;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
-	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
+	CombinedScorer, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
+	ProbabilisticScoringFeeParameters,
 };
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::persist::{
@@ -50,7 +52,9 @@ use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
-use crate::io::utils::{read_node_metrics, write_node_metrics};
+use crate::io::utils::{
+	read_external_pathfinding_scores_from_cache, read_node_metrics, write_node_metrics,
+};
 use crate::io::vss_store::VssStore;
 use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -108,6 +112,11 @@ enum EntropySourceConfig {
 enum GossipSourceConfig {
 	P2PNetwork,
 	RapidGossipSync(String),
+}
+
+#[derive(Debug, Clone)]
+struct PathfindingScoresSyncConfig {
+	url: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,6 +252,7 @@ pub struct NodeBuilder {
 	log_writer_config: Option<LogWriterConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
+	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 }
 
 impl NodeBuilder {
@@ -260,6 +270,7 @@ impl NodeBuilder {
 		let liquidity_source_config = None;
 		let log_writer_config = None;
 		let runtime_handle = None;
+		let pathfinding_scores_sync_config = None;
 		Self {
 			config,
 			entropy_source_config,
@@ -269,6 +280,7 @@ impl NodeBuilder {
 			log_writer_config,
 			runtime_handle,
 			async_payments_role: None,
+			pathfinding_scores_sync_config,
 		}
 	}
 
@@ -408,6 +420,14 @@ impl NodeBuilder {
 	/// server.
 	pub fn set_gossip_source_rgs(&mut self, rgs_server_url: String) -> &mut Self {
 		self.gossip_source_config = Some(GossipSourceConfig::RapidGossipSync(rgs_server_url));
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its external scores from the given URL.
+	///
+	/// The external scores are merged into the local scoring system to improve routing.
+	pub fn set_pathfinding_scores_source(&mut self, url: String) -> &mut Self {
+		self.pathfinding_scores_sync_config = Some(PathfindingScoresSyncConfig { url });
 		self
 	}
 
@@ -718,6 +738,7 @@ impl NodeBuilder {
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
+			self.pathfinding_scores_sync_config.as_ref(),
 			self.async_payments_role,
 			seed_bytes,
 			runtime,
@@ -751,6 +772,7 @@ impl NodeBuilder {
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
+			self.pathfinding_scores_sync_config.as_ref(),
 			self.async_payments_role,
 			seed_bytes,
 			runtime,
@@ -908,6 +930,13 @@ impl ArcedNodeBuilder {
 	/// server.
 	pub fn set_gossip_source_rgs(&self, rgs_server_url: String) {
 		self.inner.write().unwrap().set_gossip_source_rgs(rgs_server_url);
+	}
+
+	/// Configures the [`Node`] instance to source its external scores from the given URL.
+	///
+	/// The external scores are merged into the local scoring system to improve routing.
+	pub fn set_pathfinding_scores_source(&self, url: String) {
+		self.inner.write().unwrap().set_pathfinding_scores_source(url);
 	}
 
 	/// Configures the [`Node`] instance to source inbound liquidity from the given
@@ -1110,6 +1139,7 @@ fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
+	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
 	logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
@@ -1365,25 +1395,37 @@ fn build_with_store_internal(
 			},
 		};
 
-	let scorer = match io::utils::read_scorer(
+	let local_scorer = match io::utils::read_scorer(
 		Arc::clone(&kv_store),
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 	) {
-		Ok(scorer) => Arc::new(Mutex::new(scorer)),
+		Ok(scorer) => scorer,
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
 				let params = ProbabilisticScoringDecayParameters::default();
-				Arc::new(Mutex::new(ProbabilisticScorer::new(
-					params,
-					Arc::clone(&network_graph),
-					Arc::clone(&logger),
-				)))
+				ProbabilisticScorer::new(params, Arc::clone(&network_graph), Arc::clone(&logger))
 			} else {
 				return Err(BuildError::ReadFailed);
 			}
 		},
 	};
+
+	let scorer = Arc::new(Mutex::new(CombinedScorer::new(local_scorer)));
+
+	// Restore external pathfinding scores from cache if possible.
+	match read_external_pathfinding_scores_from_cache(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(external_scores) => {
+			scorer.lock().unwrap().merge(external_scores, cur_time);
+			log_trace!(logger, "External scores from cache merged successfully");
+		},
+		Err(e) => {
+			if e.kind() != std::io::ErrorKind::NotFound {
+				log_error!(logger, "Error while reading external scores from cache: {}", e);
+				return Err(BuildError::ReadFailed);
+			}
+		},
+	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
 	let router = Arc::new(DefaultRouter::new(
@@ -1716,6 +1758,8 @@ fn build_with_store_internal(
 	let (background_processor_stop_sender, _) = tokio::sync::watch::channel(());
 	let is_running = Arc::new(RwLock::new(false));
 
+	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1734,6 +1778,7 @@ fn build_with_store_internal(
 		keys_manager,
 		network_graph,
 		gossip_source,
+		pathfinding_scores_sync_url,
 		liquidity_source,
 		kv_store,
 		logger,
