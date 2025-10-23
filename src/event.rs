@@ -1642,8 +1642,35 @@ where
 					}
 				}
 			},
-			LdkEvent::FundingTransactionReadyForSigning { .. } => {
-				debug_assert!(false, "We currently don't support interactive-tx, so this event should never be emitted.");
+			LdkEvent::FundingTransactionReadyForSigning {
+				channel_id,
+				counterparty_node_id,
+				unsigned_transaction,
+				..
+			} => {
+				let partially_signed_tx =
+					self.wallet.sign_owned_inputs(unsigned_transaction).map_err(|()| {
+						log_error!(self.logger, "Failed signing funding transaction");
+						ReplayEvent()
+					})?;
+
+				self.channel_manager
+					.funding_transaction_signed(
+						&channel_id,
+						&counterparty_node_id,
+						partially_signed_tx,
+					)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed signing funding transaction: {:?}", e);
+						ReplayEvent()
+					})?;
+
+				log_info!(
+					self.logger,
+					"Signed funding transaction for channel {} with counterparty {}",
+					channel_id,
+					counterparty_node_id
+				);
 			},
 			LdkEvent::SplicePending {
 				channel_id,
