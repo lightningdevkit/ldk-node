@@ -665,6 +665,40 @@ impl Wallet {
 	}
 
 	#[allow(deprecated)]
+	pub(crate) fn sign_owned_inputs(&self, unsigned_tx: Transaction) -> Result<Transaction, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to construct PSBT: {}", e);
+		})?;
+		for (i, txin) in psbt.unsigned_tx.input.iter().enumerate() {
+			if let Some(utxo) = locked_wallet.get_utxo(txin.previous_output) {
+				psbt.inputs[i] = locked_wallet.get_psbt_input(utxo, None, true).map_err(|e| {
+					log_error!(self.logger, "Failed to construct PSBT input: {}", e);
+				})?;
+			}
+		}
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		match locked_wallet.sign(&mut psbt, sign_options) {
+			Ok(finalized) => debug_assert!(!finalized),
+			Err(e) => {
+				log_error!(self.logger, "Failed to sign owned inputs: {}", e);
+				return Err(());
+			},
+		}
+
+		let mut tx = psbt.unsigned_tx;
+		for (txin, input) in tx.input.iter_mut().zip(psbt.inputs.into_iter()) {
+			txin.witness = input.final_script_witness.unwrap_or_default();
+		}
+
+		Ok(tx)
+	}
+
+	#[allow(deprecated)]
 	fn sign_psbt_inner(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 
