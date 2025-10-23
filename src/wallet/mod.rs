@@ -25,7 +25,7 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
-	Address, Amount, FeeRate, Network, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
+	Address, Amount, FeeRate, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
 	WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -334,12 +334,10 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
-	fn parse_and_validate_address(
-		&self, network: Network, address: &Address,
-	) -> Result<Address, Error> {
+	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?
-			.require_network(network)
+			.require_network(self.config.network)
 			.map_err(|_| Error::InvalidAddress)
 	}
 
@@ -348,7 +346,7 @@ impl Wallet {
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
 		fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
-		self.parse_and_validate_address(self.config.network, &address)?;
+		self.parse_and_validate_address(&address)?;
 
 		// Use the set fee_rate or default to fee estimation.
 		let confirmation_target = ConfirmationTarget::OnchainPayment;

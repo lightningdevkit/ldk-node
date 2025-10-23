@@ -110,7 +110,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::scoring::setup_background_pathfinding_scores_sync;
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::Amount;
+use bitcoin::{Address, Amount};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -1319,6 +1319,59 @@ impl Node {
 				counterparty_node_id
 			);
 
+			Err(Error::ChannelSplicingFailed)
+		}
+	}
+
+	/// Remove funds from an existing channel, sending them to an on-chain address.
+	///
+	/// This provides for decreasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	pub fn splice_out(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: Address,
+		splice_amount_sats: u64,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			if splice_amount_sats > channel_details.outbound_capacity_msat {
+				return Err(Error::ChannelSplicingFailed);
+			}
+
+			self.wallet.parse_and_validate_address(&address)?;
+
+			let contribution = SpliceContribution::SpliceOut {
+				outputs: vec![bitcoin::TxOut {
+					value: Amount::from_sat(splice_amount_sats),
+					script_pubkey: address.script_pubkey(),
+				}],
+			};
+
+			let fee_rate = self.wallet.estimate_channel_funding_fee_rate();
+			let funding_feerate_per_kw = fee_rate.to_sat_per_kwu().try_into().unwrap_or(u32::MAX);
+
+			self.channel_manager
+				.splice_channel(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					funding_feerate_per_kw,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id: {:?} and counterparty: {}",
+				user_channel_id,
+				counterparty_node_id
+			);
 			Err(Error::ChannelSplicingFailed)
 		}
 	}
