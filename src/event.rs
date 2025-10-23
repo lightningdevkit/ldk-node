@@ -1676,8 +1676,35 @@ where
 					}
 				}
 			},
-			LdkEvent::FundingTransactionReadyForSigning { .. } => {
-				debug_assert!(false, "We currently don't support interactive-tx, so this event should never be emitted.");
+			// TODO(splicing): Revisit error handling once splicing API is settled in LDK 0.3
+			LdkEvent::FundingTransactionReadyForSigning {
+				channel_id,
+				counterparty_node_id,
+				unsigned_transaction,
+				..
+			} => match self.wallet.sign_owned_inputs(unsigned_transaction) {
+				Ok(partially_signed_tx) => {
+					match self.channel_manager.funding_transaction_signed(
+						&channel_id,
+						&counterparty_node_id,
+						partially_signed_tx,
+					) {
+						Ok(()) => {
+							log_info!(
+								self.logger,
+								"Signed funding transaction for channel {} with counterparty {}",
+								channel_id,
+								counterparty_node_id
+							);
+						},
+						Err(e) => {
+							// TODO(splicing): Abort splice once supported in LDK 0.3
+							debug_assert!(false, "Failed signing funding transaction: {:?}", e);
+							log_error!(self.logger, "Failed signing funding transaction: {:?}", e);
+						},
+					}
+				},
+				Err(()) => log_error!(self.logger, "Failed signing funding transaction"),
 			},
 			LdkEvent::SplicePending {
 				channel_id,

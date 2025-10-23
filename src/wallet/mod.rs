@@ -665,6 +665,43 @@ impl Wallet {
 	}
 
 	#[allow(deprecated)]
+	pub(crate) fn sign_owned_inputs(&self, unsigned_tx: Transaction) -> Result<Transaction, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to construct PSBT: {}", e);
+		})?;
+		for (i, txin) in psbt.unsigned_tx.input.iter().enumerate() {
+			if let Some(utxo) = locked_wallet.get_utxo(txin.previous_output) {
+				debug_assert!(!utxo.is_spent);
+				psbt.inputs[i] = locked_wallet.get_psbt_input(utxo, None, true).map_err(|e| {
+					log_error!(self.logger, "Failed to construct PSBT input: {}", e);
+				})?;
+			}
+		}
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		match locked_wallet.sign(&mut psbt, sign_options) {
+			Ok(finalized) => debug_assert!(!finalized),
+			Err(e) => {
+				log_error!(self.logger, "Failed to sign owned inputs: {}", e);
+				return Err(());
+			},
+		}
+
+		match psbt.extract_tx() {
+			Ok(tx) => Ok(tx),
+			Err(bitcoin::psbt::ExtractTxError::MissingInputValue { tx }) => Ok(tx),
+			Err(e) => {
+				log_error!(self.logger, "Failed to extract transaction: {}", e);
+				Err(())
+			},
+		}
+	}
+
+	#[allow(deprecated)]
 	fn sign_psbt_inner(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 
