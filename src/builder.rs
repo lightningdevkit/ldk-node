@@ -66,6 +66,7 @@ use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
+use crate::probing::ProbingService;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -127,6 +128,16 @@ struct LiquiditySourceConfig {
 	lsps2_client: Option<LSPS2ClientConfig>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct ProbingServiceConfig {
+	/// Time in seconds between consecutive probing attempts.
+	probing_interval_secs: u64,
+	/// Maximum number of distinct targets to probe concurrently.
+	max_probing_targets: usize,
+	/// Amount in milli-satoshis used for each probe.
+	probing_amount_msat: u64,
 }
 
 #[derive(Clone)]
@@ -253,6 +264,7 @@ pub struct NodeBuilder {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
+	probing_service_config: Option<ProbingServiceConfig>,
 }
 
 impl NodeBuilder {
@@ -271,6 +283,7 @@ impl NodeBuilder {
 		let log_writer_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
+		let probing_service_config = None;
 		Self {
 			config,
 			entropy_source_config,
@@ -281,6 +294,7 @@ impl NodeBuilder {
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
+			probing_service_config,
 		}
 	}
 
@@ -485,6 +499,23 @@ impl NodeBuilder {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
 		liquidity_source_config.lsps2_service = Some(service_config);
+		self
+	}
+
+	/// Configures the probing service used to evaluate channel liquidity by sending
+	/// pre-flight probes to peers and routes.
+	///
+	/// * `probing_interval_secs` - Time in seconds between consecutive probing attempts.
+	/// * `max_probing_targets` - Maximum number of distinct targets to probe concurrently.
+	/// * `probing_amount_msat` - Amount in milli-satoshis used for each probe.
+	pub fn set_probing_service_config(
+		&mut self, probing_interval_secs: u64, max_probing_targets: usize, probing_amount_msat: u64,
+	) -> &mut Self {
+		self.probing_service_config = Some(ProbingServiceConfig {
+			probing_interval_secs,
+			max_probing_targets,
+			probing_amount_msat,
+		});
 		self
 	}
 
@@ -744,6 +775,7 @@ impl NodeBuilder {
 			runtime,
 			logger,
 			Arc::new(vss_store),
+			self.probing_service_config.as_ref(),
 		)
 	}
 
@@ -778,6 +810,7 @@ impl NodeBuilder {
 			runtime,
 			logger,
 			kv_store,
+			self.probing_service_config.as_ref(),
 		)
 	}
 }
@@ -982,6 +1015,17 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
 	}
 
+	// Sets the probing service used to evaluate channel liquidity by sending
+	pub fn set_probing_service_config(
+		&self, probing_interval_secs: u64, max_probing_targets: usize, probing_amount_msat: u64,
+	) {
+		self.inner.write().unwrap().set_probing_service_config(
+			probing_interval_secs,
+			max_probing_targets,
+			probing_amount_msat,
+		);
+	}
+
 	/// Configures the [`Node`] instance to write logs to the filesystem.
 	///
 	/// The `log_file_path` defaults to [`DEFAULT_LOG_FILENAME`] in the configured
@@ -1142,6 +1186,7 @@ fn build_with_store_internal(
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
 	logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	probing_service_config: Option<&ProbingServiceConfig>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1760,6 +1805,23 @@ fn build_with_store_internal(
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
 
+	let probing_service = if let Some(pro_ser) = probing_service_config {
+		Some(Arc::new(ProbingService::new(
+			pro_ser.probing_interval_secs,
+			pro_ser.max_probing_targets,
+			pro_ser.probing_amount_msat,
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			Arc::clone(&channel_manager),
+			Arc::clone(&keys_manager),
+			Arc::clone(&is_running),
+			Arc::clone(&payment_store),
+			Arc::clone(&network_graph),
+		)))
+	} else {
+		None
+	};
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1790,6 +1852,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		probing_service,
 	})
 }
 
