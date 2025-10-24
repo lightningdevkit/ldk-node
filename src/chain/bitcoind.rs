@@ -598,11 +598,8 @@ impl BitcoindChainSource {
 	}
 
 	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
-		// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
-		// features, we should eventually switch to use `submitpackage` via the
-		// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
-		// transactions.
-		for tx in &package {
+		if package.len() == 1 {
+			let tx = &package[0];
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
@@ -635,6 +632,48 @@ impl BitcoindChainSource {
 						"Failed broadcast transaction bytes: {}",
 						log_bytes!(tx.encode())
 					);
+				},
+			}
+		} else if package.len() > 1 {
+			let txids: Vec<_> = package.iter().map(|tx| tx.compute_txid()).collect();
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
+				self.api_client.submit_package(&package),
+			);
+			match timeout_fut.await {
+				Ok(res) => match res {
+					Ok(result) => {
+						if result.contains(r#""package_msg":"success""#) {
+							log_trace!(self.logger, "Successfully broadcast package {:?}", txids);
+							log_trace!(self.logger, "Successfully broadcast package {}", result);
+						} else {
+							log_error!(self.logger, "Failed to broadcast package {:?}", txids);
+							log_trace!(self.logger, "Failed to broadcast package {}", result);
+							log_trace!(self.logger, "Failed broadcast package bytes:");
+							for tx in package {
+								log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+							}
+						}
+					},
+					Err(e) => {
+						log_error!(self.logger, "Failed to broadcast package {:?}: {}", txids, e);
+						log_trace!(self.logger, "Failed broadcast package bytes:");
+						for tx in package {
+							log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+						}
+					},
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to broadcast package due to timeout {:?}: {}",
+						txids,
+						e
+					);
+					log_trace!(self.logger, "Failed broadcast package bytes:");
+					for tx in package {
+						log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+					}
 				},
 			}
 		}
@@ -825,6 +864,38 @@ impl BitcoindClient {
 		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
 		let tx_json = serde_json::json!(tx_serialized);
 		rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
+	}
+
+	/// Submits the provided package
+	pub(crate) async fn submit_package(
+		&self, package: &[Transaction],
+	) -> Result<String, BitcoindClientError> {
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::submit_package_inner(Arc::clone(rpc_client), package)
+					.await
+					.map_err(BitcoindClientError::Rpc)
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				// Bitcoin Core's REST interface does not support submitting packages
+				// so we use the RPC client.
+				Self::submit_package_inner(Arc::clone(rpc_client), package)
+					.await
+					.map_err(BitcoindClientError::Rpc)
+			},
+		}
+	}
+
+	async fn submit_package_inner(
+		rpc_client: Arc<RpcClient>, package: &[Transaction],
+	) -> Result<String, RpcClientError> {
+		let package_serialized: Vec<_> =
+			package.iter().map(|tx| bitcoin::consensus::encode::serialize_hex(tx)).collect();
+		let package_json = serde_json::json!(package_serialized);
+		rpc_client
+			.call_method::<serde_json::Value>("submitpackage", &[package_json])
+			.await
+			.map(|value| value.to_string())
 	}
 
 	/// Retrieve the fee estimate needed for a transaction to begin

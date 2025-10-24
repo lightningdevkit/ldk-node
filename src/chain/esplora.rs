@@ -365,7 +365,7 @@ impl EsploraChainSource {
 	}
 
 	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
-		for tx in &package {
+		if let [tx] = &package[..] {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
@@ -389,6 +389,7 @@ impl EsploraChainSource {
 									"Failed to broadcast due to HTTP connection error: {}",
 									message
 								);
+								log_trace!(self.logger, "Failed to broadcast transaction {}", txid,);
 							} else {
 								log_error!(
 									self.logger,
@@ -396,6 +397,7 @@ impl EsploraChainSource {
 									status,
 									message
 								);
+								log_error!(self.logger, "Failed to broadcast transaction {}", txid,);
 							}
 							log_trace!(
 								self.logger,
@@ -430,6 +432,81 @@ impl EsploraChainSource {
 						"Failed broadcast transaction bytes: {}",
 						log_bytes!(tx.encode())
 					);
+				},
+			}
+		} else if package.len() > 1 {
+			let txids: Vec<_> = package.iter().map(|tx| tx.compute_txid()).collect();
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+				self.esplora_client.submit_package(&package, None, None),
+			);
+			match timeout_fut.await {
+				Ok(res) => match res {
+					Ok(result) => {
+						if result.package_msg.eq_ignore_ascii_case("success") {
+							log_trace!(self.logger, "Successfully broadcast package {:?}", txids);
+							log_trace!(self.logger, "Successfully broadcast package {:?}", result);
+						} else {
+							log_error!(self.logger, "Failed to broadcast package {:?}", txids);
+							log_trace!(self.logger, "Failed to broadcast package {:?}", result);
+							log_trace!(self.logger, "Failed broadcast package bytes:");
+							for tx in package {
+								log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+							}
+						}
+					},
+					Err(e) => match e {
+						esplora_client::Error::HttpResponse { status, message } => {
+							if status == 400 {
+								// Log 400 at lesser level, as this often just means bitcoind already knows the
+								// transaction.
+								// FIXME: We can further differentiate here based on the error
+								// message which will be available with rust-esplora-client 0.7 and
+								// later.
+								log_trace!(
+									self.logger,
+									"Failed to broadcast due to HTTP connection error: {}",
+									message
+								);
+							} else {
+								log_error!(
+									self.logger,
+									"Failed to broadcast due to HTTP connection error: {} - {}",
+									status,
+									message
+								);
+							}
+							log_error!(self.logger, "Failed to broadcast package {:?}", txids);
+							log_trace!(self.logger, "Failed broadcast package bytes:");
+							for tx in package {
+								log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+							}
+						},
+						_ => {
+							log_error!(
+								self.logger,
+								"Failed to broadcast package {:?}: {}",
+								txids,
+								e
+							);
+							log_trace!(self.logger, "Failed broadcast package bytes:");
+							for tx in package {
+								log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+							}
+						},
+					},
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to broadcast package due to timeout {:?}: {}",
+						txids,
+						e
+					);
+					log_trace!(self.logger, "Failed broadcast transaction bytes:");
+					for tx in package {
+						log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+					}
 				},
 			}
 		}
