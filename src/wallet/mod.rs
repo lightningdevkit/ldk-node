@@ -11,6 +11,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
+use bdk_wallet::event::WalletEvent;
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
 use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update};
@@ -47,7 +48,7 @@ use crate::config::Config;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
-use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
+use crate::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{Broadcaster, PaymentStore};
 use crate::Error;
 
@@ -112,15 +113,16 @@ impl Wallet {
 
 	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		match locked_wallet.apply_update(update) {
-			Ok(()) => {
+		match locked_wallet.apply_update_events(update) {
+			Ok(events) => {
 				let mut locked_persister = self.persister.lock().unwrap();
 				locked_wallet.persist(&mut locked_persister).map_err(|e| {
 					log_error!(self.logger, "Failed to persist wallet: {}", e);
 					Error::PersistenceFailed
 				})?;
 
-				self.update_payment_store(&mut *locked_wallet).map_err(|e| {
+				let events_vec: Vec<WalletEvent> = events.into_iter().collect();
+				self.update_payment_store(&mut *locked_wallet, Some(&events_vec)).map_err(|e| {
 					log_error!(self.logger, "Failed to update payment store: {}", e);
 					Error::PersistenceFailed
 				})?;
@@ -152,75 +154,206 @@ impl Wallet {
 
 	fn update_payment_store<'a>(
 		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
+		events: Option<&'a Vec<WalletEvent>>,
 	) -> Result<(), Error> {
-		for wtx in locked_wallet.transactions() {
-			let id = PaymentId(wtx.tx_node.txid.to_byte_array());
-			let txid = wtx.tx_node.txid;
-			let (payment_status, confirmation_status) = match wtx.chain_position {
-				bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
-					let confirmation_height = anchor.block_id.height;
-					let cur_height = locked_wallet.latest_checkpoint().height();
-					let payment_status = if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1
-					{
-						PaymentStatus::Succeeded
-					} else {
-						PaymentStatus::Pending
-					};
-					let confirmation_status = ConfirmationStatus::Confirmed {
-						block_hash: anchor.block_id.hash,
-						height: confirmation_height,
-						timestamp: anchor.confirmation_time,
-					};
-					(payment_status, confirmation_status)
-				},
-				bdk_chain::ChainPosition::Unconfirmed { .. } => {
-					(PaymentStatus::Pending, ConfirmationStatus::Unconfirmed)
-				},
-			};
-			// TODO: It would be great to introduce additional variants for
-			// `ChannelFunding` and `ChannelClosing`. For the former, we could just
-			// take a reference to `ChannelManager` here and check against
-			// `list_channels`. But for the latter the best approach is much less
-			// clear: for force-closes/HTLC spends we should be good querying
-			// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
-			// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
-			// spent to a wallet address. The only solution I can come up with is to
-			// create and persist a list of 'static pending outputs' that we could use
-			// here to determine the `PaymentKind`, but that's not really satisfactory, so
-			// we're punting on it until we can come up with a better solution.
-			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
-			let fee = locked_wallet.calculate_fee(&wtx.tx_node.tx).unwrap_or(Amount::ZERO);
-			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
-			let (direction, amount_msat) = if sent > received {
-				let direction = PaymentDirection::Outbound;
-				let amount_msat = Some(
-					sent.to_sat().saturating_sub(fee.to_sat()).saturating_sub(received.to_sat())
-						* 1000,
-				);
-				(direction, amount_msat)
+		if let Some(events) = events {
+			if events.is_empty() {
+				return Ok(());
+			}
+
+			let sorted_events: Vec<_> = if events.len() > 1 {
+				let mut events_vec: Vec<_> = events.iter().collect();
+				events_vec.sort_by_key(|e| match e {
+					WalletEvent::TxReplaced { .. } => 0,
+					WalletEvent::TxUnconfirmed { .. } => 1,
+					WalletEvent::TxConfirmed { .. } => 2,
+					WalletEvent::ChainTipChanged { .. } => 3,
+					WalletEvent::TxDropped { .. } => 4,
+					_ => 5,
+				});
+				events_vec
 			} else {
-				let direction = PaymentDirection::Inbound;
-				let amount_msat = Some(
-					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee.to_sat()))
-						* 1000,
-				);
-				(direction, amount_msat)
+				events.iter().collect()
 			};
 
-			let fee_paid_msat = Some(fee.to_sat() * 1000);
+			for event in sorted_events {
+				match event {
+					WalletEvent::TxConfirmed { txid, tx, block_time, .. } => {
+						let cur_height = locked_wallet.latest_checkpoint().height();
+						let confirmation_height = block_time.block_id.height;
+						let payment_status =
+							if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1 {
+								PaymentStatus::Succeeded
+							} else {
+								PaymentStatus::Pending
+							};
 
-			let payment = PaymentDetails::new(
-				id,
-				kind,
-				amount_msat,
-				fee_paid_msat,
-				direction,
-				payment_status,
-			);
+						let confirmation_status = ConfirmationStatus::Confirmed {
+							block_hash: block_time.block_id.hash,
+							height: confirmation_height,
+							timestamp: block_time.confirmation_time,
+						};
 
-			self.payment_store.insert_or_update(payment)?;
+						let payment_id = self
+							.find_payment_by_txid(*txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+
+						let payment = self.create_payment_from_tx(
+							locked_wallet,
+							*txid,
+							payment_id,
+							tx,
+							payment_status,
+							confirmation_status,
+							None,
+						);
+						self.payment_store.insert_or_update(payment)?;
+					},
+					WalletEvent::ChainTipChanged { new_tip, .. } => {
+						// Get all payments that are Pending with Confirmed status
+						let pending_payments: Vec<PaymentDetails> =
+							self.payment_store.list_filter(|p| {
+								p.status == PaymentStatus::Pending
+									&& matches!(
+										p.kind,
+										crate::payment::PaymentKind::Onchain {
+											status: ConfirmationStatus::Confirmed { .. },
+											..
+										}
+									)
+							});
+
+						for mut payment in pending_payments {
+							if let crate::payment::PaymentKind::Onchain {
+								status: ConfirmationStatus::Confirmed { height, .. },
+								..
+							} = payment.kind
+							{
+								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
+									payment.status = PaymentStatus::Succeeded;
+									self.payment_store.insert_or_update(payment)?;
+								}
+							}
+						}
+					},
+					WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
+						let payment_id = self
+							.find_payment_by_txid(*txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+
+						let payment = self.create_payment_from_tx(
+							locked_wallet,
+							*txid,
+							payment_id,
+							tx,
+							PaymentStatus::Pending,
+							ConfirmationStatus::Unconfirmed,
+							None,
+						);
+						self.payment_store.insert_or_update(payment)?;
+					},
+					WalletEvent::TxReplaced { txid, tx, conflicts } => {
+						let payment_id = self
+							.find_payment_by_txid(*txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+
+						if let Some(mut payment) = self.payment_store.get(&payment_id) {
+							if let PaymentKind::Onchain {
+								ref mut conflicting_txids,
+								txid: current_txid,
+								..
+							} = payment.kind
+							{
+								let existing_set: std::collections::HashSet<_> =
+									conflicting_txids.iter().collect();
+
+								let new_conflicts: Vec<_> = conflicts
+									.iter()
+									.map(|(_, conflict_txid)| *conflict_txid)
+									.filter(|conflict_txid| {
+										*conflict_txid != current_txid
+											&& !existing_set.contains(conflict_txid)
+									})
+									.collect();
+
+								conflicting_txids.extend(new_conflicts);
+							}
+							self.payment_store.insert_or_update(payment)?;
+						} else {
+							let conflicting_txids =
+								Some(conflicts.iter().map(|(_, txid)| *txid).collect());
+
+							let payment = self.create_payment_from_tx(
+								locked_wallet,
+								*txid,
+								payment_id,
+								tx,
+								PaymentStatus::Pending,
+								ConfirmationStatus::Unconfirmed,
+								conflicting_txids,
+							);
+							self.payment_store.insert_or_update(payment)?;
+						}
+					},
+					WalletEvent::TxDropped { txid, tx } => {
+						let payment_id = self
+							.find_payment_by_txid(*txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+						let payment = self.create_payment_from_tx(
+							locked_wallet,
+							*txid,
+							payment_id,
+							tx,
+							PaymentStatus::Pending,
+							ConfirmationStatus::Unconfirmed,
+							None,
+						);
+						self.payment_store.insert_or_update(payment)?;
+					},
+					_ => {
+						continue;
+					},
+				};
+			}
+		} else {
+			for wtx in locked_wallet.transactions() {
+				let txid = wtx.tx_node.txid;
+				let (payment_status, confirmation_status) = match wtx.chain_position {
+					bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
+						let confirmation_height = anchor.block_id.height;
+						let cur_height = locked_wallet.latest_checkpoint().height();
+						let payment_status =
+							if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1 {
+								PaymentStatus::Succeeded
+							} else {
+								PaymentStatus::Pending
+							};
+						let confirmation_status = ConfirmationStatus::Confirmed {
+							block_hash: anchor.block_id.hash,
+							height: confirmation_height,
+							timestamp: anchor.confirmation_time,
+						};
+						(payment_status, confirmation_status)
+					},
+					bdk_chain::ChainPosition::Unconfirmed { .. } => {
+						(PaymentStatus::Pending, ConfirmationStatus::Unconfirmed)
+					},
+				};
+				let payment_id = self
+					.find_payment_by_txid(txid)
+					.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+				let payment = self.create_payment_from_tx(
+					locked_wallet,
+					txid,
+					payment_id,
+					&wtx.tx_node.tx,
+					payment_status,
+					confirmation_status,
+					Some(Vec::new()),
+				);
+				self.payment_store.insert_or_update(payment)?;
+			}
 		}
-
 		Ok(())
 	}
 
@@ -693,6 +826,93 @@ impl Wallet {
 
 		Ok(tx)
 	}
+
+	fn create_payment_from_tx(
+		&self, locked_wallet: &PersistedWallet<KVStoreWalletPersister>, txid: Txid,
+		payment_id: PaymentId, tx: &Transaction, payment_status: PaymentStatus,
+		confirmation_status: ConfirmationStatus, conflicting_txids: Option<Vec<Txid>>,
+	) -> PaymentDetails {
+		// TODO: It would be great to introduce additional variants for
+		// `ChannelFunding` and `ChannelClosing`. For the former, we could just
+		// take a reference to `ChannelManager` here and check against
+		// `list_channels`. But for the latter the best approach is much less
+		// clear: for force-closes/HTLC spends we should be good querying
+		// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
+		// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
+		// spent to a wallet address. The only solution I can come up with is to
+		// create and persist a list of 'static pending outputs' that we could use
+		// here to determine the `PaymentKind`, but that's not really satisfactory, so
+		// we're punting on it until we can come up with a better solution.
+
+		let existing_payment = self.payment_store.get(&payment_id);
+		let final_conflicting_txids = if let Some(provided_conflicts) = conflicting_txids {
+			provided_conflicts
+		} else if let Some(payment) = &existing_payment {
+			if let PaymentKind::Onchain { conflicting_txids: existing_conflicts, .. } =
+				&payment.kind
+			{
+				existing_conflicts.clone()
+			} else {
+				Vec::new()
+			}
+		} else {
+			Vec::new()
+		};
+
+		let kind = crate::payment::PaymentKind::Onchain {
+			txid,
+			status: confirmation_status,
+			conflicting_txids: final_conflicting_txids,
+		};
+
+		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
+		let (sent, received) = locked_wallet.sent_and_received(tx);
+		let fee_sat = fee.to_sat();
+
+		let (direction, amount_msat) = if sent > received {
+			(
+				PaymentDirection::Outbound,
+				Some(
+					(sent.to_sat().saturating_sub(fee_sat).saturating_sub(received.to_sat()))
+						* 1000,
+				),
+			)
+		} else {
+			(
+				PaymentDirection::Inbound,
+				Some(
+					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee_sat)) * 1000,
+				),
+			)
+		};
+
+		PaymentDetails::new(
+			payment_id,
+			kind,
+			amount_msat,
+			Some(fee_sat * 1000),
+			direction,
+			payment_status,
+		)
+	}
+
+	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
+		let direct_payment_id = PaymentId(target_txid.to_byte_array());
+		if self.payment_store.get(&direct_payment_id).is_some() {
+			return Some(direct_payment_id);
+		}
+
+		self.payment_store
+			.list_filter(|p| {
+				if let PaymentKind::Onchain { txid, conflicting_txids, .. } = &p.kind {
+					*txid == target_txid || conflicting_txids.contains(&target_txid)
+				} else {
+					false
+				}
+			})
+			.first()
+			.map(|p| p.id)
+	}
 }
 
 impl Listen for Wallet {
@@ -723,7 +943,7 @@ impl Listen for Wallet {
 
 		match locked_wallet.apply_block(block, height) {
 			Ok(()) => {
-				if let Err(e) = self.update_payment_store(&mut *locked_wallet) {
+				if let Err(e) = self.update_payment_store(&mut *locked_wallet, None) {
 					log_error!(self.logger, "Failed to update payment store: {}", e);
 					return;
 				}
