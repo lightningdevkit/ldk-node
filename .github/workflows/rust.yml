@@ -41,6 +41,10 @@ jobs:
       - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check
+      - name: Pin packages to allow for MSRV
+        if: matrix.msrv
+        run: |
+          cargo update -p home --precise "0.5.11" --verbose # home v0.5.12 requires rustc 1.88 or newer
       - name: Set RUSTFLAGS to deny warnings
         if: "matrix.toolchain == 'stable'"
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
