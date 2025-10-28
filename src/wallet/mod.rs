@@ -743,7 +743,7 @@ impl Wallet {
 			Err(e) => {
 				log_error!(self.logger, "Failed to extract transaction: {}", e);
 				Err(())
-			}
+			},
 		}
 	}
 

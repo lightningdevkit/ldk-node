@@ -135,6 +135,7 @@ use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
+use lightning::ln::chan_utils::{make_funding_redeemscript, FUNDING_TRANSACTION_WITNESS_WEIGHT};
 use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
@@ -1251,19 +1252,18 @@ impl Node {
 				outpoint: funding_txo.into_bitcoin_outpoint(),
 				previous_utxo: bitcoin::TxOut {
 					value: Amount::from_sat(channel_details.channel_value_satoshis),
-					script_pubkey: lightning::ln::chan_utils::make_funding_redeemscript(
+					script_pubkey: make_funding_redeemscript(
 						&PublicKey::from_slice(&[2; 33]).unwrap(),
 						&PublicKey::from_slice(&[2; 33]).unwrap(),
 					)
 					.to_p2wsh(),
 				},
-				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT
-					+ lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT,
+				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT + FUNDING_TRANSACTION_WITNESS_WEIGHT,
 			};
 
 			let shared_output = bitcoin::TxOut {
 				value: shared_input.previous_utxo.value + Amount::from_sat(splice_amount_sats),
-				script_pubkey: lightning::ln::chan_utils::make_funding_redeemscript(
+				script_pubkey: make_funding_redeemscript(
 					&PublicKey::from_slice(&[2; 33]).unwrap(),
 					&PublicKey::from_slice(&[2; 33]).unwrap(),
 				)
