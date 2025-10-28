@@ -1350,8 +1350,14 @@ impl Node {
 				}],
 			};
 
-			let fee_rate = self.wallet.estimate_channel_funding_fee_rate();
-			let funding_feerate_per_kw = fee_rate.to_sat_per_kwu().try_into().unwrap_or(u32::MAX);
+			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
+				Ok(fee_rate) => fee_rate,
+				Err(_) => {
+					debug_assert!(false);
+					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
+				},
+			};
 
 			self.channel_manager
 				.splice_channel(
