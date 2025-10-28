@@ -386,6 +386,8 @@ interface Event {
 	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
 	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, OutPoint? funding_txo);
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
+	SplicePending(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint new_funding_txo);
+	SpliceFailed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint? abandoned_funding_txo);
 };
 
 enum PaymentFailureReason {
