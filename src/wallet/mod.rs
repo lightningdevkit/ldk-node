@@ -690,12 +690,14 @@ impl Wallet {
 			},
 		}
 
-		let mut tx = psbt.unsigned_tx;
-		for (txin, input) in tx.input.iter_mut().zip(psbt.inputs.into_iter()) {
-			txin.witness = input.final_script_witness.unwrap_or_default();
+		match psbt.extract_tx() {
+			Ok(tx) => Ok(tx),
+			Err(bitcoin::psbt::ExtractTxError::MissingInputValue { tx }) => Ok(tx),
+			Err(e) => {
+				log_error!(self.logger, "Failed to extract transaction: {}", e);
+				Err(())
+			}
 		}
-
-		Ok(tx)
 	}
 
 	#[allow(deprecated)]
