@@ -275,10 +275,6 @@ impl Wallet {
 		Ok(tx)
 	}
 
-	pub(crate) fn estimate_channel_funding_fee_rate(&self) -> FeeRate {
-		self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
-	}
-
 	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut locked_persister = self.persister.lock().unwrap();

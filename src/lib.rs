@@ -126,6 +126,7 @@ pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
+use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 #[cfg(feature = "uniffi")]
 use ffi::*;
 use gossip::GossipSource;
@@ -181,6 +182,7 @@ pub struct Node {
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
+	fee_estimator: Arc<OnchainFeeEstimator>,
 	event_queue: Arc<EventQueue<Arc<Logger>>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
@@ -1270,7 +1272,7 @@ impl Node {
 				.to_p2wsh(),
 			};
 
-			let fee_rate = self.wallet.estimate_channel_funding_fee_rate();
+			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
 
 			let inputs = self
 				.wallet
@@ -1289,7 +1291,13 @@ impl Node {
 				change_script: None,
 			};
 
-			let funding_feerate_per_kw = fee_rate.to_sat_per_kwu().try_into().unwrap_or(u32::MAX);
+			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
+				Ok(fee_rate) => fee_rate,
+				Err(_) => {
+					debug_assert!(false);
+					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
+				},
+			};
 
 			self.channel_manager
 				.splice_channel(
