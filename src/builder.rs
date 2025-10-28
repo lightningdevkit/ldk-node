@@ -1169,6 +1169,7 @@ fn build_with_store_internal(
 			if e.kind() == std::io::ErrorKind::NotFound {
 				Arc::new(RwLock::new(NodeMetrics::default()))
 			} else {
+				log_error!(logger, "Failed to read node metrics from store: {}", e);
 				return Err(BuildError::ReadFailed);
 			}
 		},
@@ -1232,7 +1233,8 @@ fn build_with_store_internal(
 			Arc::clone(&kv_store),
 			Arc::clone(&logger),
 		)),
-		Err(_) => {
+		Err(e) => {
+			log_error!(logger, "Failed to read payment data from store: {}", e);
 			return Err(BuildError::ReadFailed);
 		},
 	};
@@ -1365,7 +1367,7 @@ fn build_with_store_internal(
 			if e.kind() == lightning::io::ErrorKind::NotFound {
 				Vec::new()
 			} else {
-				log_error!(logger, "Failed to read channel monitors: {}", e.to_string());
+				log_error!(logger, "Failed to read channel monitors from store: {}", e.to_string());
 				return Err(BuildError::ReadFailed);
 			}
 		},
@@ -1390,6 +1392,7 @@ fn build_with_store_internal(
 				if e.kind() == std::io::ErrorKind::NotFound {
 					Arc::new(Graph::new(config.network.into(), Arc::clone(&logger)))
 				} else {
+					log_error!(logger, "Failed to read network graph from store: {}", e);
 					return Err(BuildError::ReadFailed);
 				}
 			},
@@ -1406,6 +1409,7 @@ fn build_with_store_internal(
 				let params = ProbabilisticScoringDecayParameters::default();
 				ProbabilisticScorer::new(params, Arc::clone(&network_graph), Arc::clone(&logger))
 			} else {
+				log_error!(logger, "Failed to read scoring data from store: {}", e);
 				return Err(BuildError::ReadFailed);
 			}
 		},
@@ -1491,7 +1495,7 @@ fn build_with_store_internal(
 			);
 			let (_hash, channel_manager) =
 				<(BlockHash, ChannelManager)>::read(&mut reader, read_args).map_err(|e| {
-					log_error!(logger, "Failed to read channel manager from KVStore: {}", e);
+					log_error!(logger, "Failed to read channel manager from store: {}", e);
 					BuildError::ReadFailed
 				})?;
 			channel_manager
@@ -1720,6 +1724,7 @@ fn build_with_store_internal(
 					Arc::clone(&logger),
 				))
 			} else {
+				log_error!(logger, "Failed to read output sweeper data from store: {}", e);
 				return Err(BuildError::ReadFailed);
 			}
 		},
@@ -1732,6 +1737,7 @@ fn build_with_store_internal(
 			if e.kind() == std::io::ErrorKind::NotFound {
 				Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 			} else {
+				log_error!(logger, "Failed to read event queue from store: {}", e);
 				return Err(BuildError::ReadFailed);
 			}
 		},
@@ -1743,6 +1749,7 @@ fn build_with_store_internal(
 			if e.kind() == std::io::ErrorKind::NotFound {
 				Arc::new(PeerStore::new(Arc::clone(&kv_store), Arc::clone(&logger)))
 			} else {
+				log_error!(logger, "Failed to read peer data from store: {}", e);
 				return Err(BuildError::ReadFailed);
 			}
 		},

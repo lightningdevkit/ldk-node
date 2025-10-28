@@ -11,7 +11,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,6 +44,11 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
+// We set this to a small number of threads that would still allow to make some progress if one
+// would hit a blocking case
+const INTERNAL_RUNTIME_WORKERS: usize = 2;
+const VSS_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
 	inner: Arc<VssStoreInner>,
@@ -51,6 +56,13 @@ pub struct VssStore {
 	// operations aren't sensitive to the order of execution.
 	next_version: AtomicU64,
 	runtime: Arc<Runtime>,
+	// A VSS-internal runtime we use to avoid any deadlocks we could hit when waiting on a spawned
+	// blocking task to finish while the blocked thread had acquired the reactor. In particular,
+	// this works around a previously-hit case where a concurrent call to
+	// `PeerManager::process_pending_events` -> `ChannelManager::get_and_clear_pending_msg_events`
+	// would deadlock when trying to acquire sync `Mutex` locks that are held by the thread
+	// currently being blocked waiting on the VSS operation to finish.
+	internal_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl VssStore {
@@ -60,7 +72,21 @@ impl VssStore {
 	) -> Self {
 		let inner = Arc::new(VssStoreInner::new(base_url, store_id, vss_seed, header_provider));
 		let next_version = AtomicU64::new(1);
-		Self { inner, next_version, runtime }
+		let internal_runtime = Some(
+			tokio::runtime::Builder::new_multi_thread()
+				.enable_all()
+				.thread_name_fn(|| {
+					static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+					let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+					format!("ldk-node-vss-runtime-{}", id)
+				})
+				.worker_threads(INTERNAL_RUNTIME_WORKERS)
+				.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
+				.build()
+				.unwrap(),
+		);
+
+		Self { inner, next_version, runtime, internal_runtime }
 	}
 
 	// Same logic as for the obfuscated keys below, but just for locking, using the plaintext keys
@@ -94,46 +120,122 @@ impl KVStoreSync for VssStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
-		let fut = self.inner.read_internal(primary_namespace, secondary_namespace, key);
-		self.runtime.block_on(fut)
+		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
+			debug_assert!(false, "Failed to access internal runtime");
+			let msg = format!("Failed to access internal runtime");
+			Error::new(ErrorKind::Other, msg)
+		})?;
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		let fut =
+			async move { inner.read_internal(primary_namespace, secondary_namespace, key).await };
+		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
+		// times out.
+		let spawned_fut = internal_runtime.spawn(async move {
+			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+				let msg = "VssStore::read timed out";
+				Error::new(ErrorKind::Other, msg)
+			})
+		});
+		self.runtime.block_on(spawned_fut).expect("We should always finish")?
 	}
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
+			debug_assert!(false, "Failed to access internal runtime");
+			let msg = format!("Failed to access internal runtime");
+			Error::new(ErrorKind::Other, msg)
+		})?;
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		let locking_key = self.build_locking_key(&primary_namespace, &secondary_namespace, &key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		let fut = self.inner.write_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			buf,
-		);
-		self.runtime.block_on(fut)
+		let fut = async move {
+			inner
+				.write_internal(
+					inner_lock_ref,
+					locking_key,
+					version,
+					primary_namespace,
+					secondary_namespace,
+					key,
+					buf,
+				)
+				.await
+		};
+		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
+		// times out.
+		let spawned_fut = internal_runtime.spawn(async move {
+			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+				let msg = "VssStore::write timed out";
+				Error::new(ErrorKind::Other, msg)
+			})
+		});
+		self.runtime.block_on(spawned_fut).expect("We should always finish")?
 	}
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
+			debug_assert!(false, "Failed to access internal runtime");
+			let msg = format!("Failed to access internal runtime");
+			Error::new(ErrorKind::Other, msg)
+		})?;
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let inner = Arc::clone(&self.inner);
+		let locking_key = self.build_locking_key(&primary_namespace, &secondary_namespace, &key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		let fut = self.inner.remove_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
-			primary_namespace,
-			secondary_namespace,
-			key,
-		);
-		self.runtime.block_on(fut)
+		let fut = async move {
+			inner
+				.remove_internal(
+					inner_lock_ref,
+					locking_key,
+					version,
+					primary_namespace,
+					secondary_namespace,
+					key,
+				)
+				.await
+		};
+		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
+		// times out.
+		let spawned_fut = internal_runtime.spawn(async move {
+			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+				let msg = "VssStore::remove timed out";
+				Error::new(ErrorKind::Other, msg)
+			})
+		});
+		self.runtime.block_on(spawned_fut).expect("We should always finish")?
 	}
 
 	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		let fut = self.inner.list_internal(primary_namespace, secondary_namespace);
-		self.runtime.block_on(fut)
+		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
+			debug_assert!(false, "Failed to access internal runtime");
+			let msg = format!("Failed to access internal runtime");
+			Error::new(ErrorKind::Other, msg)
+		})?;
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let inner = Arc::clone(&self.inner);
+		let fut = async move { inner.list_internal(primary_namespace, secondary_namespace).await };
+		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
+		// times out.
+		let spawned_fut = internal_runtime.spawn(async move {
+			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+				let msg = "VssStore::list timed out";
+				Error::new(ErrorKind::Other, msg)
+			})
+		});
+		self.runtime.block_on(spawned_fut).expect("We should always finish")?
 	}
 }
 
@@ -145,9 +247,9 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(async move {
-			inner.read_internal(&primary_namespace, &secondary_namespace, &key).await
-		})
+		Box::pin(
+			async move { inner.read_internal(primary_namespace, secondary_namespace, key).await },
+		)
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
@@ -164,9 +266,9 @@ impl KVStore for VssStore {
 					inner_lock_ref,
 					locking_key,
 					version,
-					&primary_namespace,
-					&secondary_namespace,
-					&key,
+					primary_namespace,
+					secondary_namespace,
+					key,
 					buf,
 				)
 				.await
@@ -187,9 +289,9 @@ impl KVStore for VssStore {
 					inner_lock_ref,
 					locking_key,
 					version,
-					&primary_namespace,
-					&secondary_namespace,
-					&key,
+					primary_namespace,
+					secondary_namespace,
+					key,
 				)
 				.await
 		})
@@ -200,7 +302,14 @@ impl KVStore for VssStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(async move { inner.list_internal(&primary_namespace, &secondary_namespace).await })
+		Box::pin(async move { inner.list_internal(primary_namespace, secondary_namespace).await })
+	}
+}
+
+impl Drop for VssStore {
+	fn drop(&mut self) {
+		let internal_runtime = self.internal_runtime.take();
+		tokio::task::block_in_place(move || drop(internal_runtime));
 	}
 }
 
@@ -300,11 +409,12 @@ impl VssStoreInner {
 	}
 
 	async fn read_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
 	) -> io::Result<Vec<u8>> {
-		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
+		check_namespace_key_validity(&primary_namespace, &secondary_namespace, Some(&key), "read")?;
 
-		let obfuscated_key = self.build_obfuscated_key(primary_namespace, secondary_namespace, key);
+		let obfuscated_key =
+			self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
 		let request = GetObjectRequest { store_id: self.store_id.clone(), key: obfuscated_key };
 		let resp = self.client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
@@ -332,13 +442,18 @@ impl VssStoreInner {
 
 	async fn write_internal(
 		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
-		primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
 	) -> io::Result<()> {
-		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
+		check_namespace_key_validity(
+			&primary_namespace,
+			&secondary_namespace,
+			Some(&key),
+			"write",
+		)?;
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
 			let obfuscated_key =
-				self.build_obfuscated_key(primary_namespace, secondary_namespace, key);
+				self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
 			let vss_version = -1;
 			let storable = self.storable_builder.build(buf, vss_version);
 			let request = PutObjectRequest {
@@ -367,13 +482,18 @@ impl VssStoreInner {
 
 	async fn remove_internal(
 		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
-		primary_namespace: &str, secondary_namespace: &str, key: &str,
+		primary_namespace: String, secondary_namespace: String, key: String,
 	) -> io::Result<()> {
-		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
+		check_namespace_key_validity(
+			&primary_namespace,
+			&secondary_namespace,
+			Some(&key),
+			"remove",
+		)?;
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
 			let obfuscated_key =
-				self.build_obfuscated_key(primary_namespace, secondary_namespace, key);
+				self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
 			let request = DeleteObjectRequest {
 				store_id: self.store_id.clone(),
 				key_value: Some(KeyValue { key: obfuscated_key, version: -1, value: vec![] }),
@@ -393,12 +513,12 @@ impl VssStoreInner {
 	}
 
 	async fn list_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str,
+		&self, primary_namespace: String, secondary_namespace: String,
 	) -> io::Result<Vec<String>> {
-		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
+		check_namespace_key_validity(&primary_namespace, &secondary_namespace, None, "list")?;
 
 		let keys =
-			self.list_all_keys(primary_namespace, secondary_namespace).await.map_err(|e| {
+			self.list_all_keys(&primary_namespace, &secondary_namespace).await.map_err(|e| {
 				let msg = format!(
 					"Failed to retrieve keys in namespace: {}/{} : {}",
 					primary_namespace, secondary_namespace, e
@@ -486,38 +606,40 @@ mod tests {
 
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng, RngCore};
-	use tokio::runtime;
 	use vss_client::headers::FixedHeaders;
 
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
+	use crate::logger::Logger;
 
 	#[test]
 	fn vss_read_write_remove_list_persist() {
-		let runtime = Arc::new(Runtime::new().unwrap());
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = thread_rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		let runtime = Arc::new(Runtime::new(logger).unwrap());
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime).unwrap();
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
 
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 	async fn vss_read_write_remove_list_persist_in_runtime_context() {
-		let runtime = Arc::new(Runtime::new().unwrap());
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = thread_rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		let runtime = Arc::new(Runtime::new(logger).unwrap());
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime).unwrap();
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
 
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
