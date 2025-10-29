@@ -20,10 +20,10 @@ use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
-	generate_blocks_and_wait, open_channel, open_channel_push_amt, premine_and_distribute_funds,
-	premine_blocks, prepare_rbf, random_config, random_listening_addresses,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_for_async_payments,
-	setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
+	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
+	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -927,22 +927,6 @@ async fn concurrent_connections_succeed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn splice_channel() {
-	macro_rules! expect_splice_pending_event {
-		($node: expr, $counterparty_node_id: expr) => {{
-			match $node.next_event_async().await {
-				ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
-					println!("{} got event {:?}", $node.node_id(), e);
-					assert_eq!(counterparty_node_id, $counterparty_node_id);
-					$node.event_handled().unwrap();
-					new_funding_txo
-				},
-				ref e => {
-					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-				},
-			}
-		}};
-	}
-
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
