@@ -1353,7 +1353,8 @@ impl Node {
 			.peer_by_node_id(peer_node_id)
 			.ok_or(Error::ConnectionFailed)?
 			.init_features;
-		let anchor_channel = init_features.supports_anchors_zero_fee_htlc_tx();
+		let anchor_channel = init_features.supports_anchors_zero_fee_htlc_tx()
+			|| init_features.supports_anchor_zero_fee_commitments();
 		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 
@@ -2333,9 +2334,10 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 				!anchor_channels_config.trusted_peers_no_reserve.contains(&c.counterparty.node_id)
 					&& c.channel_shutdown_state
 						.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
-					&& c.channel_type
-						.as_ref()
-						.map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
+					&& c.channel_type.as_ref().map_or(false, |t| {
+						t.requires_anchors_zero_fee_htlc_tx()
+							|| t.requires_anchor_zero_fee_commitments()
+					})
 			})
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
