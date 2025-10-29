@@ -1256,7 +1256,7 @@ where
 					}
 				}
 
-				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
+				let anchor_channel = crate::requires_anchor_channel_type(&channel_type);
 				if anchor_channel && self.config.anchor_channels_config.is_none() {
 					log_error!(
 						self.logger,
