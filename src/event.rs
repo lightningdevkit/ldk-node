@@ -1266,7 +1266,7 @@ where
 					}
 				}
 
-				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
+				let anchor_channel = crate::requires_anchor_channel_type(&channel_type);
 				let required_reserve_sats = crate::new_channel_anchor_reserve_sats(
 					&self.config,
 					&counterparty_node_id,

@@ -452,18 +452,14 @@ where
 					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 				let spendable_amount_sats =
 					self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
-				let required_funds_sats = channel_amount_sats
-					+ if init_features.supports_anchors_zero_fee_htlc_tx()
-						&& !self
-							.config
-							.anchor_channels_config
-							.trusted_peers_no_reserve
-							.contains(&their_network_key)
-					{
-						self.config.anchor_channels_config.per_channel_reserve_sats
-					} else {
-						0
-					};
+				let anchor_channel =
+					crate::peer_may_negotiate_anchor_channel_type(&self.config, &init_features);
+				let additional_reserve_required = crate::new_channel_anchor_reserve_sats(
+					&self.config,
+					&their_network_key,
+					anchor_channel,
+				);
+				let required_funds_sats = channel_amount_sats + additional_reserve_required;
 				if spendable_amount_sats < required_funds_sats {
 					log_error!(self.logger,
 						"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
