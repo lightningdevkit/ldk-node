@@ -452,8 +452,9 @@ where
 					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 				let spendable_amount_sats =
 					self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+				let anchor_channel = crate::supports_anchor_channel_type(&init_features);
 				let required_funds_sats = channel_amount_sats
-					+ if init_features.supports_anchors_zero_fee_htlc_tx()
+					+ if anchor_channel
 						&& !self
 							.config
 							.anchor_channels_config

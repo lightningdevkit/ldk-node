@@ -161,7 +161,9 @@ use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
-use lightning_types::features::NodeFeatures as LdkNodeFeatures;
+use lightning_types::features::{
+	ChannelTypeFeatures, InitFeatures, NodeFeatures as LdkNodeFeatures,
+};
 use liquidity::LiquiditySource;
 use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -212,6 +214,16 @@ impl LeakChecker {
 			assert_eq!(weak.strong_count(), 0);
 		}
 	}
+}
+
+fn supports_anchor_channel_type(init_features: &InitFeatures) -> bool {
+	init_features.supports_anchors_zero_fee_htlc_tx()
+		|| init_features.supports_anchor_zero_fee_commitments()
+}
+
+fn requires_anchor_channel_type(channel_type: &ChannelTypeFeatures) -> bool {
+	channel_type.requires_anchors_zero_fee_htlc_tx()
+		|| channel_type.requires_anchor_zero_fee_commitments()
 }
 
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
@@ -1342,7 +1354,7 @@ impl Node {
 			.peer_by_node_id(peer_node_id)
 			.ok_or(Error::ConnectionFailed)?
 			.init_features;
-		let anchor_channel = init_features.supports_anchors_zero_fee_htlc_tx();
+		let anchor_channel = supports_anchor_channel_type(&init_features);
 		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 
@@ -2415,7 +2427,7 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 				.contains(&c.counterparty.node_id)
 				&& c.channel_shutdown_state
 					.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
-				&& c.channel_type.as_ref().map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
+				&& c.channel_type.as_ref().map_or(false, requires_anchor_channel_type)
 		})
 		.count() as u64
 		* config.anchor_channels_config.per_channel_reserve_sats
