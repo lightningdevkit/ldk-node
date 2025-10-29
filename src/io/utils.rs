@@ -35,7 +35,8 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning_types::string::PrintableString;
-use rand::{rng, RngCore};
+use rand::rngs::OsRng;
+use rand::TryRngCore;
 
 use super::*;
 use crate::chain::ChainSource;
@@ -63,7 +64,7 @@ pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_sc
 pub fn generate_entropy_mnemonic() -> Mnemonic {
 	// bip39::Mnemonic supports 256 bit entropy max
 	let mut entropy = [0; 32];
-	rng().fill_bytes(&mut entropy);
+	OsRng.try_fill_bytes(&mut entropy).expect("Failed to generate entropy");
 	Mnemonic::from_entropy(&entropy).unwrap()
 }
 
@@ -96,7 +97,10 @@ where
 		Ok(key)
 	} else {
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
-		rng().fill_bytes(&mut key);
+		OsRng.try_fill_bytes(&mut key).map_err(|e| {
+			log_error!(logger, "Failed to generate entropy: {}", e);
+			std::io::Error::new(std::io::ErrorKind::Other, "Failed to generate seed bytes")
+		})?;
 
 		if let Some(parent_dir) = Path::new(&keys_seed_path).parent() {
 			fs::create_dir_all(parent_dir).map_err(|e| {
