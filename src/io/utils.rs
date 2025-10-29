@@ -35,7 +35,7 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning_types::string::PrintableString;
-use rand::{thread_rng, RngCore};
+use rand::{rng, RngCore};
 
 use super::*;
 use crate::chain::ChainSource;
@@ -63,7 +63,7 @@ pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_sc
 pub fn generate_entropy_mnemonic() -> Mnemonic {
 	// bip39::Mnemonic supports 256 bit entropy max
 	let mut entropy = [0; 32];
-	thread_rng().fill_bytes(&mut entropy);
+	rng().fill_bytes(&mut entropy);
 	Mnemonic::from_entropy(&entropy).unwrap()
 }
 
@@ -96,7 +96,7 @@ where
 		Ok(key)
 	} else {
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
-		thread_rng().fill_bytes(&mut key);
+		rng().fill_bytes(&mut key);
 
 		if let Some(parent_dir) = Path::new(&keys_seed_path).parent() {
 			fs::create_dir_all(parent_dir).map_err(|e| {

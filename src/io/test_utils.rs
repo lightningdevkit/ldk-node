@@ -18,8 +18,8 @@ use lightning::util::persist::{
 };
 use lightning::util::test_utils;
 use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
+use rand::distr::Alphanumeric;
+use rand::{rng, Rng};
 
 type TestMonitorUpdatePersister<'a, K> = MonitorUpdatingPersister<
 	&'a K,
@@ -34,7 +34,7 @@ const EXPECTED_UPDATES_PER_PAYMENT: u64 = 5;
 
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
-	let mut rng = thread_rng();
+	let mut rng = rng();
 	let rand_dir: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 	temp_path.push(rand_dir);
 	temp_path

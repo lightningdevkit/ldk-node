@@ -1117,7 +1117,7 @@ impl Node {
 		}
 
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
-		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
+		let user_channel_id: u128 = rand::rng().random::<u128>();
 
 		match self.channel_manager.create_channel(
 			peer_info.node_id,

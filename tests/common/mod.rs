@@ -43,8 +43,8 @@ use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_persister::fs_store::FilesystemStore;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use logging::TestLogWriter;
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
+use rand::distr::Alphanumeric;
+use rand::{rng, Rng};
 use serde_json::{json, Value};
 
 macro_rules! expect_event {
@@ -191,15 +191,15 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
-	let mut rng = thread_rng();
+	let mut rng = rng();
 	let rand_dir: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 	temp_path.push(rand_dir);
 	temp_path
 }
 
 pub(crate) fn random_port() -> u16 {
-	let mut rng = thread_rng();
-	rng.gen_range(5000..32768)
+	let mut rng = rng();
+	rng.random_range(5000..32768)
 }
 
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
@@ -216,8 +216,8 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 }
 
 pub(crate) fn random_node_alias() -> Option<NodeAlias> {
-	let mut rng = thread_rng();
-	let rand_val = rng.gen_range(0..1000);
+	let mut rng = rng();
+	let rand_val = rng.random_range(0..1000);
 	let alias = format!("ldk-node-{}", rand_val);
 	let mut bytes = [0u8; 32];
 	bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());

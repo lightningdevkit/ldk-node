@@ -592,7 +592,7 @@ pub(crate) struct RandEntropySource;
 
 impl EntropySource for RandEntropySource {
 	fn fill_bytes(&self, buffer: &mut [u8]) {
-		rand::thread_rng().fill_bytes(buffer);
+		rand::rng().fill_bytes(buffer);
 	}
 }
 
@@ -604,8 +604,8 @@ impl RefUnwindSafe for VssStore {}
 mod tests {
 	use std::collections::HashMap;
 
-	use rand::distributions::Alphanumeric;
-	use rand::{thread_rng, Rng, RngCore};
+	use rand::distr::Alphanumeric;
+	use rand::{rng, Rng, RngCore};
 	use vss_client::headers::FixedHeaders;
 
 	use super::*;
@@ -615,7 +615,7 @@ mod tests {
 	#[test]
 	fn vss_read_write_remove_list_persist() {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
-		let mut rng = thread_rng();
+		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
@@ -631,7 +631,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 	async fn vss_read_write_remove_list_persist_in_runtime_context() {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
-		let mut rng = thread_rng();
+		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
