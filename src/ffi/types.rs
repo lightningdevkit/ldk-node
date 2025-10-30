@@ -159,7 +159,7 @@ impl Offer {
 	/// A complete description of the purpose of the payment.
 	///
 	/// Intended to be displayed to the user but with the caveat that it has not been verified in any way.
-	pub fn description(&self) -> Option<String> {
+	pub fn offer_description(&self) -> Option<String> {
 		self.inner.description().map(|printable| printable.to_string())
 	}
 
@@ -288,7 +288,7 @@ impl Refund {
 	/// A complete description of the purpose of the refund.
 	///
 	/// Intended to be displayed to the user but with the caveat that it has not been verified in any way.
-	pub fn description(&self) -> String {
+	pub fn refund_description(&self) -> String {
 		self.inner.description().to_string()
 	}
 
@@ -466,7 +466,7 @@ impl Bolt12Invoice {
 	///
 	/// [`Offer::description`]: lightning::offers::offer::Offer::description
 	/// [`Refund::description`]: lightning::offers::refund::Refund::description
-	pub fn description(&self) -> Option<String> {
+	pub fn invoice_description(&self) -> Option<String> {
 		self.inner.description().map(|printable| printable.to_string())
 	}
 
@@ -1359,7 +1359,7 @@ mod tests {
 	#[test]
 	fn test_offer() {
 		let (ldk_offer, wrapped_offer) = create_test_offer();
-		match (ldk_offer.description(), wrapped_offer.description()) {
+		match (ldk_offer.description(), wrapped_offer.offer_description()) {
 			(Some(ldk_desc), Some(wrapped_desc)) => {
 				assert_eq!(ldk_desc.to_string(), wrapped_desc);
 			},
@@ -1481,7 +1481,7 @@ mod tests {
 	fn test_refund_properties() {
 		let (ldk_refund, wrapped_refund) = create_test_refund();
 
-		assert_eq!(ldk_refund.description().to_string(), wrapped_refund.description());
+		assert_eq!(ldk_refund.description().to_string(), wrapped_refund.refund_description());
 		assert_eq!(ldk_refund.amount_msats(), wrapped_refund.amount_msats());
 		assert_eq!(ldk_refund.is_expired(), wrapped_refund.is_expired());
 
@@ -1572,7 +1572,7 @@ mod tests {
 
 		assert_eq!(ldk_invoice.relative_expiry().as_secs(), wrapped_invoice.relative_expiry());
 
-		match (ldk_invoice.description(), wrapped_invoice.description()) {
+		match (ldk_invoice.description(), wrapped_invoice.invoice_description()) {
 			(Some(ldk_desc), Some(wrapped_desc)) => {
 				assert_eq!(ldk_desc.to_string(), wrapped_desc);
 			},
