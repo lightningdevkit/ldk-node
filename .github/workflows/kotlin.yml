@@ -2,6 +2,10 @@ name: CI Checks - Kotlin Tests
 
 on: [push, pull_request]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check-kotlin:
     runs-on: ubuntu-latest
