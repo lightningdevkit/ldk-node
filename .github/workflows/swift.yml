@@ -1,0 +1,21 @@
+name: CI Checks - Swift Tests
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-swift:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set default Rust version to stable
+        run: rustup default stable
+
+      - name: Generate Swift bindings
+        run: ./scripts/uniffi_bindgen_generate_swift.sh
