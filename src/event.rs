@@ -1137,7 +1137,7 @@ where
 					}
 				}
 
-				let user_channel_id: u128 = rng().random::<u128>();
+				let user_channel_id: u128 = rng().random();
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
 				if let Some((lsp_node_id, _)) = self
