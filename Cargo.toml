@@ -152,5 +152,4 @@ check-cfg = [
 
 [[bench]]
 name = "payments"
-path = "tests/benchmarks.rs"
 harness = false
