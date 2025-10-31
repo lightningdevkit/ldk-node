@@ -666,4 +666,87 @@ mod tests {
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
 	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn vss_lazy_delete() {
+		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
+		let mut rng = rng();
+		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
+		let mut vss_seed = [0u8; 32];
+		rng.fill_bytes(&mut vss_seed);
+		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		let runtime = Arc::new(Runtime::new(logger).unwrap());
+		let vss_store =
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
+
+		let primary_namespace = "test_namespace";
+		let secondary_namespace = "";
+		let key_to_delete = "key_to_delete";
+		let key_for_trigger = "key_for_trigger";
+		let data_to_delete = b"data_to_delete".to_vec();
+		let trigger_data = b"trigger_data".to_vec();
+
+		// Write the key that we'll later lazily delete
+		KVStore::write(
+			&vss_store,
+			primary_namespace,
+			secondary_namespace,
+			key_to_delete,
+			data_to_delete.clone(),
+		)
+		.await
+		.unwrap();
+
+		// Verify the key exists
+		let read_data =
+			KVStore::read(&vss_store, primary_namespace, secondary_namespace, key_to_delete)
+				.await
+				.unwrap();
+		assert_eq!(read_data, data_to_delete);
+
+		// Perform a lazy delete
+		KVStore::remove(&vss_store, primary_namespace, secondary_namespace, key_to_delete, true)
+			.await
+			.unwrap();
+
+		// Verify the key still exists (lazy delete doesn't immediately remove it)
+		let read_data =
+			KVStore::read(&vss_store, primary_namespace, secondary_namespace, key_to_delete)
+				.await
+				.unwrap();
+		assert_eq!(read_data, data_to_delete);
+
+		// Verify the key is still in the list
+		let keys = KVStore::list(&vss_store, primary_namespace, secondary_namespace).await.unwrap();
+		assert!(keys.contains(&key_to_delete.to_string()));
+
+		// Trigger the actual deletion by performing a write operation
+		KVStore::write(
+			&vss_store,
+			primary_namespace,
+			secondary_namespace,
+			key_for_trigger,
+			trigger_data.clone(),
+		)
+		.await
+		.unwrap();
+
+		// Now verify the key is actually deleted
+		let read_result =
+			KVStore::read(&vss_store, primary_namespace, secondary_namespace, key_to_delete).await;
+		assert!(read_result.is_err());
+		assert_eq!(read_result.unwrap_err().kind(), ErrorKind::NotFound);
+
+		// Verify the key is no longer in the list
+		let keys = KVStore::list(&vss_store, primary_namespace, secondary_namespace).await.unwrap();
+		assert!(!keys.contains(&key_to_delete.to_string()));
+
+		// Verify the trigger key still exists
+		let read_data =
+			KVStore::read(&vss_store, primary_namespace, secondary_namespace, key_for_trigger)
+				.await
+				.unwrap();
+		assert_eq!(read_data, trigger_data);
+	}
 }
