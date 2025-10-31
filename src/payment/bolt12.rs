@@ -84,7 +84,7 @@ impl Bolt12Payment {
 		let offer = maybe_deref(offer);
 
 		let mut random_bytes = [0u8; 32];
-		rand::thread_rng().fill_bytes(&mut random_bytes);
+		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let route_params_config = RouteParametersConfig::default();
@@ -191,7 +191,7 @@ impl Bolt12Payment {
 		let offer = maybe_deref(offer);
 
 		let mut random_bytes = [0u8; 32];
-		rand::thread_rng().fill_bytes(&mut random_bytes);
+		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let route_params_config = RouteParametersConfig::default();
@@ -408,7 +408,7 @@ impl Bolt12Payment {
 		payer_note: Option<String>,
 	) -> Result<Refund, Error> {
 		let mut random_bytes = [0u8; 32];
-		rand::thread_rng().fill_bytes(&mut random_bytes);
+		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
