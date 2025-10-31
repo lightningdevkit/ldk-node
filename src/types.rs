@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use bitcoin::secp256k1::PublicKey;
@@ -189,6 +190,12 @@ impl Readable for UserChannelId {
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
 		Ok(Self(Readable::read(reader)?))
+	}
+}
+
+impl fmt::Display for UserChannelId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "UserChannelId({})", self.0)
 	}
 }
 
