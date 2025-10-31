@@ -1244,14 +1244,14 @@ impl KVStore for TestSyncStore {
 		})
 	}
 	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
 		let fut = tokio::task::spawn_blocking(move || {
-			inner.remove_internal(&primary_namespace, &secondary_namespace, &key)
+			inner.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy)
 		});
 		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
@@ -1292,9 +1292,9 @@ impl KVStoreSync for TestSyncStore {
 	}
 
 	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> lightning::io::Result<()> {
-		self.inner.remove_internal(primary_namespace, secondary_namespace, key)
+		self.inner.remove_internal(primary_namespace, secondary_namespace, key, lazy)
 	}
 
 	fn list(
@@ -1432,15 +1432,25 @@ impl TestSyncStoreInner {
 	}
 
 	fn remove_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().unwrap();
 		let fs_res =
-			KVStoreSync::remove(&self.fs_store, primary_namespace, secondary_namespace, key);
-		let sqlite_res =
-			KVStoreSync::remove(&self.sqlite_store, primary_namespace, secondary_namespace, key);
-		let test_res =
-			KVStoreSync::remove(&self.test_store, primary_namespace, secondary_namespace, key);
+			KVStoreSync::remove(&self.fs_store, primary_namespace, secondary_namespace, key, lazy);
+		let sqlite_res = KVStoreSync::remove(
+			&self.sqlite_store,
+			primary_namespace,
+			secondary_namespace,
+			key,
+			lazy,
+		);
+		let test_res = KVStoreSync::remove(
+			&self.test_store,
+			primary_namespace,
+			secondary_namespace,
+			key,
+			lazy,
+		);
 
 		assert!(!self
 			.do_list(primary_namespace, secondary_namespace)
