@@ -43,6 +43,8 @@ pub enum Error {
 	ChannelCreationFailed,
 	/// A channel could not be closed.
 	ChannelClosingFailed,
+	/// A channel could not be spliced.
+	ChannelSplicingFailed,
 	/// A channel configuration could not be updated.
 	ChannelConfigUpdateFailed,
 	/// Persistence failed.
@@ -145,6 +147,7 @@ impl fmt::Display for Error {
 			Self::ProbeSendingFailed => write!(f, "Failed to send the given payment probe."),
 			Self::ChannelCreationFailed => write!(f, "Failed to create channel."),
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
+			Self::ChannelSplicingFailed => write!(f, "Failed to splice channel."),
 			Self::ChannelConfigUpdateFailed => write!(f, "Failed to update channel config."),
 			Self::PersistenceFailed => write!(f, "Failed to persist data."),
 			Self::FeerateEstimationUpdateFailed => {

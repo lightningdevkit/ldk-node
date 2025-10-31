@@ -99,6 +99,24 @@ macro_rules! expect_channel_ready_event {
 
 pub(crate) use expect_channel_ready_event;
 
+macro_rules! expect_splice_pending_event {
+	($node: expr, $counterparty_node_id: expr) => {{
+		match $node.next_event_async().await {
+			ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
+				println!("{} got event {:?}", $node.node_id(), e);
+				assert_eq!(counterparty_node_id, $counterparty_node_id);
+				$node.event_handled().unwrap();
+				new_funding_txo
+			},
+			ref e => {
+				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+			},
+		}
+	}};
+}
+
+pub(crate) use expect_splice_pending_event;
+
 macro_rules! expect_payment_received_event {
 	($node:expr, $amount_msat:expr) => {{
 		match $node.next_event_async().await {
@@ -761,8 +779,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		node_b_anchor_reserve_sat
 	);
 
-	let user_channel_id = expect_channel_ready_event!(node_a, node_b.node_id());
-	expect_channel_ready_event!(node_b, node_a.node_id());
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	println!("\nB receive");
 	let invoice_amount_1_msat = 2500_000;
@@ -1051,12 +1069,65 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		1
 	);
 
+	println!("\nB splices out to pay A");
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let splice_out_sat = funding_amount_sat / 2;
+	node_b.splice_out(&user_channel_id_b, node_a.node_id(), addr_a, splice_out_sat).unwrap();
+
+	expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		2
+	);
+	// FIXME: Should a splice-out be considered an outbound onchain payment?
+	//assert_eq!(
+	//	node_b
+	//		.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+	//			&& matches!(p.kind, PaymentKind::Onchain { .. }))
+	//		.len(),
+	//	1
+	//);
+
+	println!("\nA splices in the splice-out payment from B");
+	let splice_in_sat = splice_out_sat;
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
+
+	expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert_eq!(
+		node_a
+			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. }))
+			.len(),
+		2
+	);
+
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
 		tokio::time::sleep(Duration::from_secs(1)).await;
-		node_a.force_close_channel(&user_channel_id, node_b.node_id(), None).unwrap();
+		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	} else {
-		node_a.close_channel(&user_channel_id, node_b.node_id()).unwrap();
+		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
 	}
 
 	expect_event!(node_a, ChannelClosed);
@@ -1155,7 +1226,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		+ invoice_amount_3_msat
 		+ determined_amount_msat
 		+ keysend_amount_msat)
-		/ 1000;
+		/ 1000 - splice_out_sat;
 	let node_a_upper_bound_sat =
 		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
 	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
@@ -1176,7 +1247,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
-		2
+		3
 	);
 	assert_eq!(
 		node_b
