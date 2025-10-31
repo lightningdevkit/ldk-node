@@ -771,7 +771,7 @@ interface Offer {
 	constructor([ByRef] string offer_str);
 	OfferId id();
 	boolean is_expired();
-	string? description();
+	string? offer_description();
 	string? issuer();
 	OfferAmount? amount();
 	boolean is_valid_quantity(u64 quantity);
@@ -787,7 +787,7 @@ interface Offer {
 interface Refund {
 	[Throws=NodeError, Name=from_str]
 	constructor([ByRef] string refund_str);
-	string description();
+	string refund_description();
 	u64? absolute_expiry_seconds();
 	boolean is_expired();
 	string? issuer();
@@ -810,7 +810,7 @@ interface Bolt12Invoice {
 	u64? absolute_expiry_seconds();
 	u64 relative_expiry();
 	boolean is_expired();
-	string? description();
+	string? invoice_description();
 	string? issuer();
 	string? payer_note();
 	sequence<u8>? metadata();

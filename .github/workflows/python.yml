@@ -2,6 +2,10 @@ name: CI Checks - Python Tests
 
 on: [push, pull_request]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check-python:
     runs-on: ubuntu-latest
