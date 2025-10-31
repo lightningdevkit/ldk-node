@@ -137,7 +137,7 @@ impl KVStore for SqliteStore {
 	}
 
 	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
 	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
@@ -205,7 +205,7 @@ impl KVStoreSync for SqliteStore {
 	}
 
 	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
 	) -> io::Result<()> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());

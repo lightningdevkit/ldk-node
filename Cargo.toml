@@ -29,17 +29,17 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.2.0-beta1", features = ["std"] }
-lightning-types = { version = "0.3.0-beta1" }
-lightning-invoice = { version = "0.34.0-beta1", features = ["std"] }
-lightning-net-tokio = { version = "0.2.0-beta1" }
-lightning-persister = { version = "0.2.0-beta1", features = ["tokio"] }
-lightning-background-processor = { version = "0.2.0-beta1" }
-lightning-rapid-gossip-sync = { version = "0.2.0-beta1" }
-lightning-block-sync = { version = "0.2.0-beta1", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { version = "0.2.0-beta1", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
-lightning-liquidity = { version = "0.2.0-beta1", features = ["std"] }
-lightning-macros = { version = "0.2.0-beta1" }
+lightning = { version = "0.2.0-rc1", features = ["std"] }
+lightning-types = { version = "0.3.0-rc1" }
+lightning-invoice = { version = "0.34.0-rc1", features = ["std"] }
+lightning-net-tokio = { version = "0.2.0-rc1" }
+lightning-persister = { version = "0.2.0-rc1", features = ["tokio"] }
+lightning-background-processor = { version = "0.2.0-rc1" }
+lightning-rapid-gossip-sync = { version = "0.2.0-rc1" }
+lightning-block-sync = { version = "0.2.0-rc1", features = ["rest-client", "rpc-client", "tokio"] }
+lightning-transaction-sync = { version = "0.2.0-rc1", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
+lightning-liquidity = { version = "0.2.0-rc1", features = ["std"] }
+lightning-macros = { version = "0.2.0-rc1" }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["std"] }
 #lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
@@ -108,7 +108,7 @@ prost = { version = "0.11.6", default-features = false}
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.2.0-beta1", features = ["std", "_test_utils"] }
+lightning = { version = "0.2.0-rc1", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03", features = ["std", "_test_utils"] }
 #lightning = { path = "../rust-lightning/lightning", features = ["std", "_test_utils"] }
