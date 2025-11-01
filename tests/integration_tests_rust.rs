@@ -246,6 +246,176 @@ async fn multi_hop_sending() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_probing_high_capacity_strategy() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let probing_interval_secs = 2;
+	let probing_amount_msat = 1000;
+	let probing_max_targets_per_cycle = 7;
+	let probing_target_cache_reuse_limit = 1;
+
+	// Setup and fund 5 nodes
+	let mut nodes = Vec::new();
+	for index in 0..9 {
+		let config = random_config(true);
+		let sync_config = EsploraSyncConfig { background_sync_config: None };
+		setup_builder!(builder, config.node_config);
+		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+
+		if index == 0 {
+			builder.set_probing_service_with_high_capacity_strategy(
+				probing_interval_secs,
+				probing_amount_msat,
+				probing_max_targets_per_cycle,
+				probing_target_cache_reuse_limit,
+			);
+		}
+
+		let node = builder.build().unwrap();
+		node.start().unwrap();
+		nodes.push(node);
+	}
+
+	let addresses = nodes.iter().map(|n| n.onchain_payment().new_address().unwrap()).collect();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		addresses,
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	for n in &nodes {
+		n.sync_wallets().unwrap();
+		assert_eq!(n.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+		assert_eq!(n.next_event(), None);
+	}
+
+	// Setup channel topology:
+	//                    (1M:0)- N2 -(1M:0) - N3 -(1M:0) - N4 -(1M:0)
+	//                   /                                            \
+	//  N0 -(100k:0)-> N1                                             N5
+	//                   \                                            /
+	//                    (1M:0)- N8 -(1M:0) - N7 -(1M:0) - N6 -(1M:0)
+
+	open_channel(&nodes[0], &nodes[1], 100_000, true, &electrsd).await;
+	open_channel(&nodes[1], &nodes[2], 1_000_009, true, &electrsd).await;
+	// We need to sync wallets in-between back-to-back channel opens from the same node so BDK
+	// wallet picks up on the broadcast funding tx and doesn't double-spend itself.
+	//
+	// TODO: Remove once fixed in BDK.
+	nodes[1].sync_wallets().unwrap();
+	open_channel(&nodes[2], &nodes[3], 1_000_000, true, &electrsd).await;
+	open_channel(&nodes[3], &nodes[4], 1_000_000, true, &electrsd).await;
+	open_channel(&nodes[4], &nodes[5], 1_000_000, true, &electrsd).await;
+
+	open_channel(&nodes[6], &nodes[5], 1_000_000, true, &electrsd).await;
+	open_channel(&nodes[7], &nodes[6], 1_000_000, true, &electrsd).await;
+	open_channel(&nodes[8], &nodes[7], 1_000_000, true, &electrsd).await;
+	open_channel(&nodes[1], &nodes[8], 1_000_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	for n in &nodes {
+		n.sync_wallets().unwrap();
+	}
+
+	expect_event!(nodes[0], ChannelReady);
+	expect_event!(nodes[1], ChannelReady);
+	expect_event!(nodes[1], ChannelReady);
+	expect_event!(nodes[1], ChannelReady);
+	expect_event!(nodes[2], ChannelReady);
+	expect_event!(nodes[2], ChannelReady);
+	expect_event!(nodes[3], ChannelReady);
+	expect_event!(nodes[3], ChannelReady);
+	expect_event!(nodes[4], ChannelReady);
+	expect_event!(nodes[4], ChannelReady);
+	expect_event!(nodes[5], ChannelReady);
+	expect_event!(nodes[5], ChannelReady);
+	expect_event!(nodes[6], ChannelReady);
+	expect_event!(nodes[6], ChannelReady);
+	expect_event!(nodes[7], ChannelReady);
+	expect_event!(nodes[7], ChannelReady);
+	expect_event!(nodes[8], ChannelReady);
+	expect_event!(nodes[8], ChannelReady);
+
+	// Sleep a bit for gossip to propagate.
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	let invoice = nodes[5]
+		.bolt11_payment()
+		.receive(
+			1_000,
+			&Bolt11InvoiceDescription::Direct(
+				Description::new(String::from("probe test")).unwrap(),
+			)
+			.into(),
+			9217,
+		)
+		.unwrap();
+
+	let route_params = RouteParametersConfig {
+		max_total_routing_fee_msat: Some(75_000),
+		max_total_cltv_expiry_delta: 1000,
+		max_path_count: 1,
+		max_channel_saturation_power_of_half: 0,
+	};
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
+	expect_event!(nodes[1], PaymentForwarded);
+
+	// We expect that the payment goes through N2 or N3, so we check both for the PaymentForwarded event.
+	let node_3_fwd_event = matches!(nodes[3].next_event(), Some(Event::PaymentForwarded { .. }));
+	let node_7_fwd_event = matches!(nodes[7].next_event(), Some(Event::PaymentForwarded { .. }));
+	assert_ne!(node_3_fwd_event, node_7_fwd_event);
+	let id_node_route = if node_3_fwd_event { 3 } else { 7 };
+	println!("Probing used node {}", id_node_route);
+
+	let invoice = nodes[5]
+		.bolt11_payment()
+		.receive(
+			1_000,
+			&Bolt11InvoiceDescription::Direct(
+				Description::new(String::from("probe test")).unwrap(),
+			)
+			.into(),
+			9217,
+		)
+		.unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
+	expect_event!(nodes[1], PaymentForwarded);
+
+	let node_3_fwd_event = matches!(nodes[3].next_event(), Some(Event::PaymentForwarded { .. }));
+	let node_7_fwd_event = matches!(nodes[7].next_event(), Some(Event::PaymentForwarded { .. }));
+	assert_ne!(node_3_fwd_event, node_7_fwd_event);
+	let check_id_node_route = if node_3_fwd_event { 3 } else { 7 };
+	assert_eq!(id_node_route, check_id_node_route);
+
+	nodes[check_id_node_route].stop().unwrap();
+	// Sleep to allow probing to occur with one less node.
+	std::thread::sleep(std::time::Duration::from_secs(5));
+	nodes[check_id_node_route].start().unwrap();
+
+	let invoice = nodes[5]
+		.bolt11_payment()
+		.receive(
+			1_000,
+			&Bolt11InvoiceDescription::Direct(
+				Description::new(String::from("probe test")).unwrap(),
+			)
+			.into(),
+			9217,
+		)
+		.unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
+	expect_event!(nodes[1], PaymentForwarded);
+
+	let node_3_fwd_event = matches!(nodes[3].next_event(), Some(Event::PaymentForwarded { .. }));
+	let node_7_fwd_event = matches!(nodes[7].next_event(), Some(Event::PaymentForwarded { .. }));
+	assert!(node_3_fwd_event || node_7_fwd_event);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);

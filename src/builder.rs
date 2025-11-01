@@ -66,7 +66,7 @@ use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
-use crate::probing::{ProbingService, ProbingStrategy};
+use crate::probing::{HighCapacityStrategy, ProbingService, ProbingStrategy};
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -144,6 +144,7 @@ struct ProbingServiceConfig {
 
 pub enum ProbingStrategyConfig {
 	Custom { strategy: Arc<dyn ProbingStrategy + Send + Sync> },
+	HighCapacity { max_targets_per_cycle: usize, target_cache_reuse_limit: usize },
 }
 
 impl fmt::Debug for ProbingStrategyConfig {
@@ -152,6 +153,14 @@ impl fmt::Debug for ProbingStrategyConfig {
 			Self::Custom { .. } => {
 				f.debug_struct("Custom").field("strategy", &"<ProbingStrategy>").finish()
 			},
+			Self::HighCapacity {
+				max_targets_per_cycle: max_targets,
+				target_cache_reuse_limit: max_reloads,
+			} => f
+				.debug_struct("HighCapacity")
+				.field("max_targets", max_targets)
+				.field("max_reloads", max_reloads)
+				.finish(),
 		}
 	}
 }
@@ -160,6 +169,13 @@ impl Clone for ProbingStrategyConfig {
 	fn clone(&self) -> Self {
 		match self {
 			Self::Custom { strategy } => Self::Custom { strategy: Arc::clone(strategy) },
+			Self::HighCapacity {
+				max_targets_per_cycle: max_targets,
+				target_cache_reuse_limit: max_reloads,
+			} => Self::HighCapacity {
+				max_targets_per_cycle: *max_targets,
+				target_cache_reuse_limit: *max_reloads,
+			},
 		}
 	}
 }
@@ -544,6 +560,33 @@ impl NodeBuilder {
 			probing_interval_secs,
 			probing_amount_msat,
 			strategy: ProbingStrategyConfig::Custom { strategy: Arc::new(strategy) },
+		});
+		self
+	}
+
+	/// Configures the probing service with the built-in high-capacity strategy.
+	///
+	/// Targets peers with the highest total channel capacity to assess liquidity
+	/// on the most significant network routes.
+	///
+	/// # Parameters
+	/// * `probing_interval_secs` - Seconds between probing cycles
+	/// * `probing_amount_msat` - Amount in milli-satoshis per probe
+	/// * `max_targets_per_cycle` - Maximum peers to probe each cycle
+	/// * `target_cache_reuse_limit` - Number of cycles to reuse targets before refreshing.
+	///   Acts as a cache: targets are reloaded from the network graph only after this many cycles,
+	///   reducing overhead while adapting to network changes.
+	pub fn set_probing_service_with_high_capacity_strategy(
+		&mut self, probing_interval_secs: u64, probing_amount_msat: u64,
+		max_targets_per_cycle: usize, target_cache_reuse_limit: usize,
+	) -> &mut Self {
+		self.probing_service_config = Some(ProbingServiceConfig {
+			probing_interval_secs,
+			probing_amount_msat,
+			strategy: ProbingStrategyConfig::HighCapacity {
+				max_targets_per_cycle,
+				target_cache_reuse_limit,
+			},
 		});
 		self
 	}
@@ -1057,6 +1100,30 @@ impl ArcedNodeBuilder {
 			probing_interval_secs,
 			probing_amount_msat,
 			strategy,
+		);
+	}
+
+	/// Configures the probing service with the built-in high-capacity strategy.
+	///
+	/// Targets peers with the highest total channel capacity to assess liquidity
+	/// on the most significant network routes.
+	///
+	/// # Parameters
+	/// * `probing_interval_secs` - Seconds between probing cycles
+	/// * `probing_amount_msat` - Amount in milli-satoshis per probe
+	/// * `max_targets_per_cycle` - Maximum peers to probe each cycle
+	/// * `target_cache_reuse_limit` - Number of cycles to reuse targets before refreshing.
+	///   Acts as a cache: targets are reloaded from the network graph only after this many cycles,
+	///   reducing overhead while adapting to network changes.
+	pub fn set_probing_service_with_high_capacity_strategy(
+		&self, probing_interval_secs: u64, probing_amount_msat: u64, max_targets_per_cycle: usize,
+		target_cache_reuse_limit: usize,
+	) {
+		self.inner.write().unwrap().set_probing_service_with_high_capacity_strategy(
+			probing_interval_secs,
+			probing_amount_msat,
+			max_targets_per_cycle,
+			target_cache_reuse_limit,
 		);
 	}
 
@@ -1854,6 +1921,14 @@ fn build_with_store_internal(
 	let probing_service = if let Some(pro_ser) = probing_service_config {
 		let strategy: Arc<dyn ProbingStrategy + Send + Sync> = match &pro_ser.strategy {
 			ProbingStrategyConfig::Custom { strategy } => Arc::clone(strategy),
+			ProbingStrategyConfig::HighCapacity {
+				max_targets_per_cycle: max_targets,
+				target_cache_reuse_limit: max_reloads,
+			} => Arc::new(HighCapacityStrategy::new(
+				Arc::clone(&network_graph),
+				*max_targets,
+				*max_reloads,
+			)),
 		};
 		Some(Arc::new(ProbingService::new(
 			pro_ser.probing_interval_secs,
