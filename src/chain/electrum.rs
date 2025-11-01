@@ -36,7 +36,8 @@ use crate::fee_estimator::{
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::types::{ChainMonitor, ChannelManager, Sweeper, Wallet};
+use crate::DynStore;
 use crate::NodeMetrics;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;

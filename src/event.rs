@@ -48,7 +48,8 @@ use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::runtime::Runtime;
-use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
+use crate::types::{CustomTlvRecord, OnionMessenger, PaymentStore, Sweeper, Wallet};
+use crate::DynStore;
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -1607,11 +1608,13 @@ mod tests {
 
 	use lightning::util::test_utils::{TestLogger, TestStore};
 
+	use crate::wrap_store;
+
 	use super::*;
 
 	#[tokio::test]
 	async fn event_queue_persistence() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = wrap_store!(Arc::new(TestStore::new(false)));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
@@ -1647,7 +1650,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn event_queue_concurrency() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = wrap_store!(Arc::new(TestStore::new(false)));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);

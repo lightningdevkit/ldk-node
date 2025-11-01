@@ -38,8 +38,8 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
+use crate::types::{ChainMonitor, ChannelManager, Sweeper, Wallet};
+use crate::{DynStore, Error, NodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 

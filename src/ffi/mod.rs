@@ -45,3 +45,19 @@ pub fn maybe_try_convert_enum<T>(value: &T) -> Result<&T, crate::error::Error> {
 pub fn maybe_wrap<T>(value: T) -> T {
 	value
 }
+
+/// KVStore* wrapper
+#[macro_export]
+macro_rules! wrap_store {
+	($store:expr) => {{
+		#[cfg(feature = "uniffi")]
+		{
+			$crate::DynStore::from_ldk_store($store)
+		}
+
+		#[cfg(not(feature = "uniffi"))]
+		{
+			$store
+		}
+	}};
+}

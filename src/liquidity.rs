@@ -44,9 +44,9 @@ use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{
-	Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet,
+	Broadcaster, ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet,
 };
-use crate::{total_anchor_channels_reserve_sats, Config, Error};
+use crate::{total_anchor_channels_reserve_sats, Config, DynStore, Error};
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 

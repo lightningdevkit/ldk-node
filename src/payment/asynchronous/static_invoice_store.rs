@@ -21,7 +21,7 @@ use lightning::util::ser::{Readable, Writeable};
 use crate::hex_utils;
 use crate::io::STATIC_INVOICE_STORE_PRIMARY_NAMESPACE;
 use crate::payment::asynchronous::rate_limiter::RateLimiter;
-use crate::types::DynStore;
+use crate::DynStore;
 
 struct PersistedStaticInvoice {
 	invoice: StaticInvoice,
@@ -161,11 +161,11 @@ mod tests {
 	use lightning_types::features::BlindedHopFeatures;
 
 	use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
-	use crate::types::DynStore;
+	use crate::{wrap_store, DynStore};
 
 	#[tokio::test]
 	async fn static_invoice_store_test() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = wrap_store!(Arc::new(TestStore::new(false)));
 		let static_invoice_store = StaticInvoiceStore::new(Arc::clone(&store));
 
 		let static_invoice = invoice();

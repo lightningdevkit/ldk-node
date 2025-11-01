@@ -32,7 +32,8 @@ use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyn
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+	wrap_store, Builder, CustomTlvRecord, DynStore, Event, LightningBalance, Node, NodeError,
+	PendingSweepBalance, RetryConfig,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -268,6 +269,11 @@ pub(crate) struct TestConfig {
 	pub log_writer: TestLogWriter,
 }
 
+pub(crate) enum TestKvStore {
+	Sync,
+	Tier { primary: Arc<DynStore>, backup: Option<Arc<DynStore>>, ephemeral: Option<Arc<DynStore>> },
+}
+
 macro_rules! setup_builder {
 	($builder:ident, $config:expr) => {
 		#[cfg(feature = "uniffi")]
@@ -279,13 +285,29 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
+pub(crate) fn create_tier_stores(
+	base_path: PathBuf,
+) -> (Arc<DynStore>, Arc<DynStore>, Arc<DynStore>) {
+	let primary = wrap_store!(Arc::new(
+		SqliteStore::new(
+			base_path.join("primary"),
+			Some("primary_db".to_string()),
+			Some("primary_kv".to_string()),
+		)
+		.unwrap(),
+	));
+	let backup = wrap_store!(Arc::new(FilesystemStore::new(base_path.join("backup"))));
+	let ephemeral = wrap_store!(Arc::new(TestStore::new(false)));
+	(primary, backup, ephemeral)
+}
+
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool,
+	anchors_trusted_no_reserve: bool, kv_stores: (Option<TestKvStore>, Option<TestKvStore>),
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let config_a = random_config(anchor_channels);
-	let node_a = setup_node(chain_source, config_a, None);
+	let node_a = setup_node(chain_source, config_a, None, kv_stores.0);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
@@ -301,19 +323,20 @@ pub(crate) fn setup_two_nodes(
 			.trusted_peers_no_reserve
 			.push(node_a.node_id());
 	}
-	let node_b = setup_node(chain_source, config_b, None);
+	let node_b = setup_node(chain_source, config_b, None, kv_stores.1);
 	(node_a, node_b)
 }
 
 pub(crate) fn setup_node(
 	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
+	kv_store: Option<TestKvStore>,
 ) -> TestNode {
-	setup_node_for_async_payments(chain_source, config, seed_bytes, None)
+	setup_node_for_async_payments(chain_source, config, seed_bytes, None, kv_store)
 }
 
 pub(crate) fn setup_node_for_async_payments(
 	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
-	async_payments_role: Option<AsyncPaymentsRole>,
+	async_payments_role: Option<AsyncPaymentsRole>, kv_store: Option<TestKvStore>,
 ) -> TestNode {
 	setup_builder!(builder, config.node_config);
 	match chain_source {
@@ -381,8 +404,114 @@ pub(crate) fn setup_node_for_async_payments(
 
 	builder.set_async_payments_role(async_payments_role).unwrap();
 
-	let test_sync_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
-	let node = builder.build_with_store(test_sync_store).unwrap();
+	let node = match kv_store.unwrap_or(TestKvStore::Sync) {
+		TestKvStore::Sync => {
+			let test_sync_store = wrap_store!(Arc::new(TestSyncStore::new(
+				config.node_config.storage_dir_path.into()
+			)));
+			builder.build_with_store(test_sync_store).unwrap()
+		},
+		TestKvStore::Tier { primary, backup, ephemeral } => {
+			if let Some(backup) = backup {
+				builder.set_tier_store_backup(backup);
+			}
+
+			if let Some(ephemeral) = ephemeral {
+				builder.set_tier_store_ephemeral(ephemeral);
+			}
+
+			builder.build_with_tier_store(primary).unwrap()
+		},
+	};
+
+	node.start().unwrap();
+	assert!(node.status().is_running);
+	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+	node
+}
+
+pub(crate) fn setup_node_with_tier_store(
+	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
+	primary: Arc<DynStore>, backup: Option<Arc<DynStore>>, ephemeral: Option<Arc<DynStore>>,
+) -> TestNode {
+	setup_builder!(builder, config.node_config);
+
+	match chain_source {
+		TestChainSource::Esplora(electrsd) => {
+			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+			let sync_config = EsploraSyncConfig { background_sync_config: None };
+			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+		},
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let sync_config = ElectrumSyncConfig { background_sync_config: None };
+			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
+		},
+		TestChainSource::BitcoindRpcSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
+		},
+		TestChainSource::BitcoindRestSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rest_port = bitcoind.params.rpc_socket.port();
+			builder.set_chain_source_bitcoind_rest(
+				rest_host,
+				rest_port,
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password,
+			);
+		},
+	}
+
+	match &config.log_writer {
+		TestLogWriter::FileWriter => {
+			builder.set_filesystem_logger(None, None);
+		},
+		TestLogWriter::LogFacade => {
+			builder.set_log_facade_logger();
+		},
+		TestLogWriter::Custom(custom_log_writer) => {
+			builder.set_custom_logger(Arc::clone(custom_log_writer));
+		},
+	}
+
+	if let Some(seed) = seed_bytes {
+		#[cfg(feature = "uniffi")]
+		{
+			builder.set_entropy_seed_bytes(seed).unwrap();
+		}
+		#[cfg(not(feature = "uniffi"))]
+		{
+			let mut bytes = [0u8; 64];
+			bytes.copy_from_slice(&seed);
+			builder.set_entropy_seed_bytes(bytes);
+		}
+	}
+
+	if let Some(backup) = backup {
+		builder.set_tier_store_backup(backup);
+	}
+
+	if let Some(eph) = ephemeral {
+		builder.set_tier_store_ephemeral(eph);
+	}
+
+	let retry_config =
+		RetryConfig { initial_retry_delay_ms: 10, maximum_delay_ms: 100, backoff_multiplier: 2.0 };
+	builder.set_tier_store_retry_config(retry_config);
+
+	let node = builder.build_with_tier_store(primary).unwrap();
 	node.start().unwrap();
 	assert!(node.status().is_running);
 	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());

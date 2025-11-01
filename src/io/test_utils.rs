@@ -5,8 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use lightning::events::ClosureReason;
 use lightning::ln::functional_test_utils::{
@@ -14,12 +19,14 @@ use lightning::ln::functional_test_utils::{
 	create_network, create_node_cfgs, create_node_chanmgrs, send_payment, TestChanMonCfg,
 };
 use lightning::util::persist::{
-	KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	KVStore, KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
 };
 use lightning::util::test_utils;
-use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
+use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event, io};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+
+use crate::runtime::Runtime;
 
 type TestMonitorUpdatePersister<'a, K> = MonitorUpdatingPersister<
 	&'a K,
@@ -226,4 +233,169 @@ pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 
 	// Make sure everything is persisted as expected after close.
 	check_persisted_data!(persister_0_max_pending_updates * 2 * EXPECTED_UPDATES_PER_PAYMENT + 1);
+}
+
+struct DelayedStoreInner {
+	storage: Mutex<HashMap<String, Vec<u8>>>,
+	delay: Duration,
+}
+
+impl DelayedStoreInner {
+	fn new(delay: Duration) -> Self {
+		Self { storage: Mutex::new(HashMap::new()), delay }
+	}
+
+	fn make_key(pn: &str, sn: &str, key: &str) -> String {
+		format!("{}/{}/{}", pn, sn, key)
+	}
+
+	async fn read_internal(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, io::Error> {
+		tokio::time::sleep(self.delay).await;
+
+		let full_key = Self::make_key(&primary_namespace, &secondary_namespace, &key);
+		let storage = self.storage.lock().unwrap();
+		storage
+			.get(&full_key)
+			.cloned()
+			.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "key not found"))
+	}
+
+	async fn write_internal(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), io::Error> {
+		tokio::time::sleep(self.delay).await;
+
+		let full_key = Self::make_key(&primary_namespace, &secondary_namespace, &key);
+		let mut storage = self.storage.lock().unwrap();
+		storage.insert(full_key, buf);
+		Ok(())
+	}
+
+	async fn remove_internal(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<(), io::Error> {
+		tokio::time::sleep(self.delay).await;
+
+		let full_key = Self::make_key(&primary_namespace, &secondary_namespace, &key);
+		let mut storage = self.storage.lock().unwrap();
+		storage.remove(&full_key);
+		Ok(())
+	}
+
+	async fn list_internal(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, io::Error> {
+		tokio::time::sleep(self.delay).await;
+
+		let prefix = format!("{}/{}/", primary_namespace, secondary_namespace);
+		let storage = self.storage.lock().unwrap();
+		Ok(storage
+			.keys()
+			.filter(|k| k.starts_with(&prefix))
+			.map(|k| k.strip_prefix(&prefix).unwrap().to_string())
+			.collect())
+	}
+}
+
+pub struct DelayedStore {
+	inner: Arc<DelayedStoreInner>,
+	runtime: Arc<Runtime>,
+}
+
+impl DelayedStore {
+	pub fn new(delay_ms: u64, runtime: Arc<Runtime>) -> Self {
+		Self { inner: Arc::new(DelayedStoreInner::new(Duration::from_millis(delay_ms))), runtime }
+	}
+}
+
+impl KVStore for DelayedStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move { inner.read_internal(pn, sn, key).await })
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move { inner.write_internal(pn, sn, key, buf).await })
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move { inner.remove_internal(pn, sn, key).await })
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+
+		Box::pin(async move { inner.list_internal(pn, sn).await })
+	}
+}
+
+impl KVStoreSync for DelayedStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, io::Error> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		self.runtime.block_on(async move { inner.read_internal(pn, sn, key).await })
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), io::Error> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		self.runtime.block_on(async move { inner.write_internal(pn, sn, key, buf).await })
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
+	) -> Result<(), io::Error> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		self.runtime.block_on(async move { inner.remove_internal(pn, sn, key).await })
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, io::Error> {
+		let inner = Arc::clone(&self.inner);
+		let pn = primary_namespace.to_string();
+		let sn = secondary_namespace.to_string();
+
+		self.runtime.block_on(async move { inner.list_internal(pn, sn).await })
+	}
 }

@@ -31,28 +31,111 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, DynStore, Event, NodeError};
+use ldk_node::{wrap_store, Builder, DynStore, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::{
+	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
+
+use crate::common::{create_tier_stores, random_storage_path, TestKvStore};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_full_cycle_tier_store() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let (primary_a, backup_a, ephemeral_a) = create_tier_stores(random_storage_path());
+	let (primary_b, backup_b, ephemeral_b) = create_tier_stores(random_storage_path());
+	let kv_stores_a = TestKvStore::Tier {
+		primary: Arc::clone(&primary_a),
+		backup: Some(Arc::clone(&backup_a)),
+		ephemeral: Some(Arc::clone(&ephemeral_a)),
+	};
+	let kv_stores_b = TestKvStore::Tier {
+		primary: Arc::clone(&primary_b),
+		backup: Some(Arc::clone(&backup_b)),
+		ephemeral: Some(Arc::clone(&ephemeral_b)),
+	};
+
+	let (node_a, node_b) =
+		setup_two_nodes(&chain_source, false, true, false, (Some(kv_stores_a), Some(kv_stores_b)));
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
+		.await;
+
+	// Verify Primary store contains channel manager data
+	let primary_channel_manager = KVStoreSync::read(
+		primary_a.as_ref(),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(primary_channel_manager.is_ok(), "Primary should have channel manager data");
+
+	// Verify Primary store contains payment info
+	let primary_payments = KVStoreSync::list(primary_a.as_ref(), "payments", "");
+	assert!(primary_payments.is_ok(), "Primary should have payment data");
+	assert!(!primary_payments.unwrap().is_empty(), "Primary should have payment entries");
+
+	// Verify Backup store synced critical data
+	let backup_channel_manager = KVStoreSync::read(
+		backup_a.as_ref(),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(backup_channel_manager.is_ok(), "Backup should have synced channel manager");
+
+	// Verify backup is not empty
+	let backup_all_keys = KVStoreSync::list(backup_a.as_ref(), "", "").unwrap();
+	assert!(!backup_all_keys.is_empty(), "Backup store should not be empty");
+
+	// Verify Ephemeral does NOT have channel manager
+	let ephemeral_channel_manager = KVStoreSync::read(
+		ephemeral_a.as_ref(),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(ephemeral_channel_manager.is_err(), "Ephemeral should NOT have channel manager");
+
+	// Verify Ephemeral does NOT have payment info
+	let ephemeral_payments = KVStoreSync::list(ephemeral_a.as_ref(), "payments", "");
+	assert!(
+		ephemeral_payments.is_err() || ephemeral_payments.unwrap().is_empty(),
+		"Ephemeral should NOT have payment data"
+	);
+
+	//Verify Ephemeral does have network graph
+	let ephemeral_network_graph = KVStoreSync::read(
+		ephemeral_a.as_ref(),
+		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_KEY,
+	);
+	assert!(ephemeral_network_graph.is_ok(), "Ephemeral should have network graph");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_electrum() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Electrum(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
 }
@@ -61,7 +144,7 @@ async fn channel_full_cycle_electrum() {
 async fn channel_full_cycle_bitcoind_rpc_sync() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
 }
@@ -70,7 +153,7 @@ async fn channel_full_cycle_bitcoind_rpc_sync() {
 async fn channel_full_cycle_bitcoind_rest_sync() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::BitcoindRestSync(&bitcoind);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
 }
@@ -79,7 +162,7 @@ async fn channel_full_cycle_bitcoind_rest_sync() {
 async fn channel_full_cycle_force_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true)
 		.await;
 }
@@ -88,7 +171,7 @@ async fn channel_full_cycle_force_close() {
 async fn channel_full_cycle_force_close_trusted_no_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true)
 		.await;
 }
@@ -97,7 +180,7 @@ async fn channel_full_cycle_force_close_trusted_no_reserve() {
 async fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true, true, false)
 		.await;
 }
@@ -106,7 +189,7 @@ async fn channel_full_cycle_0conf() {
 async fn channel_full_cycle_legacy_staticremotekey() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, (None, None));
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false)
 		.await;
 }
@@ -115,7 +198,7 @@ async fn channel_full_cycle_legacy_staticremotekey() {
 async fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -252,14 +335,15 @@ async fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store: Arc<DynStore> =
-		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
+	let test_sync_store: Arc<DynStore> = wrap_store!(Arc::new(TestSyncStore::new(
+		config.node_config.storage_dir_path.clone().into()
+	)));
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
+	let node = builder.build_with_store(wrap_store!(Arc::clone(&test_sync_store))).unwrap();
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -297,7 +381,8 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let reinitialized_node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
+	let reinitialized_node =
+		builder.build_with_store(wrap_store!(Arc::clone(&test_sync_store))).unwrap();
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
@@ -319,7 +404,7 @@ async fn start_stop_reinit() {
 async fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -520,7 +605,7 @@ async fn onchain_send_receive() {
 async fn onchain_send_all_retains_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	// Setup nodes
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -609,7 +694,7 @@ async fn onchain_wallet_recovery() {
 	let seed_bytes = vec![42u8; 64];
 
 	let original_config = random_config(true);
-	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
+	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()), None);
 
 	let premine_amount_sat = 100_000;
 
@@ -649,7 +734,7 @@ async fn onchain_wallet_recovery() {
 
 	// Now we start from scratch, only the seed remains the same.
 	let recovered_config = random_config(true);
-	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
+	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes), None);
 
 	recovered_node.sync_wallets().unwrap();
 	assert_eq!(
@@ -703,7 +788,7 @@ async fn run_rbf_test(is_insert_block: bool) {
 	macro_rules! config_node {
 		($chain_source:expr, $anchor_channels:expr) => {{
 			let config_a = random_config($anchor_channels);
-			let node = setup_node(&$chain_source, config_a, None);
+			let node = setup_node(&$chain_source, config_a, None, None);
 			node
 		}};
 	}
@@ -822,7 +907,7 @@ async fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, config, None);
+	let node = setup_node(&chain_source, config, None, None);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
@@ -835,7 +920,7 @@ async fn sign_verify_msg() {
 async fn connection_multi_listen() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, (None, None));
 
 	let node_id_b = node_b.node_id();
 
@@ -855,7 +940,7 @@ async fn connection_restart_behavior() {
 async fn do_connection_restart_behavior(persist: bool) {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false, (None, None));
 
 	let node_id_a = node_a.node_id();
 	let node_id_b = node_b.node_id();
@@ -902,7 +987,7 @@ async fn do_connection_restart_behavior(persist: bool) {
 async fn concurrent_connections_succeed() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	let node_a = Arc::new(node_a);
 	let node_b = Arc::new(node_b);
@@ -929,7 +1014,7 @@ async fn concurrent_connections_succeed() {
 async fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -1162,6 +1247,7 @@ async fn async_payment() {
 		config_sender,
 		None,
 		Some(AsyncPaymentsRole::Client),
+		None,
 	);
 
 	let mut config_sender_lsp = random_config(true);
@@ -1172,6 +1258,7 @@ async fn async_payment() {
 		config_sender_lsp,
 		None,
 		Some(AsyncPaymentsRole::Server),
+		None,
 	);
 
 	let mut config_receiver_lsp = random_config(true);
@@ -1183,6 +1270,7 @@ async fn async_payment() {
 		config_receiver_lsp,
 		None,
 		Some(AsyncPaymentsRole::Server),
+		None,
 	);
 
 	let mut config_receiver = random_config(true);
@@ -1190,7 +1278,7 @@ async fn async_payment() {
 	config_receiver.node_config.node_alias = None;
 	config_receiver.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
-	let node_receiver = setup_node(&chain_source, config_receiver, None);
+	let node_receiver = setup_node(&chain_source, config_receiver, None, None);
 
 	let address_sender = node_sender.onchain_payment().new_address().unwrap();
 	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().unwrap();
@@ -1314,8 +1402,8 @@ async fn test_node_announcement_propagation() {
 	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
 	config_b.node_config.announcement_addresses = None;
 
-	let node_a = setup_node(&chain_source, config_a, None);
-	let node_b = setup_node(&chain_source, config_b, None);
+	let node_a = setup_node(&chain_source, config_a, None, None);
+	let node_b = setup_node(&chain_source, config_b, None, None);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -1382,7 +1470,7 @@ async fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -1437,7 +1525,7 @@ async fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
@@ -1775,7 +1863,7 @@ async fn facade_logging() {
 	config.log_writer = TestLogWriter::LogFacade;
 
 	println!("== Facade logging starts ==");
-	let _node = setup_node(&chain_source, config, None);
+	let _node = setup_node(&chain_source, config, None, None);
 
 	assert!(!logger.retrieve_logs().is_empty());
 	for (_, entry) in logger.retrieve_logs().iter().enumerate() {
@@ -1787,7 +1875,7 @@ async fn facade_logging() {
 async fn spontaneous_send_with_custom_preimage() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false, (None, None));
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_sat = 1_000_000;
@@ -1857,6 +1945,6 @@ async fn drop_in_async_context() {
 	let seed_bytes = vec![42u8; 64];
 
 	let config = random_config(true);
-	let node = setup_node(&chain_source, config, Some(seed_bytes));
+	let node = setup_node(&chain_source, config, Some(seed_bytes), None);
 	node.stop().unwrap();
 }
