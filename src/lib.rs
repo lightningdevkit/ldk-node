@@ -96,6 +96,7 @@ pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
+mod probing;
 mod runtime;
 mod scoring;
 mod tx_broadcaster;
@@ -149,6 +150,8 @@ use payment::{
 	UnifiedQrPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
+use probing::ProbingService;
+pub use probing::ProbingStrategy;
 use rand::Rng;
 use runtime::Runtime;
 use types::{
@@ -196,6 +199,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	probing_service: Option<Arc<ProbingService>>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -620,6 +624,32 @@ impl Node {
 							return;
 						}
 						_ = liquidity_handler.handle_next_event() => {}
+					}
+				}
+			});
+		}
+
+		if let Some(probing_service) = self.probing_service.as_ref() {
+			let mut stop_probing_service = self.stop_sender.subscribe();
+			let probing_service = Arc::clone(probing_service);
+			let probing_logger = Arc::clone(&self.logger);
+
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut interval = tokio::time::interval(Duration::from_secs(
+					probing_service.probing_interval_secs,
+				));
+				loop {
+					tokio::select! {
+						_ = stop_probing_service.changed() => {
+							log_debug!(
+								probing_logger,
+								"Stopping probing service.",
+							);
+							return;
+						}
+						_ = interval.tick() => {
+							probing_service.handle_probing();
+						}
 					}
 				}
 			});
