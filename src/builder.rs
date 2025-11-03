@@ -731,8 +731,7 @@ impl NodeBuilder {
 
 		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
 
-		let vss_store =
-			VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider, Arc::clone(&runtime));
+		let vss_store = VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider);
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
