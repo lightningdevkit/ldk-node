@@ -131,6 +131,22 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 pub use io::utils::generate_entropy_mnemonic;
 use io::utils::write_node_metrics;
+use liquidity::{LSPS1Liquidity, LiquiditySource};
+use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use payment::{
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
+	UnifiedPayment,
+};
+use peer_store::{PeerInfo, PeerStore};
+use runtime::Runtime;
+use types::{
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, HRNResolver,
+	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+};
+pub use types::{
+	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
+};
+
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::impl_writeable_tlv_based;
@@ -140,25 +156,9 @@ use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
-use liquidity::{LSPS1Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
-use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
-use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedQrPayment,
-};
-use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
-use runtime::Runtime;
-use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, KeysManager,
-	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
-};
-pub use types::{
-	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
-};
-
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -200,6 +200,7 @@ pub struct Node {
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	hrn_resolver: Option<Arc<HRNResolver>>,
 }
 
 impl Node {
@@ -927,34 +928,42 @@ impl Node {
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
+	/// This handler allows you to send payments to these URIs as well as [BIP 353] HRNs.
+	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	#[cfg(not(feature = "uniffi"))]
-	pub fn unified_qr_payment(&self) -> UnifiedQrPayment {
-		UnifiedQrPayment::new(
+	pub fn unified_payment(&self) -> UnifiedPayment {
+		UnifiedPayment::new(
 			self.onchain_payment().into(),
 			self.bolt11_payment().into(),
 			self.bolt12_payment().into(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
+			Arc::new(self.hrn_resolver.clone()),
 		)
 	}
 
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
+	/// This handler allows you to send payments to these URIs as well as [BIP 353] HRNs.
+	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	#[cfg(feature = "uniffi")]
-	pub fn unified_qr_payment(&self) -> Arc<UnifiedQrPayment> {
-		Arc::new(UnifiedQrPayment::new(
+	pub fn unified_payment(&self) -> Arc<UnifiedPayment> {
+		Arc::new(UnifiedPayment::new(
 			self.onchain_payment(),
 			self.bolt11_payment(),
 			self.bolt12_payment(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
+			Arc::new(self.hrn_resolver.clone()),
 		))
 	}
 
@@ -1621,4 +1630,61 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
+}
+
+/// Testing utils for DNSSEC proof resolution of offers associated with the given HRN.
+pub mod dnssec_testing_utils {
+	use std::collections::HashMap;
+	#[cfg(feature = "uniffi")]
+	use std::sync::Arc;
+	use std::sync::{LazyLock, Mutex};
+
+	#[cfg(not(feature = "uniffi"))]
+	type Offer = lightning::offers::offer::Offer;
+	#[cfg(feature = "uniffi")]
+	type Offer = Arc<crate::ffi::Offer>;
+
+	#[cfg(not(feature = "uniffi"))]
+	type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+	#[cfg(feature = "uniffi")]
+	type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
+
+	static OFFER_OVERRIDE_MAP: LazyLock<Mutex<HashMap<HumanReadableName, Offer>>> =
+		LazyLock::new(|| Mutex::new(HashMap::new()));
+
+	/// Sets a testing override for DNSSEC proof resolution of offers associated with the given HRN.
+	pub fn set_testing_dnssec_proof_offer_resolution_override(hrn: &str, offer: Offer) {
+		let hrn_key = {
+			#[cfg(not(feature = "uniffi"))]
+			{
+				lightning::onion_message::dns_resolution::HumanReadableName::from_encoded(hrn)
+					.unwrap()
+			}
+
+			#[cfg(feature = "uniffi")]
+			{
+				Arc::new(crate::ffi::HumanReadableName::from_encoded(hrn).unwrap())
+			}
+		};
+
+		OFFER_OVERRIDE_MAP.lock().unwrap().insert(hrn_key, offer);
+	}
+
+	/// Retrieves a testing override for DNSSEC proof resolution of offers associated with the given HRNs.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn get_testing_offer_override(hrn: Option<HumanReadableName>) -> Option<Offer> {
+		OFFER_OVERRIDE_MAP.lock().unwrap().get(&hrn?).cloned()
+	}
+
+	/// Retrieves a testing override for DNSSEC proof resolution of offers associated with the given HRNs.
+	#[cfg(feature = "uniffi")]
+	pub fn get_testing_offer_override(hrn: Option<HumanReadableName>) -> Option<Offer> {
+		let offer = OFFER_OVERRIDE_MAP.lock().unwrap().get(&hrn?).cloned().unwrap();
+		Some(offer)
+	}
+
+	/// Clears all testing overrides for DNSSEC proof resolution of offers.
+	pub fn clear_testing_overrides() {
+		OFFER_OVERRIDE_MAP.lock().unwrap().clear();
+	}
 }
