@@ -36,7 +36,6 @@ use vss_client::util::retry::{
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 
 use crate::io::utils::check_namespace_key_validity;
-use crate::runtime::Runtime;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
 	JitteredRetryPolicy<
@@ -67,7 +66,6 @@ pub struct VssStore {
 	// Version counter to ensure that writes are applied in the correct order. It is assumed that read and list
 	// operations aren't sensitive to the order of execution.
 	next_version: AtomicU64,
-	runtime: Arc<Runtime>,
 	// A VSS-internal runtime we use to avoid any deadlocks we could hit when waiting on a spawned
 	// blocking task to finish while the blocked thread had acquired the reactor. In particular,
 	// this works around a previously-hit case where a concurrent call to
@@ -80,7 +78,7 @@ pub struct VssStore {
 impl VssStore {
 	pub(crate) fn new(
 		base_url: String, store_id: String, vss_seed: [u8; 32],
-		header_provider: Arc<dyn VssHeaderProvider>, runtime: Arc<Runtime>,
+		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Self {
 		let next_version = AtomicU64::new(1);
 		let internal_runtime = Some(
@@ -124,7 +122,7 @@ impl VssStore {
 			key_obfuscator,
 		));
 
-		Self { inner, next_version, runtime, internal_runtime }
+		Self { inner, next_version, internal_runtime }
 	}
 
 	// Same logic as for the obfuscated keys below, but just for locking, using the plaintext keys
@@ -171,13 +169,14 @@ impl KVStoreSync for VssStore {
 			async move { inner.read_internal(primary_namespace, secondary_namespace, key).await };
 		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
 		// times out.
-		let spawned_fut = internal_runtime.spawn(async move {
-			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-				let msg = "VssStore::read timed out";
-				Error::new(ErrorKind::Other, msg)
-			})
-		});
-		self.runtime.block_on(spawned_fut).expect("We should always finish")?
+		tokio::task::block_in_place(move || {
+			internal_runtime.block_on(async move {
+				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+					let msg = "VssStore::read timed out";
+					Error::new(ErrorKind::Other, msg)
+				})
+			})?
+		})
 	}
 
 	fn write(
@@ -209,13 +208,14 @@ impl KVStoreSync for VssStore {
 		};
 		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
 		// times out.
-		let spawned_fut = internal_runtime.spawn(async move {
-			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-				let msg = "VssStore::write timed out";
-				Error::new(ErrorKind::Other, msg)
-			})
-		});
-		self.runtime.block_on(spawned_fut).expect("We should always finish")?
+		tokio::task::block_in_place(move || {
+			internal_runtime.block_on(async move {
+				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+					let msg = "VssStore::write timed out";
+					Error::new(ErrorKind::Other, msg)
+				})
+			})?
+		})
 	}
 
 	fn remove(
@@ -247,13 +247,14 @@ impl KVStoreSync for VssStore {
 		};
 		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
 		// times out.
-		let spawned_fut = internal_runtime.spawn(async move {
-			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-				let msg = "VssStore::remove timed out";
-				Error::new(ErrorKind::Other, msg)
-			})
-		});
-		self.runtime.block_on(spawned_fut).expect("We should always finish")?
+		tokio::task::block_in_place(move || {
+			internal_runtime.block_on(async move {
+				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+					let msg = "VssStore::remove timed out";
+					Error::new(ErrorKind::Other, msg)
+				})
+			})?
+		})
 	}
 
 	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
@@ -268,13 +269,14 @@ impl KVStoreSync for VssStore {
 		let fut = async move { inner.list_internal(primary_namespace, secondary_namespace).await };
 		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
 		// times out.
-		let spawned_fut = internal_runtime.spawn(async move {
-			tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-				let msg = "VssStore::list timed out";
-				Error::new(ErrorKind::Other, msg)
-			})
-		});
-		self.runtime.block_on(spawned_fut).expect("We should always finish")?
+		tokio::task::block_in_place(move || {
+			internal_runtime.block_on(async move {
+				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+					let msg = "VssStore::list timed out";
+					Error::new(ErrorKind::Other, msg)
+				})
+			})?
+		})
 	}
 }
 
@@ -694,7 +696,6 @@ mod tests {
 
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
-	use crate::logger::Logger;
 
 	#[test]
 	fn vss_read_write_remove_list_persist() {
@@ -704,11 +705,7 @@ mod tests {
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let logger = Arc::new(Logger::new_log_facade());
-		let runtime = Arc::new(Runtime::new(logger).unwrap());
-		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
-
+		let vss_store = VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider);
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
@@ -720,10 +717,7 @@ mod tests {
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let logger = Arc::new(Logger::new_log_facade());
-		let runtime = Arc::new(Runtime::new(logger).unwrap());
-		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
+		let vss_store = VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider);
 
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
@@ -737,10 +731,7 @@ mod tests {
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let logger = Arc::new(Logger::new_log_facade());
-		let runtime = Arc::new(Runtime::new(logger).unwrap());
-		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider, runtime);
+		let vss_store = VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider);
 
 		let primary_namespace = "test_namespace";
 		let secondary_namespace = "";
