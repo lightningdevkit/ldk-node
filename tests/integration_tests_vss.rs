@@ -16,42 +16,44 @@ use ldk_node::Builder;
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_with_vss_store() {
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
-	println!("== Node A ==");
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	let config_a = common::random_config(true);
-	let mut builder_a = Builder::from_config(config_a.node_config);
-	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
-	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
-	let node_a = builder_a
-		.build_with_vss_store_and_fixed_headers(
-			vss_base_url.clone(),
-			"node_1_store".to_string(),
-			HashMap::new(),
-		)
-		.unwrap();
-	node_a.start().unwrap();
+	for i in 1..100 {
+		println!("Run {}: == Node A ==", i);
+		let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+		let config_a = common::random_config(true);
+		let mut builder_a = Builder::from_config(config_a.node_config);
+		builder_a.set_chain_source_esplora(esplora_url.clone(), None);
+		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
+		let node_a = builder_a
+			.build_with_vss_store_and_fixed_headers(
+				vss_base_url.clone(),
+				format!("node_{}_1_store", i),
+				HashMap::new(),
+			)
+			.unwrap();
+		node_a.start().unwrap();
 
-	println!("\n== Node B ==");
-	let config_b = common::random_config(true);
-	let mut builder_b = Builder::from_config(config_b.node_config);
-	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
-	let node_b = builder_b
-		.build_with_vss_store_and_fixed_headers(
-			vss_base_url,
-			"node_2_store".to_string(),
-			HashMap::new(),
-		)
-		.unwrap();
-	node_b.start().unwrap();
+		println!("\nRun {}: == Node B ==", i);
+		let config_b = common::random_config(true);
+		let mut builder_b = Builder::from_config(config_b.node_config);
+		builder_b.set_chain_source_esplora(esplora_url.clone(), None);
+		let node_b = builder_b
+			.build_with_vss_store_and_fixed_headers(
+				vss_base_url,
+				format!("node_{}_2_store", i),
+				HashMap::new(),
+			)
+			.unwrap();
+		node_b.start().unwrap();
 
-	common::do_channel_full_cycle(
-		node_a,
-		node_b,
-		&bitcoind.client,
-		&electrsd.client,
-		false,
-		true,
-		false,
-	)
-	.await;
+		common::do_channel_full_cycle(
+			node_a,
+			node_b,
+			&bitcoind.client,
+			&electrsd.client,
+			false,
+			true,
+			false,
+		)
+		.await;
+	}
 }
