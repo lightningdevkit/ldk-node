@@ -114,6 +114,7 @@ lightning = { version = "0.2.0-rc1", features = ["std", "_test_utils"] }
 #lightning = { path = "../rust-lightning/lightning", features = ["std", "_test_utils"] }
 proptest = "1.0.0"
 regex = "1.5.6"
+criterion = { version = "0.7.0", features = ["async_tokio"] }
 
 [target.'cfg(not(no_download))'.dev-dependencies]
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
@@ -148,3 +149,7 @@ check-cfg = [
 	"cfg(cln_test)",
 	"cfg(lnd_test)",
 ]
+
+[[bench]]
+name = "payments"
+harness = false
