@@ -129,6 +129,7 @@ use event::{EventHandler, EventQueue};
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
+pub use io::tier_store::RetryConfig;
 pub use io::utils::generate_entropy_mnemonic;
 use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
@@ -155,9 +156,15 @@ use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, KeysManager,
 	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{
-	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
-};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
+
+#[cfg(feature = "uniffi")]
+pub use crate::ffi::DynStore;
+#[cfg(not(feature = "uniffi"))]
+pub use crate::types::DynStore;
+
+#[cfg(not(feature = "uniffi"))]
+pub use types::SyncAndAsyncKVStore;
 
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,

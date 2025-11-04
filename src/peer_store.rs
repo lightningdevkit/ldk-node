@@ -19,7 +19,7 @@ use crate::io::{
 	PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger};
-use crate::types::DynStore;
+use crate::DynStore;
 use crate::{Error, SocketAddress};
 
 pub struct PeerStore<L: Deref>
@@ -154,11 +154,13 @@ mod tests {
 
 	use lightning::util::test_utils::{TestLogger, TestStore};
 
+	use crate::wrap_store;
+
 	use super::*;
 
 	#[test]
 	fn peer_info_persistence() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = wrap_store!(Arc::new(TestStore::new(false)));
 		let logger = Arc::new(TestLogger::new());
 		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
 
