@@ -29,24 +29,22 @@ use vss_client::types::{
 };
 use vss_client::util::key_obfuscator::KeyObfuscator;
 use vss_client::util::retry::{
-	ExponentialBackoffRetryPolicy, FilteredRetryPolicy, JitteredRetryPolicy,
-	MaxAttemptsRetryPolicy, MaxTotalDelayRetryPolicy, RetryPolicy,
+	ExponentialBackoffRetryPolicy, FilteredRetryPolicy, MaxAttemptsRetryPolicy,
+	MaxTotalDelayRetryPolicy, RetryPolicy,
 };
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 
 use crate::io::utils::check_namespace_key_validity;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
-	JitteredRetryPolicy<
-		MaxTotalDelayRetryPolicy<MaxAttemptsRetryPolicy<ExponentialBackoffRetryPolicy<VssError>>>,
-	>,
+	MaxTotalDelayRetryPolicy<MaxAttemptsRetryPolicy<ExponentialBackoffRetryPolicy<VssError>>>,
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
 // We set this to a small number of threads that would still allow to make some progress if one
 // would hit a blocking case
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
-const VSS_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const VSS_IO_TIMEOUT: Duration = Duration::from_secs(100);
 
 /// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
@@ -335,9 +333,8 @@ impl VssStoreInner {
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
 		let storable_builder = StorableBuilder::new(data_encryption_key, RandEntropySource);
 		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
-			.with_max_attempts(10)
-			.with_max_total_delay(Duration::from_secs(15))
-			.with_max_jitter(Duration::from_millis(10))
+			.with_max_attempts(100)
+			.with_max_total_delay(VSS_IO_TIMEOUT)
 			.skip_retry_on_error(Box::new(|e: &VssError| {
 				matches!(
 					e,
