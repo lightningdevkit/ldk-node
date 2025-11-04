@@ -133,6 +133,7 @@ impl KVStoreSync for VssStore {
 			internal_runtime.block_on(async move {
 				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
 					let msg = "VssStore::read timed out";
+					eprintln!("{}", msg);
 					Error::new(ErrorKind::Other, msg)
 				})
 			})?
@@ -170,8 +171,9 @@ impl KVStoreSync for VssStore {
 		// times out.
 		tokio::task::block_in_place(move || {
 			internal_runtime.block_on(async move {
-				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
+				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|e| {
 					let msg = "VssStore::write timed out";
+					eprintln!("VssStore::write timed out: {:?}", e);
 					Error::new(ErrorKind::Other, msg)
 				})
 			})?
@@ -210,6 +212,7 @@ impl KVStoreSync for VssStore {
 			internal_runtime.block_on(async move {
 				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
 					let msg = "VssStore::remove timed out";
+					eprintln!("{}", msg);
 					Error::new(ErrorKind::Other, msg)
 				})
 			})?
@@ -232,6 +235,7 @@ impl KVStoreSync for VssStore {
 			internal_runtime.block_on(async move {
 				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
 					let msg = "VssStore::list timed out";
+					eprintln!("{}", msg);
 					Error::new(ErrorKind::Other, msg)
 				})
 			})?
