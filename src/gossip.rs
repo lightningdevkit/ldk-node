@@ -71,7 +71,7 @@ impl GossipSource {
 				if let Some(utxo_source) = chain_source.as_utxo_source() {
 					let spawner = RuntimeSpawner::new(Arc::clone(&runtime));
 					let gossip_verifier = Arc::new(GossipVerifier::new(
-						utxo_source,
+						Arc::new(utxo_source),
 						spawner,
 						Arc::clone(gossip_sync),
 						peer_manager,

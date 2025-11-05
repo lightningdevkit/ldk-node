@@ -23,10 +23,11 @@ use lightning::sign::InMemorySigner;
 use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersister};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
-use lightning_block_sync::gossip::{GossipVerifier, UtxoSource};
+use lightning_block_sync::gossip::GossipVerifier;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
+use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
 use crate::config::ChannelConfig;
 use crate::data_store::DataStore;
@@ -119,7 +120,7 @@ pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
 
-pub(crate) type UtxoLookup = GossipVerifier<RuntimeSpawner, Arc<dyn UtxoSource>, Arc<Logger>>;
+pub(crate) type UtxoLookup = GossipVerifier<RuntimeSpawner, Arc<UtxoSourceClient>, Arc<Logger>>;
 
 pub(crate) type P2PGossipSync =
 	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<Logger>>;
