@@ -45,6 +45,7 @@ use crate::io::{
 	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
+use crate::payment::ReplacedOnchainTransactionDetails;
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
@@ -615,6 +616,38 @@ pub(crate) fn read_bdk_wallet_change_set(
 	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger))?
 		.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
+}
+
+/// Read previously persisted replaced transaction information from the store.
+pub(crate) fn read_replaced_txs<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<Vec<ReplacedOnchainTransactionDetails>, std::io::Error>
+where
+	L::Target: LdkLogger,
+{
+	let mut res = Vec::new();
+
+	for stored_key in KVStoreSync::list(
+		&*kv_store,
+		REPLACED_TX_PERSISTENCE_PRIMARY_NAMESPACE,
+		REPLACED_TX_PERSISTENCE_SECONDARY_NAMESPACE,
+	)? {
+		let mut reader = Cursor::new(KVStoreSync::read(
+			&*kv_store,
+			REPLACED_TX_PERSISTENCE_PRIMARY_NAMESPACE,
+			REPLACED_TX_PERSISTENCE_SECONDARY_NAMESPACE,
+			&stored_key,
+		)?);
+		let payment = ReplacedOnchainTransactionDetails::read(&mut reader).map_err(|e| {
+			log_error!(logger, "Failed to deserialize ReplacedOnchainTransactionDetails: {}", e);
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"Failed to deserialize ReplacedOnchainTransactionDetails",
+			)
+		})?;
+		res.push(payment);
+	}
+	Ok(res)
 }
 
 #[cfg(test)]
