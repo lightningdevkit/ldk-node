@@ -291,15 +291,6 @@ impl StorableObject for PaymentDetails {
 			}
 		}
 
-		if let Some(conflicting_txids_opt) = &update.conflicting_txids {
-			match self.kind {
-				PaymentKind::Onchain { ref mut conflicting_txids, .. } => {
-					update_if_necessary!(*conflicting_txids, conflicting_txids_opt.to_vec());
-				},
-				_ => {},
-			}
-		}
-
 		if updated {
 			self.latest_update_timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -360,8 +351,6 @@ pub enum PaymentKind {
 		txid: Txid,
 		/// The confirmation status of this payment.
 		status: ConfirmationStatus,
-		/// Transaction IDs that have replaced or conflict with this payment.
-		conflicting_txids: Vec<Txid>,
 	},
 	/// A [BOLT 11] payment.
 	///
@@ -459,7 +448,6 @@ pub enum PaymentKind {
 impl_writeable_tlv_based_enum!(PaymentKind,
 	(0, Onchain) => {
 		(0, txid, required),
-		(1, conflicting_txids, optional_vec),
 		(2, status, required),
 	},
 	(2, Bolt11) => {
@@ -552,7 +540,6 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
-	pub conflicting_txids: Option<Vec<Txid>>,
 }
 
 impl PaymentDetailsUpdate {
@@ -568,7 +555,6 @@ impl PaymentDetailsUpdate {
 			direction: None,
 			status: None,
 			confirmation_status: None,
-			conflicting_txids: None,
 		}
 	}
 }
@@ -584,11 +570,9 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			_ => (None, None, None),
 		};
 
-		let (confirmation_status, conflicting_txids) = match &value.kind {
-			PaymentKind::Onchain { status, conflicting_txids, .. } => {
-				(Some(*status), conflicting_txids.clone())
-			},
-			_ => (None, Vec::new()),
+		let confirmation_status = match value.kind {
+			PaymentKind::Onchain { status, .. } => Some(status),
+			_ => None,
 		};
 
 		let counterparty_skimmed_fee_msat = match value.kind {
@@ -609,7 +593,6 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			direction: Some(value.direction),
 			status: Some(value.status),
 			confirmation_status,
-			conflicting_txids: Some(conflicting_txids),
 		}
 	}
 }
