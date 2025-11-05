@@ -50,8 +50,10 @@ use crate::config::Config;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
-use crate::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use crate::types::{Broadcaster, PaymentStore};
+use crate::payment::{
+	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, ReplacedOnchainTransactionDetails,
+};
+use crate::types::{Broadcaster, PaymentStore, ReplacedTransactionStore};
 use crate::Error;
 
 pub(crate) enum OnchainSendAmount {
@@ -72,6 +74,7 @@ pub(crate) struct Wallet {
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
+	replaced_tx_store: Arc<ReplacedTransactionStore>,
 }
 
 impl Wallet {
@@ -79,11 +82,20 @@ impl Wallet {
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
 		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
 		fee_estimator: Arc<OnchainFeeEstimator>, payment_store: Arc<PaymentStore>,
-		config: Arc<Config>, logger: Arc<Logger>,
+		config: Arc<Config>, logger: Arc<Logger>, replaced_tx_store: Arc<ReplacedTransactionStore>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
-		Self { inner, persister, broadcaster, fee_estimator, payment_store, config, logger }
+		Self {
+			inner,
+			persister,
+			broadcaster,
+			fee_estimator,
+			payment_store,
+			config,
+			logger,
+			replaced_tx_store,
+		}
 	}
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
@@ -225,9 +237,21 @@ impl Wallet {
 							..
 						} = payment.kind
 						{
+							let payment_id = payment.id;
 							if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
 								payment.status = PaymentStatus::Succeeded;
 								self.payment_store.insert_or_update(payment)?;
+
+								// Remove any replaced transactions associated with this payment
+								let replaced_txids = self
+									.replaced_tx_store
+									.list_filter(|r| r.payment_id == payment_id)
+									.iter()
+									.map(|p| p.new_txid)
+									.collect::<Vec<Txid>>();
+								for replaced_txid in replaced_txids {
+									self.replaced_tx_store.remove(&replaced_txid)?;
+								}
 							}
 						}
 					}
@@ -248,47 +272,21 @@ impl Wallet {
 					);
 					self.payment_store.insert_or_update(payment)?;
 				},
-				WalletEvent::TxReplaced { txid, tx, conflicts } => {
+				WalletEvent::TxReplaced { txid, conflicts, .. } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					if let Some(mut payment) = self.payment_store.get(&payment_id) {
-						if let PaymentKind::Onchain {
-							ref mut conflicting_txids,
-							txid: current_txid,
-							..
-						} = payment.kind
-						{
-							let existing_set: std::collections::HashSet<_> =
-								conflicting_txids.iter().collect();
+					// Collect all conflict txids
+					let conflict_txids: Vec<Txid> =
+						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
 
-							let new_conflicts: Vec<_> = conflicts
-								.iter()
-								.map(|(_, conflict_txid)| *conflict_txid)
-								.filter(|conflict_txid| {
-									*conflict_txid != current_txid
-										&& !existing_set.contains(conflict_txid)
-								})
-								.collect();
+					for conflict_txid in conflict_txids {
+						// Update the replaced transaction store
+						let replaced_tx_details =
+							ReplacedOnchainTransactionDetails::new(conflict_txid, txid, payment_id);
 
-							conflicting_txids.extend(new_conflicts);
-						}
-						self.payment_store.insert_or_update(payment)?;
-					} else {
-						let conflicting_txids =
-							Some(conflicts.iter().map(|(_, txid)| *txid).collect());
-
-						let payment = self.create_payment_from_tx(
-							locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							PaymentStatus::Pending,
-							ConfirmationStatus::Unconfirmed,
-							conflicting_txids,
-						);
-						self.payment_store.insert_or_update(payment)?;
+						self.replaced_tx_store.insert_or_update(replaced_tx_details)?;
 					}
 				},
 				WalletEvent::TxDropped { txid, tx } => {
@@ -954,20 +952,16 @@ impl Wallet {
 
 	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
 		let direct_payment_id = PaymentId(target_txid.to_byte_array());
-		if self.payment_store.get(&direct_payment_id).is_some() {
+		if self.payment_store.contains_key(&direct_payment_id) {
 			return Some(direct_payment_id);
 		}
 
-		self.payment_store
-			.list_filter(|p| {
-				if let PaymentKind::Onchain { txid, conflicting_txids, .. } = &p.kind {
-					*txid == target_txid || conflicting_txids.contains(&target_txid)
-				} else {
-					false
-				}
-			})
-			.first()
-			.map(|p| p.id)
+		// Check if this txid is a replaced transaction
+		if let Some(replaced_details) = self.replaced_tx_store.get(&target_txid) {
+			return Some(replaced_details.payment_id);
+		}
+
+		None
 	}
 }
 

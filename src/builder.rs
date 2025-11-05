@@ -59,6 +59,7 @@ use crate::io::utils::{
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	REPLACED_TX_PERSISTENCE_PRIMARY_NAMESPACE, REPLACED_TX_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
@@ -71,7 +72,8 @@ use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph, KeysManager,
-	MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister, SyncAndAsyncKVStore,
+	MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister, ReplacedTransactionStore,
+	SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1230,6 +1232,21 @@ fn build_with_store_internal(
 		},
 	};
 
+	let replaced_tx_store =
+		match io::utils::read_replaced_txs(Arc::clone(&kv_store), Arc::clone(&logger)) {
+			Ok(replaced_txs) => Arc::new(ReplacedTransactionStore::new(
+				replaced_txs,
+				REPLACED_TX_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+				REPLACED_TX_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+				Arc::clone(&kv_store),
+				Arc::clone(&logger),
+			)),
+			Err(e) => {
+				log_error!(logger, "Failed to read replaced transaction data from store: {}", e);
+				return Err(BuildError::ReadFailed);
+			},
+		};
+
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
@@ -1238,6 +1255,7 @@ fn build_with_store_internal(
 		Arc::clone(&payment_store),
 		Arc::clone(&config),
 		Arc::clone(&logger),
+		Arc::clone(&replaced_tx_store),
 	));
 
 	// Initialize the KeysManager
