@@ -38,7 +38,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::RuntimeSpawner;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::PaymentDetails;
+use crate::payment::{PaymentDetails, ReplacedOnchainTransactionDetails};
 
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
 /// same time.
@@ -609,3 +609,6 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 		CustomTlvRecord { type_num: tlv.0, value: tlv.1.clone() }
 	}
 }
+
+pub(crate) type ReplacedTransactionStore =
+	DataStore<ReplacedOnchainTransactionDetails, Arc<Logger>>;
