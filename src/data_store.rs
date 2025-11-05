@@ -176,6 +176,7 @@ mod tests {
 
 	use super::*;
 	use crate::hex_utils;
+	use crate::types::DynStoreWrapper;
 
 	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 	struct TestObjectId {
@@ -234,7 +235,7 @@ mod tests {
 
 	#[test]
 	fn data_is_persisted() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(TestStore::new(false)));
 		let logger = Arc::new(TestLogger::new());
 		let primary_namespace = "datastore_test_primary".to_string();
 		let secondary_namespace = "datastore_test_secondary".to_string();

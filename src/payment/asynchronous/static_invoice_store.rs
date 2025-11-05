@@ -161,11 +161,11 @@ mod tests {
 	use lightning_types::features::BlindedHopFeatures;
 
 	use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
-	use crate::types::DynStore;
+	use crate::types::{DynStore, DynStoreWrapper};
 
 	#[tokio::test]
 	async fn static_invoice_store_test() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(TestStore::new(false)));
 		let static_invoice_store = StaticInvoiceStore::new(Arc::clone(&store));
 
 		let static_invoice = invoice();

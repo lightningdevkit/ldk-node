@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::future::Future;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -242,7 +241,7 @@ impl KVStoreSync for VssStore {
 impl KVStore for VssStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
+	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -253,7 +252,7 @@ impl KVStore for VssStore {
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
 		let primary_namespace = primary_namespace.to_string();
@@ -276,7 +275,7 @@ impl KVStore for VssStore {
 	}
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
-	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
 		let primary_namespace = primary_namespace.to_string();
@@ -298,7 +297,7 @@ impl KVStore for VssStore {
 	}
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
+	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);

@@ -11,9 +11,10 @@ use crate::{
 	io::utils::write_external_pathfinding_scores_to_cache,
 	logger::LdkLogger,
 	runtime::Runtime,
+	types::DynStore,
 	NodeMetrics, Scorer,
 };
-use crate::{write_node_metrics, DynStore, Logger};
+use crate::{write_node_metrics, Logger};
 use lightning::{
 	log_error, log_info, log_trace, routing::scoring::ChannelLiquidities, util::ser::Readable,
 };
