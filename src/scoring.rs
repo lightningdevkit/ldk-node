@@ -1,22 +1,18 @@
-use std::{
-	io::Cursor,
-	sync::{Arc, Mutex, RwLock},
-	time::{Duration, SystemTime},
-};
+use std::io::Cursor;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
 
-use crate::{
-	config::{
-		EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL, EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS,
-	},
-	io::utils::write_external_pathfinding_scores_to_cache,
-	logger::LdkLogger,
-	runtime::Runtime,
-	NodeMetrics, Scorer,
+use lightning::routing::scoring::ChannelLiquidities;
+use lightning::util::ser::Readable;
+use lightning::{log_error, log_info, log_trace};
+
+use crate::config::{
+	EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL, EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS,
 };
-use crate::{write_node_metrics, DynStore, Logger};
-use lightning::{
-	log_error, log_info, log_trace, routing::scoring::ChannelLiquidities, util::ser::Readable,
-};
+use crate::io::utils::write_external_pathfinding_scores_to_cache;
+use crate::logger::LdkLogger;
+use crate::runtime::Runtime;
+use crate::{write_node_metrics, DynStore, Logger, NodeMetrics, Scorer};
 
 /// Start a background task that periodically downloads scores via an external url and merges them into the local
 /// pathfinding scores.
