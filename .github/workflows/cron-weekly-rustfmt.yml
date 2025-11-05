@@ -1,4 +1,9 @@
 name: Nightly rustfmt
+
+permissions:
+  contents: write
+  pull-requests: write
+
 on:
   schedule:
     - cron: "0 0 * * 0" # runs weekly on Sunday at 00:00
