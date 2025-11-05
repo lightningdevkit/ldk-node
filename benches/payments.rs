@@ -1,8 +1,8 @@
 #[path = "../tests/common/mod.rs"]
 mod common;
 
-use std::time::Instant;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bitcoin::hex::DisplayHex;
 use bitcoin::Amount;
