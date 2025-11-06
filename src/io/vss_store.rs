@@ -246,9 +246,7 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(
-			async move { inner.read_internal(primary_namespace, secondary_namespace, key).await },
-		)
+		async move { inner.read_internal(primary_namespace, secondary_namespace, key).await }
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
@@ -259,7 +257,7 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(async move {
+		async move {
 			inner
 				.write_internal(
 					inner_lock_ref,
@@ -271,7 +269,7 @@ impl KVStore for VssStore {
 					buf,
 				)
 				.await
-		})
+		}
 	}
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
@@ -282,7 +280,7 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(async move {
+		async move {
 			inner
 				.remove_internal(
 					inner_lock_ref,
@@ -293,7 +291,7 @@ impl KVStore for VssStore {
 					key,
 				)
 				.await
-		})
+		}
 	}
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
@@ -301,7 +299,7 @@ impl KVStore for VssStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(async move { inner.list_internal(primary_namespace, secondary_namespace).await })
+		async move { inner.list_internal(primary_namespace, secondary_namespace).await }
 	}
 }
 
