@@ -58,7 +58,6 @@ enum VssSchemaVersion {
 // We set this to a small number of threads that would still allow to make some progress if one
 // would hit a blocking case
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
-const VSS_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
 pub struct VssStore {
@@ -167,16 +166,7 @@ impl KVStoreSync for VssStore {
 		let inner = Arc::clone(&self.inner);
 		let fut =
 			async move { inner.read_internal(primary_namespace, secondary_namespace, key).await };
-		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
-		// times out.
-		tokio::task::block_in_place(move || {
-			internal_runtime.block_on(async move {
-				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-					let msg = "VssStore::read timed out";
-					Error::new(ErrorKind::Other, msg)
-				})
-			})?
-		})
+		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
 	}
 
 	fn write(
@@ -206,16 +196,7 @@ impl KVStoreSync for VssStore {
 				)
 				.await
 		};
-		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
-		// times out.
-		tokio::task::block_in_place(move || {
-			internal_runtime.block_on(async move {
-				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-					let msg = "VssStore::write timed out";
-					Error::new(ErrorKind::Other, msg)
-				})
-			})?
-		})
+		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
 	}
 
 	fn remove(
@@ -245,16 +226,7 @@ impl KVStoreSync for VssStore {
 				)
 				.await
 		};
-		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
-		// times out.
-		tokio::task::block_in_place(move || {
-			internal_runtime.block_on(async move {
-				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-					let msg = "VssStore::remove timed out";
-					Error::new(ErrorKind::Other, msg)
-				})
-			})?
-		})
+		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
 	}
 
 	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
@@ -267,16 +239,7 @@ impl KVStoreSync for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
 		let fut = async move { inner.list_internal(primary_namespace, secondary_namespace).await };
-		// TODO: We could drop the timeout here once we ensured vss-client's Retry logic always
-		// times out.
-		tokio::task::block_in_place(move || {
-			internal_runtime.block_on(async move {
-				tokio::time::timeout(VSS_IO_TIMEOUT, fut).await.map_err(|_| {
-					let msg = "VssStore::list timed out";
-					Error::new(ErrorKind::Other, msg)
-				})
-			})?
-		})
+		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
 	}
 }
 
