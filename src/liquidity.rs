@@ -562,7 +562,7 @@ where
 						return;
 					};
 
-					let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
+					let user_channel_id: u128 = rand::rng().random();
 					let intercept_scid = self.channel_manager.get_intercept_scid();
 
 					if let Some(payment_size_msat) = payment_size_msat {

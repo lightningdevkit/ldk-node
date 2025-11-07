@@ -22,8 +22,8 @@ use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
+use rand::distr::Alphanumeric;
+use rand::{rng, Rng};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cln() {
@@ -99,7 +99,7 @@ async fn test_cln() {
 	let user_channel_id = common::expect_channel_ready_event!(node, cln_node_id);
 
 	// Send a payment to CLN
-	let mut rng = thread_rng();
+	let mut rng = rng();
 	let rand_label: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 	let cln_invoice =
 		cln_client.invoice(Some(10_000_000), &rand_label, &rand_label, None, None, None).unwrap();

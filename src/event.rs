@@ -30,7 +30,7 @@ use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 
 use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
@@ -1137,7 +1137,7 @@ where
 					}
 				}
 
-				let user_channel_id: u128 = thread_rng().gen::<u128>();
+				let user_channel_id: u128 = rng().random();
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
 				if let Some((lsp_node_id, _)) = self
