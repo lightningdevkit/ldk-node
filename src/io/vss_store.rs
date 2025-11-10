@@ -99,9 +99,9 @@ impl VssStore {
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
 		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
-			.with_max_attempts(10)
-			.with_max_total_delay(Duration::from_secs(15))
-			.with_max_jitter(Duration::from_millis(10))
+			.with_max_attempts(100)
+			.with_max_total_delay(Duration::from_secs(180))
+			.with_max_jitter(Duration::from_millis(100))
 			.skip_retry_on_error(Box::new(|e: &VssError| {
 				matches!(
 					e,
