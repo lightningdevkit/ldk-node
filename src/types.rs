@@ -36,6 +36,34 @@ use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::PaymentDetails;
 
+/// Supported BIP39 mnemonic word counts for entropy generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MnemonicWordCount {
+	/// 12-word mnemonic (128-bit entropy)
+	Words12,
+	/// 15-word mnemonic (160-bit entropy)
+	Words15,
+	/// 18-word mnemonic (192-bit entropy)
+	Words18,
+	/// 21-word mnemonic (224-bit entropy)
+	Words21,
+	/// 24-word mnemonic (256-bit entropy)
+	Words24,
+}
+
+impl MnemonicWordCount {
+	/// Returns the entropy size in bytes for the word count.
+	pub fn entropy_bytes(&self) -> usize {
+		match self {
+			MnemonicWordCount::Words12 => 16, // 128 bits
+			MnemonicWordCount::Words15 => 20, // 160 bits
+			MnemonicWordCount::Words18 => 24, // 192 bits
+			MnemonicWordCount::Words21 => 28, // 224 bits
+			MnemonicWordCount::Words24 => 32, // 256 bits
+		}
+	}
+}
+
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
 /// same time.
 pub trait SyncAndAsyncKVStore: KVStore + KVStoreSync {}

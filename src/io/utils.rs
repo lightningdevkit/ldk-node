@@ -47,13 +47,15 @@ use crate::io::{
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
-use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
+use crate::types::{Broadcaster, DynStore, KeysManager, MnemonicWordCount, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
 use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
-/// Generates a random [BIP 39] mnemonic.
+/// Generates a random [BIP 39] mnemonic with the specified word count.
+///
+/// If no word count is specified, defaults to 24 words (256-bit entropy).
 ///
 /// The result may be used to initialize the [`Node`] entropy, i.e., can be given to
 /// [`Builder::set_entropy_bip39_mnemonic`].
@@ -61,9 +63,10 @@ pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_sc
 /// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
 /// [`Node`]: crate::Node
 /// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
-pub fn generate_entropy_mnemonic() -> Mnemonic {
-	// bip39::Mnemonic supports 256 bit entropy max
-	let mut entropy = [0; 32];
+pub fn generate_entropy_mnemonic(word_count: Option<MnemonicWordCount>) -> Mnemonic {
+	let word_count = word_count.unwrap_or(MnemonicWordCount::Words24);
+	let entropy_bytes = word_count.entropy_bytes();
+	let mut entropy = vec![0u8; entropy_bytes];
 	OsRng.try_fill_bytes(&mut entropy).expect("Failed to generate entropy");
 	Mnemonic::from_entropy(&entropy).unwrap()
 }
@@ -627,9 +630,35 @@ mod tests {
 
 	#[test]
 	fn mnemonic_to_entropy_to_mnemonic() {
-		let mnemonic = generate_entropy_mnemonic();
-
+		// Test default (24 words)
+		let mnemonic = generate_entropy_mnemonic(None);
 		let entropy = mnemonic.to_entropy();
 		assert_eq!(mnemonic, Mnemonic::from_entropy(&entropy).unwrap());
+		assert_eq!(mnemonic.word_count(), 24);
+
+		// Test with different word counts
+		let word_counts = [
+			MnemonicWordCount::Words12,
+			MnemonicWordCount::Words15,
+			MnemonicWordCount::Words18,
+			MnemonicWordCount::Words21,
+			MnemonicWordCount::Words24,
+		];
+
+		for word_count in word_counts {
+			let mnemonic = generate_entropy_mnemonic(Some(word_count));
+			let entropy = mnemonic.to_entropy();
+			assert_eq!(mnemonic, Mnemonic::from_entropy(&entropy).unwrap());
+
+			// Verify expected word count
+			let expected_words = match word_count {
+				MnemonicWordCount::Words12 => 12,
+				MnemonicWordCount::Words15 => 15,
+				MnemonicWordCount::Words18 => 18,
+				MnemonicWordCount::Words21 => 21,
+				MnemonicWordCount::Words24 => 24,
+			};
+			assert_eq!(mnemonic.word_count(), expected_words);
+		}
 	}
 }
