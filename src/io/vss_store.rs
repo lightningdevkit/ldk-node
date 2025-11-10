@@ -102,24 +102,22 @@ impl VssStore {
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
-		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
-			.with_max_attempts(100)
-			.with_max_total_delay(Duration::from_secs(180))
-			.with_max_jitter(Duration::from_millis(100))
-			.skip_retry_on_error(Box::new(|e: &VssError| {
-				matches!(
-					e,
-					VssError::NoSuchKeyError(..)
-						| VssError::InvalidRequestError(..)
-						| VssError::ConflictError(..)
-				)
-			}) as _);
 
-		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
+		let sync_retry_policy = retry_policy();
+		let blocking_client = VssClient::new_with_headers(
+			base_url.clone(),
+			sync_retry_policy,
+			header_provider.clone(),
+		);
+
+		let async_retry_policy = retry_policy();
+		let async_client =
+			VssClient::new_with_headers(base_url, async_retry_policy, header_provider);
 
 		let inner = Arc::new(VssStoreInner::new(
 			schema_version,
-			client,
+			blocking_client,
+			async_client,
 			store_id,
 			data_encryption_key,
 			key_obfuscator,
@@ -168,8 +166,11 @@ impl KVStoreSync for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		let fut =
-			async move { inner.read_internal(primary_namespace, secondary_namespace, key).await };
+		let fut = async move {
+			inner
+				.read_internal(&inner.blocking_client, primary_namespace, secondary_namespace, key)
+				.await
+		};
 		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
 	}
 
@@ -190,6 +191,7 @@ impl KVStoreSync for VssStore {
 		let fut = async move {
 			inner
 				.write_internal(
+					&inner.blocking_client,
 					inner_lock_ref,
 					locking_key,
 					version,
@@ -220,6 +222,7 @@ impl KVStoreSync for VssStore {
 		let fut = async move {
 			inner
 				.remove_internal(
+					&inner.blocking_client,
 					inner_lock_ref,
 					locking_key,
 					version,
@@ -241,7 +244,11 @@ impl KVStoreSync for VssStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		let fut = async move { inner.list_internal(primary_namespace, secondary_namespace).await };
+		let fut = async move {
+			inner
+				.list_internal(&inner.blocking_client, primary_namespace, secondary_namespace)
+				.await
+		};
 		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
 	}
 }
@@ -254,9 +261,11 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(
-			async move { inner.read_internal(primary_namespace, secondary_namespace, key).await },
-		)
+		Box::pin(async move {
+			inner
+				.read_internal(&inner.async_client, primary_namespace, secondary_namespace, key)
+				.await
+		})
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
@@ -270,6 +279,7 @@ impl KVStore for VssStore {
 		Box::pin(async move {
 			inner
 				.write_internal(
+					&inner.async_client,
 					inner_lock_ref,
 					locking_key,
 					version,
@@ -293,6 +303,7 @@ impl KVStore for VssStore {
 		Box::pin(async move {
 			inner
 				.remove_internal(
+					&inner.async_client,
 					inner_lock_ref,
 					locking_key,
 					version,
@@ -309,7 +320,9 @@ impl KVStore for VssStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		Box::pin(async move { inner.list_internal(primary_namespace, secondary_namespace).await })
+		Box::pin(async move {
+			inner.list_internal(&inner.async_client, primary_namespace, secondary_namespace).await
+		})
 	}
 }
 
@@ -322,7 +335,10 @@ impl Drop for VssStore {
 
 struct VssStoreInner {
 	schema_version: VssSchemaVersion,
-	client: VssClient<CustomRetryPolicy>,
+	blocking_client: VssClient<CustomRetryPolicy>,
+	// A secondary client that will only be used for async persistence via `KVStore`, to ensure TCP
+	// connections aren't shared between our outer and the internal runtime.
+	async_client: VssClient<CustomRetryPolicy>,
 	store_id: String,
 	data_encryption_key: [u8; 32],
 	key_obfuscator: KeyObfuscator,
@@ -333,11 +349,20 @@ struct VssStoreInner {
 
 impl VssStoreInner {
 	pub(crate) fn new(
-		schema_version: VssSchemaVersion, client: VssClient<CustomRetryPolicy>, store_id: String,
+		schema_version: VssSchemaVersion, blocking_client: VssClient<CustomRetryPolicy>,
+		async_client: VssClient<CustomRetryPolicy>, store_id: String,
 		data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator,
 	) -> Self {
 		let locks = Mutex::new(HashMap::new());
-		Self { schema_version, client, store_id, data_encryption_key, key_obfuscator, locks }
+		Self {
+			schema_version,
+			blocking_client,
+			async_client,
+			store_id,
+			data_encryption_key,
+			key_obfuscator,
+			locks,
+		}
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
@@ -397,7 +422,8 @@ impl VssStoreInner {
 	}
 
 	async fn list_all_keys(
-		&self, primary_namespace: &str, secondary_namespace: &str,
+		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: &str,
+		secondary_namespace: &str,
 	) -> io::Result<Vec<String>> {
 		let mut page_token = None;
 		let mut keys = vec![];
@@ -410,7 +436,7 @@ impl VssStoreInner {
 				page_size: None,
 			};
 
-			let response = self.client.list_key_versions(&request).await.map_err(|e| {
+			let response = client.list_key_versions(&request).await.map_err(|e| {
 				let msg = format!(
 					"Failed to list keys in {}/{}: {}",
 					primary_namespace, secondary_namespace, e
@@ -427,13 +453,14 @@ impl VssStoreInner {
 	}
 
 	async fn read_internal(
-		&self, primary_namespace: String, secondary_namespace: String, key: String,
+		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: String,
+		secondary_namespace: String, key: String,
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, Some(&key), "read")?;
 
 		let store_key = self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
 		let request = GetObjectRequest { store_id: self.store_id.clone(), key: store_key.clone() };
-		let resp = self.client.get_object(&request).await.map_err(|e| {
+		let resp = client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
 				"Failed to read from key {}/{}/{}: {}",
 				primary_namespace, secondary_namespace, key, e
@@ -462,8 +489,9 @@ impl VssStoreInner {
 	}
 
 	async fn write_internal(
-		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
-		primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+		&self, client: &VssClient<CustomRetryPolicy>, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>,
+		locking_key: String, version: u64, primary_namespace: String, secondary_namespace: String,
+		key: String, buf: Vec<u8>,
 	) -> io::Result<()> {
 		check_namespace_key_validity(
 			&primary_namespace,
@@ -491,7 +519,7 @@ impl VssStoreInner {
 		};
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
-			self.client.put_object(&request).await.map_err(|e| {
+			client.put_object(&request).await.map_err(|e| {
 				let msg = format!(
 					"Failed to write to key {}/{}/{}: {}",
 					primary_namespace, secondary_namespace, key, e
@@ -505,8 +533,9 @@ impl VssStoreInner {
 	}
 
 	async fn remove_internal(
-		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
-		primary_namespace: String, secondary_namespace: String, key: String,
+		&self, client: &VssClient<CustomRetryPolicy>, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>,
+		locking_key: String, version: u64, primary_namespace: String, secondary_namespace: String,
+		key: String,
 	) -> io::Result<()> {
 		check_namespace_key_validity(
 			&primary_namespace,
@@ -523,7 +552,7 @@ impl VssStoreInner {
 				key_value: Some(KeyValue { key: obfuscated_key, version: -1, value: vec![] }),
 			};
 
-			self.client.delete_object(&request).await.map_err(|e| {
+			client.delete_object(&request).await.map_err(|e| {
 				let msg = format!(
 					"Failed to delete key {}/{}/{}: {}",
 					primary_namespace, secondary_namespace, key, e
@@ -537,12 +566,15 @@ impl VssStoreInner {
 	}
 
 	async fn list_internal(
-		&self, primary_namespace: String, secondary_namespace: String,
+		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: String,
+		secondary_namespace: String,
 	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, None, "list")?;
 
-		let keys =
-			self.list_all_keys(&primary_namespace, &secondary_namespace).await.map_err(|e| {
+		let keys = self
+			.list_all_keys(client, &primary_namespace, &secondary_namespace)
+			.await
+			.map_err(|e| {
 				let msg = format!(
 					"Failed to retrieve keys in namespace: {}/{} : {}",
 					primary_namespace, secondary_namespace, e
@@ -609,6 +641,21 @@ fn derive_data_encryption_and_obfuscation_keys(vss_seed: &[u8; 32]) -> ([u8; 32]
 	let k1 = hkdf(&prk, b"data_encryption_key");
 	let k2 = hkdf(&prk, &[&k1[..], b"obfuscation_key"].concat());
 	(k1, k2)
+}
+
+fn retry_policy() -> CustomRetryPolicy {
+	ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
+		.with_max_attempts(100)
+		.with_max_total_delay(Duration::from_secs(180))
+		.with_max_jitter(Duration::from_millis(100))
+		.skip_retry_on_error(Box::new(|e: &VssError| {
+			matches!(
+				e,
+				VssError::NoSuchKeyError(..)
+					| VssError::InvalidRequestError(..)
+					| VssError::ConflictError(..)
+			)
+		}) as _)
 }
 
 /// A source for generating entropy/randomness using [`rand`].
