@@ -38,7 +38,7 @@ use crate::payment::PaymentDetails;
 
 /// Supported BIP39 mnemonic word counts for entropy generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MnemonicWordCount {
+pub enum WordCount {
 	/// 12-word mnemonic (128-bit entropy)
 	Words12,
 	/// 15-word mnemonic (160-bit entropy)
@@ -51,15 +51,15 @@ pub enum MnemonicWordCount {
 	Words24,
 }
 
-impl MnemonicWordCount {
-	/// Returns the entropy size in bytes for the word count.
-	pub fn entropy_bytes(&self) -> usize {
+impl WordCount {
+	/// Returns the word count as a usize value.
+	pub fn word_count(&self) -> usize {
 		match self {
-			MnemonicWordCount::Words12 => 16, // 128 bits
-			MnemonicWordCount::Words15 => 20, // 160 bits
-			MnemonicWordCount::Words18 => 24, // 192 bits
-			MnemonicWordCount::Words21 => 28, // 224 bits
-			MnemonicWordCount::Words24 => 32, // 256 bits
+			WordCount::Words12 => 12,
+			WordCount::Words15 => 15,
+			WordCount::Words18 => 18,
+			WordCount::Words21 => 21,
+			WordCount::Words24 => 24,
 		}
 	}
 }

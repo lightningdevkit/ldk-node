@@ -1,5 +1,5 @@
 namespace ldk_node {
-	Mnemonic generate_entropy_mnemonic(MnemonicWordCount? word_count);
+	Mnemonic generate_entropy_mnemonic(WordCount? word_count);
 	Config default_config();
 };
 
@@ -46,7 +46,7 @@ dictionary LSPS2ServiceConfig {
 	u64 max_payment_size_msat;
 };
 
-enum MnemonicWordCount {
+enum WordCount {
 	"Words12",
 	"Words15",
 	"Words18",
