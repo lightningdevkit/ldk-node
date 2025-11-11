@@ -45,6 +45,13 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
+enum VssSchemaVersion {
+	// The initial schema version.
+	// This used an empty `aad` and unobfuscated `primary_namespace`/`secondary_namespace`s in the
+	// stored key.
+	V0,
+}
+
 // We set this to a small number of threads that would still allow to make some progress if one
 // would hit a blocking case
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
