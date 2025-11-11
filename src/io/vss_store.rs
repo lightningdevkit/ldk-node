@@ -82,7 +82,6 @@ impl VssStore {
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>, runtime: Arc<Runtime>,
 	) -> Self {
-		let inner = Arc::new(VssStoreInner::new(base_url, store_id, vss_seed, header_provider));
 		let next_version = AtomicU64::new(1);
 		let internal_runtime = Some(
 			tokio::runtime::Builder::new_multi_thread()
@@ -97,6 +96,33 @@ impl VssStore {
 				.build()
 				.unwrap(),
 		);
+
+		let schema_version = VssSchemaVersion::V0;
+		let (data_encryption_key, obfuscation_master_key) =
+			derive_data_encryption_and_obfuscation_keys(&vss_seed);
+		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
+		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
+			.with_max_attempts(10)
+			.with_max_total_delay(Duration::from_secs(15))
+			.with_max_jitter(Duration::from_millis(10))
+			.skip_retry_on_error(Box::new(|e: &VssError| {
+				matches!(
+					e,
+					VssError::NoSuchKeyError(..)
+						| VssError::InvalidRequestError(..)
+						| VssError::ConflictError(..)
+				)
+			}) as _);
+
+		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
+
+		let inner = Arc::new(VssStoreInner::new(
+			schema_version,
+			client,
+			store_id,
+			data_encryption_key,
+			key_obfuscator,
+		));
 
 		Self { inner, next_version, runtime, internal_runtime }
 	}
@@ -341,27 +367,9 @@ struct VssStoreInner {
 
 impl VssStoreInner {
 	pub(crate) fn new(
-		base_url: String, store_id: String, vss_seed: [u8; 32],
-		header_provider: Arc<dyn VssHeaderProvider>,
+		schema_version: VssSchemaVersion, client: VssClient<CustomRetryPolicy>, store_id: String,
+		data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator,
 	) -> Self {
-		let schema_version = VssSchemaVersion::V0;
-		let (data_encryption_key, obfuscation_master_key) =
-			derive_data_encryption_and_obfuscation_keys(&vss_seed);
-		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
-		let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
-			.with_max_attempts(10)
-			.with_max_total_delay(Duration::from_secs(15))
-			.with_max_jitter(Duration::from_millis(10))
-			.skip_retry_on_error(Box::new(|e: &VssError| {
-				matches!(
-					e,
-					VssError::NoSuchKeyError(..)
-						| VssError::InvalidRequestError(..)
-						| VssError::ConflictError(..)
-				)
-			}) as _);
-
-		let client = VssClient::new_with_headers(base_url, retry_policy, header_provider);
 		let locks = Mutex::new(HashMap::new());
 		let pending_lazy_deletes = Mutex::new(Vec::new());
 		Self {
