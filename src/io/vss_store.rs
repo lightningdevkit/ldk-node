@@ -17,8 +17,10 @@ use std::time::Duration;
 
 use bdk_chain::Merge;
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+use lightning::impl_writeable_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
 use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::ser::{Readable, Writeable};
 use prost::Message;
 use rand::RngCore;
 use vss_client::client::VssClient;
@@ -55,6 +57,13 @@ enum VssSchemaVersion {
 	V1,
 }
 
+impl_writeable_tlv_based_enum!(VssSchemaVersion,
+	(0, V0) => {},
+	(1, V1) => {},
+);
+
+const VSS_SCHEMA_VERSION_KEY: &str = "vss_schema_version";
+
 // We set this to a small number of threads that would still allow to make some progress if one
 // would hit a blocking case
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
@@ -78,23 +87,20 @@ impl VssStore {
 	pub(crate) fn new(
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>,
-	) -> Self {
+	) -> io::Result<Self> {
 		let next_version = AtomicU64::new(1);
-		let internal_runtime = Some(
-			tokio::runtime::Builder::new_multi_thread()
-				.enable_all()
-				.thread_name_fn(|| {
-					static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-					let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-					format!("ldk-node-vss-runtime-{}", id)
-				})
-				.worker_threads(INTERNAL_RUNTIME_WORKERS)
-				.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
-				.build()
-				.unwrap(),
-		);
+		let internal_runtime = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.thread_name_fn(|| {
+				static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+				let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+				format!("ldk-node-vss-runtime-{}", id)
+			})
+			.worker_threads(INTERNAL_RUNTIME_WORKERS)
+			.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
+			.build()
+			.unwrap();
 
-		let schema_version = VssSchemaVersion::V0;
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
@@ -105,6 +111,19 @@ impl VssStore {
 			sync_retry_policy,
 			header_provider.clone(),
 		);
+
+		let runtime_handle = internal_runtime.handle();
+		let schema_version = tokio::task::block_in_place(|| {
+			runtime_handle.block_on(async {
+				determine_and_write_schema_version(
+					&blocking_client,
+					&store_id,
+					data_encryption_key,
+					&key_obfuscator,
+				)
+				.await
+			})
+		})?;
 
 		let async_retry_policy = retry_policy();
 		let async_client =
@@ -119,7 +138,7 @@ impl VssStore {
 			key_obfuscator,
 		));
 
-		Self { inner, next_version, internal_runtime }
+		Ok(Self { inner, next_version, internal_runtime: Some(internal_runtime) })
 	}
 
 	// Same logic as for the obfuscated keys below, but just for locking, using the plaintext keys
@@ -676,6 +695,111 @@ fn retry_policy() -> CustomRetryPolicy {
 		}) as _)
 }
 
+async fn determine_and_write_schema_version(
+	client: &VssClient<CustomRetryPolicy>, store_id: &String, data_encryption_key: [u8; 32],
+	key_obfuscator: &KeyObfuscator,
+) -> io::Result<VssSchemaVersion> {
+	// Build the obfuscated `vss_schema_version` key.
+	let obfuscated_prefix = key_obfuscator.obfuscate(&format! {"{}#{}", "", ""});
+	let obfuscated_key = key_obfuscator.obfuscate(VSS_SCHEMA_VERSION_KEY);
+	let store_key = format!("{}#{}", obfuscated_prefix, obfuscated_key);
+
+	// Try to read the stored schema version.
+	let request = GetObjectRequest { store_id: store_id.clone(), key: store_key.clone() };
+	let resp = match client.get_object(&request).await {
+		Ok(resp) => Some(resp),
+		Err(VssError::NoSuchKeyError(..)) => {
+			// The value is not set.
+			None
+		},
+		Err(e) => {
+			let msg = format!("Failed to read schema version: {}", e);
+			return Err(Error::new(ErrorKind::Other, msg));
+		},
+	};
+
+	if let Some(resp) = resp {
+		// The schema version was present, so just decrypt the stored data.
+
+		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
+		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
+		let storable = Storable::decode(&resp.value.unwrap().value[..]).map_err(|e| {
+			let msg = format!("Failed to decode schema version: {}", e);
+			Error::new(ErrorKind::Other, msg)
+		})?;
+
+		let storable_builder = StorableBuilder::new(RandEntropySource);
+		// Schema version was added starting with V1, so if set at all, we use the key as `aad`
+		let aad = store_key.as_bytes();
+		let decrypted = storable_builder
+			.deconstruct(storable, &data_encryption_key, aad)
+			.map_err(|e| {
+				let msg = format!("Failed to decode schema version: {}", e);
+				Error::new(ErrorKind::Other, msg)
+			})?
+			.0;
+
+		let schema_version: VssSchemaVersion = Readable::read(&mut io::Cursor::new(decrypted))
+			.map_err(|e| {
+				let msg = format!("Failed to decode schema version: {}", e);
+				Error::new(ErrorKind::Other, msg)
+			})?;
+		Ok(schema_version)
+	} else {
+		// The schema version wasn't present, this either means we're running for the first time *or* it's V0 pre-migration (predating writing of the schema version).
+
+		// Check if any `bdk_wallet` data was written by listing keys under the respective
+		// (unobfuscated) prefix.
+		const V0_BDK_WALLET_PREFIX: &str = "bdk_wallet#";
+		let request = ListKeyVersionsRequest {
+			store_id: store_id.clone(),
+			key_prefix: Some(V0_BDK_WALLET_PREFIX.to_string()),
+			page_token: None,
+			page_size: None,
+		};
+
+		let response = client.list_key_versions(&request).await.map_err(|e| {
+			let msg = format!("Failed to determine schema version: {}", e);
+			Error::new(ErrorKind::Other, msg)
+		})?;
+
+		let wallet_data_present = !response.key_versions.is_empty();
+		if wallet_data_present {
+			// If the wallet data is present, it means we're not running for the first time.
+			Ok(VssSchemaVersion::V0)
+		} else {
+			// We're running for the first time, write the schema version to save unnecessary IOps
+			// on future startup.
+			let schema_version = VssSchemaVersion::V1;
+			let encoded_version = schema_version.encode();
+
+			let storable_builder = StorableBuilder::new(RandEntropySource);
+			let vss_version = -1;
+			let aad = store_key.as_bytes();
+			let storable =
+				storable_builder.build(encoded_version, vss_version, &data_encryption_key, aad);
+
+			let request = PutObjectRequest {
+				store_id: store_id.clone(),
+				global_version: None,
+				transaction_items: vec![KeyValue {
+					key: store_key,
+					version: vss_version,
+					value: storable.encode_to_vec(),
+				}],
+				delete_items: vec![],
+			};
+
+			client.put_object(&request).await.map_err(|e| {
+				let msg = format!("Failed to write schema version: {}", e);
+				Error::new(ErrorKind::Other, msg)
+			})?;
+
+			Ok(schema_version)
+		}
+	}
+}
+
 /// A source for generating entropy/randomness using [`rand`].
 pub(crate) struct RandEntropySource;
 
@@ -708,7 +832,8 @@ mod tests {
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let vss_store = VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider);
+		let vss_store =
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
@@ -720,7 +845,8 @@ mod tests {
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let vss_store = VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider);
+		let vss_store =
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
 
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
@@ -734,7 +860,8 @@ mod tests {
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
 		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let vss_store = VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider);
+		let vss_store =
+			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
 
 		let primary_namespace = "test_namespace";
 		let secondary_namespace = "";
