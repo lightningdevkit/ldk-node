@@ -1076,6 +1076,49 @@ where
 					}
 				}
 
+				if self.config.blocked_peers.contains(&counterparty_node_id) {
+					log_error!(
+						self.logger,
+						"Rejecting inbound channel from blocked peer {}",
+						counterparty_node_id,
+					);
+
+					self.channel_manager
+						.force_close_broadcasting_latest_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+							"Channel request rejected".to_string(),
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to reject channel: {:?}", e)
+						});
+					return Ok(());
+				}
+
+				if let Some(max_channels_per_peer) = self.config.max_channels_per_peer {
+					let open_channels =
+						self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+					if open_channels.len() >= max_channels_per_peer.try_into().unwrap() {
+						log_error!(
+							self.logger,
+							"Rejecting inbound channel from peer {} due to reaching the maximum number of channels per peer ({}).",
+							counterparty_node_id,
+							max_channels_per_peer,
+						);
+
+						self.channel_manager
+							.force_close_broadcasting_latest_txn(
+								&temporary_channel_id,
+								&counterparty_node_id,
+								"Channel request rejected".to_string(),
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to reject channel: {:?}", e)
+							});
+						return Ok(());
+					}
+				}
+
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
 				if anchor_channel {
 					if let Some(anchor_channels_config) =

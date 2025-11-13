@@ -1860,3 +1860,141 @@ async fn drop_in_async_context() {
 	let node = setup_node(&chain_source, config, Some(seed_bytes));
 	node.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_blocked_peers_channel_rejection() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	// Setup two nodes
+	let mut config_a = random_config(true);
+	let config_b = random_config(true);
+
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	// Start node_a with node_b blocked
+	config_a.node_config.blocked_peers.push(node_b.node_id());
+	let node_a = setup_node(&chain_source, config_a, None);
+
+	// Fund node_b
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_b.sync_wallets().unwrap();
+
+	// Attempt to open channel from node_b to node_a (should be rejected)
+	node_b
+		.open_channel(
+			node_a.node_id(),
+			node_a.listening_addresses().unwrap().first().unwrap().clone(),
+			1_000_000,
+			None,
+			None,
+		)
+		.unwrap();
+
+	// Expect rejection via ChannelClosed event
+	match node_b.next_event_async().await {
+		Event::ChannelClosed { reason, .. } => {
+			assert!(matches!(
+				reason,
+				Some(lightning::events::ClosureReason::CounterpartyForceClosed { .. })
+			));
+			node_b.event_handled().unwrap();
+		},
+		e => panic!("Expected ChannelClosed event, got: {:?}", e),
+	}
+
+	if let Some(_event) = node_a.next_event() {
+		node_a.event_handled().unwrap();
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_max_channels_per_peer() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config_a = random_config(true);
+	config_a.node_config.max_channels_per_peer = Some(2);
+
+	let config_b = random_config(true);
+
+	let node_a = setup_node(&chain_source, config_a, None);
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	// Fund node_b
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	node_b.sync_wallets().unwrap();
+
+	// Open first channel - should succeed
+	open_channel(&node_b, &node_a, 1_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Open second channel - should succeed
+	node_b.sync_wallets().unwrap();
+	open_channel(&node_b, &node_a, 1_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Verify we have 2 channels
+	assert_eq!(
+		node_a
+			.list_channels()
+			.iter()
+			.filter(|c| c.counterparty_node_id == node_b.node_id())
+			.count(),
+		2
+	);
+
+	// Try to open third channel - should be rejected
+	node_b
+		.open_channel(
+			node_a.node_id(),
+			node_a.listening_addresses().unwrap().first().unwrap().clone(),
+			1_000_000,
+			None,
+			None,
+		)
+		.unwrap();
+
+	match node_b.next_event_async().await {
+		Event::ChannelClosed { reason, .. } => {
+			assert!(matches!(
+				reason,
+				Some(lightning::events::ClosureReason::CounterpartyForceClosed { .. })
+			));
+			node_b.event_handled().unwrap();
+		},
+		e => panic!("Expected ChannelClosed event, got: {:?}", e),
+	}
+
+	// Still should have only 2 channels
+	assert_eq!(
+		node_a
+			.list_channels()
+			.iter()
+			.filter(|c| c.counterparty_node_id == node_b.node_id())
+			.count(),
+		2
+	);
+}
