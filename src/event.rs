@@ -1647,30 +1647,27 @@ where
 				counterparty_node_id,
 				unsigned_transaction,
 				..
-			} => {
-				let partially_signed_tx =
-					self.wallet.sign_owned_inputs(unsigned_transaction).map_err(|()| {
-						log_error!(self.logger, "Failed signing funding transaction");
-						ReplayEvent()
-					})?;
-
-				self.channel_manager
-					.funding_transaction_signed(
+			} => match self.wallet.sign_owned_inputs(unsigned_transaction) {
+				Ok(partially_signed_tx) => {
+					match self.channel_manager.funding_transaction_signed(
 						&channel_id,
 						&counterparty_node_id,
 						partially_signed_tx,
-					)
-					.map_err(|e| {
-						log_error!(self.logger, "Failed signing funding transaction: {:?}", e);
-						ReplayEvent()
-					})?;
-
-				log_info!(
-					self.logger,
-					"Signed funding transaction for channel {} with counterparty {}",
-					channel_id,
-					counterparty_node_id
-				);
+					) {
+						Ok(()) => {
+							log_info!(
+								self.logger,
+								"Signed funding transaction for channel {} with counterparty {}",
+								channel_id,
+								counterparty_node_id
+							);
+						},
+						Err(e) => {
+							log_error!(self.logger, "Failed signing funding transaction: {:?}", e);
+						},
+					}
+				},
+				Err(()) => log_error!(self.logger, "Failed signing funding transaction"),
 			},
 			LdkEvent::SplicePending {
 				channel_id,
