@@ -1368,7 +1368,8 @@ impl Node {
 			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
 				Ok(fee_rate) => fee_rate,
 				Err(_) => {
-					debug_assert!(false);
+					debug_assert!(false, "FeeRate should always fit within u32");
+					log_error!(self.logger, "FeeRate should always fit within u32");
 					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
 				},
 			};
