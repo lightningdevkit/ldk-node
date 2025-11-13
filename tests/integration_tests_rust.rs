@@ -1020,7 +1020,7 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	let splice_in_fee_sat = 253;
+	let splice_in_fee_sat = 252;
 
 	assert_eq!(
 		node_b.list_balances().total_onchain_balance_sats,
@@ -1058,7 +1058,7 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	let splice_out_fee_sat = 184;
+	let splice_out_fee_sat = 183;
 
 	assert_eq!(
 		node_a.list_balances().total_onchain_balance_sats,
