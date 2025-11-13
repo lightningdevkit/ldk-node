@@ -91,6 +91,9 @@ clightningrpc = { version = "0.3.0-beta.8", default-features = false }
 lnd_grpc_rust = { version = "2.10.0", default-features = false }
 tokio = { version = "1.37", features = ["fs"] }
 
+[target.'cfg(vss_test)'.dev-dependencies]
+ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
+
 [build-dependencies]
 uniffi = { version = "0.28.3", features = ["build"], optional = true }
 
