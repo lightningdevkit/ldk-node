@@ -130,3 +130,69 @@ async fn vss_v0_schema_backwards_compatibility() {
 
 	node_new.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn vss_node_restart() {
+	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
+
+	let rand_suffix: String =
+		(0..7).map(|_| rng().sample(rand::distr::Alphanumeric) as char).collect();
+	let store_id = format!("restart_test_{}", rand_suffix);
+	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
+	let seed_bytes = [42u8; 64];
+
+	// Setup initial node and fund it.
+	let (expected_balance_sats, expected_node_id) = {
+		let mut builder = Builder::new();
+		builder.set_network(bitcoin::Network::Regtest);
+		builder.set_storage_dir_path(storage_path.clone());
+		builder.set_entropy_seed_bytes(seed_bytes);
+		builder.set_chain_source_esplora(esplora_url.clone(), None);
+		let node = builder
+			.build_with_vss_store_and_fixed_headers(
+				vss_base_url.clone(),
+				store_id.clone(),
+				HashMap::new(),
+			)
+			.unwrap();
+
+		node.start().unwrap();
+		let addr = node.onchain_payment().new_address().unwrap();
+		common::premine_and_distribute_funds(
+			&bitcoind.client,
+			&electrsd.client,
+			vec![addr],
+			bitcoin::Amount::from_sat(100_000),
+		)
+		.await;
+		node.sync_wallets().unwrap();
+
+		let balance = node.list_balances().spendable_onchain_balance_sats;
+		assert!(balance > 0);
+		let node_id = node.node_id();
+
+		node.stop().unwrap();
+		(balance, node_id)
+	};
+
+	// Verify node can be restarted from VSS backend.
+	let mut builder = Builder::new();
+	builder.set_network(bitcoin::Network::Regtest);
+	builder.set_storage_dir_path(storage_path);
+	builder.set_entropy_seed_bytes(seed_bytes);
+	builder.set_chain_source_esplora(esplora_url, None);
+
+	let node = builder
+		.build_with_vss_store_and_fixed_headers(vss_base_url, store_id, HashMap::new())
+		.unwrap();
+
+	node.start().unwrap();
+	node.sync_wallets().unwrap();
+
+	assert_eq!(expected_node_id, node.node_id());
+	assert_eq!(expected_balance_sats, node.list_balances().spendable_onchain_balance_sats);
+
+	node.stop().unwrap();
+}
