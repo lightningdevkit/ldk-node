@@ -1290,10 +1290,13 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			let change_script =
+				self.wallet.get_new_internal_address().map(|address| address.script_pubkey())?;
+
 			let contribution = SpliceContribution::SpliceIn {
 				value: Amount::from_sat(splice_amount_sats),
 				inputs,
-				change_script: None,
+				change_script: Some(change_script),
 			};
 
 			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {

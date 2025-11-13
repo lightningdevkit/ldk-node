@@ -288,7 +288,7 @@ impl Wallet {
 		Ok(address_info.address)
 	}
 
-	fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
+	pub(crate) fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut locked_persister = self.persister.lock().unwrap();
 
