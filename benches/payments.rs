@@ -20,7 +20,7 @@ use crate::common::open_channel_push_amt;
 
 fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, amount_msat: u64) {
 	let mut preimage_bytes = [0u8; 32];
-	rand::thread_rng().fill_bytes(&mut preimage_bytes);
+	rand::rng().fill_bytes(&mut preimage_bytes);
 	let preimage = PaymentPreimage(preimage_bytes);
 	let payment_hash: PaymentHash = preimage.into();
 
@@ -101,7 +101,7 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 
 	// Send back the money for the next iteration.
 	let mut preimage_bytes = [0u8; 32];
-	rand::thread_rng().fill_bytes(&mut preimage_bytes);
+	rand::rng().fill_bytes(&mut preimage_bytes);
 	node_b
 		.spontaneous_payment()
 		.send_with_preimage(
