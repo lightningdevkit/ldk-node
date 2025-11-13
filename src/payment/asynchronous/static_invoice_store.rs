@@ -157,15 +157,15 @@ mod tests {
 	use lightning::offers::offer::OfferBuilder;
 	use lightning::offers::static_invoice::{StaticInvoice, StaticInvoiceBuilder};
 	use lightning::sign::EntropySource;
-	use lightning::util::test_utils::TestStore;
 	use lightning_types::features::BlindedHopFeatures;
 
+	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 	use crate::types::DynStore;
 
 	#[tokio::test]
 	async fn static_invoice_store_test() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
 		let static_invoice_store = StaticInvoiceStore::new(Arc::clone(&store));
 
 		let static_invoice = invoice();

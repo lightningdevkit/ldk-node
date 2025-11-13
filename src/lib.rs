@@ -777,7 +777,10 @@ impl Node {
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
 	pub fn event_handled(&self) -> Result<(), Error> {
-		self.event_queue.event_handled().map_err(|e| {
+		// We use our runtime for the sync variant to ensure `tokio::task::block_in_place` is
+		// always called if we'd ever hit this in an outer runtime context.
+		let fut = self.event_queue.event_handled();
+		self.runtime.block_on(fut).map_err(|e| {
 			log_error!(
 				self.logger,
 				"Couldn't mark event handled due to persistence failure: {}",
