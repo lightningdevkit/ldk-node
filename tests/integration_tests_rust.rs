@@ -967,7 +967,7 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	let payment_id = node_a
 		.bolt12_payment()
-		.send(&offer, expected_quantity, expected_payer_note.clone())
+		.send(&offer, expected_quantity, expected_payer_note.clone(), None)
 		.unwrap();
 
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
@@ -1023,7 +1023,7 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	assert!(node_a
 		.bolt12_payment()
-		.send_using_amount(&offer, less_than_offer_amount, None, None)
+		.send_using_amount(&offer, less_than_offer_amount, None, None, None)
 		.is_err());
 	let payment_id = node_a
 		.bolt12_payment()
@@ -1032,6 +1032,7 @@ async fn simple_bolt12_send_receive() {
 			expected_amount_msat,
 			expected_quantity,
 			expected_payer_note.clone(),
+			None,
 		)
 		.unwrap();
 
@@ -1089,7 +1090,13 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	let refund = node_b
 		.bolt12_payment()
-		.initiate_refund(overpaid_amount, 3600, expected_quantity, expected_payer_note.clone())
+		.initiate_refund(
+			overpaid_amount,
+			3600,
+			expected_quantity,
+			expected_payer_note.clone(),
+			None,
+		)
 		.unwrap();
 	let invoice = node_a.bolt12_payment().request_refund_payment(&refund).unwrap();
 	expect_payment_received_event!(node_a, overpaid_amount);
@@ -1275,7 +1282,7 @@ async fn async_payment() {
 	node_receiver.stop().unwrap();
 
 	let payment_id =
-		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None).unwrap();
+		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None).unwrap();
 
 	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
 	tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
@@ -1473,7 +1480,7 @@ async fn unified_qr_send_receive() {
 
 	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 	let uri_str = uqr_payment.clone().unwrap();
-	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str) {
+	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str, None) {
 		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 			payment_id
@@ -1494,7 +1501,7 @@ async fn unified_qr_send_receive() {
 	// Cut off the BOLT12 part to fallback to BOLT11.
 	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_without_offer) {
+		match node_a.unified_qr_payment().send(uri_str_without_offer, None) {
 			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -1517,7 +1524,7 @@ async fn unified_qr_send_receive() {
 
 	// Cut off any lightning part to fallback to on-chain only.
 	let uri_str_without_lightning = onchain_uqr_payment.split("&lightning=").next().unwrap();
-	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning) {
+	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning, None) {
 		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},

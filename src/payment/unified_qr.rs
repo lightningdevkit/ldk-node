@@ -20,6 +20,7 @@ use bitcoin::address::{NetworkChecked, NetworkUnchecked};
 use bitcoin::{Amount, Txid};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::offer::Offer;
+use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
 use crate::error::Error;
@@ -137,8 +138,13 @@ impl UnifiedQrPayment {
 	/// Returns a `QrPaymentResult` indicating the outcome of the payment. If an error
 	/// occurs, an `Error` is returned detailing the issue encountered.
 	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	///
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
-	pub fn send(&self, uri_str: &str) -> Result<QrPaymentResult, Error> {
+	pub fn send(
+		&self, uri_str: &str, route_parameters: Option<RouteParametersConfig>,
+	) -> Result<QrPaymentResult, Error> {
 		let uri: bip21::Uri<NetworkUnchecked, Extras> =
 			uri_str.parse().map_err(|_| Error::InvalidUri)?;
 
@@ -147,7 +153,7 @@ impl UnifiedQrPayment {
 
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
 			let offer = maybe_wrap(offer);
-			match self.bolt12_payment.send(&offer, None, None) {
+			match self.bolt12_payment.send(&offer, None, None, route_parameters) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
 			}
@@ -155,7 +161,7 @@ impl UnifiedQrPayment {
 
 		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
 			let invoice = maybe_wrap(invoice);
-			match self.bolt11_invoice.send(&invoice, None) {
+			match self.bolt11_invoice.send(&invoice, route_parameters) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
 			}
