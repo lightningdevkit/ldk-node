@@ -133,7 +133,7 @@ use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::impl_writeable_tlv_based;
-use lightning::ln::channel_state::ChannelShutdownState;
+use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
@@ -1289,7 +1289,7 @@ impl Node {
 			force_close_reason.is_none() || force,
 			"Reason can only be set for force closures"
 		);
-		let open_channels =
+		let open_channels: Vec<LdkChannelDetails> =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
@@ -1328,7 +1328,7 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		channel_config: ChannelConfig,
 	) -> Result<(), Error> {
-		let open_channels =
+		let open_channels: Vec<LdkChannelDetails> =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
