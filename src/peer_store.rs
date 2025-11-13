@@ -152,13 +152,14 @@ mod tests {
 	use std::str::FromStr;
 	use std::sync::Arc;
 
-	use lightning::util::test_utils::{TestLogger, TestStore};
+	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
+	use crate::io::test_utils::InMemoryStore;
 
 	#[test]
 	fn peer_info_persistence() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
 		let logger = Arc::new(TestLogger::new());
 		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
 

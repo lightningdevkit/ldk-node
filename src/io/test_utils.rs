@@ -5,8 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::boxed::Box;
+use std::collections::{hash_map, HashMap};
+use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Mutex;
 
 use lightning::events::ClosureReason;
 use lightning::ln::functional_test_utils::{
@@ -14,10 +19,10 @@ use lightning::ln::functional_test_utils::{
 	create_network, create_node_cfgs, create_node_chanmgrs, send_payment, TestChanMonCfg,
 };
 use lightning::util::persist::{
-	KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	KVStore, KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
 };
 use lightning::util::test_utils;
-use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
+use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event, io};
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 
@@ -31,6 +36,125 @@ type TestMonitorUpdatePersister<'a, K> = MonitorUpdatingPersister<
 >;
 
 const EXPECTED_UPDATES_PER_PAYMENT: u64 = 5;
+
+pub struct InMemoryStore {
+	persisted_bytes: Mutex<HashMap<String, HashMap<String, Vec<u8>>>>,
+}
+
+impl InMemoryStore {
+	pub fn new() -> Self {
+		let persisted_bytes = Mutex::new(HashMap::new());
+		Self { persisted_bytes }
+	}
+
+	fn read_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<Vec<u8>> {
+		let persisted_lock = self.persisted_bytes.lock().unwrap();
+		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
+
+		if let Some(outer_ref) = persisted_lock.get(&prefixed) {
+			if let Some(inner_ref) = outer_ref.get(key) {
+				let bytes = inner_ref.clone();
+				Ok(bytes)
+			} else {
+				Err(io::Error::new(io::ErrorKind::NotFound, "Key not found"))
+			}
+		} else {
+			Err(io::Error::new(io::ErrorKind::NotFound, "Namespace not found"))
+		}
+	}
+
+	fn write_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> io::Result<()> {
+		let mut persisted_lock = self.persisted_bytes.lock().unwrap();
+
+		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
+		let outer_e = persisted_lock.entry(prefixed).or_insert(HashMap::new());
+		outer_e.insert(key.to_string(), buf);
+		Ok(())
+	}
+
+	fn remove_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
+	) -> io::Result<()> {
+		let mut persisted_lock = self.persisted_bytes.lock().unwrap();
+
+		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
+		if let Some(outer_ref) = persisted_lock.get_mut(&prefixed) {
+			outer_ref.remove(&key.to_string());
+		}
+
+		Ok(())
+	}
+
+	fn list_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<Vec<String>> {
+		let mut persisted_lock = self.persisted_bytes.lock().unwrap();
+
+		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
+		match persisted_lock.entry(prefixed) {
+			hash_map::Entry::Occupied(e) => Ok(e.get().keys().cloned().collect()),
+			hash_map::Entry::Vacant(_) => Ok(Vec::new()),
+		}
+	}
+}
+
+impl KVStore for InMemoryStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send>> {
+		let res = self.read_internal(&primary_namespace, &secondary_namespace, &key);
+		Box::pin(async move { res })
+	}
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+		let res = self.write_internal(&primary_namespace, &secondary_namespace, &key, buf);
+		Box::pin(async move { res })
+	}
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+		let res = self.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy);
+		Box::pin(async move { res })
+	}
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
+		let res = self.list_internal(primary_namespace, secondary_namespace);
+		Box::pin(async move { res })
+	}
+}
+
+impl KVStoreSync for InMemoryStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<Vec<u8>> {
+		self.read_internal(primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> io::Result<()> {
+		self.write_internal(primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> io::Result<()> {
+		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
+		self.list_internal(primary_namespace, secondary_namespace)
+	}
+}
+
+unsafe impl Sync for InMemoryStore {}
+unsafe impl Send for InMemoryStore {}
 
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();

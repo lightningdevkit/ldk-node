@@ -172,10 +172,11 @@ where
 #[cfg(test)]
 mod tests {
 	use lightning::impl_writeable_tlv_based;
-	use lightning::util::test_utils::{TestLogger, TestStore};
+	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
 	use crate::hex_utils;
+	use crate::io::test_utils::InMemoryStore;
 
 	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 	struct TestObjectId {
@@ -234,7 +235,7 @@ mod tests {
 
 	#[test]
 	fn data_is_persisted() {
-		let store: Arc<DynStore> = Arc::new(TestStore::new(false));
+		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
 		let logger = Arc::new(TestLogger::new());
 		let primary_namespace = "datastore_test_primary".to_string();
 		let secondary_namespace = "datastore_test_secondary".to_string();
