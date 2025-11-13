@@ -1322,7 +1322,7 @@ impl Node {
 		} else {
 			log_error!(
 				self.logger,
-				"Channel not found for user_channel_id: {:?} and counterparty: {}",
+				"Channel not found for user_channel_id {} and counterparty {}",
 				user_channel_id,
 				counterparty_node_id
 			);
