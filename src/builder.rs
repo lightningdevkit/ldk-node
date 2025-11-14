@@ -582,6 +582,25 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Sets the list of peers from which we will not accept inbound channels.
+	pub fn set_blocked_peers(
+		&mut self, blocked_peers: Vec<PublicKey>,
+	) -> Result<&mut Self, BuildError> {
+		self.config.blocked_peers = blocked_peers;
+		Ok(self)
+	}
+
+	/// Sets the maximum number of channels we'll accept from any single peer.
+	///
+	/// If set, we will reject inbound channel requests from peers that already have this many
+	/// channels open with us. If set to `None`, no limit is enforced.
+	pub fn set_max_channels_per_peer(
+		&mut self, max_channels_per_peer: Option<u32>,
+	) -> Result<&mut Self, BuildError> {
+		self.config.max_channels_per_peer = max_channels_per_peer;
+		Ok(self)
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self) -> Result<Node, BuildError> {
@@ -1043,6 +1062,21 @@ impl ArcedNodeBuilder {
 		&self, role: Option<AsyncPaymentsRole>,
 	) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_async_payments_role(role).map(|_| ())
+	}
+
+	/// Sets the list of peers from which we will not accept inbound channels.
+	pub fn set_blocked_peers(&self, blocked_peers: Vec<PublicKey>) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_blocked_peers(blocked_peers).map(|_| ())
+	}
+
+	/// Sets the maximum number of channels we'll accept from any single peer.
+	///
+	/// If set, we will reject inbound channel requests from peers that already have this many
+	/// channels open with us. If set to `None`, no limit is enforced.
+	pub fn set_max_channels_per_peer(
+		&self, max_channels_per_peer: Option<u32>,
+	) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_max_channels_per_peer(max_channels_per_peer).map(|_| ())
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options

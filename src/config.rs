@@ -119,7 +119,9 @@ pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `route_parameters`                   | None               |
+/// | `route_parameters`                     | None               |
+/// | `blocked_peers`                        | []                 |
+/// | `max_channels_per_peer`                | None               |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -184,6 +186,15 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// A list of peers from which we will not accept inbound channels.
+	///
+	/// Channels requested by peers in this list will be automatically rejected.
+	pub blocked_peers: Vec<PublicKey>,
+	/// The maximum number of channels we'll accept from any single peer.
+	///
+	/// If set, we will reject inbound channel requests from peers that already have this many
+	/// channels open with us. If set to `None`, no limit is enforced.
+	pub max_channels_per_peer: Option<u32>,
 }
 
 impl Default for Config {
@@ -198,6 +209,8 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			blocked_peers: Vec::new(),
+			max_channels_per_peer: None,
 		}
 	}
 }
