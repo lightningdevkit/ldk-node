@@ -23,7 +23,7 @@ use lightning::util::ser::{Readable, Writeable};
 use lightning_types::string::UntrustedString;
 use rand::RngCore;
 
-use crate::config::{AsyncPaymentsRole, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
@@ -54,6 +54,7 @@ type Refund = Arc<crate::ffi::Refund>;
 pub struct Bolt12Payment {
 	channel_manager: Arc<ChannelManager>,
 	payment_store: Arc<PaymentStore>,
+	config: Arc<Config>,
 	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 	async_payments_role: Option<AsyncPaymentsRole>,
@@ -62,10 +63,10 @@ pub struct Bolt12Payment {
 impl Bolt12Payment {
 	pub(crate) fn new(
 		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
-		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 		async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
-		Self { channel_manager, payment_store, is_running, logger, async_payments_role }
+		Self { channel_manager, payment_store, config, is_running, logger, async_payments_role }
 	}
 
 	/// Send a payment given an offer.
@@ -74,8 +75,12 @@ impl Bolt12Payment {
 	/// response.
 	///
 	/// If `quantity` is `Some` it represents the number of items requested.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send(
 		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -87,7 +92,8 @@ impl Bolt12Payment {
 		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let route_params_config = RouteParametersConfig::default();
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -104,7 +110,7 @@ impl Bolt12Payment {
 		let params = OptionalOfferPaymentParams {
 			payer_note: payer_note.clone(),
 			retry_strategy,
-			route_params_config,
+			route_params_config: route_parameters,
 		};
 		let res = if let Some(quantity) = quantity {
 			self.channel_manager
@@ -181,8 +187,12 @@ impl Bolt12Payment {
 	///
 	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
 	/// response.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send_using_amount(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
+		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -194,7 +204,8 @@ impl Bolt12Payment {
 		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let route_params_config = RouteParametersConfig::default();
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
 		let offer_amount_msat = match offer.amount() {
 			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
@@ -215,7 +226,7 @@ impl Bolt12Payment {
 		let params = OptionalOfferPaymentParams {
 			payer_note: payer_note.clone(),
 			retry_strategy,
-			route_params_config,
+			route_params_config: route_parameters,
 		};
 		let res = if let Some(quantity) = quantity {
 			self.channel_manager.pay_for_offer_with_quantity(
@@ -402,10 +413,13 @@ impl Bolt12Payment {
 
 	/// Returns a [`Refund`] object that can be used to offer a refund payment of the amount given.
 	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	///
 	/// [`Refund`]: lightning::offers::refund::Refund
 	pub fn initiate_refund(
 		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
-		payer_note: Option<String>,
+		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<Refund, Error> {
 		let mut random_bytes = [0u8; 32];
 		rand::rng().fill_bytes(&mut random_bytes);
@@ -415,7 +429,8 @@ impl Bolt12Payment {
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let route_params_config = RouteParametersConfig::default();
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
 		let mut refund_builder = self
 			.channel_manager
@@ -424,7 +439,7 @@ impl Bolt12Payment {
 				absolute_expiry,
 				payment_id,
 				retry_strategy,
-				route_params_config,
+				route_parameters,
 			)
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to create refund builder: {:?}", e);

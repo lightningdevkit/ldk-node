@@ -857,6 +857,7 @@ impl Node {
 		Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.async_payments_role,
@@ -871,6 +872,7 @@ impl Node {
 		Arc::new(Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.async_payments_role,
