@@ -117,15 +117,13 @@ impl VssStore {
 		);
 
 		let runtime_handle = internal_runtime.handle();
-		let schema_store_id = store_id.clone();
-		let schema_key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
-		let (schema_version, blocking_client) = tokio::task::block_in_place(move || {
+		let schema_version = tokio::task::block_in_place(|| {
 			runtime_handle.block_on(async {
 				determine_and_write_schema_version(
-					blocking_client,
-					schema_store_id,
+					&blocking_client,
+					&store_id,
 					data_encryption_key,
-					schema_key_obfuscator,
+					&key_obfuscator,
 				)
 				.await
 			})
@@ -679,13 +677,10 @@ fn retry_policy() -> CustomRetryPolicy {
 		}) as _)
 }
 
-// FIXME: This returns the used client as currently `VssClient`'s `RetryPolicy`s aren't `Clone`. So
-// we're forced to take the owned client and return it to be able to reuse the same connection
-// later.
 async fn determine_and_write_schema_version(
-	client: VssClient<CustomRetryPolicy>, store_id: String, data_encryption_key: [u8; 32],
-	key_obfuscator: KeyObfuscator,
-) -> io::Result<(VssSchemaVersion, VssClient<CustomRetryPolicy>)> {
+	client: &VssClient<CustomRetryPolicy>, store_id: &String, data_encryption_key: [u8; 32],
+	key_obfuscator: &KeyObfuscator,
+) -> io::Result<VssSchemaVersion> {
 	// Build the obfuscated `vss_schema_version` key.
 	let obfuscated_prefix = key_obfuscator.obfuscate(&format! {"{}#{}", "", ""});
 	let obfuscated_key = key_obfuscator.obfuscate(VSS_SCHEMA_VERSION_KEY);
@@ -731,7 +726,7 @@ async fn determine_and_write_schema_version(
 				let msg = format!("Failed to decode schema version: {}", e);
 				Error::new(ErrorKind::Other, msg)
 			})?;
-		Ok((schema_version, client))
+		Ok(schema_version)
 	} else {
 		// The schema version wasn't present, this either means we're running for the first time *or* it's V0 pre-migration (predating writing of the schema version).
 
@@ -753,7 +748,7 @@ async fn determine_and_write_schema_version(
 		let wallet_data_present = !response.key_versions.is_empty();
 		if wallet_data_present {
 			// If the wallet data is present, it means we're not running for the first time.
-			Ok((VssSchemaVersion::V0, client))
+			Ok(VssSchemaVersion::V0)
 		} else {
 			// We're running for the first time, write the schema version to save unnecessary IOps
 			// on future startup.
@@ -767,7 +762,7 @@ async fn determine_and_write_schema_version(
 				storable_builder.build(encoded_version, vss_version, &data_encryption_key, aad);
 
 			let request = PutObjectRequest {
-				store_id,
+				store_id: store_id.clone(),
 				global_version: None,
 				transaction_items: vec![KeyValue {
 					key: store_key,
@@ -782,7 +777,7 @@ async fn determine_and_write_schema_version(
 				Error::new(ErrorKind::Other, msg)
 			})?;
 
-			Ok((schema_version, client))
+			Ok(schema_version)
 		}
 	}
 }
