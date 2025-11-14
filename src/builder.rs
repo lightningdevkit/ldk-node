@@ -1775,6 +1775,7 @@ fn build_with_store_internal(
 		wallet,
 		chain_source,
 		tx_broadcaster,
+		fee_estimator,
 		event_queue,
 		channel_manager,
 		chain_monitor,
