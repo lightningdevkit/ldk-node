@@ -78,3 +78,7 @@ pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 ///
 /// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 pub(crate) const STATIC_INVOICE_STORE_PRIMARY_NAMESPACE: &str = "static_invoices";
+
+/// The replaced transaction information will be persisted under this prefix.
+pub(crate) const REPLACED_TX_PERSISTENCE_PRIMARY_NAMESPACE: &str = "replaced_txs";
+pub(crate) const REPLACED_TX_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
