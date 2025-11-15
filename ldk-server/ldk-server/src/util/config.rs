@@ -16,12 +16,16 @@ pub struct Config {
 	pub network: Network,
 	pub rest_service_addr: SocketAddr,
 	pub storage_dir_path: String,
-	pub bitcoind_rpc_addr: SocketAddr,
-	pub bitcoind_rpc_user: String,
-	pub bitcoind_rpc_password: String,
+	pub chain_source: ChainSource,
 	pub rabbitmq_connection_string: String,
 	pub rabbitmq_exchange_name: String,
 	pub lsps2_service_config: Option<LSPS2ServiceConfig>,
+}
+
+#[derive(Debug)]
+pub enum ChainSource {
+	Rpc { rpc_address: SocketAddr, rpc_user: String, rpc_password: String },
+	Esplora { server_url: String },
 }
 
 impl TryFrom<TomlConfig> for Config {
@@ -42,13 +46,30 @@ impl TryFrom<TomlConfig> for Config {
 					format!("Invalid rest service address configured: {}", e),
 				)
 			})?;
-		let bitcoind_rpc_addr =
-			SocketAddr::from_str(&toml_config.bitcoind.rpc_address).map_err(|e| {
-				io::Error::new(
+		let chain_source = match (toml_config.esplora, toml_config.bitcoind) {
+			(Some(EsploraConfig { server_url }), None) => ChainSource::Esplora { server_url },
+			(None, Some(BitcoindConfig { rpc_address, rpc_user, rpc_password })) => {
+				let rpc_address = SocketAddr::from_str(&rpc_address).map_err(|e| {
+					io::Error::new(
+						io::ErrorKind::InvalidInput,
+						format!("Invalid bitcoind RPC address configured: {}", e),
+					)
+				})?;
+				ChainSource::Rpc { rpc_address, rpc_user, rpc_password }
+			},
+			(Some(_), Some(_)) => {
+				return Err(io::Error::new(
 					io::ErrorKind::InvalidInput,
-					format!("Invalid bitcoind RPC address configured: {}", e),
-				)
-			})?;
+					format!("Must set a single chain source, multiple were configured"),
+				))
+			},
+			(None, None) => {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					format!("At least one chain source must be set, either bitcoind or esplora"),
+				))
+			},
+		};
 
 		let alias = if let Some(alias_str) = toml_config.node.alias {
 			let mut bytes = [0u8; 32];
@@ -97,9 +118,7 @@ impl TryFrom<TomlConfig> for Config {
 			alias,
 			rest_service_addr,
 			storage_dir_path: toml_config.storage.disk.dir_path,
-			bitcoind_rpc_addr,
-			bitcoind_rpc_user: toml_config.bitcoind.rpc_user,
-			bitcoind_rpc_password: toml_config.bitcoind.rpc_password,
+			chain_source,
 			rabbitmq_connection_string,
 			rabbitmq_exchange_name,
 			lsps2_service_config,
@@ -112,7 +131,8 @@ impl TryFrom<TomlConfig> for Config {
 pub struct TomlConfig {
 	node: NodeConfig,
 	storage: StorageConfig,
-	bitcoind: BitcoindConfig,
+	bitcoind: Option<BitcoindConfig>,
+	esplora: Option<EsploraConfig>,
 	rabbitmq: Option<RabbitmqConfig>,
 	liquidity: Option<LiquidityConfig>,
 }
@@ -140,6 +160,11 @@ struct BitcoindConfig {
 	rpc_address: String,
 	rpc_user: String,
 	rpc_password: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct EsploraConfig {
+	server_url: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -233,10 +258,8 @@ mod tests {
 			[storage.disk]
 			dir_path = "/tmp"
 			
-			[bitcoind]
-			rpc_address = "127.0.0.1:8332"    # RPC endpoint
-			rpc_user = "bitcoind-testuser"
-			rpc_password = "bitcoind-testpassword"
+			[esplora]
+			server_url = "https://mempool.space/api"
 			
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
@@ -266,9 +289,9 @@ mod tests {
 			network: Network::Regtest,
 			rest_service_addr: SocketAddr::from_str("127.0.0.1:3002").unwrap(),
 			storage_dir_path: "/tmp".to_string(),
-			bitcoind_rpc_addr: SocketAddr::from_str("127.0.0.1:8332").unwrap(),
-			bitcoind_rpc_user: "bitcoind-testuser".to_string(),
-			bitcoind_rpc_password: "bitcoind-testpassword".to_string(),
+			chain_source: ChainSource::Esplora {
+				server_url: String::from("https://mempool.space/api"),
+			},
 			rabbitmq_connection_string: "rabbitmq_connection_string".to_string(),
 			rabbitmq_exchange_name: "rabbitmq_exchange_name".to_string(),
 			lsps2_service_config: Some(LSPS2ServiceConfig {
@@ -288,12 +311,98 @@ mod tests {
 		assert_eq!(config.network, expected.network);
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
 		assert_eq!(config.storage_dir_path, expected.storage_dir_path);
-		assert_eq!(config.bitcoind_rpc_addr, expected.bitcoind_rpc_addr);
-		assert_eq!(config.bitcoind_rpc_user, expected.bitcoind_rpc_user);
-		assert_eq!(config.bitcoind_rpc_password, expected.bitcoind_rpc_password);
+		let ChainSource::Esplora { server_url } = config.chain_source else {
+			panic!("unexpected config chain source");
+		};
+		let ChainSource::Esplora { server_url: expected_server_url } = expected.chain_source else {
+			panic!("unexpected chain source");
+		};
+		assert_eq!(server_url, expected_server_url);
 		assert_eq!(config.rabbitmq_connection_string, expected.rabbitmq_connection_string);
 		assert_eq!(config.rabbitmq_exchange_name, expected.rabbitmq_exchange_name);
 		#[cfg(feature = "experimental-lsps2-support")]
 		assert_eq!(config.lsps2_service_config.is_some(), expected.lsps2_service_config.is_some());
+
+		// Test case where only bitcoind is set
+
+		let toml_config = r#"
+			[node]
+			network = "regtest"
+			listening_address = "localhost:3001"
+			rest_service_address = "127.0.0.1:3002"
+			alias = "LDK Server"
+			
+			[storage.disk]
+			dir_path = "/tmp"
+			
+			[bitcoind]
+			rpc_address = "127.0.0.1:8332"    # RPC endpoint
+			rpc_user = "bitcoind-testuser"
+			rpc_password = "bitcoind-testpassword"
+			
+			[rabbitmq]
+			connection_string = "rabbitmq_connection_string"
+			exchange_name = "rabbitmq_exchange_name"
+			
+			[liquidity.lsps2_service]
+			advertise_service = false
+			channel_opening_fee_ppm = 1000            # 0.1% fee
+			channel_over_provisioning_ppm = 500000    # 50% extra capacity
+			min_channel_opening_fee_msat = 10000000   # 10,000 satoshis
+			min_channel_lifetime = 4320               # ~30 days
+			max_client_to_self_delay = 1440           # ~10 days
+			min_payment_size_msat = 10000000          # 10,000 satoshis
+			max_payment_size_msat = 25000000000       # 0.25 BTC
+			"#;
+
+		fs::write(storage_path.join(config_file_name), toml_config).unwrap();
+		let config = load_config(storage_path.join(config_file_name)).unwrap();
+
+		let ChainSource::Rpc { rpc_address, rpc_user, rpc_password } = config.chain_source else {
+			panic!("unexpected chain source");
+		};
+
+		assert_eq!(rpc_address, SocketAddr::from_str("127.0.0.1:8332").unwrap());
+		assert_eq!(rpc_user, "bitcoind-testuser");
+		assert_eq!(rpc_password, "bitcoind-testpassword");
+
+		// Test case where both bitcoind and esplora are set, resulting in an error
+
+		let toml_config = r#"
+			[node]
+			network = "regtest"
+			listening_address = "localhost:3001"
+			rest_service_address = "127.0.0.1:3002"
+			alias = "LDK Server"
+			
+			[storage.disk]
+			dir_path = "/tmp"
+			
+			[bitcoind]
+			rpc_address = "127.0.0.1:8332"    # RPC endpoint
+			rpc_user = "bitcoind-testuser"
+			rpc_password = "bitcoind-testpassword"
+			
+			[esplora]
+			server_url = "https://mempool.space/api"
+			
+			[rabbitmq]
+			connection_string = "rabbitmq_connection_string"
+			exchange_name = "rabbitmq_exchange_name"
+			
+			[liquidity.lsps2_service]
+			advertise_service = false
+			channel_opening_fee_ppm = 1000            # 0.1% fee
+			channel_over_provisioning_ppm = 500000    # 50% extra capacity
+			min_channel_opening_fee_msat = 10000000   # 10,000 satoshis
+			min_channel_lifetime = 4320               # ~30 days
+			max_client_to_self_delay = 1440           # ~10 days
+			min_payment_size_msat = 10000000          # 10,000 satoshis
+			max_payment_size_msat = 25000000000       # 0.25 BTC
+			"#;
+
+		fs::write(storage_path.join(config_file_name), toml_config).unwrap();
+		let error = load_config(storage_path.join(config_file_name)).unwrap_err();
+		assert_eq!(error.to_string(), "Must set a single chain source, multiple were configured");
 	}
 }
