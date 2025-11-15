@@ -52,7 +52,11 @@ enum VssSchemaVersion {
 	// stored key.
 	V0,
 	// The second deployed schema version.
-	// Here we started to obfuscate the primary and secondary namespaces and the obfuscated `store_key` (`obfuscate(primary_namespace#secondary_namespace)#obfuscate(key)`) is now used as `aad` for encryption, ensuring that the encrypted blobs commit to the key they're stored under.
+	//
+	// Here we started to obfuscate the primary and secondary namespaces and the obfuscated
+	// `store_key` (`obfuscate(primary_namespace#secondary_namespace)#obfuscate(key)`) is now used
+	// as `aad` for encryption, ensuring that the encrypted blobs commit to the key they're stored
+	// under.
 	V1,
 }
 
