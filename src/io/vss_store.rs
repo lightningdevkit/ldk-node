@@ -46,6 +46,7 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 
 enum VssSchemaVersion {
 	// The initial schema version.
+	//
 	// This used an empty `aad` and unobfuscated `primary_namespace`/`secondary_namespace`s in the
 	// stored key.
 	V0,
