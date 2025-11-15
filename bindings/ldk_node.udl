@@ -423,6 +423,19 @@ enum VssHeaderProviderError {
 };
 
 [Enum]
+interface TransactionContext {
+	ChannelFunding(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id);
+	ChannelClosure(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
+	RegularWallet();
+};
+
+enum SyncType {
+	"OnchainWallet",
+	"LightningWallet",
+	"FeeRateCache",
+};
+
+[Enum]
 interface Event {
 	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat);
 	PaymentFailed(PaymentId? payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
@@ -435,6 +448,12 @@ interface Event {
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
 	SplicePending(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint new_funding_txo);
 	SpliceFailed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint? abandoned_funding_txo);
+	OnchainTransactionConfirmed(Txid txid, BlockHash block_hash, u32 block_height, u64 confirmation_time, TransactionContext context);
+	OnchainTransactionUnconfirmed(Txid txid);
+	OnchainTransactionReceived(Txid txid, i64 amount_sats, TransactionContext context);
+	SyncProgress(SyncType sync_type, u8 progress_percent, u32 current_block_height, u32 target_block_height);
+	SyncCompleted(SyncType sync_type, u32 synced_block_height);
+	BalanceChanged(u64 old_spendable_onchain_balance_sats, u64 new_spendable_onchain_balance_sats, u64 old_total_onchain_balance_sats, u64 new_total_onchain_balance_sats, u64 old_total_lightning_balance_sats, u64 new_total_lightning_balance_sats);
 };
 
 enum PaymentFailureReason {

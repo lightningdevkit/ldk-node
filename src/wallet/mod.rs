@@ -15,6 +15,7 @@ use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
+use bdk_wallet::event::WalletEvent;
 use bdk_wallet::{
 	Balance, KeychainKind, LocalOutput, PersistedWallet, Update, WeightedUtxo,
 };
@@ -171,10 +172,10 @@ impl Wallet {
 		Ok(change_address.address.script_pubkey())
 	}
 
-	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
+	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<Vec<WalletEvent>, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		match locked_wallet.apply_update(update) {
-			Ok(()) => {
+		match locked_wallet.apply_update_events(update) {
+			Ok(events) => {
 				let mut locked_persister = self.persister.lock().unwrap();
 				locked_wallet.persist(&mut locked_persister).map_err(|e| {
 					log_error!(self.logger, "Failed to persist wallet: {}", e);
@@ -186,7 +187,7 @@ impl Wallet {
 					Error::PersistenceFailed
 				})?;
 
-				Ok(())
+				Ok(events)
 			},
 			Err(e) => {
 				log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
@@ -887,6 +888,15 @@ impl Wallet {
 		&self, total_anchor_channels_reserve_sats: u64,
 	) -> Result<u64, Error> {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
+	}
+
+	/// Get the net amount (received - sent) for a specific transaction.
+	/// Returns None if the transaction is not found in the wallet.
+	pub(crate) fn get_tx_net_amount(&self, txid: &Txid) -> Option<i64> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let tx_node = locked_wallet.get_tx(*txid)?;
+		let (sent, received) = locked_wallet.sent_and_received(&tx_node.tx_node.tx);
+		Some(received.to_sat() as i64 - sent.to_sat() as i64)
 	}
 
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {

@@ -1,4 +1,28 @@
-# 0.7.0 - Dec. 3, 2025
+# 0.7.0 - Dec. 3, 2025 (Synonym Fork)
+
+## Synonym Fork Additions
+- Added reactive event system for wallet monitoring without polling:
+  - **Onchain Transaction Events** (fully implemented):
+    - `OnchainTransactionReceived`: Emitted when a new unconfirmed transaction is
+      first detected in the mempool (instant notification for incoming payments!)
+    - `OnchainTransactionConfirmed`: Emitted when a transaction receives confirmations
+    - `OnchainTransactionUnconfirmed`: Emitted when a previously confirmed transaction
+      becomes unconfirmed (blockchain reorg)
+  - **Sync Completion Event** (fully implemented):
+    - `SyncCompleted`: Emitted when onchain wallet sync finishes successfully
+  - **Balance Change Event** (fully implemented):
+    - `BalanceChanged`: Emitted when onchain or Lightning balances change, allowing
+      applications to update balance displays immediately without polling
+- Added `TransactionContext` enum to onchain transaction events, which provides
+  information about whether a transaction is related to channel funding, channel
+  closure, or regular wallet activity. Applications can cross-reference with
+  `ChannelPending` and `ChannelClosed` events to identify channel-related
+  transactions.
+- Added `SyncType` enum to distinguish between onchain wallet sync, Lightning
+  wallet sync, and fee rate cache updates.
+- Balance tracking is now persisted in `NodeMetrics` to detect changes across restarts.
+
+## Upstream v0.7.0 Release Notes
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 
 ## Feature and API updates

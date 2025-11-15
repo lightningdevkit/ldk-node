@@ -54,9 +54,156 @@ use crate::{
 	UserChannelId,
 };
 
+/// Describes the context of an onchain transaction.
+///
+/// This helps applications understand why a transaction exists and how to handle it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionContext {
+	/// A channel funding transaction (channel open).
+	///
+	/// This transaction creates a new Lightning channel.
+	ChannelFunding {
+		/// The channel ID associated with this funding transaction.
+		channel_id: ChannelId,
+		/// The user channel ID for this channel.
+		user_channel_id: UserChannelId,
+		/// The counterparty node ID.
+		counterparty_node_id: PublicKey,
+	},
+	/// A channel closure transaction.
+	///
+	/// This transaction closes an existing Lightning channel, either cooperatively
+	/// or through a force-close.
+	ChannelClosure {
+		/// The channel ID that was closed.
+		channel_id: ChannelId,
+		/// The user channel ID for this channel.
+		user_channel_id: UserChannelId,
+		/// The counterparty node ID.
+		counterparty_node_id: Option<PublicKey>,
+	},
+	/// A regular wallet transaction (not related to any channel).
+	///
+	/// This could be:
+	/// - Receiving funds to the onchain wallet
+	/// - Sending funds from the onchain wallet
+	/// - Any other non-channel transaction
+	RegularWallet,
+}
+
+impl_writeable_tlv_based_enum!(TransactionContext,
+	(0, ChannelFunding) => {
+		(0, channel_id, required),
+		(2, user_channel_id, required),
+		(4, counterparty_node_id, required),
+	},
+	(1, ChannelClosure) => {
+		(0, channel_id, required),
+		(2, user_channel_id, required),
+		(4, counterparty_node_id, option),
+	},
+	(2, RegularWallet) => {},
+);
+
+/// Describes what component is being synchronized.
+///
+/// Note: Currently, only `OnchainWallet` sync completion events are emitted.
+/// `LightningWallet` and `FeeRateCache` variants are reserved for future use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncType {
+	/// Synchronizing the onchain wallet (checking for new transactions and confirmations).
+	OnchainWallet,
+	/// Synchronizing the Lightning wallet (updating channel states and commitments).
+	///
+	/// Reserved for future use - not currently emitted.
+	LightningWallet,
+	/// Updating fee rate estimates from the blockchain.
+	///
+	/// Reserved for future use - not currently emitted.
+	FeeRateCache,
+}
+
+impl_writeable_tlv_based_enum!(SyncType,
+	(0, OnchainWallet) => {},
+	(1, LightningWallet) => {},
+	(2, FeeRateCache) => {},
+);
+
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
+/// Events provide a reactive way to be notified about important state changes in the node,
+/// including payment status updates, channel lifecycle events, and onchain transaction
+/// confirmations.
+///
+/// # Handling Events
+///
+/// Events should be regularly retrieved and handled using [`Node::next_event`] or
+/// [`Node::next_event_async`]. After processing an event, you must call [`Node::event_handled`]
+/// to mark it as processed.
+///
+/// # Onchain Transaction Events
+///
+/// The `OnchainTransactionConfirmed` and `OnchainTransactionUnconfirmed` events allow
+/// applications to reactively respond to onchain wallet activity without polling.
+///
+/// ## Example: Monitoring Onchain Transactions (Reactive - No Polling!)
+///
+/// ```no_run
+/// use ldk_node::{Builder, Event};
+/// use ldk_node::bitcoin::Network;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Build and start the node with background sync enabled (default)
+/// let mut builder = Builder::new();
+/// builder.set_network(Network::Testnet);
+/// builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+/// let node = builder.build()?;
+/// node.start()?;  // Background sync starts automatically!
+///
+/// // Event handling loop (NOT a polling loop!)
+/// // The loop is needed to process multiple events over time, but wait_next_event()
+/// // BLOCKS (doesn't consume CPU) until an event arrives from background sync.
+/// // This is fundamentally different from a polling loop with sleep().
+/// //
+/// // WRONG (polling - consumes CPU, slow to react):
+/// //   loop { sync(); check_state(); sleep(30_seconds); }
+/// //
+/// // RIGHT (event-driven - zero CPU when idle, instant reaction):
+/// //   loop { event = wait_for_event(); handle(event); }
+/// //
+/// loop {
+///     // This blocks until an event is available (pushed by background sync)
+///     match node.wait_next_event() {
+///         Event::OnchainTransactionConfirmed { txid, block_height, .. } => {
+///             println!("Transaction {} confirmed at height {}", txid, block_height);
+///             // Update UI, send push notification, etc. - truly reactive!
+///             node.event_handled()?;
+///         },
+///         Event::OnchainTransactionUnconfirmed { txid } => {
+///             println!("Transaction {} became unconfirmed (reorg)", txid);
+///             node.event_handled()?;
+///         },
+///         Event::PaymentReceived { .. } => {
+///             println!("Payment received!");
+///             node.event_handled()?;
+///         },
+///         _ => {
+///             node.event_handled()?;
+///         }
+///     }
+/// }
+/// # }
+/// ```
+///
+/// **Important**: With background sync enabled (default), wallet syncs happen automatically
+/// every ~30 seconds in the background, and events are emitted automatically. You do NOT need
+/// to call `sync_wallets()` in a loop. The example above uses `wait_next_event()` which blocks
+/// (consumes zero CPU) until events arrive, making it truly reactive with instant notifications.
+///
 /// [`Node`]: [`crate::Node`]
+/// [`Node::next_event`]: [`crate::Node::next_event`]
+/// [`Node::next_event_async`]: [`crate::Node::next_event_async`]
+/// [`Node::event_handled`]: [`crate::Node::event_handled`]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
 	/// A sent payment was successful.
@@ -256,6 +403,286 @@ pub enum Event {
 		/// The outpoint of the channel's splice funding transaction, if one was created.
 		abandoned_funding_txo: Option<OutPoint>,
 	},
+	/// An onchain transaction was confirmed.
+	///
+	/// This event is emitted when the onchain wallet detects that a transaction has transitioned
+	/// from unconfirmed to confirmed during a wallet sync operation. This includes both incoming
+	/// and outgoing transactions.
+	///
+	/// Note: This event is only emitted when a transaction's confirmation status changes
+	/// (unconfirmed → confirmed). Already-confirmed transactions will not trigger this event
+	/// on subsequent syncs unless they become unconfirmed first (due to a reorg).
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// // Sync the wallet
+	/// node.sync_wallets().unwrap();
+	///
+	/// // Check for onchain transaction events
+	/// if let Some(Event::OnchainTransactionConfirmed { txid, block_height, context, .. }) = node.next_event() {
+	///     match context {
+	///         TransactionContext::ChannelFunding { channel_id, .. } => {
+	///             println!("Channel funding tx {} confirmed at {}", txid, block_height);
+	///         },
+	///         TransactionContext::ChannelClosure { channel_id, .. } => {
+	///             println!("Channel close tx {} confirmed at {}", txid, block_height);
+	///         },
+	///         TransactionContext::RegularWallet => {
+	///             println!("Regular wallet tx {} confirmed at {}", txid, block_height);
+	///         }
+	///     }
+	///     node.event_handled().unwrap();
+	/// }
+	/// ```
+	///
+	/// ## Cross-Referencing Channel Events
+	///
+	/// Note: Currently, the `context` field is set to `RegularWallet` for all transactions.
+	/// To determine if a transaction is channel-related, applications should cross-reference
+	/// with `ChannelPending` and `ChannelClosed` events:
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event, TransactionContext};
+	/// # use ldk_node::bitcoin::Network;
+	/// # use std::collections::HashMap;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// // Track channel funding transactions
+	/// let mut channel_funding_txs = HashMap::new();
+	///
+	/// loop {
+	///     if let Some(event) = node.next_event() {
+	///         match event {
+	///             Event::ChannelPending { funding_txo, channel_id, .. } => {
+	///                 channel_funding_txs.insert(funding_txo.txid, channel_id);
+	///                 node.event_handled().unwrap();
+	///             },
+	///             Event::OnchainTransactionConfirmed { txid, .. } => {
+	///                 // This event is only emitted once when the transaction confirms
+	///                 if let Some(channel_id) = channel_funding_txs.get(&txid) {
+	///                     println!("Channel {} funding confirmed!", channel_id);
+	///                 }
+	///                 node.event_handled().unwrap();
+	///             },
+	///             _ => { node.event_handled().unwrap(); }
+	///         }
+	///     }
+	///     # break;
+	/// }
+	/// ```
+	OnchainTransactionConfirmed {
+		/// The transaction ID.
+		txid: bitcoin::Txid,
+		/// The confirmation block hash.
+		block_hash: bitcoin::BlockHash,
+		/// The confirmation block height.
+		block_height: u32,
+		/// The confirmation timestamp (seconds since epoch).
+		confirmation_time: u64,
+		/// Context about what type of transaction this is.
+		///
+		/// This indicates whether the transaction is related to a channel operation
+		/// (open/close) or a regular wallet transaction.
+		context: TransactionContext,
+	},
+	/// An onchain transaction became unconfirmed.
+	///
+	/// This can happen after a chain reorganization where a previously confirmed transaction
+	/// is no longer in the best chain. Applications should handle this by marking the
+	/// transaction as pending again.
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// // After a chain reorg...
+	/// node.sync_wallets().unwrap();
+	///
+	/// if let Some(Event::OnchainTransactionUnconfirmed { txid }) = node.next_event() {
+	///     println!("Transaction {} is now unconfirmed due to reorg", txid);
+	///     node.event_handled().unwrap();
+	/// }
+	/// ```
+	OnchainTransactionUnconfirmed {
+		/// The transaction ID that became unconfirmed.
+		txid: bitcoin::Txid,
+	},
+	/// A new unconfirmed onchain transaction was detected in the mempool.
+	///
+	/// This event is emitted when a transaction is first seen in the mempool, before any
+	/// confirmations. This is useful for immediately showing incoming payments in the UI
+	/// or sending notifications to users.
+	///
+	/// **Important**: Unconfirmed transactions can be replaced (RBF), double-spent, or may
+	/// never confirm. Wait for confirmations before considering funds as received.
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// // When someone sends sats to your wallet...
+	/// match node.wait_next_event() {
+	///     Event::OnchainTransactionReceived { txid, context } => {
+	///         println!("Incoming payment detected! Txid: {}", txid);
+	///         println!("Waiting for confirmations...");
+	///         node.event_handled().unwrap();
+	///     },
+	///     _ => {}
+	/// }
+	/// ```
+	OnchainTransactionReceived {
+		/// The transaction ID of the newly detected transaction.
+		txid: bitcoin::Txid,
+		/// The net amount received in this transaction (in satoshis).
+		///
+		/// This is calculated as: (received - sent). For incoming payments,
+		/// this will be positive. For outgoing payments, this will be negative.
+		///
+		/// Note: This amount does NOT include transaction fees.
+		amount_sats: i64,
+		/// The context describing what type of transaction this is.
+		///
+		/// This will always be `RegularWallet` currently, as channel funding
+		/// and closure transactions are typically already known before they
+		/// appear in the mempool.
+		context: TransactionContext,
+	},
+	/// Synchronization progress update.
+	///
+	/// This event is emitted periodically during sync operations to report progress.
+	/// It allows applications to show progress bars or status messages during lengthy
+	/// sync operations.
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event, SyncType};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// match node.wait_next_event() {
+	///     Event::SyncProgress { sync_type, progress_percent, current_block_height, .. } => {
+	///         match sync_type {
+	///             SyncType::OnchainWallet => {
+	///                 println!("Syncing wallet: {}% (block {})", progress_percent, current_block_height);
+	///             },
+	///             SyncType::LightningWallet => {
+	///                 println!("Syncing Lightning: {}%", progress_percent);
+	///             },
+	///             _ => {}
+	///         }
+	///         node.event_handled().unwrap();
+	///     },
+	///     _ => {}
+	/// }
+	/// ```
+	SyncProgress {
+		/// The type of sync operation in progress.
+		sync_type: SyncType,
+		/// Progress percentage (0-100).
+		progress_percent: u8,
+		/// Current block height being processed.
+		current_block_height: u32,
+		/// Target block height to sync to.
+		target_block_height: u32,
+	},
+	/// Wallet synchronization has completed.
+	///
+	/// This event is emitted when a sync operation finishes successfully.
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event, SyncType};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// match node.wait_next_event() {
+	///     Event::SyncCompleted { sync_type, synced_block_height, .. } => {
+	///         println!("Sync completed! Now at block {}", synced_block_height);
+	///         node.event_handled().unwrap();
+	///     },
+	///     _ => {}
+	/// }
+	/// ```
+	SyncCompleted {
+		/// The type of sync operation that completed.
+		sync_type: SyncType,
+		/// The block height that was synced to.
+		synced_block_height: u32,
+	},
+	/// Wallet balance has changed.
+	///
+	/// This event is emitted when either onchain or Lightning balances change,
+	/// allowing applications to update balance displays immediately without polling.
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// match node.wait_next_event() {
+	///     Event::BalanceChanged {
+	///         new_spendable_onchain_balance_sats,
+	///         new_total_lightning_balance_sats,
+	///         ..
+	///     } => {
+	///         println!("💰 Balance updated!");
+	///         println!("   Onchain: {} sats", new_spendable_onchain_balance_sats);
+	///         println!("   Lightning: {} sats", new_total_lightning_balance_sats);
+	///         node.event_handled().unwrap();
+	///     },
+	///     _ => {}
+	/// }
+	/// ```
+	BalanceChanged {
+		/// Previous spendable onchain balance in satoshis.
+		old_spendable_onchain_balance_sats: u64,
+		/// New spendable onchain balance in satoshis.
+		new_spendable_onchain_balance_sats: u64,
+		/// Previous total onchain balance (including unconfirmed and reserved) in satoshis.
+		old_total_onchain_balance_sats: u64,
+		/// New total onchain balance (including unconfirmed and reserved) in satoshis.
+		new_total_onchain_balance_sats: u64,
+		/// Previous total Lightning balance in satoshis.
+		old_total_lightning_balance_sats: u64,
+		/// New total Lightning balance in satoshis.
+		new_total_lightning_balance_sats: u64,
+	},
 }
 
 impl_writeable_tlv_based_enum!(Event,
@@ -326,6 +753,39 @@ impl_writeable_tlv_based_enum!(Event,
 		(5, user_channel_id, required),
 		(7, abandoned_funding_txo, option),
 	},
+	(10, OnchainTransactionConfirmed) => {
+		(0, txid, required),
+		(2, block_hash, required),
+		(4, block_height, required),
+		(6, confirmation_time, required),
+		(8, context, required),
+	},
+	(11, OnchainTransactionUnconfirmed) => {
+		(0, txid, required),
+	},
+	(12, OnchainTransactionReceived) => {
+		(0, txid, required),
+		(2, amount_sats, required),
+		(4, context, required),
+	},
+	(13, SyncProgress) => {
+		(0, sync_type, required),
+		(2, progress_percent, required),
+		(4, current_block_height, required),
+		(6, target_block_height, required),
+	},
+	(14, SyncCompleted) => {
+		(0, sync_type, required),
+		(2, synced_block_height, required),
+	},
+	(15, BalanceChanged) => {
+		(0, old_spendable_onchain_balance_sats, required),
+		(2, new_spendable_onchain_balance_sats, required),
+		(4, old_total_onchain_balance_sats, required),
+		(6, new_total_onchain_balance_sats, required),
+		(8, old_total_lightning_balance_sats, required),
+		(10, new_total_lightning_balance_sats, required),
+	}
 );
 
 pub struct EventQueue<L: Deref>

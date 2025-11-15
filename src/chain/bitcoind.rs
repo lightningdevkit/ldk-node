@@ -50,10 +50,10 @@ pub(super) struct BitcoindChainSource {
 	latest_chain_tip: RwLock<Option<ValidatedBlockHeader>>,
 	wallet_polling_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
-	kv_store: Arc<DynStore>,
-	config: Arc<Config>,
+	pub(super) kv_store: Arc<DynStore>,
+	pub(super) config: Arc<Config>,
 	logger: Arc<Logger>,
-	node_metrics: Arc<RwLock<NodeMetrics>>,
+	pub(super) node_metrics: Arc<RwLock<NodeMetrics>>,
 }
 
 impl BitcoindChainSource {

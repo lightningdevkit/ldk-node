@@ -130,6 +130,7 @@ pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
+pub use event::{SyncType, TransactionContext};
 use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 #[cfg(feature = "uniffi")]
 use ffi::*;
@@ -173,6 +174,7 @@ pub use {
 };
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
+use std::ops::Deref;
 
 #[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
@@ -249,7 +251,6 @@ impl Node {
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
-		let sync_wallet = Arc::clone(&self.wallet);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
@@ -1448,25 +1449,43 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
+		let event_queue = Arc::clone(&self.event_queue);
+		let config = Arc::clone(&self.config);
 		self.runtime.block_on(async move {
-			if chain_source.is_transaction_based() {
-				chain_source.update_fee_rate_estimates().await?;
-				chain_source
-					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
-					.await?;
-				chain_source.sync_onchain_wallet(sync_wallet).await?;
-			} else {
-				chain_source.update_fee_rate_estimates().await?;
-				chain_source
-					.poll_and_update_listeners(
-						sync_wallet,
-						sync_cman,
-						sync_cmon,
-						Arc::clone(&sync_sweeper),
-					)
-					.await?;
+			match chain_source.as_ref() {
+				ChainSource::Esplora { .. } => {
+					chain_source.update_fee_rate_estimates().await?;
+					chain_source
+						.sync_lightning_wallet(sync_cman.clone(), sync_cmon.clone(), sync_sweeper.clone())
+						.await?;
+					chain_source.sync_onchain_wallet(
+						Some(&*event_queue),
+						Some(&sync_cman),
+						Some(&sync_cmon),
+						Some(&config),
+					).await?;
+					let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
+				},
+				ChainSource::Electrum { .. } => {
+					chain_source.update_fee_rate_estimates().await?;
+					chain_source
+						.sync_lightning_wallet(sync_cman.clone(), sync_cmon.clone(), sync_sweeper.clone())
+						.await?;
+					chain_source.sync_onchain_wallet(
+						Some(&*event_queue),
+						Some(&sync_cman),
+						Some(&sync_cmon),
+						Some(&config),
+					).await?;
+					let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
+				},
+				ChainSource::BitcoindRpc { .. } => {
+					chain_source.update_fee_rate_estimates().await?;
+					chain_source
+						.poll_and_update_listeners(sync_wallet, sync_cman, sync_cmon, sync_sweeper)
+						.await?;
+				},
 			}
-			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
 			Ok(())
 		})
 	}
@@ -1797,6 +1816,9 @@ pub(crate) struct NodeMetrics {
 	latest_pathfinding_scores_sync_timestamp: Option<u64>,
 	latest_node_announcement_broadcast_timestamp: Option<u64>,
 	latest_channel_monitor_archival_height: Option<u32>,
+	last_known_spendable_onchain_balance_sats: Option<u64>,
+	last_known_total_onchain_balance_sats: Option<u64>,
+	last_known_total_lightning_balance_sats: Option<u64>,
 }
 
 impl Default for NodeMetrics {
@@ -1809,6 +1831,9 @@ impl Default for NodeMetrics {
 			latest_pathfinding_scores_sync_timestamp: None,
 			latest_node_announcement_broadcast_timestamp: None,
 			latest_channel_monitor_archival_height: None,
+			last_known_spendable_onchain_balance_sats: None,
+			last_known_total_onchain_balance_sats: None,
+			last_known_total_lightning_balance_sats: None,
 		}
 	}
 }
@@ -1821,7 +1846,66 @@ impl_writeable_tlv_based!(NodeMetrics, {
 	(6, latest_rgs_snapshot_timestamp, option),
 	(8, latest_node_announcement_broadcast_timestamp, option),
 	(10, latest_channel_monitor_archival_height, option),
+	(12, last_known_spendable_onchain_balance_sats, option),
+	(14, last_known_total_onchain_balance_sats, option),
+	(16, last_known_total_lightning_balance_sats, option),
 });
+
+/// Check if balances have changed and emit BalanceChanged event if so.
+pub(crate) fn check_and_emit_balance_update<L: Deref>(
+	node_metrics: &Arc<RwLock<NodeMetrics>>, balance_details: &BalanceDetails,
+	event_queue: &EventQueue<L>, kv_store: &Arc<DynStore>, logger: &Arc<Logger>,
+) -> Result<(), Error>
+where
+	L::Target: LdkLogger,
+{
+	let mut locked_metrics = node_metrics.write().unwrap();
+
+	let new_spendable_onchain = balance_details.spendable_onchain_balance_sats;
+	let new_total_onchain = balance_details.total_onchain_balance_sats;
+	let new_total_lightning = balance_details.total_lightning_balance_sats;
+
+	let old_spendable_onchain = locked_metrics.last_known_spendable_onchain_balance_sats.unwrap_or(0);
+	let old_total_onchain = locked_metrics.last_known_total_onchain_balance_sats.unwrap_or(0);
+	let old_total_lightning = locked_metrics.last_known_total_lightning_balance_sats.unwrap_or(0);
+
+	// Check if any balance has changed
+	if old_spendable_onchain != new_spendable_onchain
+		|| old_total_onchain != new_total_onchain
+		|| old_total_lightning != new_total_lightning
+	{
+		log_info!(
+			logger,
+			"Balance changed: onchain {} -> {} (spendable), {} -> {} (total), lightning {} -> {}",
+			old_spendable_onchain,
+			new_spendable_onchain,
+			old_total_onchain,
+			new_total_onchain,
+			old_total_lightning,
+			new_total_lightning
+		);
+
+		// Emit balance changed event
+		event_queue.add_event(Event::BalanceChanged {
+			old_spendable_onchain_balance_sats: old_spendable_onchain,
+			new_spendable_onchain_balance_sats: new_spendable_onchain,
+			old_total_onchain_balance_sats: old_total_onchain,
+			new_total_onchain_balance_sats: new_total_onchain,
+			old_total_lightning_balance_sats: old_total_lightning,
+			new_total_lightning_balance_sats: new_total_lightning,
+		})?;
+
+		// Update tracked balances
+		locked_metrics.last_known_spendable_onchain_balance_sats = Some(new_spendable_onchain);
+		locked_metrics.last_known_total_onchain_balance_sats = Some(new_total_onchain);
+		locked_metrics.last_known_total_lightning_balance_sats = Some(new_total_lightning);
+
+		// Persist updated metrics
+		write_node_metrics(&*locked_metrics, Arc::clone(kv_store), Arc::clone(logger))?;
+	}
+
+	Ok(())
+}
 
 pub(crate) fn total_anchor_channels_reserve_sats(
 	channel_manager: &ChannelManager, config: &Config,

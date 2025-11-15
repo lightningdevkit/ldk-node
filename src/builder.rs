@@ -1357,6 +1357,9 @@ fn build_with_store_internal(
 		Arc::clone(&logger),
 	));
 
+	// Set the wallet in the chain source for event processing
+	chain_source.set_onchain_wallet(Arc::clone(&wallet));
+
 	// Initialize the KeysManager
 	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
 		log_error!(logger, "Failed to get current time: {}", e);

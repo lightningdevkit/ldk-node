@@ -27,8 +27,7 @@ let package = Package(
         ),
         .binaryTarget(
             name: "LDKNodeFFI",
-            url: url,
-            checksum: checksum
+            path: "./bindings/swift/LDKNodeFFI.xcframework"
             )
     ]
 )

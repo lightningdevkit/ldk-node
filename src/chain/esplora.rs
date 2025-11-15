@@ -31,6 +31,8 @@ use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
+use bdk_wallet::event::WalletEvent;
+
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
 	esplora_client: EsploraAsyncClient,
@@ -38,10 +40,10 @@ pub(super) struct EsploraChainSource {
 	tx_sync: Arc<EsploraSyncClient<Arc<Logger>>>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
-	kv_store: Arc<DynStore>,
-	config: Arc<Config>,
+	pub(super) kv_store: Arc<DynStore>,
+	pub(super) config: Arc<Config>,
 	logger: Arc<Logger>,
-	node_metrics: Arc<RwLock<NodeMetrics>>,
+	pub(super) node_metrics: Arc<RwLock<NodeMetrics>>,
 }
 
 impl EsploraChainSource {
@@ -79,7 +81,7 @@ impl EsploraChainSource {
 
 	pub(super) async fn sync_onchain_wallet(
 		&self, onchain_wallet: Arc<Wallet>,
-	) -> Result<(), Error> {
+	) -> Result<Vec<WalletEvent>, Error> {
 		let receiver_res = {
 			let mut status_lock = self.onchain_wallet_sync_status.lock().unwrap();
 			status_lock.register_or_subscribe_pending_sync()
@@ -112,7 +114,7 @@ impl EsploraChainSource {
 				match $sync_future.await {
 					Ok(res) => match res {
 						Ok(update) => match onchain_wallet.apply_update(update) {
-							Ok(()) => {
+							Ok(wallet_events) => {
 								log_info!(
 									self.logger,
 									"{} of on-chain wallet finished in {}ms.",
@@ -132,7 +134,7 @@ impl EsploraChainSource {
 											Arc::clone(&self.logger)
 										)?;
 									}
-									Ok(())
+									Ok(wallet_events)
 							},
 							Err(e) => Err(e),
 						},
