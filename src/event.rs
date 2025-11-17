@@ -491,7 +491,7 @@ where
 				counterparty_node_id,
 				channel_value_satoshis,
 				output_script,
-				..
+				user_channel_id,
 			} => {
 				// Construct the raw transaction with the output that is paid the amount of the
 				// channel.
@@ -510,16 +510,44 @@ where
 					locktime,
 				) {
 					Ok(final_tx) => {
-						// Give the funding transaction back to LDK for opening the channel.
-						match self.channel_manager.funding_transaction_generated(
-							temporary_channel_id,
-							counterparty_node_id,
-							final_tx,
-						) {
+						let needs_manual_broadcast =
+							self.liquidity_source.as_ref().map_or(false, |ls| {
+								ls.as_ref().lsps2_channel_needs_manual_broadcast(
+									counterparty_node_id,
+									user_channel_id,
+								)
+							});
+
+						let result = if needs_manual_broadcast {
+							self.liquidity_source.as_ref().map(|ls| {
+								ls.lsps2_store_funding_transaction(
+									user_channel_id,
+									counterparty_node_id,
+									final_tx.clone(),
+								);
+							});
+							self.channel_manager.funding_transaction_generated_manual_broadcast(
+								temporary_channel_id,
+								counterparty_node_id,
+								final_tx,
+							)
+						} else {
+							self.channel_manager.funding_transaction_generated(
+								temporary_channel_id,
+								counterparty_node_id,
+								final_tx,
+							)
+						};
+
+						match result {
 							Ok(()) => {},
 							Err(APIError::APIMisuseError { err }) => {
-								log_error!(self.logger, "Panicking due to APIMisuseError: {}", err);
-								panic!("APIMisuseError: {}", err);
+								log_error!(
+									self.logger,
+									"Encountered APIMisuseError, this should never happen: {}",
+									err
+								);
+								debug_assert!(false, "APIMisuseError: {}", err);
 							},
 							Err(APIError::ChannelUnavailable { err }) => {
 								log_error!(
@@ -547,15 +575,17 @@ where
 							)
 							.unwrap_or_else(|e| {
 								log_error!(self.logger, "Failed to force close channel after funding generation failed: {:?}", e);
-								panic!(
+								debug_assert!(false,
 									"Failed to force close channel after funding generation failed"
 								);
 							});
 					},
 				}
 			},
-			LdkEvent::FundingTxBroadcastSafe { .. } => {
-				debug_assert!(false, "We currently only support safe funding, so this event should never be emitted.");
+			LdkEvent::FundingTxBroadcastSafe { user_channel_id, counterparty_node_id, .. } => {
+				self.liquidity_source.as_ref().map(|ls| {
+					ls.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
+				});
 			},
 			LdkEvent::PaymentClaimable {
 				payment_hash,

@@ -1552,8 +1552,12 @@ async fn unified_qr_send_receive() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_client_service_integration() {
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	do_lsps2_client_service_integration(true).await;
+	do_lsps2_client_service_integration(false).await;
+}
 
+async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };
@@ -1571,6 +1575,7 @@ async fn lsps2_client_service_integration() {
 		min_channel_lifetime: 100,
 		min_channel_opening_fee_msat: 0,
 		max_client_to_self_delay: 1024,
+		client_trusts_lsp,
 	};
 
 	let service_config = random_config(true);
@@ -1866,4 +1871,304 @@ async fn drop_in_async_context() {
 	let config = random_config(true);
 	let node = setup_node(&chain_source, config, Some(seed_bytes));
 	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_client_trusts_lsp() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	// Setup three nodes: service, client, and payer
+	let channel_opening_fee_ppm = 10_000;
+	let channel_over_provisioning_ppm = 100_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+	};
+
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	let service_node = service_builder.build().unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
+	let client_node = client_builder.build().unwrap();
+	client_node.start().unwrap();
+	let client_node_id = client_node.node_id();
+
+	let payer_config = random_config(true);
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build().unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
+	let client_addr_onchain = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr_onchain = payer_node.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 10_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr_onchain, client_addr_onchain, payer_addr_onchain],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	println!("Premine complete!");
+	// Open a channel payer -> service that will allow paying the JIT invoice
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_amount_msat = 100_000_000;
+
+	println!("Generating JIT invoice!");
+	let manual_preimage = PaymentPreimage([42u8; 32]);
+	let manual_payment_hash: PaymentHash = manual_preimage.into();
+	let res = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel_for_hash(
+			jit_amount_msat,
+			&invoice_description.into(),
+			1024,
+			None,
+			manual_payment_hash,
+		)
+		.unwrap();
+
+	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
+	println!("Paying JIT invoice!");
+	let payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	println!("Payment ID: {:?}", payment_id);
+	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	// Check the funding transaction hasn't been broadcasted yet and nodes aren't seeing it.
+	println!("Try to find funding tx... It won't be found yet, as the client has not claimed it.");
+	tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+	let mempool = bitcoind.client.get_raw_mempool().unwrap().into_model().unwrap();
+	let funding_tx_found = mempool.0.iter().any(|txid| *txid == funding_txo.txid);
+	assert!(!funding_tx_found, "Funding transaction should NOT be broadcast yet");
+
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	assert_eq!(
+		client_node
+			.list_channels()
+			.iter()
+			.find(|c| c.counterparty_node_id == service_node_id)
+			.unwrap()
+			.confirmations,
+		Some(0)
+	);
+	assert_eq!(
+		service_node
+			.list_channels()
+			.iter()
+			.find(|c| c.counterparty_node_id == client_node_id)
+			.unwrap()
+			.confirmations,
+		Some(0)
+	);
+
+	// Now claim the JIT payment, which should release the funding transaction
+	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
+
+	let _ = expect_payment_claimable_event!(
+		client_node,
+		payment_id,
+		manual_payment_hash,
+		expected_received_amount_msat
+	);
+
+	client_node
+		.bolt11_payment()
+		.claim_for_hash(manual_payment_hash, jit_amount_msat, manual_preimage)
+		.unwrap();
+
+	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+
+	let _ = expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
+
+	// Check the nodes pick up on the confirmed funding tx now.
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	assert_eq!(
+		client_node
+			.list_channels()
+			.iter()
+			.find(|c| c.counterparty_node_id == service_node_id)
+			.unwrap()
+			.confirmations,
+		Some(6)
+	);
+	assert_eq!(
+		service_node
+			.list_channels()
+			.iter()
+			.find(|c| c.counterparty_node_id == client_node_id)
+			.unwrap()
+			.confirmations,
+		Some(6)
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	// Setup three nodes: service, client, and payer
+	let channel_opening_fee_ppm = 10_000;
+	let channel_over_provisioning_ppm = 100_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: false,
+	};
+
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	let service_node = service_builder.build().unwrap();
+	service_node.start().unwrap();
+
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
+	let client_node = client_builder.build().unwrap();
+	client_node.start().unwrap();
+
+	let client_node_id = client_node.node_id();
+
+	let payer_config = random_config(true);
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build().unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
+	let client_addr_onchain = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr_onchain = payer_node.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 10_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr_onchain, client_addr_onchain, payer_addr_onchain],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	println!("Premine complete!");
+	// Open a channel payer -> service that will allow paying the JIT invoice
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_amount_msat = 100_000_000;
+
+	println!("Generating JIT invoice!");
+	let manual_preimage = PaymentPreimage([42u8; 32]);
+	let manual_payment_hash: PaymentHash = manual_preimage.into();
+	let res = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel_for_hash(
+			jit_amount_msat,
+			&invoice_description.into(),
+			1024,
+			None,
+			manual_payment_hash,
+		)
+		.unwrap();
+
+	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
+	println!("Paying JIT invoice!");
+	let _payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	println!("Waiting for funding transaction to be broadcast...");
+
+	// Check the nodes pick up on the confirmed funding tx now.
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	assert_eq!(
+		client_node
+			.list_channels()
+			.iter()
+			.find(|c| c.counterparty_node_id == service_node_id)
+			.unwrap()
+			.confirmations,
+		Some(6)
+	);
+	assert_eq!(
+		service_node
+			.list_channels()
+			.iter()
+			.find(|c| c.counterparty_node_id == client_node_id)
+			.unwrap()
+			.confirmations,
+		Some(6)
+	);
 }

@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bitcoin::Transaction;
 use chrono::Utc;
 use lightning::events::HTLCHandlingFailureType;
 use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
@@ -51,7 +52,6 @@ use crate::{total_anchor_channels_reserve_sats, Config, Error};
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
-const LSPS2_CLIENT_TRUSTS_LSP_MODE: bool = true;
 const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
 
 struct LSPS1Client {
@@ -130,6 +130,8 @@ pub struct LSPS2ServiceConfig {
 	pub min_payment_size_msat: u64,
 	/// The maximum payment size that we will accept when opening a channel.
 	pub max_payment_size_msat: u64,
+	/// Use the client trusts lsp model
+	pub client_trusts_lsp: bool,
 }
 
 pub(crate) struct LiquiditySourceBuilder<L: Deref>
@@ -303,6 +305,73 @@ where
 
 	pub(crate) fn get_lsps2_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
 		self.lsps2_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
+	}
+
+	pub(crate) fn lsps2_channel_needs_manual_broadcast(
+		&self, counterparty_node_id: PublicKey, user_channel_id: u128,
+	) -> bool {
+		self.lsps2_service.as_ref().map_or(false, |lsps2_service| {
+			lsps2_service.service_config.client_trusts_lsp
+				&& self
+					.liquidity_manager()
+					.lsps2_service_handler()
+					.and_then(|handler| {
+						handler
+							.channel_needs_manual_broadcast(user_channel_id, &counterparty_node_id)
+							.ok()
+					})
+					.unwrap_or(false)
+		})
+	}
+
+	pub(crate) fn lsps2_store_funding_transaction(
+		&self, user_channel_id: u128, counterparty_node_id: PublicKey, funding_tx: Transaction,
+	) {
+		if self.lsps2_service.as_ref().map_or(false, |svc| !svc.service_config.client_trusts_lsp) {
+			// Only necessary for client-trusts-LSP flow
+			return;
+		}
+
+		let lsps2_service_handler = self.liquidity_manager.lsps2_service_handler();
+		if let Some(handler) = lsps2_service_handler {
+			handler
+				.store_funding_transaction(user_channel_id, &counterparty_node_id, funding_tx)
+				.unwrap_or_else(|e| {
+					debug_assert!(false, "Failed to store funding transaction: {:?}", e);
+					log_error!(self.logger, "Failed to store funding transaction: {:?}", e);
+				});
+		} else {
+			log_error!(self.logger, "LSPS2 service handler is not available.");
+		}
+	}
+
+	pub(crate) fn lsps2_funding_tx_broadcast_safe(
+		&self, user_channel_id: u128, counterparty_node_id: PublicKey,
+	) {
+		if self.lsps2_service.as_ref().map_or(false, |svc| !svc.service_config.client_trusts_lsp) {
+			// Only necessary for client-trusts-LSP flow
+			return;
+		}
+
+		let lsps2_service_handler = self.liquidity_manager.lsps2_service_handler();
+		if let Some(handler) = lsps2_service_handler {
+			handler
+				.set_funding_tx_broadcast_safe(user_channel_id, &counterparty_node_id)
+				.unwrap_or_else(|e| {
+					debug_assert!(
+						false,
+						"Failed to mark funding transaction safe to broadcast: {:?}",
+						e
+					);
+					log_error!(
+						self.logger,
+						"Failed to mark funding transaction safe to broadcast: {:?}",
+						e
+					);
+				});
+		} else {
+			log_error!(self.logger, "LSPS2 service handler is not available.");
+		}
 	}
 
 	pub(crate) async fn handle_next_event(&self) {
@@ -594,7 +663,7 @@ where
 							request_id,
 							intercept_scid,
 							LSPS2_CHANNEL_CLTV_EXPIRY_DELTA,
-							LSPS2_CLIENT_TRUSTS_LSP_MODE,
+							service_config.client_trusts_lsp,
 							user_channel_id,
 						)
 						.await
