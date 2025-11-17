@@ -1465,29 +1465,30 @@ where
 				self.runtime.spawn_cancellable_background_task(future);
 			},
 			LdkEvent::BumpTransaction(bte) => {
-				match bte {
+				let (channel_id, counterparty_node_id) = match bte {
 					BumpTransactionEvent::ChannelClose {
 						ref channel_id,
 						ref counterparty_node_id,
 						..
-					} => {
-						// Skip bumping channel closes if our counterparty is trusted.
-						if let Some(anchor_channels_config) =
-							self.config.anchor_channels_config.as_ref()
-						{
-							if anchor_channels_config
-								.trusted_peers_no_reserve
-								.contains(counterparty_node_id)
-							{
-								log_debug!(self.logger,
-									"Ignoring BumpTransactionEvent::ChannelClose for channel {} due to trusted counterparty {}",
-									channel_id, counterparty_node_id
-								);
-								return Ok(());
-							}
-						}
-					},
-					BumpTransactionEvent::HTLCResolution { .. } => {},
+					} => (channel_id, counterparty_node_id),
+					BumpTransactionEvent::HTLCResolution {
+						ref channel_id,
+						ref counterparty_node_id,
+						..
+					} => (channel_id, counterparty_node_id),
+				};
+
+				if let Some(anchor_channels_config) = self.config.anchor_channels_config.as_ref() {
+					if anchor_channels_config
+						.trusted_peers_no_reserve
+						.contains(counterparty_node_id)
+					{
+						log_debug!(self.logger,
+							"Ignoring BumpTransactionEvent for channel {} due to trusted counterparty {}",
+							channel_id, counterparty_node_id
+						);
+						return Ok(());
+					}
 				}
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
