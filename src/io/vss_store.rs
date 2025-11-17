@@ -475,10 +475,15 @@ impl VssStoreInner {
 					version: vss_version,
 					value: storable.encode_to_vec(),
 				}],
-				delete_items,
+				delete_items: delete_items.clone(),
 			};
 
 			self.client.put_object(&request).await.map_err(|e| {
+				// Restore delete items so they'll be retried on next write.
+				if !delete_items.is_empty() {
+					self.pending_lazy_deletes.lock().unwrap().extend(delete_items);
+				}
+
 				let msg = format!(
 					"Failed to write to key {}/{}/{}: {}",
 					primary_namespace, secondary_namespace, key, e
