@@ -542,8 +542,12 @@ where
 						match result {
 							Ok(()) => {},
 							Err(APIError::APIMisuseError { err }) => {
-								log_error!(self.logger, "Panicking due to APIMisuseError: {}", err);
-								panic!("APIMisuseError: {}", err);
+								log_error!(
+									self.logger,
+									"Encountered APIMisuseError, this should never happen: {}",
+									err
+								);
+								debug_assert!(false, "APIMisuseError: {}", err);
 							},
 							Err(APIError::ChannelUnavailable { err }) => {
 								log_error!(
@@ -571,7 +575,7 @@ where
 							)
 							.unwrap_or_else(|e| {
 								log_error!(self.logger, "Failed to force close channel after funding generation failed: {:?}", e);
-								panic!(
+								debug_assert!(false,
 									"Failed to force close channel after funding generation failed"
 								);
 							});
