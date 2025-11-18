@@ -29,6 +29,7 @@
 //!
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use ldk_node::bitcoin::Network;
+//! use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::Builder;
@@ -41,7 +42,9 @@
 //! 		"https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string(),
 //! 	);
 //!
-//! 	let node = builder.build().unwrap();
+//! 	let mnemonic = generate_entropy_mnemonic(None);
+//! 	let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+//! 	let node = builder.build(node_entropy).unwrap();
 //!
 //! 	node.start().unwrap();
 //!
@@ -1625,11 +1628,19 @@ impl Node {
 	/// # use ldk_node::config::Config;
 	/// # use ldk_node::payment::PaymentDirection;
 	/// # use ldk_node::bitcoin::Network;
+	/// # use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
+	/// # use rand::distr::Alphanumeric;
+	/// # use rand::{rng, Rng};
 	/// # let mut config = Config::default();
 	/// # config.network = Network::Regtest;
-	/// # config.storage_dir_path = "/tmp/ldk_node_test/".to_string();
+	/// # let mut temp_path = std::env::temp_dir();
+	/// # let rand_dir: String = (0..7).map(|_| rng().sample(Alphanumeric) as char).collect();
+	/// # temp_path.push(rand_dir);
+	/// # config.storage_dir_path = temp_path.display().to_string();
 	/// # let builder = Builder::from_config(config);
-	/// # let node = builder.build().unwrap();
+	/// # let mnemonic = generate_entropy_mnemonic(None);
+	/// # let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+	/// # let node = builder.build(node_entropy.into()).unwrap();
 	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
 	/// ```
 	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(

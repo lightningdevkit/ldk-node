@@ -193,8 +193,13 @@ class LibraryTest {
         builder2.setChainSourceEsplora(esploraEndpoint, null)
         builder2.setCustomLogger(logWriter2)
 
-        val node1 = builder1.build()
-        val node2 = builder2.build()
+        val mnemonic1 = generateEntropyMnemonic(null)
+        val nodeEntropy1 = NodeEntropy.fromBip39Mnemonic(mnemonic1, null)
+        val node1 = builder1.build(nodeEntropy1)
+
+        val mnemonic2 = generateEntropyMnemonic(null)
+        val nodeEntropy2 = NodeEntropy.fromBip39Mnemonic(mnemonic2, null)
+        val node2 = builder2.build(nodeEntropy2)
 
         node1.start()
         node2.start()

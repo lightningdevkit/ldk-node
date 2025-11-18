@@ -15,7 +15,6 @@ use std::{fmt, fs};
 
 use bdk_wallet::template::Bip84;
 use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
-use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
@@ -45,9 +44,10 @@ use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
+	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
+use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
@@ -102,13 +102,6 @@ enum ChainDataSourceConfig {
 }
 
 #[derive(Debug, Clone)]
-enum EntropySourceConfig {
-	SeedFile(String),
-	SeedBytes([u8; WALLET_KEYS_SEED_LEN]),
-	Bip39Mnemonic { mnemonic: Mnemonic, passphrase: Option<String> },
-}
-
-#[derive(Debug, Clone)]
 enum GossipSourceConfig {
 	P2PNetwork,
 	RapidGossipSync(String),
@@ -157,10 +150,6 @@ impl std::fmt::Debug for LogWriterConfig {
 /// [`Node`]: crate::Node
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildError {
-	/// The given seed bytes are invalid, e.g., have invalid length.
-	InvalidSeedBytes,
-	/// The given seed file is invalid, e.g., has invalid length, or could not be read.
-	InvalidSeedFile,
 	/// The current system time is invalid, clocks might have gone backwards.
 	InvalidSystemTime,
 	/// The a read channel monitor is invalid.
@@ -200,8 +189,6 @@ pub enum BuildError {
 impl fmt::Display for BuildError {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match *self {
-			Self::InvalidSeedBytes => write!(f, "Given seed bytes are invalid."),
-			Self::InvalidSeedFile => write!(f, "Given seed file is invalid or could not be read."),
 			Self::InvalidSystemTime => {
 				write!(f, "System time is invalid. Clocks might have gone back in time.")
 			},
@@ -245,7 +232,6 @@ impl std::error::Error for BuildError {}
 #[derive(Debug)]
 pub struct NodeBuilder {
 	config: Config,
-	entropy_source_config: Option<EntropySourceConfig>,
 	chain_data_source_config: Option<ChainDataSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
@@ -264,7 +250,6 @@ impl NodeBuilder {
 
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
-		let entropy_source_config = None;
 		let chain_data_source_config = None;
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
@@ -273,7 +258,6 @@ impl NodeBuilder {
 		let pathfinding_scores_sync_config = None;
 		Self {
 			config,
-			entropy_source_config,
 			chain_data_source_config,
 			gossip_source_config,
 			liquidity_source_config,
@@ -291,33 +275,6 @@ impl NodeBuilder {
 	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn set_runtime(&mut self, runtime_handle: tokio::runtime::Handle) -> &mut Self {
 		self.runtime_handle = Some(runtime_handle);
-		self
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
-	///
-	/// If the given file does not exist a new random seed file will be generated and
-	/// stored at the given location.
-	pub fn set_entropy_seed_path(&mut self, seed_path: String) -> &mut Self {
-		self.entropy_source_config = Some(EntropySourceConfig::SeedFile(seed_path));
-		self
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from the given
-	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
-	pub fn set_entropy_seed_bytes(&mut self, seed_bytes: [u8; WALLET_KEYS_SEED_LEN]) -> &mut Self {
-		self.entropy_source_config = Some(EntropySourceConfig::SeedBytes(seed_bytes));
-		self
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
-	///
-	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn set_entropy_bip39_mnemonic(
-		&mut self, mnemonic: Mnemonic, passphrase: Option<String>,
-	) -> &mut Self {
-		self.entropy_source_config =
-			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
 		self
 	}
 
@@ -584,7 +541,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Node, BuildError> {
+	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
@@ -596,19 +553,19 @@ impl NodeBuilder {
 			)
 			.map_err(|_| BuildError::KVStoreSetupFailed)?,
 		);
-		self.build_with_store(kv_store)
+		self.build_with_store(node_entropy, kv_store)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Node, BuildError> {
+	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
 		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path));
-		self.build_with_store(kv_store)
+		self.build_with_store(node_entropy, kv_store)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -629,19 +586,14 @@ impl NodeBuilder {
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
 	pub fn build_with_vss_store(
-		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
-		fixed_headers: HashMap<String, String>,
+		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
+		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		use bitcoin::key::Secp256k1;
 
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
-		let seed_bytes = seed_bytes_from_config(
-			&self.config,
-			self.entropy_source_config.as_ref(),
-			Arc::clone(&logger),
-		)?;
-
+		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
 
 		let vss_xprv =
@@ -666,7 +618,12 @@ impl NodeBuilder {
 
 		let header_provider = Arc::new(lnurl_auth_jwt_provider);
 
-		self.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+		self.build_with_vss_store_and_header_provider(
+			node_entropy,
+			vss_url,
+			store_id,
+			header_provider,
+		)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -682,11 +639,17 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_vss_store_and_fixed_headers(
-		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
+		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
+		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let header_provider = Arc::new(FixedHeaders::new(fixed_headers));
 
-		self.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+		self.build_with_vss_store_and_header_provider(
+			node_entropy,
+			vss_url,
+			store_id,
+			header_provider,
+		)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -701,16 +664,12 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_vss_store_and_header_provider(
-		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
+		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
-		let seed_bytes = seed_bytes_from_config(
-			&self.config,
-			self.entropy_source_config.as_ref(),
-			Arc::clone(&logger),
-		)?;
-
+		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
 
 		let vss_xprv = derive_xprv(
@@ -728,11 +687,13 @@ impl NodeBuilder {
 				BuildError::KVStoreSetupFailed
 			})?;
 
-		self.build_with_store(Arc::new(vss_store))
+		self.build_with_store(node_entropy, Arc::new(vss_store))
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Node, BuildError> {
+	pub fn build_with_store(
+		&self, node_entropy: NodeEntropy, kv_store: Arc<DynStore>,
+	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
 		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
@@ -744,11 +705,7 @@ impl NodeBuilder {
 			})?)
 		};
 
-		let seed_bytes = seed_bytes_from_config(
-			&self.config,
-			self.entropy_source_config.as_ref(),
-			Arc::clone(&logger),
-		)?;
+		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
 
 		build_with_store_internal(
@@ -791,37 +748,6 @@ impl ArcedNodeBuilder {
 	pub fn from_config(config: Config) -> Self {
 		let inner = RwLock::new(NodeBuilder::from_config(config));
 		Self { inner }
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
-	///
-	/// If the given file does not exist a new random seed file will be generated and
-	/// stored at the given location.
-	pub fn set_entropy_seed_path(&self, seed_path: String) {
-		self.inner.write().unwrap().set_entropy_seed_path(seed_path);
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from the given
-	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
-	///
-	/// **Note:** Will return an error if the length of the given `seed_bytes` differs from
-	/// [`WALLET_KEYS_SEED_LEN`].
-	pub fn set_entropy_seed_bytes(&self, seed_bytes: Vec<u8>) -> Result<(), BuildError> {
-		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
-			return Err(BuildError::InvalidSeedBytes);
-		}
-		let mut bytes = [0u8; WALLET_KEYS_SEED_LEN];
-		bytes.copy_from_slice(&seed_bytes);
-
-		self.inner.write().unwrap().set_entropy_seed_bytes(bytes);
-		Ok(())
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
-	///
-	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-	pub fn set_entropy_bip39_mnemonic(&self, mnemonic: Mnemonic, passphrase: Option<String>) {
-		self.inner.write().unwrap().set_entropy_bip39_mnemonic(mnemonic, passphrase);
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -1031,14 +957,16 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build().map(Arc::new)
+	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
+		self.inner.read().unwrap().build(*node_entropy).map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(&self) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build_with_fs_store().map(Arc::new)
+	pub fn build_with_fs_store(
+		&self, node_entropy: Arc<NodeEntropy>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner.read().unwrap().build_with_fs_store(*node_entropy).map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -1059,13 +987,19 @@ impl ArcedNodeBuilder {
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
 	pub fn build_with_vss_store(
-		&self, vss_url: String, store_id: String, lnurl_auth_server_url: String,
-		fixed_headers: HashMap<String, String>,
+		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
+		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner
 			.read()
 			.unwrap()
-			.build_with_vss_store(vss_url, store_id, lnurl_auth_server_url, fixed_headers)
+			.build_with_vss_store(
+				*node_entropy,
+				vss_url,
+				store_id,
+				lnurl_auth_server_url,
+				fixed_headers,
+			)
 			.map(Arc::new)
 	}
 
@@ -1082,12 +1016,13 @@ impl ArcedNodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_vss_store_and_fixed_headers(
-		&self, vss_url: String, store_id: String, fixed_headers: HashMap<String, String>,
+		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
+		fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner
 			.read()
 			.unwrap()
-			.build_with_vss_store_and_fixed_headers(vss_url, store_id, fixed_headers)
+			.build_with_vss_store_and_fixed_headers(*node_entropy, vss_url, store_id, fixed_headers)
 			.map(Arc::new)
 	}
 
@@ -1103,18 +1038,26 @@ impl ArcedNodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_vss_store_and_header_provider(
-		&self, vss_url: String, store_id: String, header_provider: Arc<dyn VssHeaderProvider>,
+		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
+		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner
 			.read()
 			.unwrap()
-			.build_with_vss_store_and_header_provider(vss_url, store_id, header_provider)
+			.build_with_vss_store_and_header_provider(
+				*node_entropy,
+				vss_url,
+				store_id,
+				header_provider,
+			)
 			.map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store(&self, kv_store: Arc<DynStore>) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build_with_store(kv_store).map(Arc::new)
+	pub fn build_with_store(
+		&self, node_entropy: Arc<NodeEntropy>, kv_store: Arc<DynStore>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner.read().unwrap().build_with_store(*node_entropy, kv_store).map(Arc::new)
 	}
 }
 
@@ -1265,7 +1208,7 @@ fn build_with_store_internal(
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::Xpriv::new_master(config.network, &seed_bytes).map_err(|e| {
 		log_error!(logger, "Failed to derive master secret: {}", e);
-		BuildError::InvalidSeedBytes
+		BuildError::WalletSetupFailed
 	})?;
 
 	let descriptor = Bip84(xprv, KeychainKind::External);
@@ -1851,28 +1794,6 @@ fn setup_logger(
 	Ok(Arc::new(logger))
 }
 
-fn seed_bytes_from_config(
-	config: &Config, entropy_source_config: Option<&EntropySourceConfig>, logger: Arc<Logger>,
-) -> Result<[u8; 64], BuildError> {
-	match entropy_source_config {
-		Some(EntropySourceConfig::SeedBytes(bytes)) => Ok(bytes.clone()),
-		Some(EntropySourceConfig::SeedFile(seed_path)) => {
-			Ok(io::utils::read_or_generate_seed_file(seed_path, Arc::clone(&logger))
-				.map_err(|_| BuildError::InvalidSeedFile)?)
-		},
-		Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase }) => match passphrase {
-			Some(passphrase) => Ok(mnemonic.to_seed(passphrase)),
-			None => Ok(mnemonic.to_seed("")),
-		},
-		None => {
-			// Default to read or generate from the default location generate a seed file.
-			let seed_path = format!("{}/keys_seed", config.storage_dir_path);
-			Ok(io::utils::read_or_generate_seed_file(&seed_path, Arc::clone(&logger))
-				.map_err(|_| BuildError::InvalidSeedFile)?)
-		},
-	}
-}
-
 fn derive_xprv(
 	config: Arc<Config>, seed_bytes: &[u8; 64], hardened_child_index: u32, logger: Arc<Logger>,
 ) -> Result<Xpriv, BuildError> {
@@ -1880,13 +1801,13 @@ fn derive_xprv(
 
 	let xprv = Xpriv::new_master(config.network, seed_bytes).map_err(|e| {
 		log_error!(logger, "Failed to derive master secret: {}", e);
-		BuildError::InvalidSeedBytes
+		BuildError::WalletSetupFailed
 	})?;
 
 	xprv.derive_priv(&Secp256k1::new(), &[ChildNumber::Hardened { index: hardened_child_index }])
 		.map_err(|e| {
 			log_error!(logger, "Failed to derive hardened child secret: {}", e);
-			BuildError::InvalidSeedBytes
+			BuildError::WalletSetupFailed
 		})
 }
 

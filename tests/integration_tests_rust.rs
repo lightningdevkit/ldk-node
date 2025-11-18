@@ -159,7 +159,7 @@ async fn multi_hop_sending() {
 		let sync_config = EsploraSyncConfig { background_sync_config: None };
 		setup_builder!(builder, config.node_config);
 		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-		let node = builder.build().unwrap();
+		let node = builder.build(config.node_entropy.into()).unwrap();
 		node.start().unwrap();
 		nodes.push(node);
 	}
@@ -259,7 +259,8 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
+	let node =
+		builder.build_with_store(config.node_entropy.into(), Arc::clone(&test_sync_store)).unwrap();
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -297,7 +298,8 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let reinitialized_node = builder.build_with_store(Arc::clone(&test_sync_store)).unwrap();
+	let reinitialized_node =
+		builder.build_with_store(config.node_entropy.into(), Arc::clone(&test_sync_store)).unwrap();
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
@@ -606,10 +608,9 @@ async fn onchain_wallet_recovery() {
 
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
-	let seed_bytes = vec![42u8; 64];
-
 	let original_config = random_config(true);
-	let original_node = setup_node(&chain_source, original_config, Some(seed_bytes.clone()));
+	let original_node_entropy = original_config.node_entropy;
+	let original_node = setup_node(&chain_source, original_config);
 
 	let premine_amount_sat = 100_000;
 
@@ -648,8 +649,9 @@ async fn onchain_wallet_recovery() {
 	drop(original_node);
 
 	// Now we start from scratch, only the seed remains the same.
-	let recovered_config = random_config(true);
-	let recovered_node = setup_node(&chain_source, recovered_config, Some(seed_bytes));
+	let mut recovered_config = random_config(true);
+	recovered_config.node_entropy = original_node_entropy;
+	let recovered_node = setup_node(&chain_source, recovered_config);
 
 	recovered_node.sync_wallets().unwrap();
 	assert_eq!(
@@ -703,7 +705,7 @@ async fn run_rbf_test(is_insert_block: bool) {
 	macro_rules! config_node {
 		($chain_source:expr, $anchor_channels:expr) => {{
 			let config_a = random_config($anchor_channels);
-			let node = setup_node(&$chain_source, config_a, None);
+			let node = setup_node(&$chain_source, config_a);
 			node
 		}};
 	}
@@ -822,7 +824,7 @@ async fn sign_verify_msg() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, config, None);
+	let node = setup_node(&chain_source, config);
 
 	// Tests arbitrary message signing and later verification
 	let msg = "OK computer".as_bytes();
@@ -1296,7 +1298,6 @@ async fn async_payment() {
 	let node_sender = setup_node_for_async_payments(
 		&chain_source,
 		config_sender,
-		None,
 		Some(AsyncPaymentsRole::Client),
 	);
 
@@ -1306,7 +1307,6 @@ async fn async_payment() {
 	let node_sender_lsp = setup_node_for_async_payments(
 		&chain_source,
 		config_sender_lsp,
-		None,
 		Some(AsyncPaymentsRole::Server),
 	);
 
@@ -1317,7 +1317,6 @@ async fn async_payment() {
 	let node_receiver_lsp = setup_node_for_async_payments(
 		&chain_source,
 		config_receiver_lsp,
-		None,
 		Some(AsyncPaymentsRole::Server),
 	);
 
@@ -1326,7 +1325,7 @@ async fn async_payment() {
 	config_receiver.node_config.node_alias = None;
 	config_receiver.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
-	let node_receiver = setup_node(&chain_source, config_receiver, None);
+	let node_receiver = setup_node(&chain_source, config_receiver);
 
 	let address_sender = node_sender.onchain_payment().new_address().unwrap();
 	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().unwrap();
@@ -1450,8 +1449,8 @@ async fn test_node_announcement_propagation() {
 	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
 	config_b.node_config.announcement_addresses = None;
 
-	let node_a = setup_node(&chain_source, config_a, None);
-	let node_b = setup_node(&chain_source, config_b, None);
+	let node_a = setup_node(&chain_source, config_a);
+	let node_b = setup_node(&chain_source, config_b);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
@@ -1711,7 +1710,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
-	let service_node = service_builder.build().unwrap();
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
 	let service_node_id = service_node.node_id();
@@ -1721,13 +1720,13 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
-	let client_node = client_builder.build().unwrap();
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 
 	let payer_config = random_config(true);
 	setup_builder!(payer_builder, payer_config.node_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let payer_node = payer_builder.build().unwrap();
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
 	let service_addr = service_node.onchain_payment().new_address().unwrap();
@@ -1916,7 +1915,7 @@ async fn facade_logging() {
 	config.log_writer = TestLogWriter::LogFacade;
 
 	println!("== Facade logging starts ==");
-	let _node = setup_node(&chain_source, config, None);
+	let _node = setup_node(&chain_source, config);
 
 	assert!(!logger.retrieve_logs().is_empty());
 	for (_, entry) in logger.retrieve_logs().iter().enumerate() {
@@ -1995,10 +1994,8 @@ async fn spontaneous_send_with_custom_preimage() {
 async fn drop_in_async_context() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
-	let seed_bytes = vec![42u8; 64];
-
 	let config = random_config(true);
-	let node = setup_node(&chain_source, config, Some(seed_bytes));
+	let node = setup_node(&chain_source, config);
 	node.stop().unwrap();
 }
 
@@ -2030,7 +2027,7 @@ async fn lsps2_client_trusts_lsp() {
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
-	let service_node = service_builder.build().unwrap();
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 	let service_node_id = service_node.node_id();
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
@@ -2039,14 +2036,14 @@ async fn lsps2_client_trusts_lsp() {
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
-	let client_node = client_builder.build().unwrap();
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 	let client_node_id = client_node.node_id();
 
 	let payer_config = random_config(true);
 	setup_builder!(payer_builder, payer_config.node_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let payer_node = payer_builder.build().unwrap();
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
 	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
@@ -2203,7 +2200,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
-	let service_node = service_builder.build().unwrap();
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
 	let service_node_id = service_node.node_id();
@@ -2213,7 +2210,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
-	let client_node = client_builder.build().unwrap();
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 
 	let client_node_id = client_node.node_id();
@@ -2221,7 +2218,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let payer_config = random_config(true);
 	setup_builder!(payer_builder, payer_config.node_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let payer_node = payer_builder.build().unwrap();
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
 	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();

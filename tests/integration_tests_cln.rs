@@ -43,7 +43,7 @@ async fn test_cln() {
 	let mut builder = Builder::from_config(config.node_config);
 	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
 
-	let node = builder.build().unwrap();
+	let node = builder.build(config.node_entropy).unwrap();
 	node.start().unwrap();
 
 	// Premine some funds and distribute

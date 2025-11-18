@@ -52,24 +52,13 @@ use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
-pub(crate) fn read_or_generate_seed_file<L: Deref>(
-	keys_seed_path: &str, logger: L,
-) -> std::io::Result<[u8; WALLET_KEYS_SEED_LEN]>
-where
-	L::Target: LdkLogger,
-{
+pub(crate) fn read_or_generate_seed_file(
+	keys_seed_path: &str,
+) -> std::io::Result<[u8; WALLET_KEYS_SEED_LEN]> {
 	if Path::new(&keys_seed_path).exists() {
-		let seed = fs::read(keys_seed_path).map_err(|e| {
-			log_error!(logger, "Failed to read keys seed file: {}", keys_seed_path);
-			e
-		})?;
+		let seed = fs::read(keys_seed_path)?;
 
 		if seed.len() != WALLET_KEYS_SEED_LEN {
-			log_error!(
-				logger,
-				"Failed to read keys seed file due to invalid length: {}",
-				keys_seed_path
-			);
 			return Err(std::io::Error::new(
 				std::io::ErrorKind::InvalidData,
 				"Failed to read keys seed file due to invalid length",
@@ -81,37 +70,19 @@ where
 		Ok(key)
 	} else {
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
-		OsRng.try_fill_bytes(&mut key).map_err(|e| {
-			log_error!(logger, "Failed to generate entropy: {}", e);
+		OsRng.try_fill_bytes(&mut key).map_err(|_| {
 			std::io::Error::new(std::io::ErrorKind::Other, "Failed to generate seed bytes")
 		})?;
 
 		if let Some(parent_dir) = Path::new(&keys_seed_path).parent() {
-			fs::create_dir_all(parent_dir).map_err(|e| {
-				log_error!(
-					logger,
-					"Failed to create parent directory for key seed file: {}.",
-					keys_seed_path
-				);
-				e
-			})?;
+			fs::create_dir_all(parent_dir)?;
 		}
 
-		let mut f = fs::File::create(keys_seed_path).map_err(|e| {
-			log_error!(logger, "Failed to create keys seed file: {}", keys_seed_path);
-			e
-		})?;
+		let mut f = fs::File::create(keys_seed_path)?;
 
-		f.write_all(&key).map_err(|e| {
-			log_error!(logger, "Failed to write node keys seed to disk: {}", keys_seed_path);
-			e
-		})?;
+		f.write_all(&key)?;
 
-		f.sync_all().map_err(|e| {
-			log_error!(logger, "Failed to sync node keys seed to disk: {}", keys_seed_path);
-			e
-		})?;
-
+		f.sync_all()?;
 		Ok(key)
 	}
 }

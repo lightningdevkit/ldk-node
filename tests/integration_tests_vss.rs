@@ -11,6 +11,7 @@ mod common;
 
 use std::collections::HashMap;
 
+use ldk_node::entropy::NodeEntropy;
 use ldk_node::Builder;
 use rand::{rng, Rng};
 
@@ -25,6 +26,7 @@ async fn channel_full_cycle_with_vss_store() {
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 	let node_a = builder_a
 		.build_with_vss_store_and_fixed_headers(
+			config_a.node_entropy,
 			vss_base_url.clone(),
 			"node_1_store".to_string(),
 			HashMap::new(),
@@ -38,6 +40,7 @@ async fn channel_full_cycle_with_vss_store() {
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b
 		.build_with_vss_store_and_fixed_headers(
+			config_b.node_entropy,
 			vss_base_url,
 			"node_2_store".to_string(),
 			HashMap::new(),
@@ -68,6 +71,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 	let store_id = format!("v0_compat_test_{}", rand_suffix);
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
 	let seed_bytes = [42u8; 64];
+	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup a v0.6.2 `Node` persisted with the v0 scheme.
 	let (old_balance, old_node_id) = {
@@ -112,11 +116,15 @@ async fn vss_v0_schema_backwards_compatibility() {
 	let mut builder_new = Builder::new();
 	builder_new.set_network(bitcoin::Network::Regtest);
 	builder_new.set_storage_dir_path(storage_path);
-	builder_new.set_entropy_seed_bytes(seed_bytes);
 	builder_new.set_chain_source_esplora(esplora_url, None);
 
 	let node_new = builder_new
-		.build_with_vss_store_and_fixed_headers(vss_base_url, store_id, HashMap::new())
+		.build_with_vss_store_and_fixed_headers(
+			node_entropy,
+			vss_base_url,
+			store_id,
+			HashMap::new(),
+		)
 		.unwrap();
 
 	node_new.start().unwrap();
@@ -142,16 +150,17 @@ async fn vss_node_restart() {
 	let store_id = format!("restart_test_{}", rand_suffix);
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
 	let seed_bytes = [42u8; 64];
+	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup initial node and fund it.
 	let (expected_balance_sats, expected_node_id) = {
 		let mut builder = Builder::new();
 		builder.set_network(bitcoin::Network::Regtest);
 		builder.set_storage_dir_path(storage_path.clone());
-		builder.set_entropy_seed_bytes(seed_bytes);
 		builder.set_chain_source_esplora(esplora_url.clone(), None);
 		let node = builder
 			.build_with_vss_store_and_fixed_headers(
+				node_entropy,
 				vss_base_url.clone(),
 				store_id.clone(),
 				HashMap::new(),
@@ -181,11 +190,15 @@ async fn vss_node_restart() {
 	let mut builder = Builder::new();
 	builder.set_network(bitcoin::Network::Regtest);
 	builder.set_storage_dir_path(storage_path);
-	builder.set_entropy_seed_bytes(seed_bytes);
 	builder.set_chain_source_esplora(esplora_url, None);
 
 	let node = builder
-		.build_with_vss_store_and_fixed_headers(vss_base_url, store_id, HashMap::new())
+		.build_with_vss_store_and_fixed_headers(
+			node_entropy,
+			vss_base_url,
+			store_id,
+			HashMap::new(),
+		)
 		.unwrap();
 
 	node.start().unwrap();

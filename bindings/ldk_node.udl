@@ -47,6 +47,20 @@ dictionary LSPS2ServiceConfig {
 	boolean client_trusts_lsp;
 };
 
+interface NodeEntropy {
+	[Name=from_bip39_mnemonic]
+	constructor(Mnemonic mnemonic, string? passphrase);
+	[Throws=EntropyError, Name=from_seed_bytes]
+	constructor(bytes seed_bytes);
+	[Throws=EntropyError, Name=from_seed_path]
+	constructor(string seed_path);
+};
+
+enum EntropyError {
+	"InvalidSeedBytes",
+	"InvalidSeedFile",
+};
+
 enum WordCount {
 	"Words12",
 	"Words15",
@@ -80,10 +94,6 @@ interface Builder {
 	constructor();
 	[Name=from_config]
 	constructor(Config config);
-	void set_entropy_seed_path(string seed_path);
-	[Throws=BuildError]
-	void set_entropy_seed_bytes(sequence<u8> seed_bytes);
-	void set_entropy_bip39_mnemonic(Mnemonic mnemonic, string? passphrase);
 	void set_chain_source_esplora(string server_url, EsploraSyncConfig? config);
 	void set_chain_source_electrum(string server_url, ElectrumSyncConfig? config);
 	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
@@ -107,15 +117,15 @@ interface Builder {
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	[Throws=BuildError]
-	Node build();
+	Node build(NodeEntropy node_entropy);
 	[Throws=BuildError]
-	Node build_with_fs_store();
+	Node build_with_fs_store(NodeEntropy node_entropy);
 	[Throws=BuildError]
-	Node build_with_vss_store(string vss_url, string store_id, string lnurl_auth_server_url, record<string, string> fixed_headers);
+	Node build_with_vss_store(NodeEntropy node_entropy, string vss_url, string store_id, string lnurl_auth_server_url, record<string, string> fixed_headers);
 	[Throws=BuildError]
-	Node build_with_vss_store_and_fixed_headers(string vss_url, string store_id, record<string, string> fixed_headers);
+	Node build_with_vss_store_and_fixed_headers(NodeEntropy node_entropy, string vss_url, string store_id, record<string, string> fixed_headers);
 	[Throws=BuildError]
-	Node build_with_vss_store_and_header_provider(string vss_url, string store_id, VssHeaderProvider header_provider);
+	Node build_with_vss_store_and_header_provider(NodeEntropy node_entropy, string vss_url, string store_id, VssHeaderProvider header_provider);
 };
 
 interface Node {
@@ -357,8 +367,6 @@ dictionary BestBlock {
 
 [Error]
 enum BuildError {
-	"InvalidSeedBytes",
-	"InvalidSeedFile",
 	"InvalidSystemTime",
 	"InvalidChannelMonitor",
 	"InvalidListeningAddresses",
