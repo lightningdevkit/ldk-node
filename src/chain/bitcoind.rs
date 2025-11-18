@@ -14,7 +14,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bitcoin::{BlockHash, FeeRate, Network, Transaction, Txid};
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::Listen;
+use lightning::chain::{BestBlock, Listen};
 use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpEndpoint, JsonResponse};
@@ -42,6 +42,7 @@ use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
+const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
 
 pub(super) struct BitcoindChainSource {
 	api_client: Arc<BitcoindClient>,
@@ -329,6 +330,33 @@ impl BitcoindChainSource {
 		}
 	}
 
+	pub(super) async fn poll_best_block(&self) -> Result<BestBlock, Error> {
+		self.poll_chain_tip().await.map(|tip| tip.to_best_block())
+	}
+
+	async fn poll_chain_tip(&self) -> Result<ValidatedBlockHeader, Error> {
+		let validate_res = tokio::time::timeout(
+			Duration::from_secs(CHAIN_POLLING_TIMEOUT_SECS),
+			validate_best_block_header(self.api_client.as_ref()),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
+			Error::TxSyncTimeout
+		})?;
+
+		match validate_res {
+			Ok(tip) => {
+				*self.latest_chain_tip.write().unwrap() = Some(tip);
+				Ok(tip)
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
+				return Err(Error::TxSyncFailed);
+			},
+		}
+	}
+
 	pub(super) async fn poll_and_update_listeners(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
@@ -366,20 +394,8 @@ impl BitcoindChainSource {
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let latest_chain_tip_opt = self.latest_chain_tip.read().unwrap().clone();
-		let chain_tip = if let Some(tip) = latest_chain_tip_opt {
-			tip
-		} else {
-			match validate_best_block_header(self.api_client.as_ref()).await {
-				Ok(tip) => {
-					*self.latest_chain_tip.write().unwrap() = Some(tip);
-					tip
-				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
-					return Err(Error::TxSyncFailed);
-				},
-			}
-		};
+		let chain_tip =
+			if let Some(tip) = latest_chain_tip_opt { tip } else { self.poll_chain_tip().await? };
 
 		let mut locked_header_cache = self.header_cache.lock().await;
 		let chain_poller = ChainPoller::new(Arc::clone(&self.api_client), self.config.network);

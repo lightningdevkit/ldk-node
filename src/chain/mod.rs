@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
-use lightning::chain::Filter;
+use lightning::chain::{BestBlock, Filter};
 use lightning_block_sync::gossip::UtxoSource;
 
 use crate::chain::bitcoind::BitcoindChainSource;
@@ -102,7 +102,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Self {
+	) -> (Self, Option<BestBlock>) {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
@@ -114,7 +114,7 @@ impl ChainSource {
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Esplora(esplora_chain_source);
-		Self { kind, tx_broadcaster, logger }
+		(Self { kind, tx_broadcaster, logger }, None)
 	}
 
 	pub(crate) fn new_electrum(
@@ -122,7 +122,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Self {
+	) -> (Self, Option<BestBlock>) {
 		let electrum_chain_source = ElectrumChainSource::new(
 			server_url,
 			sync_config,
@@ -133,15 +133,15 @@ impl ChainSource {
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Electrum(electrum_chain_source);
-		Self { kind, tx_broadcaster, logger }
+		(Self { kind, tx_broadcaster, logger }, None)
 	}
 
-	pub(crate) fn new_bitcoind_rpc(
+	pub(crate) async fn new_bitcoind_rpc(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Self {
+	) -> (Self, Option<BestBlock>) {
 		let bitcoind_chain_source = BitcoindChainSource::new_rpc(
 			rpc_host,
 			rpc_port,
@@ -153,16 +153,17 @@ impl ChainSource {
 			Arc::clone(&logger),
 			node_metrics,
 		);
+		let best_block = bitcoind_chain_source.poll_best_block().await.ok();
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		Self { kind, tx_broadcaster, logger }
+		(Self { kind, tx_broadcaster, logger }, best_block)
 	}
 
-	pub(crate) fn new_bitcoind_rest(
+	pub(crate) async fn new_bitcoind_rest(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, rest_client_config: BitcoindRestClientConfig,
 		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Self {
+	) -> (Self, Option<BestBlock>) {
 		let bitcoind_chain_source = BitcoindChainSource::new_rest(
 			rpc_host,
 			rpc_port,
@@ -175,8 +176,9 @@ impl ChainSource {
 			Arc::clone(&logger),
 			node_metrics,
 		);
+		let best_block = bitcoind_chain_source.poll_best_block().await.ok();
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		Self { kind, tx_broadcaster, logger }
+		(Self { kind, tx_broadcaster, logger }, best_block)
 	}
 
 	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
