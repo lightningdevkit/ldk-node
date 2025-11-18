@@ -47,7 +47,6 @@ pub(super) struct ElectrumChainSource {
 	server_url: String,
 	pub(super) sync_config: ElectrumSyncConfig,
 	electrum_runtime_status: RwLock<ElectrumRuntimeStatus>,
-	onchain_wallet: Arc<Wallet>,
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
@@ -59,7 +58,7 @@ pub(super) struct ElectrumChainSource {
 
 impl ElectrumChainSource {
 	pub(super) fn new(
-		server_url: String, sync_config: ElectrumSyncConfig, onchain_wallet: Arc<Wallet>,
+		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
@@ -70,7 +69,6 @@ impl ElectrumChainSource {
 			server_url,
 			sync_config,
 			electrum_runtime_status,
-			onchain_wallet,
 			onchain_wallet_sync_status,
 			lightning_wallet_sync_status,
 			fee_estimator,
@@ -94,7 +92,9 @@ impl ElectrumChainSource {
 		self.electrum_runtime_status.write().unwrap().stop();
 	}
 
-	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
+	pub(crate) async fn sync_onchain_wallet(
+		&self, onchain_wallet: Arc<Wallet>,
+	) -> Result<(), Error> {
 		let receiver_res = {
 			let mut status_lock = self.onchain_wallet_sync_status.lock().unwrap();
 			status_lock.register_or_subscribe_pending_sync()
@@ -108,14 +108,14 @@ impl ElectrumChainSource {
 			})?;
 		}
 
-		let res = self.sync_onchain_wallet_inner().await;
+		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
 		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
 		res
 	}
 
-	async fn sync_onchain_wallet_inner(&self) -> Result<(), Error> {
+	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<(), Error> {
 		let electrum_client: Arc<ElectrumRuntimeClient> =
 			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
 				Arc::clone(client)
@@ -133,7 +133,7 @@ impl ElectrumChainSource {
 
 		let apply_wallet_update =
 			|update_res: Result<BdkUpdate, Error>, now: Instant| match update_res {
-				Ok(update) => match self.onchain_wallet.apply_update(update) {
+				Ok(update) => match onchain_wallet.apply_update(update) {
 					Ok(()) => {
 						log_info!(
 							self.logger,
@@ -160,10 +160,10 @@ impl ElectrumChainSource {
 				Err(e) => Err(e),
 			};
 
-		let cached_txs = self.onchain_wallet.get_cached_txs();
+		let cached_txs = onchain_wallet.get_cached_txs();
 
 		let res = if incremental_sync {
-			let incremental_sync_request = self.onchain_wallet.get_incremental_sync_request();
+			let incremental_sync_request = onchain_wallet.get_incremental_sync_request();
 			let incremental_sync_fut = electrum_client
 				.get_incremental_sync_wallet_update(incremental_sync_request, cached_txs);
 
@@ -171,7 +171,7 @@ impl ElectrumChainSource {
 			let update_res = incremental_sync_fut.await.map(|u| u.into());
 			apply_wallet_update(update_res, now)
 		} else {
-			let full_scan_request = self.onchain_wallet.get_full_scan_request();
+			let full_scan_request = onchain_wallet.get_full_scan_request();
 			let full_scan_fut =
 				electrum_client.get_full_scan_wallet_update(full_scan_request, cached_txs);
 			let now = Instant::now();

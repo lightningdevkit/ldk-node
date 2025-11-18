@@ -1178,6 +1178,102 @@ fn build_with_store_internal(
 			}
 		},
 	};
+	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
+	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
+
+	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
+		Ok(payments) => Arc::new(PaymentStore::new(
+			payments,
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read payment data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
+	let chain_source = match chain_data_source_config {
+		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
+			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
+			Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				headers.clone(),
+				sync_config,
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+		Some(ChainDataSourceConfig::Electrum { server_url, sync_config }) => {
+			let sync_config = sync_config.unwrap_or(ElectrumSyncConfig::default());
+			Arc::new(ChainSource::new_electrum(
+				server_url.clone(),
+				sync_config,
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+		Some(ChainDataSourceConfig::Bitcoind {
+			rpc_host,
+			rpc_port,
+			rpc_user,
+			rpc_password,
+			rest_client_config,
+		}) => match rest_client_config {
+			Some(rest_client_config) => Arc::new(ChainSource::new_bitcoind_rest(
+				rpc_host.clone(),
+				*rpc_port,
+				rpc_user.clone(),
+				rpc_password.clone(),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				rest_client_config.clone(),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			)),
+			None => Arc::new(ChainSource::new_bitcoind_rpc(
+				rpc_host.clone(),
+				*rpc_port,
+				rpc_user.clone(),
+				rpc_password.clone(),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			)),
+		},
+
+		None => {
+			// Default to Esplora client.
+			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
+			let sync_config = EsploraSyncConfig::default();
+			Arc::new(ChainSource::new_esplora(
+				server_url.clone(),
+				HashMap::new(),
+				sync_config,
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			))
+		},
+	};
 
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::Xpriv::new_master(config.network, &seed_bytes).map_err(|e| {
@@ -1226,23 +1322,6 @@ fn build_with_store_internal(
 			})?,
 	};
 
-	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
-	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
-
-	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
-		Ok(payments) => Arc::new(PaymentStore::new(
-			payments,
-			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
-			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
-			Arc::clone(&kv_store),
-			Arc::clone(&logger),
-		)),
-		Err(e) => {
-			log_error!(logger, "Failed to read payment data from store: {}", e);
-			return Err(BuildError::ReadFailed);
-		},
-	};
-
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
@@ -1252,91 +1331,6 @@ fn build_with_store_internal(
 		Arc::clone(&config),
 		Arc::clone(&logger),
 	));
-
-	let chain_source = match chain_data_source_config {
-		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
-			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
-			Arc::new(ChainSource::new_esplora(
-				server_url.clone(),
-				headers.clone(),
-				sync_config,
-				Arc::clone(&wallet),
-				Arc::clone(&fee_estimator),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-				Arc::clone(&node_metrics),
-			))
-		},
-		Some(ChainDataSourceConfig::Electrum { server_url, sync_config }) => {
-			let sync_config = sync_config.unwrap_or(ElectrumSyncConfig::default());
-			Arc::new(ChainSource::new_electrum(
-				server_url.clone(),
-				sync_config,
-				Arc::clone(&wallet),
-				Arc::clone(&fee_estimator),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-				Arc::clone(&node_metrics),
-			))
-		},
-		Some(ChainDataSourceConfig::Bitcoind {
-			rpc_host,
-			rpc_port,
-			rpc_user,
-			rpc_password,
-			rest_client_config,
-		}) => match rest_client_config {
-			Some(rest_client_config) => Arc::new(ChainSource::new_bitcoind_rest(
-				rpc_host.clone(),
-				*rpc_port,
-				rpc_user.clone(),
-				rpc_password.clone(),
-				Arc::clone(&wallet),
-				Arc::clone(&fee_estimator),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				rest_client_config.clone(),
-				Arc::clone(&logger),
-				Arc::clone(&node_metrics),
-			)),
-			None => Arc::new(ChainSource::new_bitcoind_rpc(
-				rpc_host.clone(),
-				*rpc_port,
-				rpc_user.clone(),
-				rpc_password.clone(),
-				Arc::clone(&wallet),
-				Arc::clone(&fee_estimator),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-				Arc::clone(&node_metrics),
-			)),
-		},
-
-		None => {
-			// Default to Esplora client.
-			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
-			let sync_config = EsploraSyncConfig::default();
-			Arc::new(ChainSource::new_esplora(
-				server_url.clone(),
-				HashMap::new(),
-				sync_config,
-				Arc::clone(&wallet),
-				Arc::clone(&fee_estimator),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-				Arc::clone(&node_metrics),
-			))
-		},
-	};
 
 	// Initialize the KeysManager
 	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {

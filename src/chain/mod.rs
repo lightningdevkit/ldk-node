@@ -99,15 +99,14 @@ enum ChainSourceKind {
 impl ChainSource {
 	pub(crate) fn new_esplora(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
-		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
 			sync_config,
-			onchain_wallet,
 			fee_estimator,
 			kv_store,
 			config,
@@ -119,7 +118,7 @@ impl ChainSource {
 	}
 
 	pub(crate) fn new_electrum(
-		server_url: String, sync_config: ElectrumSyncConfig, onchain_wallet: Arc<Wallet>,
+		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
@@ -127,7 +126,6 @@ impl ChainSource {
 		let electrum_chain_source = ElectrumChainSource::new(
 			server_url,
 			sync_config,
-			onchain_wallet,
 			fee_estimator,
 			kv_store,
 			config,
@@ -140,16 +138,15 @@ impl ChainSource {
 
 	pub(crate) fn new_bitcoind_rpc(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
-		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let bitcoind_chain_source = BitcoindChainSource::new_rpc(
 			rpc_host,
 			rpc_port,
 			rpc_user,
 			rpc_password,
-			onchain_wallet,
 			fee_estimator,
 			kv_store,
 			config,
@@ -162,17 +159,15 @@ impl ChainSource {
 
 	pub(crate) fn new_bitcoind_rest(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
-		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		rest_client_config: BitcoindRestClientConfig, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, rest_client_config: BitcoindRestClientConfig,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let bitcoind_chain_source = BitcoindChainSource::new_rest(
 			rpc_host,
 			rpc_port,
 			rpc_user,
 			rpc_password,
-			onchain_wallet,
 			fee_estimator,
 			kv_store,
 			config,
@@ -223,7 +218,7 @@ impl ChainSource {
 	}
 
 	pub(crate) async fn continuously_sync_wallets(
-		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>,
+		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) {
@@ -234,6 +229,7 @@ impl ChainSource {
 				{
 					self.start_tx_based_sync_loop(
 						stop_sync_receiver,
+						onchain_wallet,
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
@@ -256,6 +252,7 @@ impl ChainSource {
 				{
 					self.start_tx_based_sync_loop(
 						stop_sync_receiver,
+						onchain_wallet,
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
@@ -276,6 +273,7 @@ impl ChainSource {
 				bitcoind_chain_source
 					.continuously_sync_wallets(
 						stop_sync_receiver,
+						onchain_wallet,
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
@@ -287,9 +285,9 @@ impl ChainSource {
 
 	async fn start_tx_based_sync_loop(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
-		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>, background_sync_config: &BackgroundSyncConfig,
-		logger: Arc<Logger>,
+		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		background_sync_config: &BackgroundSyncConfig, logger: Arc<Logger>,
 	) {
 		// Setup syncing intervals
 		let onchain_wallet_sync_interval_secs = background_sync_config
@@ -328,7 +326,7 @@ impl ChainSource {
 					return;
 				}
 				_ = onchain_wallet_sync_interval.tick() => {
-					let _ = self.sync_onchain_wallet().await;
+					let _ = self.sync_onchain_wallet(Arc::clone(&onchain_wallet)).await;
 				}
 				_ = fee_rate_update_interval.tick() => {
 					let _ = self.update_fee_rate_estimates().await;
@@ -346,13 +344,15 @@ impl ChainSource {
 
 	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum,
 	// etc.)
-	pub(crate) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
+	pub(crate) async fn sync_onchain_wallet(
+		&self, onchain_wallet: Arc<Wallet>,
+	) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
-				esplora_chain_source.sync_onchain_wallet().await
+				esplora_chain_source.sync_onchain_wallet(onchain_wallet).await
 			},
 			ChainSourceKind::Electrum(electrum_chain_source) => {
-				electrum_chain_source.sync_onchain_wallet().await
+				electrum_chain_source.sync_onchain_wallet(onchain_wallet).await
 			},
 			ChainSourceKind::Bitcoind { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
@@ -388,8 +388,8 @@ impl ChainSource {
 	}
 
 	pub(crate) async fn poll_and_update_listeners(
-		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>,
+		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Esplora { .. } => {
@@ -404,7 +404,12 @@ impl ChainSource {
 			},
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source
-					.poll_and_update_listeners(channel_manager, chain_monitor, output_sweeper)
+					.poll_and_update_listeners(
+						onchain_wallet,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+					)
 					.await
 			},
 		}

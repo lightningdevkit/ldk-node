@@ -34,7 +34,6 @@ use crate::{Error, NodeMetrics};
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
 	esplora_client: EsploraAsyncClient,
-	onchain_wallet: Arc<Wallet>,
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	tx_sync: Arc<EsploraSyncClient<Arc<Logger>>>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
@@ -48,9 +47,8 @@ pub(super) struct EsploraChainSource {
 impl EsploraChainSource {
 	pub(crate) fn new(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
-		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
@@ -68,7 +66,6 @@ impl EsploraChainSource {
 		Self {
 			sync_config,
 			esplora_client,
-			onchain_wallet,
 			onchain_wallet_sync_status,
 			tx_sync,
 			lightning_wallet_sync_status,
@@ -80,7 +77,9 @@ impl EsploraChainSource {
 		}
 	}
 
-	pub(super) async fn sync_onchain_wallet(&self) -> Result<(), Error> {
+	pub(super) async fn sync_onchain_wallet(
+		&self, onchain_wallet: Arc<Wallet>,
+	) -> Result<(), Error> {
 		let receiver_res = {
 			let mut status_lock = self.onchain_wallet_sync_status.lock().unwrap();
 			status_lock.register_or_subscribe_pending_sync()
@@ -94,14 +93,14 @@ impl EsploraChainSource {
 			})?;
 		}
 
-		let res = self.sync_onchain_wallet_inner().await;
+		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
 		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
 		res
 	}
 
-	async fn sync_onchain_wallet_inner(&self) -> Result<(), Error> {
+	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<(), Error> {
 		// If this is our first sync, do a full scan with the configured gap limit.
 		// Otherwise just do an incremental sync.
 		let incremental_sync =
@@ -112,7 +111,7 @@ impl EsploraChainSource {
 				let now = Instant::now();
 				match $sync_future.await {
 					Ok(res) => match res {
-						Ok(update) => match self.onchain_wallet.apply_update(update) {
+						Ok(update) => match onchain_wallet.apply_update(update) {
 							Ok(()) => {
 								log_info!(
 									self.logger,
@@ -182,14 +181,14 @@ impl EsploraChainSource {
 		}
 
 		if incremental_sync {
-			let sync_request = self.onchain_wallet.get_incremental_sync_request();
+			let sync_request = onchain_wallet.get_incremental_sync_request();
 			let wallet_sync_timeout_fut = tokio::time::timeout(
 				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
 				self.esplora_client.sync(sync_request, BDK_CLIENT_CONCURRENCY),
 			);
 			get_and_apply_wallet_update!(wallet_sync_timeout_fut)
 		} else {
-			let full_scan_request = self.onchain_wallet.get_full_scan_request();
+			let full_scan_request = onchain_wallet.get_full_scan_request();
 			let wallet_sync_timeout_fut = tokio::time::timeout(
 				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
 				self.esplora_client.full_scan(
