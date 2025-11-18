@@ -705,15 +705,6 @@ impl NodeBuilder {
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
-		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
-			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(&logger)))
-		} else {
-			Arc::new(Runtime::new(Arc::clone(&logger)).map_err(|e| {
-				log_error!(logger, "Failed to setup tokio runtime: {}", e);
-				BuildError::RuntimeSetupFailed
-			})?)
-		};
-
 		let seed_bytes = seed_bytes_from_config(
 			&self.config,
 			self.entropy_source_config.as_ref(),
@@ -737,18 +728,7 @@ impl NodeBuilder {
 				BuildError::KVStoreSetupFailed
 			})?;
 
-		build_with_store_internal(
-			config,
-			self.chain_data_source_config.as_ref(),
-			self.gossip_source_config.as_ref(),
-			self.liquidity_source_config.as_ref(),
-			self.pathfinding_scores_sync_config.as_ref(),
-			self.async_payments_role,
-			seed_bytes,
-			runtime,
-			logger,
-			Arc::new(vss_store),
-		)
+		self.build_with_store(Arc::new(vss_store))
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
