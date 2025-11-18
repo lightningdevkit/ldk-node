@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
-use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
+use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
 #[cfg(feature = "uniffi")]
@@ -44,6 +44,11 @@ type Offer = Arc<crate::ffi::Offer>;
 type Refund = lightning::offers::refund::Refund;
 #[cfg(feature = "uniffi")]
 type Refund = Arc<crate::ffi::Refund>;
+
+#[cfg(not(feature = "uniffi"))]
+type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+#[cfg(feature = "uniffi")]
+type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
@@ -192,7 +197,7 @@ impl Bolt12Payment {
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send_using_amount(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
-		route_parameters: Option<RouteParametersConfig>,
+		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -228,7 +233,11 @@ impl Bolt12Payment {
 			retry_strategy,
 			route_params_config: route_parameters,
 		};
-		let res = if let Some(quantity) = quantity {
+		let res = if let Some(hrn) = hrn {
+			let hrn = maybe_deref(&hrn);
+			let offer = OfferFromHrn { offer: offer.clone(), hrn: *hrn };
+			self.channel_manager.pay_for_offer_from_hrn(&offer, amount_msat, payment_id, params)
+		} else if let Some(quantity) = quantity {
 			self.channel_manager.pay_for_offer_with_quantity(
 				&offer,
 				Some(amount_msat),
