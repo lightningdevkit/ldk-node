@@ -83,6 +83,7 @@ mod chain;
 pub mod config;
 mod connection;
 mod data_store;
+pub mod entropy;
 mod error;
 mod event;
 mod fee_estimator;
@@ -130,7 +131,6 @@ use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
-pub use io::utils::generate_entropy_mnemonic;
 use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
@@ -160,7 +160,6 @@ use types::{
 };
 pub use types::{
 	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
-	WordCount,
 };
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,

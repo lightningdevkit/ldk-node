@@ -17,7 +17,6 @@ use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
 use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
-use bip39::Mnemonic;
 use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
@@ -47,26 +46,11 @@ use crate::io::{
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
-use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper, WordCount};
+use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
 use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
-
-/// Generates a random [BIP 39] mnemonic with the specified word count.
-///
-/// If no word count is specified, defaults to 24 words (256-bit entropy).
-///
-/// The result may be used to initialize the [`Node`] entropy, i.e., can be given to
-/// [`Builder::set_entropy_bip39_mnemonic`].
-///
-/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
-/// [`Node`]: crate::Node
-/// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
-pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
-	let word_count = word_count.unwrap_or(WordCount::Words24).word_count();
-	Mnemonic::generate(word_count).expect("Failed to generate mnemonic")
-}
 
 pub(crate) fn read_or_generate_seed_file<L: Deref>(
 	keys_seed_path: &str, logger: L,
@@ -619,43 +603,4 @@ pub(crate) fn read_bdk_wallet_change_set(
 	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger))?
 		.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn mnemonic_to_entropy_to_mnemonic() {
-		// Test default (24 words)
-		let mnemonic = generate_entropy_mnemonic(None);
-		let entropy = mnemonic.to_entropy();
-		assert_eq!(mnemonic, Mnemonic::from_entropy(&entropy).unwrap());
-		assert_eq!(mnemonic.word_count(), 24);
-
-		// Test with different word counts
-		let word_counts = [
-			WordCount::Words12,
-			WordCount::Words15,
-			WordCount::Words18,
-			WordCount::Words21,
-			WordCount::Words24,
-		];
-
-		for word_count in word_counts {
-			let mnemonic = generate_entropy_mnemonic(Some(word_count));
-			let entropy = mnemonic.to_entropy();
-			assert_eq!(mnemonic, Mnemonic::from_entropy(&entropy).unwrap());
-
-			// Verify expected word count
-			let expected_words = match word_count {
-				WordCount::Words12 => 12,
-				WordCount::Words15 => 15,
-				WordCount::Words18 => 18,
-				WordCount::Words21 => 21,
-				WordCount::Words24 => 24,
-			};
-			assert_eq!(mnemonic.word_count(), expected_words);
-		}
-	}
 }
