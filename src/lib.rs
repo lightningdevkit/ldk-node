@@ -238,12 +238,19 @@ impl Node {
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
+		let sync_wallet = Arc::clone(&self.wallet);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		self.runtime.spawn_background_task(async move {
 			chain_source
-				.continuously_sync_wallets(stop_sync_receiver, sync_cman, sync_cmon, sync_sweeper)
+				.continuously_sync_wallets(
+					stop_sync_receiver,
+					sync_wallet,
+					sync_cman,
+					sync_cmon,
+					sync_sweeper,
+				)
 				.await;
 		});
 
@@ -1235,6 +1242,7 @@ impl Node {
 		}
 
 		let chain_source = Arc::clone(&self.chain_source);
+		let sync_wallet = Arc::clone(&self.wallet);
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
@@ -1244,11 +1252,16 @@ impl Node {
 				chain_source
 					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
 					.await?;
-				chain_source.sync_onchain_wallet().await?;
+				chain_source.sync_onchain_wallet(sync_wallet).await?;
 			} else {
 				chain_source.update_fee_rate_estimates().await?;
 				chain_source
-					.poll_and_update_listeners(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.poll_and_update_listeners(
+						sync_wallet,
+						sync_cman,
+						sync_cmon,
+						Arc::clone(&sync_sweeper),
+					)
 					.await?;
 			}
 			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;

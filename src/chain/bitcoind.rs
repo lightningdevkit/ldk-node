@@ -14,7 +14,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bitcoin::{BlockHash, FeeRate, Network, Transaction, Txid};
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::Listen;
+use lightning::chain::{BestBlock, Listen};
 use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpEndpoint, JsonResponse};
@@ -42,12 +42,12 @@ use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
+const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
 
 pub(super) struct BitcoindChainSource {
 	api_client: Arc<BitcoindClient>,
 	header_cache: tokio::sync::Mutex<BoundedHeaderCache>,
 	latest_chain_tip: RwLock<Option<ValidatedBlockHeader>>,
-	onchain_wallet: Arc<Wallet>,
 	wallet_polling_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	kv_store: Arc<DynStore>,
@@ -59,9 +59,8 @@ pub(super) struct BitcoindChainSource {
 impl BitcoindChainSource {
 	pub(crate) fn new_rpc(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
-		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rpc(
 			rpc_host.clone(),
@@ -77,7 +76,6 @@ impl BitcoindChainSource {
 			api_client,
 			header_cache,
 			latest_chain_tip,
-			onchain_wallet,
 			wallet_polling_status,
 			fee_estimator,
 			kv_store,
@@ -89,9 +87,9 @@ impl BitcoindChainSource {
 
 	pub(crate) fn new_rest(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
-		onchain_wallet: Arc<Wallet>, fee_estimator: Arc<OnchainFeeEstimator>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, rest_client_config: BitcoindRestClientConfig,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		rest_client_config: BitcoindRestClientConfig, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rest(
 			rest_client_config.rest_host,
@@ -111,7 +109,6 @@ impl BitcoindChainSource {
 			header_cache,
 			latest_chain_tip,
 			wallet_polling_status,
-			onchain_wallet,
 			fee_estimator,
 			kv_store,
 			config,
@@ -126,8 +123,8 @@ impl BitcoindChainSource {
 
 	pub(super) async fn continuously_sync_wallets(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
-		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>,
+		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
@@ -155,14 +152,10 @@ impl BitcoindChainSource {
 
 			let channel_manager_best_block_hash = channel_manager.current_best_block().block_hash;
 			let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
-			let onchain_wallet_best_block_hash =
-				self.onchain_wallet.current_best_block().block_hash;
+			let onchain_wallet_best_block_hash = onchain_wallet.current_best_block().block_hash;
 
 			let mut chain_listeners = vec![
-				(
-					onchain_wallet_best_block_hash,
-					&*self.onchain_wallet as &(dyn Listen + Send + Sync),
-				),
+				(onchain_wallet_best_block_hash, &*onchain_wallet as &(dyn Listen + Send + Sync)),
 				(channel_manager_best_block_hash, &*channel_manager as &(dyn Listen + Send + Sync)),
 				(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
 			];
@@ -307,6 +300,7 @@ impl BitcoindChainSource {
 							return;
 						}
 						_ = self.poll_and_update_listeners(
+							Arc::clone(&onchain_wallet),
 							Arc::clone(&channel_manager),
 							Arc::clone(&chain_monitor),
 							Arc::clone(&output_sweeper)
@@ -336,9 +330,36 @@ impl BitcoindChainSource {
 		}
 	}
 
+	pub(super) async fn poll_best_block(&self) -> Result<BestBlock, Error> {
+		self.poll_chain_tip().await.map(|tip| tip.to_best_block())
+	}
+
+	async fn poll_chain_tip(&self) -> Result<ValidatedBlockHeader, Error> {
+		let validate_res = tokio::time::timeout(
+			Duration::from_secs(CHAIN_POLLING_TIMEOUT_SECS),
+			validate_best_block_header(self.api_client.as_ref()),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
+			Error::TxSyncTimeout
+		})?;
+
+		match validate_res {
+			Ok(tip) => {
+				*self.latest_chain_tip.write().unwrap() = Some(tip);
+				Ok(tip)
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
+				return Err(Error::TxSyncFailed);
+			},
+		}
+	}
+
 	pub(super) async fn poll_and_update_listeners(
-		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>,
+		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let receiver_res = {
 			let mut status_lock = self.wallet_polling_status.lock().unwrap();
@@ -355,7 +376,12 @@ impl BitcoindChainSource {
 		}
 
 		let res = self
-			.poll_and_update_listeners_inner(channel_manager, chain_monitor, output_sweeper)
+			.poll_and_update_listeners_inner(
+				onchain_wallet,
+				channel_manager,
+				chain_monitor,
+				output_sweeper,
+			)
 			.await;
 
 		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
@@ -364,29 +390,17 @@ impl BitcoindChainSource {
 	}
 
 	async fn poll_and_update_listeners_inner(
-		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>,
+		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let latest_chain_tip_opt = self.latest_chain_tip.read().unwrap().clone();
-		let chain_tip = if let Some(tip) = latest_chain_tip_opt {
-			tip
-		} else {
-			match validate_best_block_header(self.api_client.as_ref()).await {
-				Ok(tip) => {
-					*self.latest_chain_tip.write().unwrap() = Some(tip);
-					tip
-				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
-					return Err(Error::TxSyncFailed);
-				},
-			}
-		};
+		let chain_tip =
+			if let Some(tip) = latest_chain_tip_opt { tip } else { self.poll_chain_tip().await? };
 
 		let mut locked_header_cache = self.header_cache.lock().await;
 		let chain_poller = ChainPoller::new(Arc::clone(&self.api_client), self.config.network);
 		let chain_listener = ChainListener {
-			onchain_wallet: Arc::clone(&self.onchain_wallet),
+			onchain_wallet: Arc::clone(&onchain_wallet),
 			channel_manager: Arc::clone(&channel_manager),
 			chain_monitor: Arc::clone(&chain_monitor),
 			output_sweeper,
@@ -422,7 +436,7 @@ impl BitcoindChainSource {
 		let cur_height = channel_manager.current_best_block().height;
 
 		let now = SystemTime::now();
-		let bdk_unconfirmed_txids = self.onchain_wallet.get_unconfirmed_txids();
+		let bdk_unconfirmed_txids = onchain_wallet.get_unconfirmed_txids();
 		match self
 			.api_client
 			.get_updated_mempool_transactions(cur_height, bdk_unconfirmed_txids)
@@ -436,11 +450,11 @@ impl BitcoindChainSource {
 					evicted_txids.len(),
 					now.elapsed().unwrap().as_millis()
 				);
-				self.onchain_wallet
-					.apply_mempool_txs(unconfirmed_txs, evicted_txids)
-					.unwrap_or_else(|e| {
+				onchain_wallet.apply_mempool_txs(unconfirmed_txs, evicted_txids).unwrap_or_else(
+					|e| {
 						log_error!(self.logger, "Failed to apply mempool transactions: {:?}", e);
-					});
+					},
+				);
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to poll for mempool transactions: {:?}", e);
