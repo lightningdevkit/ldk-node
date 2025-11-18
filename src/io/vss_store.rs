@@ -5,8 +5,11 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+//! Objects related to [`VssStore`] live here.
+
 use std::boxed::Box;
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
@@ -15,7 +18,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+use bitcoin::key::Secp256k1;
+use bitcoin::Network;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
 use lightning::util::persist::{KVStore, KVStoreSync};
@@ -24,7 +30,7 @@ use prost::Message;
 use rand::RngCore;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
-use vss_client::headers::VssHeaderProvider;
+use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 use vss_client::types::{
 	DeleteObjectRequest, GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest,
 	Storable,
@@ -36,6 +42,7 @@ use vss_client::util::retry::{
 };
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 
+use crate::entropy::NodeEntropy;
 use crate::io::utils::check_namespace_key_validity;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
@@ -61,13 +68,17 @@ impl_writeable_tlv_based_enum!(VssSchemaVersion,
 	(1, V1) => {},
 );
 
+const VSS_HARDENED_CHILD_INDEX: u32 = 877;
+const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
 const VSS_SCHEMA_VERSION_KEY: &str = "vss_schema_version";
 
 // We set this to a small number of threads that would still allow to make some progress if one
 // would hit a blocking case
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
 
-/// A [`KVStoreSync`] implementation that writes to and reads from a [VSS](https://github.com/lightningdevkit/vss-server/blob/main/README.md) backend.
+/// A [`KVStore`]/[`KVStoreSync`] implementation that writes to and reads from a [VSS] backend.
+///
+/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 pub struct VssStore {
 	inner: Arc<VssStoreInner>,
 	// Version counter to ensure that writes are applied in the correct order. It is assumed that read and list
@@ -138,6 +149,12 @@ impl VssStore {
 		));
 
 		Ok(Self { inner, next_version, internal_runtime: Some(internal_runtime) })
+	}
+	/// Returns a [`VssStoreBuilder`] allowing to build a [`VssStore`].
+	pub fn builder(
+		node_entropy: NodeEntropy, vss_url: String, store_id: String, network: Network,
+	) -> VssStoreBuilder {
+		VssStoreBuilder::new(node_entropy, vss_url, store_id, network)
 	}
 
 	// Same logic as for the obfuscated keys below, but just for locking, using the plaintext keys
@@ -799,6 +816,148 @@ impl EntropySource for RandEntropySource {
 
 #[cfg(test)]
 impl RefUnwindSafe for VssStore {}
+
+/// An error that could arise during [`VssStore`] building.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VssStoreBuildError {
+	/// Key derivation failed
+	KeyDerivationFailed,
+	/// Authentication provider setup failed
+	AuthProviderSetupFailed,
+	/// Store setup failed
+	StoreSetupFailed,
+}
+
+impl fmt::Display for VssStoreBuildError {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match *self {
+			Self::KeyDerivationFailed => write!(f, "Key derivation failed"),
+			Self::AuthProviderSetupFailed => write!(f, "Authentication provider setup failed"),
+			Self::StoreSetupFailed => write!(f, "Store setup failed"),
+		}
+	}
+}
+
+impl std::error::Error for VssStoreBuildError {}
+
+/// A builder for a [`VssStore`] instance.
+pub struct VssStoreBuilder {
+	node_entropy: NodeEntropy,
+	vss_url: String,
+	store_id: String,
+	network: Network,
+}
+
+impl VssStoreBuilder {
+	/// Create a new [`VssStoreBuilder`].
+	pub fn new(
+		node_entropy: NodeEntropy, vss_url: String, store_id: String, network: Network,
+	) -> Self {
+		Self { node_entropy, vss_url, store_id, network }
+	}
+
+	/// Builds a [`VssStore`] with [LNURL-auth] based authentication scheme as default method for
+	/// authentication/authorization.
+	///
+	/// The LNURL challenge will be retrieved by making a request to the given
+	/// `lnurl_auth_server_url`. The returned JWT token in response to the signed LNURL request,
+	/// will be used for authentication/authorization of all the requests made to VSS.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth
+	/// server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental. Using VSS (or any
+	/// remote persistence) may cause LDK to panic if persistence failures are unrecoverable, i.e.,
+	/// if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	pub fn build(
+		&self, lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
+	) -> Result<VssStore, VssStoreBuildError> {
+		let secp_ctx = Secp256k1::new();
+		let seed_bytes = self.node_entropy.to_seed_bytes();
+		let vss_xprv = Xpriv::new_master(self.network, &seed_bytes)
+			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
+			.and_then(|master| {
+				master
+					.derive_priv(
+						&secp_ctx,
+						&[ChildNumber::Hardened { index: VSS_HARDENED_CHILD_INDEX }],
+					)
+					.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
+			})?;
+
+		let lnurl_auth_xprv = vss_xprv
+			.derive_priv(
+				&secp_ctx,
+				&[ChildNumber::Hardened { index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX }],
+			)
+			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)?;
+
+		let lnurl_auth_jwt_provider =
+			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers)
+				.map_err(|_| VssStoreBuildError::AuthProviderSetupFailed)?;
+
+		let header_provider = Arc::new(lnurl_auth_jwt_provider);
+
+		self.build_with_header_provider(header_provider)
+	}
+
+	/// Builds a [`VssStore`] with [`FixedHeaders`] as default method for
+	/// authentication/authorization.
+	///
+	/// Given `fixed_headers` are included as it is in all the requests made to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental. Using VSS (or any
+	/// remote persistence) may cause LDK to panic if persistence failures are unrecoverable, i.e.,
+	/// if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_fixed_headers(
+		&self, fixed_headers: HashMap<String, String>,
+	) -> Result<VssStore, VssStoreBuildError> {
+		let header_provider = Arc::new(FixedHeaders::new(fixed_headers));
+		self.build_with_header_provider(header_provider)
+	}
+
+	/// Builds a [`VssStore`] with [`VssHeaderProvider`].
+	///
+	/// Any headers provided by `header_provider` will be attached to every request made to VSS.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_header_provider(
+		&self, header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<VssStore, VssStoreBuildError> {
+		let seed_bytes = self.node_entropy.to_seed_bytes();
+		let vss_xprv = Xpriv::new_master(self.network, &seed_bytes)
+			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
+			.and_then(|master| {
+				master
+					.derive_priv(
+						&Secp256k1::new(),
+						&[ChildNumber::Hardened { index: VSS_HARDENED_CHILD_INDEX }],
+					)
+					.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
+			})?;
+
+		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
+
+		let vss_store = VssStore::new(
+			self.vss_url.clone(),
+			self.store_id.clone(),
+			vss_seed_bytes,
+			header_provider,
+		)
+		.map_err(|_| VssStoreBuildError::StoreSetupFailed)?;
+
+		Ok(vss_store)
+	}
+}
 
 #[cfg(test)]
 #[cfg(vss_test)]
