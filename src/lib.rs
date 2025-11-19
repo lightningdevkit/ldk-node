@@ -109,6 +109,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::{Address, Amount};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -124,6 +125,7 @@ pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
+use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 #[cfg(feature = "uniffi")]
 use ffi::*;
 use gossip::GossipSource;
@@ -131,10 +133,12 @@ use graph::NetworkGraph;
 pub use io::utils::generate_entropy_mnemonic;
 use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
-use lightning::events::bump_transaction::Wallet as LdkWallet;
+use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
+use lightning::ln::chan_utils::{make_funding_redeemscript, FUNDING_TRANSACTION_WITNESS_WEIGHT};
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
@@ -179,6 +183,7 @@ pub struct Node {
 	wallet: Arc<Wallet>,
 	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
+	fee_estimator: Arc<OnchainFeeEstimator>,
 	event_queue: Arc<EventQueue<Arc<Logger>>>,
 	channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>,
@@ -1072,50 +1077,14 @@ impl Node {
 		let con_addr = peer_info.address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
-		let cur_anchor_reserve_sats =
-			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-		let spendable_amount_sats =
-			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
-
-		// Fail early if we have less than the channel value available.
-		if spendable_amount_sats < channel_amount_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, channel_amount_sats
-			);
-			return Err(Error::InsufficientFunds);
-		}
-
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		self.runtime.block_on(async move {
 			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
-		// Fail if we have less than the channel value + anchor reserve available (if applicable).
-		let init_features = self
-			.peer_manager
-			.peer_by_node_id(&node_id)
-			.ok_or(Error::ConnectionFailed)?
-			.init_features;
-		let required_funds_sats = channel_amount_sats
-			+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-				if init_features.requires_anchors_zero_fee_htlc_tx()
-					&& !c.trusted_peers_no_reserve.contains(&node_id)
-				{
-					c.per_channel_reserve_sats
-				} else {
-					0
-				}
-			});
-
-		if spendable_amount_sats < required_funds_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, required_funds_sats
-			);
-			return Err(Error::InsufficientFunds);
-		}
+		// Check funds availability after connection (includes anchor reserve calculation)
+		self.check_sufficient_funds_for_channel(channel_amount_sats, &node_id)?;
 
 		let mut user_config = default_user_config(&self.config);
 		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
@@ -1154,6 +1123,51 @@ impl Node {
 				Err(Error::ChannelCreationFailed)
 			},
 		}
+	}
+
+	fn check_sufficient_funds_for_channel(
+		&self, amount_sats: u64, peer_node_id: &PublicKey,
+	) -> Result<(), Error> {
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let spendable_amount_sats =
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+
+		// Fail early if we have less than the channel value available.
+		if spendable_amount_sats < amount_sats {
+			log_error!(self.logger,
+				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+				spendable_amount_sats, amount_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		// Fail if we have less than the channel value + anchor reserve available (if applicable).
+		let init_features = self
+			.peer_manager
+			.peer_by_node_id(peer_node_id)
+			.ok_or(Error::ConnectionFailed)?
+			.init_features;
+		let required_funds_sats = amount_sats
+			+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
+				if init_features.requires_anchors_zero_fee_htlc_tx()
+					&& !c.trusted_peers_no_reserve.contains(peer_node_id)
+				{
+					c.per_channel_reserve_sats
+				} else {
+					0
+				}
+			});
+
+		if spendable_amount_sats < required_funds_sats {
+			log_error!(self.logger,
+				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+				spendable_amount_sats, required_funds_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		Ok(())
 	}
 
 	/// Connect to a node and open a new unannounced channel.
@@ -1225,6 +1239,186 @@ impl Node {
 			channel_config,
 			true,
 		)
+	}
+
+	/// Add funds from the on-chain wallet into an existing channel.
+	///
+	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
+	/// this classification may change in the future.
+	pub fn splice_in(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		splice_amount_sats: u64,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
+
+			const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
+				1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
+
+			// Used for creating a redeem script for the previous funding txo and the new funding
+			// txo. Only needed when selecting which UTXOs to include in the funding tx that would
+			// be sufficient to pay for fees. Hence, the value does not matter.
+			let dummy_pubkey = PublicKey::from_slice(&[2; 33]).unwrap();
+
+			let funding_txo = channel_details.funding_txo.ok_or_else(|| {
+				log_error!(self.logger, "Failed to splice channel: channel not yet ready",);
+				Error::ChannelSplicingFailed
+			})?;
+
+			let shared_input = Input {
+				outpoint: funding_txo.into_bitcoin_outpoint(),
+				previous_utxo: bitcoin::TxOut {
+					value: Amount::from_sat(channel_details.channel_value_satoshis),
+					script_pubkey: make_funding_redeemscript(&dummy_pubkey, &dummy_pubkey)
+						.to_p2wsh(),
+				},
+				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT + FUNDING_TRANSACTION_WITNESS_WEIGHT,
+			};
+
+			let shared_output = bitcoin::TxOut {
+				value: shared_input.previous_utxo.value + Amount::from_sat(splice_amount_sats),
+				script_pubkey: make_funding_redeemscript(&dummy_pubkey, &dummy_pubkey).to_p2wsh(),
+			};
+
+			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+
+			let inputs = self
+				.wallet
+				.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
+				.map_err(|()| {
+					log_error!(
+						self.logger,
+						"Failed to splice channel: insufficient confirmed UTXOs",
+					);
+					Error::ChannelSplicingFailed
+				})?;
+
+			let change_address = self.wallet.get_new_internal_address()?;
+
+			let contribution = SpliceContribution::SpliceIn {
+				value: Amount::from_sat(splice_amount_sats),
+				inputs,
+				change_script: Some(change_address.script_pubkey()),
+			};
+
+			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
+				Ok(fee_rate) => fee_rate,
+				Err(_) => {
+					debug_assert!(false);
+					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
+				},
+			};
+
+			self.channel_manager
+				.splice_channel(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					funding_feerate_per_kw,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					let tx = bitcoin::Transaction {
+						version: bitcoin::transaction::Version::TWO,
+						lock_time: bitcoin::absolute::LockTime::ZERO,
+						input: vec![],
+						output: vec![bitcoin::TxOut {
+							value: Amount::ZERO,
+							script_pubkey: change_address.script_pubkey(),
+						}],
+					};
+					match self.wallet.cancel_tx(&tx) {
+						Ok(()) => Error::ChannelSplicingFailed,
+						Err(e) => e,
+					}
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id {} and counterparty {}",
+				user_channel_id,
+				counterparty_node_id
+			);
+
+			Err(Error::ChannelSplicingFailed)
+		}
+	}
+
+	/// Remove funds from an existing channel, sending them to an on-chain address.
+	///
+	/// This provides for decreasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-out will be marked as an inbound payment if
+	/// paid to an address associated with the on-chain wallet, but this classification may change
+	/// in the future.
+	pub fn splice_out(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
+		splice_amount_sats: u64,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			if splice_amount_sats > channel_details.outbound_capacity_msat {
+				return Err(Error::ChannelSplicingFailed);
+			}
+
+			self.wallet.parse_and_validate_address(address)?;
+
+			let contribution = SpliceContribution::SpliceOut {
+				outputs: vec![bitcoin::TxOut {
+					value: Amount::from_sat(splice_amount_sats),
+					script_pubkey: address.script_pubkey(),
+				}],
+			};
+
+			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
+				Ok(fee_rate) => fee_rate,
+				Err(_) => {
+					debug_assert!(false, "FeeRate should always fit within u32");
+					log_error!(self.logger, "FeeRate should always fit within u32");
+					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
+				},
+			};
+
+			self.channel_manager
+				.splice_channel(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					funding_feerate_per_kw,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id {} and counterparty {}",
+				user_channel_id,
+				counterparty_node_id
+			);
+			Err(Error::ChannelSplicingFailed)
+		}
 	}
 
 	/// Manually sync the LDK and BDK wallets with the current chain state and update the fee rate

@@ -6,11 +6,13 @@
 // accordance with one or both of these licenses.
 
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
+use bdk_wallet::descriptor::ExtendedDescriptor;
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
 use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update};
@@ -19,19 +21,20 @@ use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::key::XOnlyPublicKey;
-use bitcoin::psbt::Psbt;
+use bitcoin::psbt::{self, Psbt};
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
-	Address, Amount, FeeRate, Network, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash,
+	Address, Amount, FeeRate, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
 	WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BestBlock, Listen};
-use lightning::events::bump_transaction::{Utxo, WalletSource};
+use lightning::events::bump_transaction::{Input, Utxo, WalletSource};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
@@ -285,7 +288,7 @@ impl Wallet {
 		Ok(address_info.address)
 	}
 
-	fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
+	pub(crate) fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut locked_persister = self.persister.lock().unwrap();
 
@@ -295,6 +298,19 @@ impl Wallet {
 			Error::PersistenceFailed
 		})?;
 		Ok(address_info.address)
+	}
+
+	pub(crate) fn cancel_tx(&self, tx: &Transaction) -> Result<(), Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_persister = self.persister.lock().unwrap();
+
+		locked_wallet.cancel_tx(tx);
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		Ok(())
 	}
 
 	pub(crate) fn get_balances(
@@ -332,12 +348,10 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
-	fn parse_and_validate_address(
-		&self, network: Network, address: &Address,
-	) -> Result<Address, Error> {
+	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?
-			.require_network(network)
+			.require_network(self.config.network)
 			.map_err(|_| Error::InvalidAddress)
 	}
 
@@ -346,7 +360,7 @@ impl Wallet {
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
 		fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
-		self.parse_and_validate_address(self.config.network, &address)?;
+		self.parse_and_validate_address(&address)?;
 
 		// Use the set fee_rate or default to fee estimation.
 		let confirmation_target = ConfirmationTarget::OnchainPayment;
@@ -559,6 +573,56 @@ impl Wallet {
 		Ok(txid)
 	}
 
+	pub(crate) fn select_confirmed_utxos(
+		&self, must_spend: Vec<Input>, must_pay_to: &[TxOut], fee_rate: FeeRate,
+	) -> Result<Vec<FundingTxInput>, ()> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::External),
+			ExtendedDescriptor::Wpkh(_)
+		));
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::Internal),
+			ExtendedDescriptor::Wpkh(_)
+		));
+
+		let mut tx_builder = locked_wallet.build_tx();
+		tx_builder.only_witness_utxo();
+
+		for input in &must_spend {
+			let psbt_input = psbt::Input {
+				witness_utxo: Some(input.previous_utxo.clone()),
+				..Default::default()
+			};
+			let weight = Weight::from_wu(input.satisfaction_weight);
+			tx_builder.add_foreign_utxo(input.outpoint, psbt_input, weight).map_err(|_| ())?;
+		}
+
+		for output in must_pay_to {
+			tx_builder.add_recipient(output.script_pubkey.clone(), output.value);
+		}
+
+		tx_builder.fee_rate(fee_rate);
+		tx_builder.exclude_unconfirmed();
+
+		tx_builder
+			.finish()
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to select confirmed UTXOs: {}", e);
+			})?
+			.unsigned_tx
+			.input
+			.iter()
+			.filter(|txin| must_spend.iter().all(|input| input.outpoint != txin.previous_output))
+			.filter_map(|txin| {
+				locked_wallet
+					.tx_details(txin.previous_output.txid)
+					.map(|tx_details| tx_details.tx.deref().clone())
+					.map(|prevtx| FundingTxInput::new_p2wpkh(prevtx, txin.previous_output.vout))
+			})
+			.collect::<Result<Vec<_>, ()>>()
+	}
+
 	fn list_confirmed_utxos_inner(&self) -> Result<Vec<Utxo>, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut utxos = Vec::new();
@@ -662,6 +726,43 @@ impl Wallet {
 			()
 		})?;
 		Ok(address_info.address.script_pubkey())
+	}
+
+	#[allow(deprecated)]
+	pub(crate) fn sign_owned_inputs(&self, unsigned_tx: Transaction) -> Result<Transaction, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to construct PSBT: {}", e);
+		})?;
+		for (i, txin) in psbt.unsigned_tx.input.iter().enumerate() {
+			if let Some(utxo) = locked_wallet.get_utxo(txin.previous_output) {
+				debug_assert!(!utxo.is_spent);
+				psbt.inputs[i] = locked_wallet.get_psbt_input(utxo, None, true).map_err(|e| {
+					log_error!(self.logger, "Failed to construct PSBT input: {}", e);
+				})?;
+			}
+		}
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		match locked_wallet.sign(&mut psbt, sign_options) {
+			Ok(finalized) => debug_assert!(!finalized),
+			Err(e) => {
+				log_error!(self.logger, "Failed to sign owned inputs: {}", e);
+				return Err(());
+			},
+		}
+
+		match psbt.extract_tx() {
+			Ok(tx) => Ok(tx),
+			Err(bitcoin::psbt::ExtractTxError::MissingInputValue { tx }) => Ok(tx),
+			Err(e) => {
+				log_error!(self.logger, "Failed to extract transaction: {}", e);
+				Err(())
+			},
+		}
 	}
 
 	#[allow(deprecated)]
