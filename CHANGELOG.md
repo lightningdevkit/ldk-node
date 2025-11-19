@@ -1,3 +1,56 @@
+# 0.7.0 - TODO
+This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
+
+## Feature and API updates
+- Experimental support for channel splicing has been added. (#677)
+    - **Note**: Splicing-related transactions might currently still get misclassified in the payment store.
+- Support for serving and paying static invoices for Async Payments has been added. (#621, #632)
+- Sourcing chain data via Bitcoin Core's REST interface is now supported. (#526)
+- A new `Builder::set_chain_source_esplora_with_headers` method has been added
+  that allows specifying headers to be sent to the Esplora backend. (#596)
+- The ability to import and merge pathfinding scores has been added. (#449)
+- Passing a custom pre-image when sending spontaneous payments is now supported. (#549)
+- When running in the context of a `tokio` runtime, we now attempt to reuse the
+  outer runtime context for our main runtime. (#543)
+- Specifying a `RouteParametersConfig` when paying BOLT12 offers or sending refunds is now supported. (#702)
+- Liquidity service data is now persisted across restarts. (#650)
+- The bLIP-52/LSPS2 service now supports the 'client-trusts-LSP' model. (#687)
+- The manual-claiming flow is now also supported for JIT invoices. (#608)
+- Any key-value stores provided to `Builder::build_with_store` are now
+  required to implement LDK's `KVStore` as well as `KVStoreSync` interfaces.
+  (#633)
+- The `generate_entropy_mnemonic` method now supports specifying a word count. (#699)
+
+## Bug Fixes and Improvements
+- Robustness of the shutdown procedure has been improved, minimizing risk of blocking during `Node::stop`. (#592, #612, #619, #622)
+- The VSS storage backend now supports 'lazy' deletes, allowing it to avoid unnecessary remote calls for certain operations. (#689)
+- The encryption and obfuscation scheme used when storing data against a VSS backend has been improved. (#627)
+- Transient errors during `bitcoind` RPC chain synchronization are now retried with an exponential back-off. (#588)
+- Transactions evicted from the mempool are now correctly handled when syncing via `bitcoind` RPC/REST. (#605)
+- When sourcing chain data from a Bitcoin Core backend, we now poll for the
+  current tip in `Builder::build`, avoiding re-validating the chain from
+  genesis on first startup. (#706)
+- A bug that could result in the node hanging on shutdown when sourcing chain data from a Bitcoin Core backend has been fixed. (#682)
+- Unnecessary fee estimation calls to Bitcoin Core RPC are now avoided. (#631)
+- The node now persists differential updates instead of re-persisting full channel monitor, reducing IO load. (#661)
+- The previously rather restrictive `MaximumFeeEstimate` was relaxed. (#629)
+- The node now listens on all provided listening addresses. (#644)
+
+## Compatibility Notes
+- The minimum supported Rust version (MSRV) has been bumped to `rustc` v1.85 (#606)
+- The LDK dependency has been bumped to v0.2.
+- The BDK dependency has been bumped to v2.2. (#656)
+- The VSS client dependency has been updated to utilize the new `vss-client-ng` crate v0.4. (#627)
+- The `rust-bitcoin` dependency has been bumped to v0.32.7. (#656)
+- The `uniffi` dependency has been bumped to v0.28.3. (#591)
+- The `electrum-client` dependency has been bumped to v0.24.0. (#602)
+- For Kotlin/Android builds we now require 16kb page sizes, ensuring Play Store compatibility. (#625)
+
+In total, this release features TODO files changed, TODO insertions, TODO
+deletions in TODO commits from TODO authors in alphabetical order:
+
+- TODO TODO
+
 # 0.6.2 - Aug. 14, 2025
 This patch release fixes a panic that could have been hit when syncing to a
 TLS-enabled Electrum server, as well as some minor issues when shutting down
