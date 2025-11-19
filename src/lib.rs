@@ -75,7 +75,7 @@
 #![deny(rustdoc::private_intra_doc_links)]
 #![allow(bare_trait_objects)]
 #![allow(ellipsis_inclusive_range_patterns)]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod balance;
 mod builder;
