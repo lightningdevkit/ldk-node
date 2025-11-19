@@ -130,7 +130,18 @@ pub struct LSPS2ServiceConfig {
 	pub min_payment_size_msat: u64,
 	/// The maximum payment size that we will accept when opening a channel.
 	pub max_payment_size_msat: u64,
-	/// Use the client trusts lsp model
+	/// Use the 'client-trusts-LSP' trust model.
+	///
+	/// When set, the service will delay *broadcasting* the JIT channel's funding transaction until
+	/// the client claimed sufficient HTLC parts to pay for the channel open.
+	///
+	/// Note this will render the flow incompatible with clients utilizing the 'LSP-trust-client'
+	/// trust model, i.e., in turn delay *claiming* any HTLCs until they see the funding
+	/// transaction in the mempool.
+	///
+	/// Please refer to [`bLIP-52`] for more information.
+	///
+	/// [`bLIP-52`]: https://github.com/lightning/blips/blob/master/blip-0052.md#trust-models
 	pub client_trusts_lsp: bool,
 }
 
