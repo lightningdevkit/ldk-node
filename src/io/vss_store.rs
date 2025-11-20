@@ -5,6 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+//! Objects related to [`VssStore`] live here.
+
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::future::Future;
@@ -36,7 +38,6 @@ use vss_client::util::retry::{
 	MaxAttemptsRetryPolicy, MaxTotalDelayRetryPolicy, RetryPolicy,
 };
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
-
 use crate::io::utils::check_namespace_key_validity;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
@@ -84,7 +85,12 @@ pub struct VssStore {
 }
 
 impl VssStore {
-	pub(crate) fn new(
+	/// Constructs a new [`VssStore`].
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental.
+	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
+	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+	pub fn new(
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> io::Result<Self> {
