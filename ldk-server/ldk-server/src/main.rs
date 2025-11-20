@@ -24,7 +24,7 @@ use crate::io::persist::{
 	FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE, PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
 	PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::util::config::load_config;
+use crate::util::config::{load_config, ChainSource};
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use hex::DisplayHex;
 use ldk_node::config::Config;
@@ -79,14 +79,19 @@ fn main() {
 	let mut builder = Builder::from_config(ldk_node_config);
 	builder.set_log_facade_logger();
 
-	let bitcoind_rpc_addr = config_file.bitcoind_rpc_addr;
-
-	builder.set_chain_source_bitcoind_rpc(
-		bitcoind_rpc_addr.ip().to_string(),
-		bitcoind_rpc_addr.port(),
-		config_file.bitcoind_rpc_user,
-		config_file.bitcoind_rpc_password,
-	);
+	match config_file.chain_source {
+		ChainSource::Rpc { rpc_address, rpc_user, rpc_password } => {
+			builder.set_chain_source_bitcoind_rpc(
+				rpc_address.ip().to_string(),
+				rpc_address.port(),
+				rpc_user,
+				rpc_password,
+			);
+		},
+		ChainSource::Esplora { server_url } => {
+			builder.set_chain_source_esplora(server_url, None);
+		},
+	}
 
 	// LSPS2 support is highly experimental and for testing purposes only.
 	#[cfg(feature = "experimental-lsps2-support")]
