@@ -76,8 +76,11 @@ use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics};
 
-const VSS_HARDENED_CHILD_INDEX: u32 = 877;
-const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
+/// Child index used for deriving the VSS XPriv from the wallet seed.
+pub const VSS_HARDENED_CHILD_INDEX: u32 = 877;
+/// Child index used for deriving the LNURL-auth XPriv from the VSS XPriv.
+pub const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
+
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
 
