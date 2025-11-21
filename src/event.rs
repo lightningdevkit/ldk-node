@@ -498,9 +498,19 @@ pub enum Event {
 	},
 	/// An onchain transaction became unconfirmed.
 	///
-	/// This can happen after a chain reorganization where a previously confirmed transaction
-	/// is no longer in the best chain. Applications should handle this by marking the
-	/// transaction as pending again.
+	/// This event is emitted in two scenarios:
+	/// 1. **Chain Reorg**: A previously confirmed transaction is no longer
+	///    in the best chain due to a reorg.
+	/// 2. **Replace-By-Fee (RBF)**: A transaction was replaced by another transaction.
+	///
+	/// **Note**: This event does NOT cover all cases of transaction removal from the mempool.
+	/// Specifically, it will NOT be emitted when:
+	/// - A transaction is dropped from the mempool due to expiration
+	/// - A transaction is evicted due to low fees when the mempool is full
+	/// - A transaction is simply "forgotten" by nodes without replacement
+	///
+	/// Applications should handle this event by marking the transaction as pending again
+	/// and potentially taking action (e.g., updating UI, re-evaluating fee requirements).
 	///
 	/// # Example
 	///
@@ -516,7 +526,7 @@ pub enum Event {
 	/// node.sync_wallets().unwrap();
 	///
 	/// if let Some(Event::OnchainTransactionUnconfirmed { txid }) = node.next_event() {
-	///     println!("Transaction {} is now unconfirmed due to reorg", txid);
+	///     println!("Transaction {} is now unconfirmed due to a reorg or RBF", txid);
 	///     node.event_handled().unwrap();
 	/// }
 	/// ```
