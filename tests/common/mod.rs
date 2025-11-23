@@ -100,7 +100,7 @@ macro_rules! expect_channel_ready_event {
 pub(crate) use expect_channel_ready_event;
 
 macro_rules! expect_splice_pending_event {
-	($node: expr, $counterparty_node_id: expr) => {{
+	($node:expr, $counterparty_node_id:expr) => {{
 		match $node.next_event_async().await {
 			ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
