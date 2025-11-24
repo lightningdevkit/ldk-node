@@ -72,11 +72,6 @@ jobs:
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
         if: matrix.build-uniffi
         run: cargo build --features uniffi --verbose --color always
-      - name: Build documentation on Rust ${{ matrix.toolchain }}
-        if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.85.0'"
-        run: |
-          cargo doc --release --verbose --color always
-          cargo doc --document-private-items --verbose --color always
       - name: Check release build on Rust ${{ matrix.toolchain }}
         run: cargo check --release --verbose --color always
       - name: Check release build with UniFFI support on Rust ${{ matrix.toolchain }}
@@ -90,3 +85,14 @@ jobs:
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
           RUSTFLAGS="--cfg no_download" cargo test --features uniffi
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/install@cargo-docs-rs
+      - run: cargo docs-rs
