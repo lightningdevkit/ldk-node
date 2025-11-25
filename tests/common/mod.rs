@@ -215,22 +215,17 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-pub(crate) fn random_port() -> u16 {
-	let mut rng = rng();
-	rng.random_range(5000..32768)
-}
-
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 	let num_addresses = 2;
-	let mut listening_addresses = Vec::with_capacity(num_addresses);
+	let mut listening_addresses = HashSet::new();
 
-	for _ in 0..num_addresses {
-		let rand_port = random_port();
-		let address: SocketAddress = format!("127.0.0.1:{}", rand_port).parse().unwrap();
-		listening_addresses.push(address);
+	while listening_addresses.len() < num_addresses {
+		let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		let address: SocketAddress = socket.local_addr().unwrap().into();
+		listening_addresses.insert(address);
 	}
 
-	listening_addresses
+	listening_addresses.into_iter().collect()
 }
 
 pub(crate) fn random_node_alias() -> Option<NodeAlias> {
