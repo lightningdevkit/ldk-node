@@ -35,7 +35,7 @@ use bdk_wallet::event::WalletEvent;
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
-	esplora_client: EsploraAsyncClient,
+	pub(super) esplora_client: EsploraAsyncClient,
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	tx_sync: Arc<EsploraSyncClient<Arc<Logger>>>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,

@@ -2448,7 +2448,10 @@ fn test_event_serialization_roundtrip() {
 	test_roundtrip(event);
 
 	// Test OnchainTransactionReplaced
-	let event = Event::OnchainTransactionReplaced { txid: Txid::from_slice(&[6; 32]).unwrap() };
+	let event = Event::OnchainTransactionReplaced {
+		txid: Txid::from_slice(&[6; 32]).unwrap(),
+		conflicts: vec![Txid::from_slice(&[7; 32]).unwrap()],
+	};
 	test_roundtrip(event);
 
 	// Test OnchainTransactionReorged

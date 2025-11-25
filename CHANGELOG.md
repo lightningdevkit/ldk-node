@@ -6,7 +6,7 @@
     - `OnchainTransactionReceived`: Emitted when a new unconfirmed transaction is
       first detected in the mempool (instant notification for incoming payments!)
     - `OnchainTransactionConfirmed`: Emitted when a transaction receives confirmations
-    - `OnchainTransactionReplaced`: Emitted when a transaction is replaced (via RBF or different transaction using a commmon input)
+    - `OnchainTransactionReplaced`: Emitted when a transaction is replaced (via RBF or different transaction using a common input). Includes the replaced transaction ID and the list of conflicting replacement transaction IDs.
     - `OnchainTransactionReorged`: Emitted when a previously confirmed transaction
       becomes unconfirmed due to a blockchain reorg
     - `OnchainTransactionEvicted`: Emitted when a transaction is evicted from the mempool

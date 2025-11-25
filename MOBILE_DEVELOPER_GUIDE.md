@@ -41,7 +41,8 @@ These events notify you about Bitcoin transactions affecting your onchain wallet
 - **When**: Transaction is replaced via Replace-By-Fee (RBF)
 - **Use Case**: Update UI to show the transaction was replaced
 - **Fields**:
-  - `txid`: Transaction ID of the replacement transaction
+  - `txid`: Transaction ID of the transaction that was replaced (the old transaction)
+  - `conflicts`: Array of transaction IDs that replaced this transaction (the replacement transactions)
 
 #### `OnchainTransactionReorged`
 - **When**: Previously confirmed transaction becomes unconfirmed due to blockchain reorg
@@ -201,8 +202,8 @@ class WalletEventHandler {
         case .onchainTransactionConfirmed(let txid, let blockHash, let blockHeight, let confirmationTime, let details):
             handleConfirmedTransaction(txid: txid, height: blockHeight, details: details)
 
-        case .onchainTransactionReplaced(let txid):
-            handleReplacedTransaction(txid: txid)
+        case .onchainTransactionReplaced(let txid, let conflicts):
+            handleReplacedTransaction(txid: txid, conflicts: conflicts)
 
         case .onchainTransactionReorged(let txid):
             handleReorgedTransaction(txid: txid)
@@ -278,14 +279,27 @@ func handleConfirmedTransaction(txid: String, height: UInt32, details: Transacti
     }
 }
 
-func handleReplacedTransaction(txid: String) {
+func handleReplacedTransaction(txid: String, conflicts: [String]) {
     DispatchQueue.main.async {
         self.updateTransactionStatus(txid: txid, status: .replaced)
-        self.showNotification(
-            title: "Transaction Replaced",
-            body: "Transaction was replaced via RBF",
-            txid: txid
-        )
+        
+        if conflicts.isEmpty {
+            self.showNotification(
+                title: "Transaction Replaced",
+                body: "Transaction was replaced via RBF",
+                txid: txid
+            )
+        } else {
+            self.showNotification(
+                title: "Transaction Replaced",
+                body: "Transaction was replaced by \(conflicts.count) transaction(s)",
+                txid: txid
+            )
+            // Track replacement transactions
+            for conflictTxid in conflicts {
+                self.trackReplacementTransaction(originalTxid: txid, replacementTxid: conflictTxid)
+            }
+        }
     }
 }
 
@@ -460,7 +474,7 @@ class WalletEventHandler(private val node: Node) {
             }
 
             is Event.OnchainTransactionReplaced -> {
-                handleReplacedTransaction(event.txid)
+                handleReplacedTransaction(event.txid, event.conflicts)
             }
 
             is Event.OnchainTransactionReorged -> {
@@ -556,14 +570,27 @@ class TransactionNotificationManager(private val context: Context) {
         }
     }
 
-    fun handleReplacedTransaction(txid: String) {
+    fun handleReplacedTransaction(txid: String, conflicts: List<String>) {
         GlobalScope.launch(Dispatchers.Main) {
             updateTransactionStatus(txid, TransactionStatus.REPLACED)
-            showNotification(
-                title = "Transaction Replaced",
-                message = "Transaction was replaced via RBF",
-                txid = txid
-            )
+            
+            if (conflicts.isEmpty()) {
+                showNotification(
+                    title = "Transaction Replaced",
+                    message = "Transaction was replaced via RBF",
+                    txid = txid
+                )
+            } else {
+                showNotification(
+                    title = "Transaction Replaced",
+                    message = "Transaction was replaced by ${conflicts.size} transaction(s)",
+                    txid = txid
+                )
+                // Track replacement transactions
+                conflicts.forEach { conflictTxid ->
+                    trackReplacementTransaction(originalTxid = txid, replacementTxid = conflictTxid)
+                }
+            }
         }
     }
 

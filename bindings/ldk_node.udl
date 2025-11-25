@@ -468,7 +468,7 @@ interface Event {
 	SpliceFailed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint? abandoned_funding_txo);
 	OnchainTransactionConfirmed(Txid txid, BlockHash block_hash, u32 block_height, u64 confirmation_time, TransactionDetails details);
 	OnchainTransactionReceived(Txid txid, TransactionDetails details);
-	OnchainTransactionReplaced(Txid txid);
+	OnchainTransactionReplaced(Txid txid, sequence<Txid> conflicts);
 	OnchainTransactionReorged(Txid txid);
 	OnchainTransactionEvicted(Txid txid);
 	SyncProgress(SyncType sync_type, u8 progress_percent, u32 current_block_height, u32 target_block_height);

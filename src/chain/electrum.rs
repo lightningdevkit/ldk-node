@@ -48,7 +48,7 @@ const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 10;
 pub(super) struct ElectrumChainSource {
 	server_url: String,
 	pub(super) sync_config: ElectrumSyncConfig,
-	electrum_runtime_status: RwLock<ElectrumRuntimeStatus>,
+	pub(super) electrum_runtime_status: RwLock<ElectrumRuntimeStatus>,
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
@@ -370,7 +370,7 @@ impl ElectrumRuntimeStatus {
 		*self = Self::new()
 	}
 
-	fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
+	pub(super) fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
 		match self {
 			Self::Started(client) => Some(Arc::clone(&client)),
 			Self::Stopped { .. } => None,

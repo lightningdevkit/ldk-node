@@ -259,9 +259,15 @@ where
 				);
 				// We don't emit an event for chain tip changes as this is too noisy
 			},
-			BdkWalletEvent::TxReplaced { txid, .. } => {
-				log_info!(logger, "Onchain transaction {} was replaced", txid);
-				let event = Event::OnchainTransactionReplaced { txid };
+			BdkWalletEvent::TxReplaced { txid, conflicts, .. } => {
+				let conflict_txids: Vec<Txid> = conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
+				log_info!(
+					logger,
+					"Onchain transaction {} was replaced by {} transaction(s)",
+					txid,
+					conflict_txids.len()
+				);
+				let event = Event::OnchainTransactionReplaced { txid, conflicts: conflict_txids };
 				event_queue.add_event(event).await.map_err(|e| {
 					log_error!(logger, "Failed to push onchain event to queue: {}", e);
 					e
@@ -778,10 +784,10 @@ impl Filter for ChainSource {
 impl ChainSource {
 	/// Get the current balance for an address from the chain source.
 	pub(crate) async fn get_address_balance(&self, address: &bitcoin::Address) -> Option<u64> {
-		match self {
-			Self::Esplora { esplora_client, .. } => {
+		match &self.kind {
+			ChainSourceKind::Esplora(esplora_chain_source) => {
 				let script = address.script_pubkey();
-				match esplora_client.scripthash_txs(&script, None).await {
+				match esplora_chain_source.esplora_client.scripthash_txs(&script, None).await {
 					Ok(txs) => {
 						let mut balance = 0i64;
 						for tx in txs {
@@ -803,14 +809,14 @@ impl ChainSource {
 					Err(_) => None,
 				}
 			},
-			Self::Electrum { electrum_runtime_status, .. } => {
-				if let Some(client) = electrum_runtime_status.read().unwrap().client().as_ref() {
+			ChainSourceKind::Electrum(electrum_chain_source) => {
+				if let Some(client) = electrum_chain_source.electrum_runtime_status.read().unwrap().client() {
 					client.get_address_balance(address).await
 				} else {
 					None
 				}
 			},
-			Self::BitcoindRpc { .. } => {
+			ChainSourceKind::Bitcoind(_) => {
 				// BitcoindRpc doesn't have a direct address balance query API
 				None
 			},
