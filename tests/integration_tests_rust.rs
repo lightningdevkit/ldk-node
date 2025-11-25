@@ -2643,3 +2643,133 @@ fn test_reorg_event_emission() {
 
 	node.stop().unwrap();
 }
+
+#[test]
+fn onchain_transaction_evicted_event() {
+	// Test that OnchainTransactionEvicted event is emitted when a transaction is evicted from mempool
+	use std::thread;
+	use std::time::Duration;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let config = random_config(false);
+	let node = setup_node(&chain_source, config, None);
+
+	// Fund the node first
+	let addr = node.onchain_payment().new_address().unwrap();
+	let fund_amount = 200_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr.clone()],
+		Amount::from_sat(fund_amount),
+	);
+
+	// Sync to get the funds
+	node.sync_wallets().unwrap();
+
+	// Clear any existing events
+	while node.next_event().is_some() {
+		node.event_handled().unwrap();
+	}
+
+	// Create a transaction - this will be unconfirmed initially
+	let recipient_addr = node.onchain_payment().new_address().unwrap();
+	let send_amount = 50_000;
+	let txid =
+		node.onchain_payment().send_to_address(&recipient_addr, send_amount, None, None).unwrap();
+
+	println!("Created transaction {} (unconfirmed)", txid);
+
+	// Wait for transaction to be broadcast
+	thread::sleep(Duration::from_millis(500));
+
+	// Sync to detect the unconfirmed transaction
+	node.sync_wallets().unwrap();
+
+	// Verify we received OnchainTransactionReceived event
+	let mut found_received_event = false;
+	for _ in 0..10 {
+		if let Some(event) = node.next_event() {
+			match event {
+				Event::OnchainTransactionReceived { txid: event_txid, .. } => {
+					if event_txid == txid {
+						found_received_event = true;
+						println!("Received OnchainTransactionReceived event for {}", txid);
+						node.event_handled().unwrap();
+						break;
+					}
+					node.event_handled().unwrap();
+				},
+				_ => {
+					node.event_handled().unwrap();
+				},
+			}
+		}
+		thread::sleep(Duration::from_millis(100));
+	}
+
+	assert!(
+		found_received_event,
+		"Should have received OnchainTransactionReceived event for transaction {}",
+		txid
+	);
+
+	// Remove the transaction from bitcoind's mempool to simulate eviction
+	let txid_hex = format!("{:x}", txid);
+
+	let removed = match bitcoind
+		.client
+		.call::<serde_json::Value>("removetx", &[serde_json::json!(txid_hex)])
+	{
+		Ok(_) => {
+			println!("Removed transaction {} from mempool using removetx", txid);
+			true
+		},
+		Err(e) => {
+			panic!("removetx RPC not available ({}). This test requires Bitcoin Core 25.0+ to test eviction.", e);
+		},
+	};
+
+	assert!(removed, "Failed to remove transaction from mempool");
+
+	// Wait for the removal to propagate
+	thread::sleep(Duration::from_millis(1000));
+
+	// Sync again - this should detect the eviction
+	node.sync_wallets().unwrap();
+
+	// Verify we received OnchainTransactionEvicted event
+	let mut found_evicted_event = false;
+	let mut evicted_txid = None;
+
+	for _ in 0..20 {
+		if let Some(event) = node.next_event() {
+			match event {
+				Event::OnchainTransactionEvicted { txid: event_txid } => {
+					if event_txid == txid {
+						found_evicted_event = true;
+						evicted_txid = Some(event_txid);
+						println!("Received OnchainTransactionEvicted event for {}", event_txid);
+						node.event_handled().unwrap();
+						break;
+					}
+					node.event_handled().unwrap();
+				},
+				_ => {
+					node.event_handled().unwrap();
+				},
+			}
+		}
+		thread::sleep(Duration::from_millis(100));
+	}
+
+	assert!(
+		found_evicted_event,
+		"Should have received OnchainTransactionEvicted event for transaction {}",
+		txid
+	);
+	assert_eq!(evicted_txid, Some(txid), "Evicted txid should match the transaction we created");
+
+	node.stop().unwrap();
+}

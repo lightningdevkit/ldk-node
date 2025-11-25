@@ -423,7 +423,7 @@ enum VssHeaderProviderError {
 };
 
 dictionary TxInput {
-	string txid;
+	Txid txid;
 	u32 vout;
 	string scriptsig;
 	sequence<string> witness;
@@ -467,6 +467,7 @@ interface Event {
 	OnchainTransactionReceived(Txid txid, TransactionDetails details);
 	OnchainTransactionReplaced(Txid txid);
 	OnchainTransactionReorged(Txid txid);
+	OnchainTransactionEvicted(Txid txid);
 	SyncProgress(SyncType sync_type, u8 progress_percent, u32 current_block_height, u32 target_block_height);
 	SyncCompleted(SyncType sync_type, u32 synced_block_height);
 	BalanceChanged(u64 old_spendable_onchain_balance_sats, u64 new_spendable_onchain_balance_sats, u64 old_total_onchain_balance_sats, u64 new_total_onchain_balance_sats, u64 old_total_lightning_balance_sats, u64 new_total_lightning_balance_sats);

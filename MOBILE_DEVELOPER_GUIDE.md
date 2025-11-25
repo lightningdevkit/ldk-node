@@ -25,8 +25,7 @@ These events notify you about Bitcoin transactions affecting your onchain wallet
 - **Use Case**: Show "Payment incoming!" notification immediately
 - **Fields**:
   - `txid`: Transaction ID
-  - `amountSats`: Net amount (positive for incoming, negative for outgoing)
-  - `context`: Type of transaction (channel-related or regular wallet)
+  - `details`: `TransactionDetails` object with comprehensive transaction information
 
 #### `OnchainTransactionConfirmed`
 - **When**: Transaction receives blockchain confirmations
@@ -36,13 +35,26 @@ These events notify you about Bitcoin transactions affecting your onchain wallet
   - `blockHash`: Block hash where confirmed
   - `blockHeight`: Block height
   - `confirmationTime`: Unix timestamp
-  - `context`: Transaction type
+  - `details`: `TransactionDetails` object with comprehensive transaction information
 
-#### `OnchainTransactionUnconfirmed`
-- **When**: Previously confirmed transaction becomes unconfirmed (blockchain reorg)
+#### `OnchainTransactionReplaced`
+- **When**: Transaction is replaced via Replace-By-Fee (RBF)
+- **Use Case**: Update UI to show the transaction was replaced
+- **Fields**:
+  - `txid`: Transaction ID of the replacement transaction
+
+#### `OnchainTransactionReorged`
+- **When**: Previously confirmed transaction becomes unconfirmed due to blockchain reorg
 - **Use Case**: Mark transaction as pending again
 - **Fields**:
   - `txid`: Transaction ID
+
+#### `OnchainTransactionEvicted`
+- **When**: Transaction is evicted from the mempool (no longer unconfirmed and not confirmed)
+- **Use Case**: Mark transaction as evicted, potentially allow user to rebroadcast
+- **Fields**:
+  - `txid`: Transaction ID
+- **Note**: Works with all chain sources (Esplora, Electrum, and BitcoindRpc)
 
 ### 2. Sync Events
 
@@ -77,13 +89,30 @@ Track synchronization progress and completion:
   - `oldTotalLightningBalanceSats`: Previous Lightning balance
   - `newTotalLightningBalanceSats`: New Lightning balance
 
-### 4. Transaction Context
+### 4. Transaction Details
 
-The `TransactionContext` enum helps identify what type of transaction you're dealing with:
+The `TransactionDetails` struct provides comprehensive information about transactions, allowing you to analyze transaction purposes yourself:
 
-- `RegularWallet`: Normal Bitcoin transaction
-- `ChannelFunding`: Opening a Lightning channel
-- `ChannelClosure`: Closing a Lightning channel
+#### `TransactionDetails`
+- `amountSats`: Net amount in satoshis (positive for incoming, negative for outgoing)
+- `inputs`: Array of `TxInput` objects
+- `outputs`: Array of `TxOutput` objects
+
+#### `TxInput`
+- `txid`: Previous transaction ID being spent
+- `vout`: Output index being spent
+- `scriptsig`: Script signature (hex-encoded)
+- `witness`: Witness stack (array of hex-encoded strings)
+- `sequence`: Sequence number
+
+#### `TxOutput`
+- `scriptpubkey`: Script public key (hex-encoded)
+- `scriptpubkeyType`: Script type (e.g., "p2wpkh", "p2wsh", "p2tr")
+- `scriptpubkeyAddress`: Bitcoin address (if decodable)
+- `value`: Value in satoshis
+- `n`: Output index
+
+**Note**: You can analyze transaction inputs and outputs to detect channel funding, channel closures, and other transaction types. This provides more flexibility than the previous `TransactionContext` enum.
 
 ---
 
@@ -119,14 +148,20 @@ class WalletEventHandler {
 
     func handleEvent(_ event: Event) {
         switch event {
-        case .onchainTransactionReceived(let txid, let amountSats, let context):
-            handleIncomingTransaction(txid: txid, amount: amountSats, context: context)
+        case .onchainTransactionReceived(let txid, let details):
+            handleIncomingTransaction(txid: txid, details: details)
 
-        case .onchainTransactionConfirmed(let txid, let blockHash, let blockHeight, let confirmationTime, let context):
-            handleConfirmedTransaction(txid: txid, height: blockHeight, context: context)
+        case .onchainTransactionConfirmed(let txid, let blockHash, let blockHeight, let confirmationTime, let details):
+            handleConfirmedTransaction(txid: txid, height: blockHeight, details: details)
 
-        case .onchainTransactionUnconfirmed(let txid):
-            handleUnconfirmedTransaction(txid: txid)
+        case .onchainTransactionReplaced(let txid):
+            handleReplacedTransaction(txid: txid)
+
+        case .onchainTransactionReorged(let txid):
+            handleReorgedTransaction(txid: txid)
+
+        case .onchainTransactionEvicted(let txid):
+            handleEvictedTransaction(txid: txid)
 
         case .syncProgress(let syncType, let progressPercent, let currentBlock, let targetBlock):
             updateSyncProgress(type: syncType, percent: progressPercent)
@@ -150,18 +185,18 @@ class WalletEventHandler {
 #### Example 1: Real-time Transaction Notifications
 
 ```swift
-func handleIncomingTransaction(txid: String, amount: Int64, context: TransactionContext) {
+func handleIncomingTransaction(txid: String, details: TransactionDetails) {
     DispatchQueue.main.async {
-        if amount > 0 {
+        if details.amountSats > 0 {
             // Incoming payment
             self.showNotification(
                 title: "Payment Received!",
-                body: "Incoming payment of \(amount) sats (unconfirmed)",
+                body: "Incoming payment of \(details.amountSats) sats (unconfirmed)",
                 txid: txid
             )
 
             // Update UI to show pending transaction
-            self.addPendingTransaction(txid: txid, amount: amount)
+            self.addPendingTransaction(txid: txid, amount: details.amountSats)
 
             // Play sound or haptic feedback
             self.playPaymentReceivedSound()
@@ -170,19 +205,16 @@ func handleIncomingTransaction(txid: String, amount: Int64, context: Transaction
             self.updateTransactionStatus(txid: txid, status: .broadcasting)
         }
 
-        // Check if this is channel-related
-        switch context {
-        case .channelFunding(let channelId, _, let counterpartyNodeId):
-            print("Channel \(channelId) funding transaction detected")
-        case .channelClosure(let channelId, _, _):
-            print("Channel \(channelId) closing transaction detected")
-        case .regularWallet:
-            print("Regular wallet transaction")
+        // Analyze transaction to detect channel-related transactions
+        if self.isChannelFundingTransaction(details: details) {
+            print("Channel funding transaction detected")
+        } else if self.isChannelClosureTransaction(details: details) {
+            print("Channel closure transaction detected")
         }
     }
 }
 
-func handleConfirmedTransaction(txid: String, height: UInt32, context: TransactionContext) {
+func handleConfirmedTransaction(txid: String, height: UInt32, details: TransactionDetails) {
     DispatchQueue.main.async {
         // Update transaction status
         self.updateTransactionStatus(txid: txid, status: .confirmed(height: height))
@@ -197,6 +229,54 @@ func handleConfirmedTransaction(txid: String, height: UInt32, context: Transacti
         // Refresh transaction list
         self.refreshTransactionList()
     }
+}
+
+func handleReplacedTransaction(txid: String) {
+    DispatchQueue.main.async {
+        self.updateTransactionStatus(txid: txid, status: .replaced)
+        self.showNotification(
+            title: "Transaction Replaced",
+            body: "Transaction was replaced via RBF",
+            txid: txid
+        )
+    }
+}
+
+func handleReorgedTransaction(txid: String) {
+    DispatchQueue.main.async {
+        self.updateTransactionStatus(txid: txid, status: .pending)
+        self.showNotification(
+            title: "Transaction Unconfirmed",
+            body: "Transaction became unconfirmed due to reorg",
+            txid: txid
+        )
+    }
+}
+
+func handleEvictedTransaction(txid: String) {
+    DispatchQueue.main.async {
+        self.updateTransactionStatus(txid: txid, status: .evicted)
+        self.showNotification(
+            title: "Transaction Evicted",
+            body: "Transaction was evicted from mempool",
+            txid: txid
+        )
+        // Optionally allow user to rebroadcast
+        self.promptRebroadcast(txid: txid)
+    }
+}
+
+// Helper functions to analyze transaction details
+func isChannelFundingTransaction(details: TransactionDetails) -> Bool {
+    // Analyze inputs/outputs to detect channel funding
+    // This is a simplified example - implement based on your needs
+    return details.outputs.count == 2 && details.amountSats > 0
+}
+
+func isChannelClosureTransaction(details: TransactionDetails) -> Bool {
+    // Analyze inputs/outputs to detect channel closure
+    // This is a simplified example - implement based on your needs
+    return details.inputs.count > 0 && details.outputs.count >= 2
 }
 ```
 
@@ -325,23 +405,23 @@ class WalletEventHandler(private val node: Node) {
     private fun handleEvent(event: Event) {
         when (event) {
             is Event.OnchainTransactionReceived -> {
-                handleIncomingTransaction(
-                    event.txid,
-                    event.amountSats,
-                    event.context
-                )
+                handleIncomingTransaction(event.txid, event.details)
             }
 
             is Event.OnchainTransactionConfirmed -> {
-                handleConfirmedTransaction(
-                    event.txid,
-                    event.blockHeight,
-                    event.context
-                )
+                handleConfirmedTransaction(event.txid, event.blockHeight, event.details)
             }
 
-            is Event.OnchainTransactionUnconfirmed -> {
-                handleUnconfirmedTransaction(event.txid)
+            is Event.OnchainTransactionReplaced -> {
+                handleReplacedTransaction(event.txid)
+            }
+
+            is Event.OnchainTransactionReorged -> {
+                handleReorgedTransaction(event.txid)
+            }
+
+            is Event.OnchainTransactionEvicted -> {
+                handleEvictedTransaction(event.txid)
             }
 
             is Event.SyncProgress -> {
@@ -380,18 +460,18 @@ class WalletEventHandler(private val node: Node) {
 ```kotlin
 class TransactionNotificationManager(private val context: Context) {
 
-    fun handleIncomingTransaction(txid: String, amountSats: Long, context: TransactionContext) {
+    fun handleIncomingTransaction(txid: String, details: TransactionDetails) {
         GlobalScope.launch(Dispatchers.Main) {
-            if (amountSats > 0) {
+            if (details.amountSats > 0) {
                 // Incoming payment
                 showNotification(
                     title = "Payment Received!",
-                    message = "Incoming payment of $amountSats sats (unconfirmed)",
+                    message = "Incoming payment of ${details.amountSats} sats (unconfirmed)",
                     txid = txid
                 )
 
                 // Update transaction list
-                addPendingTransaction(txid, amountSats)
+                addPendingTransaction(txid, details.amountSats)
 
                 // Play sound
                 playPaymentSound()
@@ -400,22 +480,16 @@ class TransactionNotificationManager(private val context: Context) {
                 updateTransactionStatus(txid, TransactionStatus.BROADCASTING)
             }
 
-            // Check transaction type
-            when (context) {
-                is TransactionContext.ChannelFunding -> {
-                    Log.d("Wallet", "Channel ${context.channelId} funding transaction")
-                }
-                is TransactionContext.ChannelClosure -> {
-                    Log.d("Wallet", "Channel ${context.channelId} closing transaction")
-                }
-                is TransactionContext.RegularWallet -> {
-                    Log.d("Wallet", "Regular wallet transaction")
-                }
+            // Analyze transaction to detect channel-related transactions
+            if (isChannelFundingTransaction(details)) {
+                Log.d("Wallet", "Channel funding transaction detected")
+            } else if (isChannelClosureTransaction(details)) {
+                Log.d("Wallet", "Channel closure transaction detected")
             }
         }
     }
 
-    fun handleConfirmedTransaction(txid: String, height: UInt, context: TransactionContext) {
+    fun handleConfirmedTransaction(txid: String, height: UInt, details: TransactionDetails) {
         GlobalScope.launch(Dispatchers.Main) {
             // Update status
             updateTransactionStatus(txid, TransactionStatus.CONFIRMED)
@@ -429,6 +503,59 @@ class TransactionNotificationManager(private val context: Context) {
 
             // Vibrate
             vibrate()
+
+            // Refresh transaction list
+            refreshTransactionList()
+        }
+    }
+
+    fun handleReplacedTransaction(txid: String) {
+        GlobalScope.launch(Dispatchers.Main) {
+            updateTransactionStatus(txid, TransactionStatus.REPLACED)
+            showNotification(
+                title = "Transaction Replaced",
+                message = "Transaction was replaced via RBF",
+                txid = txid
+            )
+        }
+    }
+
+    fun handleReorgedTransaction(txid: String) {
+        GlobalScope.launch(Dispatchers.Main) {
+            updateTransactionStatus(txid, TransactionStatus.PENDING)
+            showNotification(
+                title = "Transaction Unconfirmed",
+                message = "Transaction became unconfirmed due to reorg",
+                txid = txid
+            )
+        }
+    }
+
+    fun handleEvictedTransaction(txid: String) {
+        GlobalScope.launch(Dispatchers.Main) {
+            updateTransactionStatus(txid, TransactionStatus.EVICTED)
+            showNotification(
+                title = "Transaction Evicted",
+                message = "Transaction was evicted from mempool",
+                txid = txid
+            )
+            // Optionally allow user to rebroadcast
+            promptRebroadcast(txid)
+        }
+    }
+
+    // Helper functions to analyze transaction details
+    private fun isChannelFundingTransaction(details: TransactionDetails): Boolean {
+        // Analyze inputs/outputs to detect channel funding
+        // This is a simplified example - implement based on your needs
+        return details.outputs.size == 2 && details.amountSats > 0
+    }
+
+    private fun isChannelClosureTransaction(details: TransactionDetails): Boolean {
+        // Analyze inputs/outputs to detect channel closure
+        // This is a simplified example - implement based on your needs
+        return details.inputs.isNotEmpty() && details.outputs.size >= 2
+    }
         }
     }
 

@@ -162,6 +162,15 @@ impl Wallet {
 			.collect()
 	}
 
+	pub(crate) fn is_tx_confirmed(&self, txid: &Txid) -> bool {
+		self.inner
+			.lock()
+			.unwrap()
+			.get_tx(*txid)
+			.map(|tx_node| tx_node.chain_position.is_confirmed())
+			.unwrap_or(false)
+	}
+
 	pub(crate) fn current_best_block(&self) -> BestBlock {
 		let checkpoint = self.inner.lock().unwrap().latest_checkpoint();
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }

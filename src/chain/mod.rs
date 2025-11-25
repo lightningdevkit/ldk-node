@@ -15,7 +15,7 @@ use crate::event::{Event, EventQueue, SyncType};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bitcoin::{Script, Txid};
 use lightning::chain::{BestBlock, Filter};
@@ -30,13 +30,12 @@ use crate::config::{
 };
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::utils::write_node_metrics;
-use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
 use bdk_wallet::event::WalletEvent as BdkWalletEvent;
-use bdk_wallet::Update as BdkUpdate;
 
 pub(crate) enum WalletSyncStatus {
 	Completed,
@@ -106,16 +105,60 @@ enum ChainSourceKind {
 
 use crate::event::TransactionDetails;
 
-/// Get transaction details including inputs and outputs.
-fn get_transaction_details<B: Deref, E: Deref, L: Deref>(
-	txid: &bitcoin::Txid, wallet: &crate::wallet::Wallet<B, E, L>,
-	_channel_manager: Option<&Arc<ChannelManager>>,
-) -> Option<TransactionDetails>
-where
-	B::Target: lightning::chain::chaininterface::BroadcasterInterface,
-	E::Target: crate::fee_estimator::FeeEstimator,
-	L::Target: crate::logger::LdkLogger,
+/// Check for evicted transactions by comparing unconfirmed txids before and after sync.
+/// Returns a list of txids that were unconfirmed before but are no longer unconfirmed
+/// and are not confirmed in the wallet.
+fn check_evicted_transactions(
+	prev_unconfirmed_txids: Vec<Txid>, wallet: &crate::wallet::Wallet, logger: &Logger,
+) -> Vec<Txid> {
+	let current_unconfirmed_txids: std::collections::HashSet<Txid> =
+		wallet.get_unconfirmed_txids().into_iter().collect();
+
+	let mut evicted_txids = Vec::new();
+	for txid in prev_unconfirmed_txids {
+		// If transaction is still unconfirmed, skip it
+		if current_unconfirmed_txids.contains(&txid) {
+			continue;
+		}
+
+		// Check if transaction is confirmed in wallet
+		// If it's confirmed, it wasn't evicted - it was included in a block
+		if wallet.is_tx_confirmed(&txid) {
+			continue;
+		}
+
+		// Transaction is not unconfirmed and not confirmed in wallet
+		// This means it was evicted from the mempool
+		// (We don't need to check via chain source since the wallet state after sync
+		//  should be up-to-date - if it were confirmed, it would be in the wallet)
+		log_info!(logger, "Transaction {} was evicted from the mempool", txid);
+		evicted_txids.push(txid);
+	}
+
+	evicted_txids
+}
+
+/// Check for evicted transactions and emit events for them.
+async fn check_and_emit_evicted_transactions<L2: Deref>(
+	prev_unconfirmed_txids: Vec<Txid>, wallet: &crate::wallet::Wallet,
+	event_queue: &EventQueue<L2>, logger: &Logger,
+) where
+	L2::Target: LdkLogger,
 {
+	let evicted_txids = check_evicted_transactions(prev_unconfirmed_txids, wallet, logger);
+
+	for txid in evicted_txids {
+		if let Err(e) = event_queue.add_event(Event::OnchainTransactionEvicted { txid }).await {
+			log_error!(logger, "Failed to push evicted transaction event to queue: {}", e);
+		}
+	}
+}
+
+/// Get transaction details including inputs and outputs.
+fn get_transaction_details(
+	txid: &bitcoin::Txid, wallet: &crate::wallet::Wallet,
+	_channel_manager: Option<&Arc<ChannelManager>>,
+) -> Option<TransactionDetails> {
 	// Get transaction details from wallet
 	let (amount_sats, inputs, outputs) = wallet.get_tx_details(txid)?;
 
@@ -123,15 +166,12 @@ where
 }
 
 /// Process BDK wallet events and emit corresponding ldk-node events via the event queue.
-fn process_wallet_events<B: Deref, E: Deref, L: Deref, L2: Deref>(
-	wallet_events: Vec<BdkWalletEvent>, wallet: &crate::wallet::Wallet<B, E, L>,
+async fn process_wallet_events<L2: Deref>(
+	wallet_events: Vec<BdkWalletEvent>, wallet: &crate::wallet::Wallet,
 	event_queue: &EventQueue<L2>, logger: &Arc<Logger>,
 	channel_manager: Option<&Arc<ChannelManager>>, _chain_monitor: Option<&Arc<ChainMonitor>>,
 ) -> Result<(), Error>
 where
-	B::Target: BroadcasterInterface,
-	E::Target: FeeEstimator,
-	L::Target: LdkLogger,
 	L2::Target: LdkLogger,
 {
 	for wallet_event in wallet_events {
@@ -161,7 +201,7 @@ where
 					confirmation_time: block_time.confirmation_time,
 					details,
 				};
-				event_queue.add_event(event).map_err(|e| {
+				event_queue.add_event(event).await.map_err(|e| {
 					log_error!(logger, "Failed to push onchain event to queue: {}", e);
 					e
 				})?;
@@ -176,7 +216,7 @@ where
 							txid
 						);
 						let event = Event::OnchainTransactionReorged { txid };
-						event_queue.add_event(event).map_err(|e| {
+						event_queue.add_event(event).await.map_err(|e| {
 							log_error!(logger, "Failed to push onchain event to queue: {}", e);
 							e
 						})?;
@@ -201,7 +241,7 @@ where
 						);
 
 						let event = Event::OnchainTransactionReceived { txid, details };
-						event_queue.add_event(event).map_err(|e| {
+						event_queue.add_event(event).await.map_err(|e| {
 							log_error!(logger, "Failed to push onchain event to queue: {}", e);
 							e
 						})?;
@@ -222,7 +262,7 @@ where
 			BdkWalletEvent::TxReplaced { txid, .. } => {
 				log_info!(logger, "Onchain transaction {} was replaced", txid);
 				let event = Event::OnchainTransactionReplaced { txid };
-				event_queue.add_event(event).map_err(|e| {
+				event_queue.add_event(event).await.map_err(|e| {
 					log_error!(logger, "Failed to push onchain event to queue: {}", e);
 					e
 				})?;
@@ -443,6 +483,9 @@ impl ChainSource {
 
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
+				// Track unconfirmed transactions before sync to detect evictions
+				let prev_unconfirmed_txids = wallet.get_unconfirmed_txids();
+				
 				let wallet_events = esplora_chain_source.sync_onchain_wallet(Arc::clone(&wallet)).await?;
 				
 				// Process wallet events if event queue is provided
@@ -454,15 +497,22 @@ impl ChainSource {
 						&self.logger,
 						channel_manager,
 						chain_monitor,
-					)?;
+					).await?;
+
+					// Check for evicted transactions
+					check_and_emit_evicted_transactions(
+						prev_unconfirmed_txids,
+						&wallet,
+						event_queue,
+						&self.logger,
+					).await;
 
 					// Emit SyncCompleted event
 					let synced_height = wallet.current_best_block().height;
 					event_queue.add_event(Event::SyncCompleted {
 						sync_type: SyncType::OnchainWallet,
 						synced_block_height: synced_height,
-					})?;
-
+					}).await?;
 					// Check for balance changes and emit BalanceChanged event if needed
 					if let (Some(cm), Some(chain_mon), Some(cfg)) = (channel_manager, chain_monitor, config) {
 						let cur_anchor_reserve_sats = crate::total_anchor_channels_reserve_sats(cm, cfg);
@@ -513,6 +563,9 @@ impl ChainSource {
 				Ok(())
 			},
 			ChainSourceKind::Electrum(electrum_chain_source) => {
+				// Track unconfirmed transactions before sync to detect evictions
+				let prev_unconfirmed_txids = wallet.get_unconfirmed_txids();
+				
 				let wallet_events = electrum_chain_source.sync_onchain_wallet(Arc::clone(&wallet)).await?;
 				
 				// Process wallet events if event queue is provided
@@ -524,14 +577,22 @@ impl ChainSource {
 						&self.logger,
 						channel_manager,
 						chain_monitor,
-					)?;
+					).await?;
+
+					// Check for evicted transactions
+					check_and_emit_evicted_transactions(
+						prev_unconfirmed_txids,
+						&wallet,
+						event_queue,
+						&self.logger,
+					).await;
 
 					// Emit SyncCompleted event
 					let synced_height = wallet.current_best_block().height;
 					event_queue.add_event(Event::SyncCompleted {
 						sync_type: SyncType::OnchainWallet,
 						synced_block_height: synced_height,
-					})?;
+					}).await?;
 
 					// Check for balance changes and emit BalanceChanged event if needed
 					if let (Some(cm), Some(chain_mon), Some(cfg)) = (channel_manager, chain_monitor, config) {

@@ -6,18 +6,19 @@
     - `OnchainTransactionReceived`: Emitted when a new unconfirmed transaction is
       first detected in the mempool (instant notification for incoming payments!)
     - `OnchainTransactionConfirmed`: Emitted when a transaction receives confirmations
-    - `OnchainTransactionUnconfirmed`: Emitted when a previously confirmed transaction
-      becomes unconfirmed (blockchain reorg)
+    - `OnchainTransactionReplaced`: Emitted when a transaction is replaced (via RBF or different transaction using a commmon input)
+    - `OnchainTransactionReorged`: Emitted when a previously confirmed transaction
+      becomes unconfirmed due to a blockchain reorg
+    - `OnchainTransactionEvicted`: Emitted when a transaction is evicted from the mempool
   - **Sync Completion Event** (fully implemented):
     - `SyncCompleted`: Emitted when onchain wallet sync finishes successfully
   - **Balance Change Event** (fully implemented):
     - `BalanceChanged`: Emitted when onchain or Lightning balances change, allowing
       applications to update balance displays immediately without polling
-- Added `TransactionContext` enum to onchain transaction events, which provides
-  information about whether a transaction is related to channel funding, channel
-  closure, or regular wallet activity. Applications can cross-reference with
-  `ChannelPending` and `ChannelClosed` events to identify channel-related
-  transactions.
+- Added `TransactionDetails`, `TxInput`, and `TxOutput` structs to provide comprehensive
+  transaction information in onchain events, including inputs and outputs. This enables
+  applications to analyze transaction data themselves to detect channel funding, closures,
+  and other transaction types.
 - Added `SyncType` enum to distinguish between onchain wallet sync, Lightning
   wallet sync, and fee rate cache updates.
 - Balance tracking is now persisted in `NodeMetrics` to detect changes across restarts.

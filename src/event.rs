@@ -211,8 +211,8 @@ impl_writeable_tlv_based_enum!(SyncType,
 /// # Onchain Transaction Events
 ///
 /// The onchain transaction events (`OnchainTransactionConfirmed`, `OnchainTransactionReceived`,
-/// `OnchainTransactionReplaced`, and `OnchainTransactionReorged`) allow applications to reactively
-/// respond to onchain wallet activity without polling.
+/// `OnchainTransactionReplaced`, `OnchainTransactionReorged`, and `OnchainTransactionEvicted`)
+/// allow applications to reactively respond to onchain wallet activity without polling.
 ///
 /// ## Example: Monitoring Onchain Transactions (Reactive - No Polling!)
 ///
@@ -259,6 +259,10 @@ impl_writeable_tlv_based_enum!(SyncType,
 ///         },
 ///         Event::OnchainTransactionReorged { txid } => {
 ///             println!("Transaction {} became unconfirmed due to a reorg", txid);
+///             node.event_handled()?;
+///         },
+///         Event::OnchainTransactionEvicted { txid } => {
+///             println!("Transaction {} was evicted from the mempool", txid);
 ///             node.event_handled()?;
 ///         },
 ///         Event::PaymentReceived { .. } => {
@@ -663,6 +667,42 @@ pub enum Event {
 		/// The transaction ID that became unconfirmed due to a reorg.
 		txid: bitcoin::Txid,
 	},
+	/// An onchain transaction was evicted from the mempool.
+	///
+	/// This event is emitted when a previously unconfirmed transaction is no longer
+	/// in the mempool and has not been confirmed in a block. Transactions can be
+	/// evicted from the mempool for various reasons, such as:
+	/// - Mempool size limits being exceeded
+	/// - Transaction expiry (typically 14 days)
+	/// - Conflicts with other transactions
+	///
+	/// Applications should handle this event by:
+	/// - Marking the transaction as evicted
+	/// - Updating UI to reflect the evicted status
+	/// - Potentially rebroadcasting the transaction if needed
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// match node.wait_next_event() {
+	///     Event::OnchainTransactionEvicted { txid } => {
+	///         println!("Transaction {} was evicted from the mempool", txid);
+	///         node.event_handled().unwrap();
+	///     },
+	///     _ => {}
+	/// }
+	/// ```
+	OnchainTransactionEvicted {
+		/// The transaction ID that was evicted from the mempool.
+		txid: bitcoin::Txid,
+	},
 	/// Synchronization progress update.
 	///
 	/// This event is emitted periodically during sync operations to report progress.
@@ -861,6 +901,9 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, txid, required),
 	},
 	(11, OnchainTransactionReorged) => {
+		(0, txid, required),
+	},
+	(13, OnchainTransactionEvicted) => {
 		(0, txid, required),
 	},
 	(12, SyncProgress) => {
