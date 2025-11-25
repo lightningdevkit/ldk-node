@@ -139,6 +139,7 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
+	TransactionDetails? get_transaction_details([ByRef]Txid txid);
 	UnifiedQrPayment unified_qr_payment();
 	LSPS1Liquidity lsps1_liquidity();
 	[Throws=NodeError]

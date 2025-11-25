@@ -957,6 +957,14 @@ impl Node {
 		))
 	}
 
+	/// Returns transaction details for the given transaction ID, if available in the wallet.
+	///
+	/// Returns `None` if the transaction is not found in the wallet.
+	pub fn get_transaction_details(&self, txid: &bitcoin::Txid) -> Option<TransactionDetails> {
+		let (amount_sats, inputs, outputs) = self.wallet.get_tx_details(txid)?;
+		Some(TransactionDetails { amount_sats, inputs, outputs })
+	}
+
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///

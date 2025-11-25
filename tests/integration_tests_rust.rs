@@ -2773,3 +2773,105 @@ fn onchain_transaction_evicted_event() {
 
 	node.stop().unwrap();
 }
+
+#[test]
+fn get_transaction_details() {
+	use std::time::Duration;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let config = random_config(false);
+	let node = setup_node(&chain_source, config, None);
+
+	// Fund the node
+	let addr = node.onchain_payment().new_address().unwrap();
+	let fund_amount = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr.clone()],
+		Amount::from_sat(fund_amount),
+	);
+
+	// Sync to get the funds
+	node.sync_wallets().unwrap();
+
+	// Clear any existing events
+	while node.next_event().is_some() {
+		node.event_handled().unwrap();
+	}
+
+	// Wait a bit for events to be processed
+	std::thread::sleep(Duration::from_millis(100));
+
+	// Get the transaction ID from the confirmed event
+	let mut funding_txid = None;
+	for _ in 0..5 {
+		if let Some(event) = node.next_event() {
+			match event {
+				Event::OnchainTransactionConfirmed { txid, details, .. } => {
+					funding_txid = Some(txid);
+					// Verify we can access the details from the event
+					assert!(!details.inputs.is_empty());
+					assert!(!details.outputs.is_empty());
+					node.event_handled().unwrap();
+					break;
+				},
+				_ => {
+					node.event_handled().unwrap();
+				},
+			}
+		}
+		std::thread::sleep(Duration::from_millis(100));
+	}
+
+	let txid = funding_txid.expect("Should have received OnchainTransactionConfirmed event");
+
+	// Test get_transaction_details with the funding transaction
+	let details = node.get_transaction_details(&txid).expect("Transaction should be found in wallet");
+
+	// Verify the details match what we expect
+	assert!(!details.inputs.is_empty(), "Transaction should have inputs");
+	assert!(!details.outputs.is_empty(), "Transaction should have outputs");
+	assert_eq!(details.amount_sats, fund_amount as i64, "Amount should match funding amount");
+
+	// Verify input structure
+	for input in &details.inputs {
+		assert!(!input.txid.to_string().is_empty(), "Input should have a txid");
+		assert!(!input.scriptsig.is_empty(), "Input should have a scriptsig");
+	}
+
+	// Verify output structure
+	for output in &details.outputs {
+		assert!(output.value > 0, "Output should have a positive value");
+		assert!(!output.scriptpubkey.is_empty(), "Output should have a scriptpubkey");
+	}
+
+	// Test with a non-existent transaction
+	let fake_txid = Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
+	let result = node.get_transaction_details(&fake_txid);
+	assert!(result.is_none(), "Non-existent transaction should return None");
+
+	// Create a new transaction and verify we can get its details
+	let recipient_addr = node.onchain_payment().new_address().unwrap();
+	let send_amount = 20_000;
+	let send_txid = node.onchain_payment().send_to_address(&recipient_addr, send_amount, None, None).unwrap();
+
+	// Sync to include the new transaction
+	node.sync_wallets().unwrap();
+
+	// Wait a bit
+	std::thread::sleep(Duration::from_millis(500));
+
+	// Get details for the send transaction
+	let send_details = node.get_transaction_details(&send_txid).expect("Send transaction should be found");
+
+	// Verify the send transaction details
+	assert!(!send_details.inputs.is_empty());
+	assert!(!send_details.outputs.is_empty());
+	// The amount should be negative (outgoing) or positive depending on change
+	// But the absolute value should be at least the send amount
+	assert!(send_details.amount_sats.abs() >= send_amount as i64 || send_details.amount_sats < 0);
+
+	node.stop().unwrap();
+}

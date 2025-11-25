@@ -114,6 +114,25 @@ The `TransactionDetails` struct provides comprehensive information about transac
 
 **Note**: You can analyze transaction inputs and outputs to detect channel funding, channel closures, and other transaction types. This provides more flexibility than the previous `TransactionContext` enum.
 
+#### Retrieving Transaction Details
+
+You can also retrieve transaction details directly using `Node::get_transaction_details()`:
+
+```swift
+// Get transaction details for a specific transaction ID
+if let details = node.getTransactionDetails(txid: txid) {
+    // Analyze the transaction details
+    print("Transaction amount: \(details.amountSats) sats")
+    print("Number of inputs: \(details.inputs.count)")
+    print("Number of outputs: \(details.outputs.count)")
+} else {
+    // Transaction not found in wallet
+    print("Transaction not found")
+}
+```
+
+This method returns `nil` if the transaction is not found in the wallet.
+
 ---
 
 ## iOS/Swift Implementation
@@ -542,6 +561,11 @@ class TransactionNotificationManager(private val context: Context) {
             // Optionally allow user to rebroadcast
             promptRebroadcast(txid)
         }
+    }
+
+    // Retrieve transaction details directly
+    fun getTransactionDetails(txid: String): TransactionDetails? {
+        return node.getTransactionDetails(txid = txid)
     }
 
     // Helper functions to analyze transaction details

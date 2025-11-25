@@ -19,6 +19,8 @@
   transaction information in onchain events, including inputs and outputs. This enables
   applications to analyze transaction data themselves to detect channel funding, closures,
   and other transaction types.
+- Added `Node::get_transaction_details()` method to retrieve transaction details for any
+  transaction ID that exists in the wallet, returning `None` if the transaction is not found.
 - Added `SyncType` enum to distinguish between onchain wallet sync, Lightning
   wallet sync, and fee rate cache updates.
 - Balance tracking is now persisted in `NodeMetrics` to detect changes across restarts.
