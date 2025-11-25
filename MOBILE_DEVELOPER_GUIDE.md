@@ -133,6 +133,34 @@ if let details = node.getTransactionDetails(txid: txid) {
 
 This method returns `nil` if the transaction is not found in the wallet.
 
+#### Retrieving Address Balance
+
+You can retrieve the current balance for any Bitcoin address using `Node::get_address_balance()`:
+
+```swift
+// Get balance for a Bitcoin address
+do {
+    let balance = try node.getAddressBalance(addressStr: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh")
+    print("Address balance: \(balance) sats")
+} catch {
+    // Invalid address or network mismatch
+    print("Error: \(error)")
+}
+```
+
+```kotlin
+// Get balance for a Bitcoin address
+try {
+    val balance = node.getAddressBalance("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh")
+    println("Address balance: $balance sats")
+} catch (e: Exception) {
+    // Invalid address or network mismatch
+    println("Error: ${e.message}")
+}
+```
+
+**Note**: This method queries the chain source directly and returns the balance in satoshis. It throws an error if the address string cannot be parsed or doesn't match the node's network. It returns `0` if the balance cannot be queried (e.g., chain source unavailable). This method is not available when using BitcoindRpc as the chain source.
+
 ---
 
 ## iOS/Swift Implementation

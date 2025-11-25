@@ -965,6 +965,36 @@ impl Node {
 		Some(TransactionDetails { amount_sats, inputs, outputs })
 	}
 
+	/// Gets the current balance (in satoshis) for a Bitcoin address.
+	///
+	/// This queries the chain source (Esplora or Electrum) to get the current balance of the
+	/// address. Returns 0 if the balance cannot be queried (e.g., chain source unavailable).
+	///
+	/// Returns [`Error::InvalidAddress`] if the address string cannot be parsed or doesn't match
+	/// the node's network.
+	pub fn get_address_balance(&self, address_str: &str) -> Result<u64, Error> {
+		use bitcoin::address::NetworkUnchecked;
+		use std::str::FromStr;
+
+		let addr_unchecked = bitcoin::Address::<NetworkUnchecked>::from_str(address_str)
+			.map_err(|_| Error::InvalidAddress)?;
+
+		let addr_checked = addr_unchecked
+			.require_network(self.config.network)
+			.map_err(|_| Error::InvalidAddress)?;
+
+		if let Ok(runtime_guard) = self.runtime.read() {
+			if let Some(runtime) = runtime_guard.as_ref() {
+				let chain_source = Arc::clone(&self.chain_source);
+				let balance = runtime
+					.block_on(async move { chain_source.get_address_balance(&addr_checked).await });
+				return Ok(balance.unwrap_or(0));
+			}
+		}
+
+		Ok(0)
+	}
+
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///

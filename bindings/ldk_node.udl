@@ -140,6 +140,8 @@ interface Node {
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
 	TransactionDetails? get_transaction_details([ByRef]Txid txid);
+	[Throws=NodeError]
+	u64 get_address_balance([ByRef]string address_str);
 	UnifiedQrPayment unified_qr_payment();
 	LSPS1Liquidity lsps1_liquidity();
 	[Throws=NodeError]

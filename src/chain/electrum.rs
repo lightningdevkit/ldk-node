@@ -103,7 +103,7 @@ impl ElectrumChainSource {
 		};
 		if let Some(mut sync_receiver) = receiver_res {
 			log_info!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.recv().await.map_err(|e| {
+			return sync_receiver.recv().await.map(|res| res.map(|_| Vec::new())).map_err(|e| {
 				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
 				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
 				Error::WalletOperationFailed
@@ -112,12 +112,12 @@ impl ElectrumChainSource {
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
-		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res.as_ref().map(|_| ()).map_err(|e| e.clone()));
 
 		res
 	}
 
-	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<(), Error> {
+	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<Vec<WalletEvent>, Error> {
 		let electrum_client: Arc<ElectrumRuntimeClient> =
 			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
 				Arc::clone(client)
@@ -430,7 +430,32 @@ impl ElectrumRuntimeClient {
 		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, config, logger })
 	}
 
-	async fn sync_confirmables(
+	pub(crate) async fn get_address_balance(&self, address: &bitcoin::Address) -> Option<u64> {
+		use electrum_client::ElectrumApi;
+
+		let script = address.script_pubkey();
+		let electrum_client = Arc::clone(&self.electrum_client);
+		let script_clone = script.clone();
+		let balance_result = self
+			.runtime
+			.spawn_blocking(move || {
+				electrum_client
+					.script_get_balance(&script_clone)
+					.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e)))
+			})
+			.await;
+
+		match balance_result {
+			Ok(Ok(balance)) => {
+				let confirmed = balance.confirmed.max(0) as u64;
+				let unconfirmed = balance.unconfirmed.max(0) as u64;
+				Some(confirmed + unconfirmed)
+			},
+			_ => None,
+		}
+	}
+
+	pub(crate) async fn sync_confirmables(
 		&self, confirmables: Vec<Arc<dyn Confirm + Sync + Send>>,
 	) -> Result<(), Error> {
 		let now = Instant::now();

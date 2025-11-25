@@ -775,6 +775,49 @@ impl Filter for ChainSource {
 	}
 }
 
+impl ChainSource {
+	/// Get the current balance for an address from the chain source.
+	pub(crate) async fn get_address_balance(&self, address: &bitcoin::Address) -> Option<u64> {
+		match self {
+			Self::Esplora { esplora_client, .. } => {
+				let script = address.script_pubkey();
+				match esplora_client.scripthash_txs(&script, None).await {
+					Ok(txs) => {
+						let mut balance = 0i64;
+						for tx in txs {
+							for output in &tx.vout {
+								if output.scriptpubkey == script {
+									balance += output.value as i64;
+								}
+							}
+							for input in &tx.vin {
+								if let Some(prevout) = &input.prevout {
+									if prevout.scriptpubkey == script {
+										balance -= prevout.value as i64;
+									}
+								}
+							}
+						}
+						Some(balance.max(0) as u64)
+					},
+					Err(_) => None,
+				}
+			},
+			Self::Electrum { electrum_runtime_status, .. } => {
+				if let Some(client) = electrum_runtime_status.read().unwrap().client().as_ref() {
+					client.get_address_balance(address).await
+				} else {
+					None
+				}
+			},
+			Self::BitcoindRpc { .. } => {
+				// BitcoindRpc doesn't have a direct address balance query API
+				None
+			},
+		}
+	}
+}
+
 fn periodically_archive_fully_resolved_monitors(
 	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 	kv_store: Arc<DynStore>, logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,

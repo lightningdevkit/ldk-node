@@ -2828,7 +2828,8 @@ fn get_transaction_details() {
 	let txid = funding_txid.expect("Should have received OnchainTransactionConfirmed event");
 
 	// Test get_transaction_details with the funding transaction
-	let details = node.get_transaction_details(&txid).expect("Transaction should be found in wallet");
+	let details =
+		node.get_transaction_details(&txid).expect("Transaction should be found in wallet");
 
 	// Verify the details match what we expect
 	assert!(!details.inputs.is_empty(), "Transaction should have inputs");
@@ -2848,14 +2849,16 @@ fn get_transaction_details() {
 	}
 
 	// Test with a non-existent transaction
-	let fake_txid = Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
+	let fake_txid =
+		Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
 	let result = node.get_transaction_details(&fake_txid);
 	assert!(result.is_none(), "Non-existent transaction should return None");
 
 	// Create a new transaction and verify we can get its details
 	let recipient_addr = node.onchain_payment().new_address().unwrap();
 	let send_amount = 20_000;
-	let send_txid = node.onchain_payment().send_to_address(&recipient_addr, send_amount, None, None).unwrap();
+	let send_txid =
+		node.onchain_payment().send_to_address(&recipient_addr, send_amount, None, None).unwrap();
 
 	// Sync to include the new transaction
 	node.sync_wallets().unwrap();
@@ -2864,7 +2867,8 @@ fn get_transaction_details() {
 	std::thread::sleep(Duration::from_millis(500));
 
 	// Get details for the send transaction
-	let send_details = node.get_transaction_details(&send_txid).expect("Send transaction should be found");
+	let send_details =
+		node.get_transaction_details(&send_txid).expect("Send transaction should be found");
 
 	// Verify the send transaction details
 	assert!(!send_details.inputs.is_empty());
@@ -2874,4 +2878,82 @@ fn get_transaction_details() {
 	assert!(send_details.amount_sats.abs() >= send_amount as i64 || send_details.amount_sats < 0);
 
 	node.stop().unwrap();
+}
+
+#[test]
+fn get_address_balance_esplora() {
+	use std::time::Duration;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let config = random_config(false);
+	let node = setup_node(&chain_source, config, None);
+
+	// Fund an address
+	let addr = node.onchain_payment().new_address().unwrap();
+	let fund_amount = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr.clone()],
+		Amount::from_sat(fund_amount),
+	);
+
+	// Sync to get the funds
+	node.sync_wallets().unwrap();
+
+	// Wait a bit for the chain source to index the transaction
+	std::thread::sleep(Duration::from_millis(500));
+
+	// Test get_address_balance with the funded address
+	let balance = node.get_address_balance(&addr.to_string()).unwrap();
+	assert_eq!(balance, fund_amount, "Balance should match funded amount");
+
+	// Test with an unfunded address
+	let unfunded_addr = node.onchain_payment().new_address().unwrap();
+	let unfunded_balance = node.get_address_balance(&unfunded_addr.to_string()).unwrap();
+	assert_eq!(unfunded_balance, 0, "Unfunded address should have zero balance");
+
+	// Test with an invalid address
+	let invalid_result = node.get_address_balance("invalid_address");
+	assert!(invalid_result.is_err(), "Invalid address should return error");
+}
+
+#[test]
+fn get_address_balance_electrum() {
+	use std::time::Duration;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+	let config = random_config(false);
+	let node = setup_node(&chain_source, config, None);
+
+	// Fund an address
+	let addr = node.onchain_payment().new_address().unwrap();
+	let fund_amount = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr.clone()],
+		Amount::from_sat(fund_amount),
+	);
+
+	// Sync to get the funds
+	node.sync_wallets().unwrap();
+
+	// Wait a bit for the chain source to index the transaction
+	std::thread::sleep(Duration::from_millis(500));
+
+	// Test get_address_balance with the funded address
+	let balance = node.get_address_balance(&addr.to_string()).unwrap();
+	assert_eq!(balance, fund_amount, "Balance should match funded amount");
+
+	// Test with an unfunded address
+	let unfunded_addr = node.onchain_payment().new_address().unwrap();
+	let unfunded_balance = node.get_address_balance(&unfunded_addr.to_string()).unwrap();
+	assert_eq!(unfunded_balance, 0, "Unfunded address should have zero balance");
+
+	// Test with an invalid address
+	let invalid_result = node.get_address_balance("invalid_address");
+	assert!(invalid_result.is_err(), "Invalid address should return error");
 }

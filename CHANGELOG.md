@@ -21,6 +21,11 @@
   and other transaction types.
 - Added `Node::get_transaction_details()` method to retrieve transaction details for any
   transaction ID that exists in the wallet, returning `None` if the transaction is not found.
+- Added `Node::get_address_balance()` method to retrieve the current balance (in satoshis) for
+  any Bitcoin address. This queries the chain source (Esplora or Electrum) to get the balance.
+  Throws `InvalidAddress` if the address string cannot be parsed or doesn't match the node's
+  network. Returns 0 if the balance cannot be queried (e.g., chain source unavailable). Note: This
+  method is not available for BitcoindRpc chain source.
 - Added `SyncType` enum to distinguish between onchain wallet sync, Lightning
   wallet sync, and fee rate cache updates.
 - Balance tracking is now persisted in `NodeMetrics` to detect changes across restarts.
