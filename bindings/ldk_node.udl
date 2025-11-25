@@ -422,11 +422,26 @@ enum VssHeaderProviderError {
 	"InternalError",
 };
 
-[Enum]
-interface TransactionContext {
-	ChannelFunding(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id);
-	ChannelClosure(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id);
-	RegularWallet();
+dictionary TxInput {
+	string txid;
+	u32 vout;
+	string scriptsig;
+	sequence<string> witness;
+	u32 sequence;
+};
+
+dictionary TxOutput {
+	string scriptpubkey;
+	string? scriptpubkey_type;
+	string? scriptpubkey_address;
+	i64 value;
+	u32 n;
+};
+
+dictionary TransactionDetails {
+	i64 amount_sats;
+	sequence<TxInput> inputs;
+	sequence<TxOutput> outputs;
 };
 
 enum SyncType {
@@ -448,9 +463,10 @@ interface Event {
 	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
 	SplicePending(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint new_funding_txo);
 	SpliceFailed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint? abandoned_funding_txo);
-	OnchainTransactionConfirmed(Txid txid, BlockHash block_hash, u32 block_height, u64 confirmation_time, TransactionContext context);
-	OnchainTransactionUnconfirmed(Txid txid);
-	OnchainTransactionReceived(Txid txid, i64 amount_sats, TransactionContext context);
+	OnchainTransactionConfirmed(Txid txid, BlockHash block_hash, u32 block_height, u64 confirmation_time, TransactionDetails details);
+	OnchainTransactionReceived(Txid txid, TransactionDetails details);
+	OnchainTransactionReplaced(Txid txid);
+	OnchainTransactionReorged(Txid txid);
 	SyncProgress(SyncType sync_type, u8 progress_percent, u32 current_block_height, u32 target_block_height);
 	SyncCompleted(SyncType sync_type, u32 synced_block_height);
 	BalanceChanged(u64 old_spendable_onchain_balance_sats, u64 new_spendable_onchain_balance_sats, u64 old_total_onchain_balance_sats, u64 new_total_onchain_balance_sats, u64 old_total_lightning_balance_sats, u64 new_total_lightning_balance_sats);

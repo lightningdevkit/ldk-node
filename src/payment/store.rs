@@ -683,7 +683,13 @@ mod tests {
 			);
 
 			match bolt11_decoded.kind {
-				PaymentKind::Bolt11 { hash: h, preimage: p, secret: s, description: _, bolt11: _ } => {
+				PaymentKind::Bolt11 {
+					hash: h,
+					preimage: p,
+					secret: s,
+					description: _,
+					bolt11: _,
+				} => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);

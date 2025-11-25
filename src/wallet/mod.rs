@@ -11,6 +11,8 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::event::{TxInput, TxOutput};
+
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 #[allow(deprecated)]
@@ -172,7 +174,9 @@ impl Wallet {
 		Ok(change_address.address.script_pubkey())
 	}
 
-	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<Vec<WalletEvent>, Error> {
+	pub(crate) fn apply_update(
+		&self, update: impl Into<Update>,
+	) -> Result<Vec<WalletEvent>, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		match locked_wallet.apply_update_events(update) {
 			Ok(events) => {
@@ -890,13 +894,28 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
-	/// Get the net amount (received - sent) for a specific transaction.
+	/// Get transaction details including inputs, outputs, and net amount.
 	/// Returns None if the transaction is not found in the wallet.
-	pub(crate) fn get_tx_net_amount(&self, txid: &Txid) -> Option<i64> {
+	pub(crate) fn get_tx_details(&self, txid: &Txid) -> Option<(i64, Vec<TxInput>, Vec<TxOutput>)> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let tx_node = locked_wallet.get_tx(*txid)?;
-		let (sent, received) = locked_wallet.sent_and_received(&tx_node.tx_node.tx);
-		Some(received.to_sat() as i64 - sent.to_sat() as i64)
+		let tx = &tx_node.tx_node.tx;
+		let (sent, received) = locked_wallet.sent_and_received(tx);
+		let net_amount = received.to_sat() as i64 - sent.to_sat() as i64;
+
+		let inputs: Vec<TxInput> =
+			tx.input.iter().map(|tx_input| TxInput::from_tx_input(tx_input)).collect();
+
+		let outputs: Vec<TxOutput> = tx
+			.output
+			.iter()
+			.enumerate()
+			.map(|(index, tx_output)| {
+				TxOutput::from_tx_output(tx_output, index as u32, self.config.network)
+			})
+			.collect();
+
+		Some((net_amount, inputs, outputs))
 	}
 
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {

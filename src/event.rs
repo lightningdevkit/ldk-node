@@ -54,56 +54,123 @@ use crate::{
 	UserChannelId,
 };
 
-/// Describes the context of an onchain transaction.
-///
-/// This helps applications understand why a transaction exists and how to handle it.
+/// Details about a transaction input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransactionContext {
-	/// A channel funding transaction (channel open).
-	///
-	/// This transaction creates a new Lightning channel.
-	ChannelFunding {
-		/// The channel ID associated with this funding transaction.
-		channel_id: ChannelId,
-		/// The user channel ID for this channel.
-		user_channel_id: UserChannelId,
-		/// The counterparty node ID.
-		counterparty_node_id: PublicKey,
-	},
-	/// A channel closure transaction.
-	///
-	/// This transaction closes an existing Lightning channel, either cooperatively
-	/// or through a force-close.
-	ChannelClosure {
-		/// The channel ID that was closed.
-		channel_id: ChannelId,
-		/// The user channel ID for this channel.
-		user_channel_id: UserChannelId,
-		/// The counterparty node ID.
-		counterparty_node_id: Option<PublicKey>,
-	},
-	/// A regular wallet transaction (not related to any channel).
-	///
-	/// This could be:
-	/// - Receiving funds to the onchain wallet
-	/// - Sending funds from the onchain wallet
-	/// - Any other non-channel transaction
-	RegularWallet,
+pub struct TxInput {
+	/// The transaction ID of the previous output being spent.
+	pub txid: bitcoin::Txid,
+	/// The output index of the previous output being spent.
+	pub vout: u32,
+	/// The script signature (hex-encoded).
+	pub scriptsig: String,
+	/// The witness stack (hex-encoded strings).
+	pub witness: Vec<String>,
+	/// The sequence number.
+	pub sequence: u32,
 }
 
-impl_writeable_tlv_based_enum!(TransactionContext,
-	(0, ChannelFunding) => {
-		(0, channel_id, required),
-		(2, user_channel_id, required),
-		(4, counterparty_node_id, required),
-	},
-	(1, ChannelClosure) => {
-		(0, channel_id, required),
-		(2, user_channel_id, required),
-		(4, counterparty_node_id, option),
-	},
-	(2, RegularWallet) => {},
-);
+/// Details about a transaction output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxOutput {
+	/// The script public key (hex-encoded).
+	pub scriptpubkey: String,
+	/// The script public key type (e.g., "p2pkh", "p2sh", "p2wpkh", "p2wsh", "p2tr").
+	pub scriptpubkey_type: Option<String>,
+	/// The address corresponding to this script (if decodable).
+	pub scriptpubkey_address: Option<String>,
+	/// The value in satoshis.
+	pub value: i64,
+	/// The output index in the transaction.
+	pub n: u32,
+}
+
+/// Details about an onchain transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionDetails {
+	/// The net amount in this transaction (in satoshis).
+	///
+	/// This is calculated as: (received - sent). For incoming payments,
+	/// this will be positive. For outgoing payments, this will be negative.
+	///
+	/// Note: This amount does NOT include transaction fees.
+	pub amount_sats: i64,
+	/// The transaction inputs with full details.
+	pub inputs: Vec<TxInput>,
+	/// The transaction outputs with full details.
+	pub outputs: Vec<TxOutput>,
+}
+
+impl_writeable_tlv_based!(TxInput, {
+	(0, txid, required),
+	(2, vout, required),
+	(4, scriptsig, required),
+	(6, witness, required_vec),
+	(8, sequence, required),
+});
+
+impl_writeable_tlv_based!(TxOutput, {
+	(0, scriptpubkey, required),
+	(2, scriptpubkey_type, option),
+	(4, scriptpubkey_address, option),
+	(6, value, required),
+	(8, n, required),
+});
+
+impl_writeable_tlv_based!(TransactionDetails, {
+	(0, amount_sats, required),
+	(2, inputs, required_vec),
+	(4, outputs, required_vec),
+});
+
+impl TxInput {
+	pub(crate) fn from_tx_input(tx_input: &TxIn) -> Self {
+		let scriptsig = hex_utils::to_string(tx_input.script_sig.as_bytes());
+		let witness: Vec<String> =
+			tx_input.witness.iter().map(|w| hex_utils::to_string(w)).collect();
+
+		Self {
+			txid: tx_input.previous_output.txid,
+			vout: tx_input.previous_output.vout,
+			scriptsig,
+			witness,
+			sequence: tx_input.sequence.to_consensus_u32(),
+		}
+	}
+}
+
+impl TxOutput {
+	pub(crate) fn from_tx_output(tx_output: &TxOut, index: u32, network: bitcoin::Network) -> Self {
+		let scriptpubkey = hex_utils::to_string(tx_output.script_pubkey.as_bytes());
+		let (scriptpubkey_type, scriptpubkey_address) =
+			Self::parse_script_type_and_address(&tx_output.script_pubkey, network);
+
+		Self {
+			scriptpubkey,
+			scriptpubkey_type,
+			scriptpubkey_address,
+			value: tx_output.value.to_sat() as i64,
+			n: index,
+		}
+	}
+
+	fn parse_script_type_and_address(
+		script: &bitcoin::Script, network: bitcoin::Network,
+	) -> (Option<String>, Option<String>) {
+		bitcoin::Address::from_script(script, network)
+			.map(|addr| {
+				let script_type = match addr.address_type() {
+					Some(bitcoin::address::AddressType::P2pkh) => Some("p2pkh".to_string()),
+					Some(bitcoin::address::AddressType::P2sh) => Some("p2sh".to_string()),
+					Some(bitcoin::address::AddressType::P2wpkh) => Some("p2wpkh".to_string()),
+					Some(bitcoin::address::AddressType::P2wsh) => Some("p2wsh".to_string()),
+					Some(bitcoin::address::AddressType::P2tr) => Some("p2tr".to_string()),
+					_ => None,
+				};
+				(script_type, Some(addr.to_string()))
+			})
+			.unwrap_or((None, None))
+	}
+}
 
 /// Describes what component is being synchronized.
 ///
@@ -143,8 +210,9 @@ impl_writeable_tlv_based_enum!(SyncType,
 ///
 /// # Onchain Transaction Events
 ///
-/// The `OnchainTransactionConfirmed` and `OnchainTransactionUnconfirmed` events allow
-/// applications to reactively respond to onchain wallet activity without polling.
+/// The onchain transaction events (`OnchainTransactionConfirmed`, `OnchainTransactionReceived`,
+/// `OnchainTransactionReplaced`, and `OnchainTransactionReorged`) allow applications to reactively
+/// respond to onchain wallet activity without polling.
 ///
 /// ## Example: Monitoring Onchain Transactions (Reactive - No Polling!)
 ///
@@ -174,13 +242,23 @@ impl_writeable_tlv_based_enum!(SyncType,
 /// loop {
 ///     // This blocks until an event is available (pushed by background sync)
 ///     match node.wait_next_event() {
-///         Event::OnchainTransactionConfirmed { txid, block_height, .. } => {
+///         Event::OnchainTransactionConfirmed { txid, block_height, details, .. } => {
 ///             println!("Transaction {} confirmed at height {}", txid, block_height);
+///             println!("Amount: {} sats", details.amount_sats);
 ///             // Update UI, send push notification, etc. - truly reactive!
 ///             node.event_handled()?;
 ///         },
-///         Event::OnchainTransactionUnconfirmed { txid } => {
-///             println!("Transaction {} became unconfirmed (reorg)", txid);
+///         Event::OnchainTransactionReceived { txid, details } => {
+///             println!("New transaction {} received", txid);
+///             println!("Amount: {} sats", details.amount_sats);
+///             node.event_handled()?;
+///         },
+///         Event::OnchainTransactionReplaced { txid } => {
+///             println!("Transaction {} was replaced (RBF)", txid);
+///             node.event_handled()?;
+///         },
+///         Event::OnchainTransactionReorged { txid } => {
+///             println!("Transaction {} became unconfirmed due to a reorg", txid);
 ///             node.event_handled()?;
 ///         },
 ///         Event::PaymentReceived { .. } => {
@@ -427,30 +505,20 @@ pub enum Event {
 	/// node.sync_wallets().unwrap();
 	///
 	/// // Check for onchain transaction events
-	/// if let Some(Event::OnchainTransactionConfirmed { txid, block_height, context, .. }) = node.next_event() {
-	///     match context {
-	///         TransactionContext::ChannelFunding { channel_id, .. } => {
-	///             println!("Channel funding tx {} confirmed at {}", txid, block_height);
-	///         },
-	///         TransactionContext::ChannelClosure { channel_id, .. } => {
-	///             println!("Channel close tx {} confirmed at {}", txid, block_height);
-	///         },
-	///         TransactionContext::RegularWallet => {
-	///             println!("Regular wallet tx {} confirmed at {}", txid, block_height);
-	///         }
-	///     }
+	/// if let Some(Event::OnchainTransactionConfirmed { txid, block_height, details, .. }) = node.next_event() {
+	///     println!("Transaction {} confirmed at height {}", txid, block_height);
+	///     println!("Amount: {} sats", details.amount_sats);
 	///     node.event_handled().unwrap();
 	/// }
 	/// ```
 	///
 	/// ## Cross-Referencing Channel Events
 	///
-	/// Note: Currently, the `context` field is set to `RegularWallet` for all transactions.
 	/// To determine if a transaction is channel-related, applications should cross-reference
 	/// with `ChannelPending` and `ChannelClosed` events:
 	///
 	/// ```no_run
-	/// # use ldk_node::{Builder, Event, TransactionContext};
+	/// # use ldk_node::{Builder, Event, TransactionDetails};
 	/// # use ldk_node::bitcoin::Network;
 	/// # use std::collections::HashMap;
 	/// # let mut builder = Builder::new();
@@ -490,51 +558,10 @@ pub enum Event {
 		block_height: u32,
 		/// The confirmation timestamp (seconds since epoch).
 		confirmation_time: u64,
-		/// Context about what type of transaction this is.
-		///
-		/// This indicates whether the transaction is related to a channel operation
-		/// (open/close) or a regular wallet transaction.
-		context: TransactionContext,
+		/// Details about the transaction including inputs and outputs.
+		details: TransactionDetails,
 	},
-	/// An onchain transaction became unconfirmed.
-	///
-	/// This event is emitted in two scenarios:
-	/// 1. **Chain Reorg**: A previously confirmed transaction is no longer
-	///    in the best chain due to a reorg.
-	/// 2. **Replace-By-Fee (RBF)**: A transaction was replaced by another transaction.
-	///
-	/// **Note**: This event does NOT cover all cases of transaction removal from the mempool.
-	/// Specifically, it will NOT be emitted when:
-	/// - A transaction is dropped from the mempool due to expiration
-	/// - A transaction is evicted due to low fees when the mempool is full
-	/// - A transaction is simply "forgotten" by nodes without replacement
-	///
-	/// Applications should handle this event by marking the transaction as pending again
-	/// and potentially taking action (e.g., updating UI, re-evaluating fee requirements).
-	///
-	/// # Example
-	///
-	/// ```no_run
-	/// # use ldk_node::{Builder, Event};
-	/// # use ldk_node::bitcoin::Network;
-	/// # let mut builder = Builder::new();
-	/// # builder.set_network(Network::Testnet);
-	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
-	/// # let node = builder.build().unwrap();
-	/// # node.start().unwrap();
-	/// // After a chain reorg...
-	/// node.sync_wallets().unwrap();
-	///
-	/// if let Some(Event::OnchainTransactionUnconfirmed { txid }) = node.next_event() {
-	///     println!("Transaction {} is now unconfirmed due to a reorg or RBF", txid);
-	///     node.event_handled().unwrap();
-	/// }
-	/// ```
-	OnchainTransactionUnconfirmed {
-		/// The transaction ID that became unconfirmed.
-		txid: bitcoin::Txid,
-	},
-	/// A new unconfirmed onchain transaction was detected in the mempool.
+	/// A new onchain transaction was received (detected in the mempool).
 	///
 	/// This event is emitted when a transaction is first seen in the mempool, before any
 	/// confirmations. This is useful for immediately showing incoming payments in the UI
@@ -555,8 +582,9 @@ pub enum Event {
 	/// # node.start().unwrap();
 	/// // When someone sends sats to your wallet...
 	/// match node.wait_next_event() {
-	///     Event::OnchainTransactionReceived { txid, context } => {
+	///     Event::OnchainTransactionReceived { txid, details } => {
 	///         println!("Incoming payment detected! Txid: {}", txid);
+	///         println!("Amount: {} sats", details.amount_sats);
 	///         println!("Waiting for confirmations...");
 	///         node.event_handled().unwrap();
 	///     },
@@ -566,19 +594,74 @@ pub enum Event {
 	OnchainTransactionReceived {
 		/// The transaction ID of the newly detected transaction.
 		txid: bitcoin::Txid,
-		/// The net amount received in this transaction (in satoshis).
-		///
-		/// This is calculated as: (received - sent). For incoming payments,
-		/// this will be positive. For outgoing payments, this will be negative.
-		///
-		/// Note: This amount does NOT include transaction fees.
-		amount_sats: i64,
-		/// The context describing what type of transaction this is.
-		///
-		/// This will always be `RegularWallet` currently, as channel funding
-		/// and closure transactions are typically already known before they
-		/// appear in the mempool.
-		context: TransactionContext,
+		/// Details about the transaction including inputs and outputs.
+		details: TransactionDetails,
+	},
+	/// An onchain transaction was replaced via Replace-By-Fee (RBF).
+	///
+	/// This event is emitted when a transaction is replaced by another transaction.
+	///
+	/// Applications should handle this event by:
+	/// - Marking the original transaction as replaced
+	/// - Updating UI to reflect the replacement
+	/// - Potentially tracking the new replacement transaction
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// match node.wait_next_event() {
+	///     Event::OnchainTransactionReplaced { txid } => {
+	///         println!("Transaction {} was replaced", txid);
+	///         node.event_handled().unwrap();
+	///     },
+	///     _ => {}
+	/// }
+	/// ```
+	OnchainTransactionReplaced {
+		/// The transaction ID that was replaced.
+		txid: bitcoin::Txid,
+	},
+	/// An onchain transaction became unconfirmed due to a chain reorganization.
+	///
+	/// This event is emitted when a previously confirmed transaction is no longer
+	/// in the best chain due to a reorg. The transaction may re-confirm in a future block
+	/// or remain unconfirmed.
+	///
+	/// **Note**: The reorged transaction may re-confirm in a future block or remain unconfirmed.
+	///
+	/// Applications should handle this event by:
+	/// - Marking the transaction as pending again
+	/// - Updating UI to reflect the unconfirmed status
+	/// - Potentially re-evaluating fee requirements if needed
+	///
+	/// # Example
+	///
+	/// ```no_run
+	/// # use ldk_node::{Builder, Event};
+	/// # use ldk_node::bitcoin::Network;
+	/// # let mut builder = Builder::new();
+	/// # builder.set_network(Network::Testnet);
+	/// # builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
+	/// # let node = builder.build().unwrap();
+	/// # node.start().unwrap();
+	/// // After a chain reorg...
+	/// node.sync_wallets().unwrap();
+	///
+	/// if let Some(Event::OnchainTransactionReorged { txid }) = node.next_event() {
+	///     println!("Transaction {} became unconfirmed due to a reorg", txid);
+	///     node.event_handled().unwrap();
+	/// }
+	/// ```
+	OnchainTransactionReorged {
+		/// The transaction ID that became unconfirmed due to a reorg.
+		txid: bitcoin::Txid,
 	},
 	/// Synchronization progress update.
 	///
@@ -768,17 +851,19 @@ impl_writeable_tlv_based_enum!(Event,
 		(2, block_hash, required),
 		(4, block_height, required),
 		(6, confirmation_time, required),
-		(8, context, required),
+		(8, details, required),
 	},
-	(11, OnchainTransactionUnconfirmed) => {
+	(9, OnchainTransactionReceived) => {
+		(0, txid, required),
+		(2, details, required),
+	},
+	(10, OnchainTransactionReplaced) => {
 		(0, txid, required),
 	},
-	(12, OnchainTransactionReceived) => {
+	(11, OnchainTransactionReorged) => {
 		(0, txid, required),
-		(2, amount_sats, required),
-		(4, context, required),
 	},
-	(13, SyncProgress) => {
+	(12, SyncProgress) => {
 		(0, sync_type, required),
 		(2, progress_percent, required),
 		(4, current_block_height, required),

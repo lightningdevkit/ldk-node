@@ -108,6 +108,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
+pub use error::Error as NodeError;
+use error::Error;
+
+pub use event::{Event, SyncType, TransactionDetails, TxInput, TxOutput};
+
+pub use io::utils::generate_entropy_mnemonic;
+
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount};
 pub use wallet::CoinSelectionAlgorithm;
@@ -130,7 +137,7 @@ pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
-pub use event::{SyncType, TransactionContext};
+pub use event::SyncType;
 use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 #[cfg(feature = "uniffi")]
 use ffi::*;
@@ -1865,7 +1872,8 @@ where
 	let new_total_onchain = balance_details.total_onchain_balance_sats;
 	let new_total_lightning = balance_details.total_lightning_balance_sats;
 
-	let old_spendable_onchain = locked_metrics.last_known_spendable_onchain_balance_sats.unwrap_or(0);
+	let old_spendable_onchain =
+		locked_metrics.last_known_spendable_onchain_balance_sats.unwrap_or(0);
 	let old_total_onchain = locked_metrics.last_known_total_onchain_balance_sats.unwrap_or(0);
 	let old_total_lightning = locked_metrics.last_known_total_lightning_balance_sats.unwrap_or(0);
 

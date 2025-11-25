@@ -194,17 +194,18 @@ impl OnchainPayment {
 
 		let cur_anchor_reserve_sats =
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-		
+
 		// Get current balances
-		let (_total_balance, spendable_balance) = self.wallet.get_balances(cur_anchor_reserve_sats)
-			.unwrap_or((0, 0));
-		
+		let (_total_balance, spendable_balance) =
+			self.wallet.get_balances(cur_anchor_reserve_sats).unwrap_or((0, 0));
+
 		// First try with the exact amount
 		let outpoints = utxos_to_spend.map(|utxos| utxos.into_iter().map(|u| u.outpoint).collect());
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		
+
 		// Try calculating with exact amount first
-		let send_amount = OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
+		let send_amount =
+			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
 		let result = self.wallet.calculate_transaction_fee(
 			address,
 			send_amount,
@@ -212,7 +213,7 @@ impl OnchainPayment {
 			outpoints.clone(),
 			&self.channel_manager,
 		);
-		
+
 		// If we get InsufficientFunds and the amount is within the spendable balance,
 		// try calculating as if sending all available funds
 		if matches!(result, Err(Error::InsufficientFunds)) && amount_sats <= spendable_balance {
@@ -229,7 +230,7 @@ impl OnchainPayment {
 				return Ok(fee);
 			}
 		}
-		
+
 		result
 	}
 

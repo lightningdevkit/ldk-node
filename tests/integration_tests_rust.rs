@@ -2165,8 +2165,11 @@ fn onchain_transaction_events() {
 	for _ in 0..5 {
 		if let Some(event) = node.next_event() {
 			match event {
-				Event::OnchainTransactionConfirmed { txid, block_height, context, .. } => {
-					println!("Received OnchainTransactionConfirmed event for txid: {}, height: {}, context: {:?}", txid, block_height, context);
+				Event::OnchainTransactionConfirmed { txid, block_height, details, .. } => {
+					println!("Received OnchainTransactionConfirmed event for txid: {}, height: {}, amount: {}", txid, block_height, details.amount_sats);
+					// Verify TransactionDetails structure is populated
+					assert!(!details.inputs.is_empty(), "Transaction should have inputs");
+					assert!(!details.outputs.is_empty(), "Transaction should have outputs");
 					received_confirmed_event = true;
 					txid_from_event = Some(txid);
 					node.event_handled().unwrap();
@@ -2189,7 +2192,7 @@ fn onchain_transaction_events() {
 	// and can be pattern matched
 	match node.next_event() {
 		None => {}, // No more events is fine
-		Some(Event::OnchainTransactionUnconfirmed { .. }) => {
+		Some(Event::OnchainTransactionReceived { .. }) => {
 			node.event_handled().unwrap();
 		},
 		Some(_) => {}, // Other events are fine
@@ -2229,7 +2232,10 @@ fn onchain_transaction_events_electrum() {
 	let mut found_event = false;
 	for _ in 0..5 {
 		if let Some(event) = node.next_event() {
-			if matches!(event, Event::OnchainTransactionConfirmed { .. }) {
+			if let Event::OnchainTransactionConfirmed { details, .. } = event {
+				// Verify TransactionDetails structure is populated
+				assert!(!details.inputs.is_empty(), "Transaction should have inputs");
+				assert!(!details.outputs.is_empty(), "Transaction should have outputs");
 				found_event = true;
 				node.event_handled().unwrap();
 				break;
@@ -2268,7 +2274,10 @@ fn sync_completed_event() {
 		if let Some(event) = node.next_event() {
 			match event {
 				Event::SyncCompleted { sync_type, synced_block_height } => {
-					println!("Received SyncCompleted event: type={:?}, height={}", sync_type, synced_block_height);
+					println!(
+						"Received SyncCompleted event: type={:?}, height={}",
+						sync_type, synced_block_height
+					);
 					found_sync_completed = true;
 					node.event_handled().unwrap();
 					break;
@@ -2343,10 +2352,15 @@ fn balance_changed_event() {
 					);
 
 					// Verify balance actually increased
-					assert!(new_total_onchain_balance_sats > old_total_onchain_balance_sats,
-						"Balance should have increased");
-					assert_eq!(new_total_onchain_balance_sats - old_total_onchain_balance_sats, fund_amount,
-						"Balance increase should match funded amount");
+					assert!(
+						new_total_onchain_balance_sats > old_total_onchain_balance_sats,
+						"Balance should have increased"
+					);
+					assert_eq!(
+						new_total_onchain_balance_sats - old_total_onchain_balance_sats,
+						fund_amount,
+						"Balance increase should match funded amount"
+					);
 
 					found_balance_changed = true;
 					node.event_handled().unwrap();
@@ -2365,7 +2379,11 @@ fn balance_changed_event() {
 
 	// Verify the balance is now reflected in list_balances
 	let final_balance = node.list_balances().total_onchain_balance_sats;
-	assert_eq!(final_balance, initial_total_balance + fund_amount, "Balance should reflect the funded amount");
+	assert_eq!(
+		final_balance,
+		initial_total_balance + fund_amount,
+		"Balance should reflect the funded amount"
+	);
 
 	node.stop().unwrap();
 }
@@ -2373,12 +2391,9 @@ fn balance_changed_event() {
 #[test]
 fn test_event_serialization_roundtrip() {
 	// Test that all event types can be serialized and deserialized correctly
-	use ldk_node::{Event, SyncType, TransactionContext, UserChannelId};
 	use bitcoin::{BlockHash, Txid};
-	use bitcoin::secp256k1::PublicKey;
-	use lightning::ln::types::ChannelId;
-	use lightning_types::payment::{PaymentHash, PaymentPreimage};
-	use lightning::util::ser::{Writeable, Readable};
+	use ldk_node::{Event, SyncType, TransactionDetails, TxInput, TxOutput};
+	use lightning::util::ser::{Readable, Writeable};
 
 	// Helper function to test serialization roundtrip
 	fn test_roundtrip(event: Event) {
@@ -2395,22 +2410,49 @@ fn test_event_serialization_roundtrip() {
 		block_hash: BlockHash::from_slice(&[2; 32]).unwrap(),
 		block_height: 100000,
 		confirmation_time: 1234567890,
-		context: TransactionContext::RegularWallet,
-	};
-	test_roundtrip(event);
-
-	// Test OnchainTransactionUnconfirmed
-	let event = Event::OnchainTransactionUnconfirmed {
-		txid: Txid::from_slice(&[3; 32]).unwrap(),
+		details: TransactionDetails {
+			amount_sats: 100000,
+			inputs: vec![TxInput {
+				txid: Txid::from_slice(&[10; 32]).unwrap(),
+				vout: 0,
+				scriptsig: "".to_string(),
+				witness: vec![],
+				sequence: 0xffffffff,
+			}],
+			outputs: vec![TxOutput {
+				scriptpubkey: "0014".to_string(),
+				scriptpubkey_type: Some("p2wpkh".to_string()),
+				scriptpubkey_address: None,
+				value: 100000,
+				n: 0,
+			}],
+		},
 	};
 	test_roundtrip(event);
 
 	// Test OnchainTransactionReceived
 	let event = Event::OnchainTransactionReceived {
-		txid: Txid::from_slice(&[4; 32]).unwrap(),
-		amount_sats: -50000, // Test negative amount for outgoing
-		context: TransactionContext::RegularWallet,
+		txid: Txid::from_slice(&[3; 32]).unwrap(),
+		details: TransactionDetails {
+			amount_sats: -50000, // Test negative amount for outgoing
+			inputs: vec![TxInput {
+				txid: Txid::from_slice(&[11; 32]).unwrap(),
+				vout: 1,
+				scriptsig: "".to_string(),
+				witness: vec![],
+				sequence: 0xffffffff,
+			}],
+			outputs: vec![],
+		},
 	};
+	test_roundtrip(event);
+
+	// Test OnchainTransactionReplaced
+	let event = Event::OnchainTransactionReplaced { txid: Txid::from_slice(&[6; 32]).unwrap() };
+	test_roundtrip(event);
+
+	// Test OnchainTransactionReorged
+	let event = Event::OnchainTransactionReorged { txid: Txid::from_slice(&[7; 32]).unwrap() };
 	test_roundtrip(event);
 
 	// Test SyncProgress
@@ -2423,10 +2465,8 @@ fn test_event_serialization_roundtrip() {
 	test_roundtrip(event);
 
 	// Test SyncCompleted
-	let event = Event::SyncCompleted {
-		sync_type: SyncType::LightningWallet,
-		synced_block_height: 800000,
-	};
+	let event =
+		Event::SyncCompleted { sync_type: SyncType::LightningWallet, synced_block_height: 800000 };
 	test_roundtrip(event);
 
 	// Test BalanceChanged
@@ -2440,38 +2480,57 @@ fn test_event_serialization_roundtrip() {
 	};
 	test_roundtrip(event);
 
-	// Test TransactionContext variants
-	// Use a valid compressed public key (33 bytes, starting with 0x02 or 0x03)
-	let valid_pubkey = PublicKey::from_slice(&[
-		0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
-	]).unwrap();
-
-	let context = TransactionContext::ChannelFunding {
-		channel_id: ChannelId::from_bytes([5; 32]),
-		user_channel_id: UserChannelId(12345),
-		counterparty_node_id: valid_pubkey,
+	// Test TransactionDetails with multiple inputs and outputs
+	let details = TransactionDetails {
+		amount_sats: 1000000,
+		inputs: vec![TxInput {
+			txid: Txid::from_slice(&[12; 32]).unwrap(),
+			vout: 0,
+			scriptsig: "160014".to_string(),
+			witness: vec!["30440220".to_string()],
+			sequence: 0xffffffff,
+		}],
+		outputs: vec![TxOutput {
+			scriptpubkey: "0014".to_string(),
+			scriptpubkey_type: Some("p2wpkh".to_string()),
+			scriptpubkey_address: None,
+			value: 1000000,
+			n: 0,
+		}],
 	};
 	let event = Event::OnchainTransactionConfirmed {
 		txid: Txid::from_slice(&[6; 32]).unwrap(),
 		block_hash: BlockHash::from_slice(&[7; 32]).unwrap(),
 		block_height: 100001,
 		confirmation_time: 1234567891,
-		context,
+		details,
 	};
 	test_roundtrip(event);
 
-	let context = TransactionContext::ChannelClosure {
-		channel_id: ChannelId::from_bytes([8; 32]),
-		user_channel_id: UserChannelId(54321),
-		counterparty_node_id: Some(valid_pubkey),
+	// Test TransactionDetails with coinbase input
+	let details = TransactionDetails {
+		amount_sats: 62500000000, // Block reward
+		inputs: vec![TxInput {
+			txid: Txid::from_slice(&[0u8; 32]).unwrap(),
+			vout: 0xffffffff,
+			scriptsig: "03".to_string(),
+			witness: vec![],
+			sequence: 0xffffffff,
+		}],
+		outputs: vec![TxOutput {
+			scriptpubkey: "0014".to_string(),
+			scriptpubkey_type: Some("p2wpkh".to_string()),
+			scriptpubkey_address: None,
+			value: 62500000000,
+			n: 0,
+		}],
 	};
 	let event = Event::OnchainTransactionConfirmed {
 		txid: Txid::from_slice(&[9; 32]).unwrap(),
 		block_hash: BlockHash::from_slice(&[10; 32]).unwrap(),
 		block_height: 100002,
 		confirmation_time: 1234567892,
-		context,
+		details,
 	};
 	test_roundtrip(event);
 }
@@ -2526,17 +2585,20 @@ fn test_concurrent_event_emission() {
 	}
 
 	// We should have received at least one SyncCompleted event per thread
-	assert!(sync_completed_count >= 1, "Should have received at least one SyncCompleted event from concurrent syncs");
+	assert!(
+		sync_completed_count >= 1,
+		"Should have received at least one SyncCompleted event from concurrent syncs"
+	);
 
 	node.stop().unwrap();
 }
 
 #[test]
 fn test_reorg_event_emission() {
-	// Test that reorg scenarios properly emit OnchainTransactionUnconfirmed events
+	// Test that reorg scenarios properly emit OnchainTransactionReceived events
 	// Note: This is a simplified test as true reorg testing requires complex setup
-	use std::time::Duration;
 	use std::thread;
+	use std::time::Duration;
 
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
