@@ -15,14 +15,15 @@ use std::sync::Mutex;
 
 use lightning::events::ClosureReason;
 use lightning::ln::functional_test_utils::{
-	connect_block, create_announced_chan_between_nodes, create_chanmon_cfgs, create_dummy_block,
-	create_network, create_node_cfgs, create_node_chanmgrs, send_payment, TestChanMonCfg,
+	check_closed_event, connect_block, create_announced_chan_between_nodes, create_chanmon_cfgs,
+	create_dummy_block, create_network, create_node_cfgs, create_node_chanmgrs, send_payment,
+	TestChanMonCfg,
 };
 use lightning::util::persist::{
 	KVStore, KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
 };
 use lightning::util::test_utils;
-use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event, io};
+use lightning::{check_added_monitors, check_closed_broadcast, io};
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 
@@ -326,12 +327,12 @@ pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 			message.clone(),
 		)
 		.unwrap();
-	check_closed_event!(
-		nodes[0],
+	check_closed_event(
+		&nodes[0],
 		1,
 		ClosureReason::HolderForceClosed { broadcasted_latest_txn: Some(true), message },
-		[nodes[1].node.get_our_node_id()],
-		100000
+		&[nodes[1].node.get_our_node_id()],
+		100000,
 	);
 	check_closed_broadcast!(nodes[0], true);
 	check_added_monitors!(nodes[0], 1);
@@ -345,7 +346,7 @@ pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 	check_closed_broadcast!(nodes[1], true);
 	let reason = ClosureReason::CommitmentTxConfirmed;
 	let node_id_0 = nodes[0].node.get_our_node_id();
-	check_closed_event!(nodes[1], 1, reason, false, [node_id_0], 100000);
+	check_closed_event(&nodes[1], 1, reason, &[node_id_0], 100000);
 	check_added_monitors!(nodes[1], 1);
 
 	// Make sure everything is persisted as expected after close.
