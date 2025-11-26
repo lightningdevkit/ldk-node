@@ -575,3 +575,18 @@ pub(crate) fn read_bdk_wallet_change_set(
 		.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }
+
+#[cfg(test)]
+mod tests {
+	use super::read_or_generate_seed_file;
+	use super::test_utils::random_storage_path;
+
+	#[test]
+	fn generated_seed_is_readable() {
+		let mut rand_path = random_storage_path();
+		rand_path.push("test_keys_seed");
+		let expected_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
+		let read_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
+		assert_eq!(expected_seed_bytes, read_seed_bytes);
+	}
+}
