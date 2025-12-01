@@ -29,8 +29,6 @@ use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use hex::DisplayHex;
 use ldk_node::config::Config;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
-#[cfg(feature = "experimental-lsps2-support")]
-use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_server_protos::events;
 use ldk_server_protos::events::{event_envelope, EventEnvelope};
 use ldk_server_protos::types::Payment;
@@ -79,6 +77,13 @@ fn main() {
 	let mut builder = Builder::from_config(ldk_node_config);
 	builder.set_log_facade_logger();
 
+	if let Some(alias) = config_file.alias {
+		if let Err(e) = builder.set_node_alias(alias.to_string()) {
+			eprintln!("Failed to set node alias: {e}");
+			std::process::exit(-1);
+		}
+	}
+
 	match config_file.chain_source {
 		ChainSource::Rpc { rpc_address, rpc_user, rpc_password } => {
 			builder.set_chain_source_bitcoind_rpc(
@@ -106,6 +111,8 @@ fn main() {
 			std::process::exit(-1);
 		},
 	};
+
+	builder.set_runtime(runtime.handle().clone());
 
 	let node = match builder.build() {
 		Ok(node) => Arc::new(node),
@@ -136,7 +143,7 @@ fn main() {
 	};
 
 	println!("Starting up...");
-	match node.start_with_runtime(Arc::clone(&runtime)) {
+	match node.start() {
 		Ok(()) => {},
 		Err(e) => {
 			eprintln!("Failed to start up LDK Node: {}", e);
@@ -171,14 +178,18 @@ fn main() {
 								"CHANNEL_PENDING: {} from counterparty {}",
 								channel_id, counterparty_node_id
 							);
-							event_node.event_handled();
+							if let Err(e) = event_node.event_handled() {
+								eprintln!("Failed to mark event as handled: {e}");
+							}
 						},
 						Event::ChannelReady { channel_id, counterparty_node_id, .. } => {
 							println!(
 								"CHANNEL_READY: {} from counterparty {:?}",
 								channel_id, counterparty_node_id
 							);
-							event_node.event_handled();
+							if let Err(e) = event_node.event_handled() {
+								eprintln!("Failed to mark event as handled: {e}");
+							}
 						},
 						Event::PaymentReceived { payment_id, payment_hash, amount_msat, .. } => {
 							println!(
@@ -281,7 +292,9 @@ fn main() {
 								&forwarded_payment.encode_to_vec(),
 							) {
 								Ok(_) => {
-										event_node.event_handled();
+									if let Err(e) = event_node.event_handled() {
+										eprintln!("Failed to mark event as handled: {e}");
+									}
 								}
 								Err(e) => {
 										println!("Failed to write forwarded payment to persistence: {}", e);
@@ -289,7 +302,9 @@ fn main() {
 							}
 						},
 						_ => {
-							event_node.event_handled();
+							if let Err(e) = event_node.event_handled() {
+								eprintln!("Failed to mark event as handled: {e}");
+							}
 						},
 					}
 				},
@@ -361,7 +376,9 @@ fn upsert_payment_details(
 		&payment.encode_to_vec(),
 	) {
 		Ok(_) => {
-			event_node.event_handled();
+			if let Err(e) = event_node.event_handled() {
+				eprintln!("Failed to mark event as handled: {e}");
+			}
 		},
 		Err(e) => {
 			eprintln!("Failed to write payment to persistence: {}", e);

@@ -53,6 +53,11 @@ min_payment_size_msat = 10000000          # 10,000 satoshis
 # The maximum payment size that we will accept when opening a channel.
 max_payment_size_msat = 25000000000       # 0.25 BTC
 
+# Use the 'client-trusts-LSP' trust model.
+# When set, the service will delay broadcasting the JIT channel's
+# funding transaction until the client claimed sufficient HTLC parts to pay for the channel open.
+client_trusts_lsp = false
+
 # Optional token for clients (uncomment and set if required)
 ## A token we may require to be sent by the clients.
 ## If set, only requests matching this token will be accepted. (uncomment and set if required)

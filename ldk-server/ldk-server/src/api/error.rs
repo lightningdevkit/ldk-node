@@ -78,7 +78,9 @@ impl From<NodeError> for LdkServerError {
 			| NodeError::InvalidNodeAlias
 			| NodeError::InvalidDateTime
 			| NodeError::InvalidFeeRate
-			| NodeError::UriParameterParsingFailed => {
+			| NodeError::UriParameterParsingFailed
+			| NodeError::InvalidBlindedPaths
+			| NodeError::AsyncPaymentServicesDisabled => {
 				(error.to_string(), LdkServerErrorCode::InvalidRequestError)
 			},
 
@@ -92,6 +94,7 @@ impl From<NodeError> for LdkServerError {
 			| NodeError::ProbeSendingFailed
 			| NodeError::ChannelCreationFailed
 			| NodeError::ChannelClosingFailed
+			| NodeError::ChannelSplicingFailed
 			| NodeError::ChannelConfigUpdateFailed
 			| NodeError::DuplicatePayment
 			| NodeError::InsufficientFunds

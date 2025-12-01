@@ -134,6 +134,12 @@ pub struct Bolt11Jit {
 	/// for more information.
 	#[prost(message, optional, tag = "4")]
 	pub lsp_fee_limits: ::core::option::Option<LspFeeLimits>,
+	/// The value, in thousands of a satoshi, that was deducted from this payment as an extra
+	/// fee taken by our channel counterparty.
+	///
+	/// Will only be `Some` once we received the payment.
+	#[prost(uint64, optional, tag = "5")]
+	pub counterparty_skimmed_fee_msat: ::core::option::Option<u64>,
 }
 /// Represents a BOLT 12 ‘offer’ payment, i.e., a payment for an Offer.
 #[allow(clippy::derive_partial_eq_without_eq)]
