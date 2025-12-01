@@ -228,12 +228,15 @@ impl fmt::Display for UserChannelId {
 
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
+/// When a channel is spliced, most fields continue to refer to the original pre-splice channel
+/// state until the splice transaction reaches sufficient confirmations to be locked (and we
+/// exchange `splice_locked` messages with our peer). See individual fields for details.
+///
 /// [`Node::list_channels`]: crate::Node::list_channels
 #[derive(Debug, Clone)]
 pub struct ChannelDetails {
-	/// The channel ID (prior to funding transaction generation, this is a random 32-byte
-	/// identifier, afterwards this is the transaction ID of the funding transaction XOR the
-	/// funding transaction output).
+	/// The channel's ID (prior to initial channel setup this is a random 32 bytes, thereafter it
+	/// is derived from channel funding or key material).
 	///
 	/// Note that this means this value is *not* persistent - it can change once during the
 	/// lifetime of the channel.
@@ -242,6 +245,10 @@ pub struct ChannelDetails {
 	pub counterparty_node_id: PublicKey,
 	/// The channel's funding transaction output, if we've negotiated the funding transaction with
 	/// our counterparty already.
+	///
+	/// When a channel is spliced, this continues to refer to the original pre-splice channel
+	/// state until the splice transaction reaches sufficient confirmations to be locked (and we
+	/// exchange `splice_locked` messages with our peer).
 	pub funding_txo: Option<OutPoint>,
 	/// The position of the funding transaction in the chain. None if the funding transaction has
 	/// not yet been confirmed and the channel fully opened.
@@ -251,6 +258,10 @@ pub struct ChannelDetails {
 	///
 	/// For channels with [`confirmations_required`] set to `Some(0)`, [`outbound_scid_alias`] may
 	/// be used in place of this in outbound routes.
+	///
+	/// When a channel is spliced, this continues to refer to the original pre-splice channel state
+	/// until the splice transaction reaches sufficient confirmations to be locked (and we exchange
+	/// `splice_locked` messages with our peer).
 	///
 	/// [`inbound_scid_alias`]: Self::inbound_scid_alias
 	/// [`outbound_scid_alias`]: Self::outbound_scid_alias
@@ -262,6 +273,10 @@ pub struct ChannelDetails {
 	/// `Some(0)`).
 	///
 	/// This will be `None` as long as the channel is not available for routing outbound payments.
+	///
+	/// When a channel is spliced, this continues to refer to the original pre-splice channel
+	/// state until the splice transaction reaches sufficient confirmations to be locked (and we
+	/// exchange `splice_locked` messages with our peer).
 	///
 	/// [`short_channel_id`]: Self::short_channel_id
 	/// [`confirmations_required`]: Self::confirmations_required
@@ -277,6 +292,10 @@ pub struct ChannelDetails {
 	/// [`short_channel_id`]: Self::short_channel_id
 	pub inbound_scid_alias: Option<u64>,
 	/// The value, in satoshis, of this channel as it appears in the funding output.
+	///
+	/// When a channel is spliced, this continues to refer to the original pre-splice channel
+	/// state until the splice transaction reaches sufficient confirmations to be locked (and we
+	/// exchange `splice_locked` messages with our peer).
 	pub channel_value_sats: u64,
 	/// The value, in satoshis, that must always be held as a reserve in the channel for us. This
 	/// value ensures that if we broadcast a revoked state, our counterparty can punish us by
