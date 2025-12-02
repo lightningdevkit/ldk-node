@@ -65,6 +65,12 @@ cargo ndk \
 echo "Generating Kotlin bindings..."
 $UNIFFI_BINDGEN_BIN bindings/ldk_node.udl --lib-file $TARGET_DIR/aarch64-linux-android/release-smaller/libldk_node.so --config uniffi-android.toml -o "$ANDROID_LIB_DIR/lib/src" || exit 1
 
+# Fix incorrect kotlinx.coroutines.IO import (removed in newer kotlinx.coroutines versions)
+echo "Fixing Kotlin coroutines imports..."
+KOTLIN_BINDINGS_FILE="$ANDROID_LIB_DIR/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.android.kt"
+sed -i.bak '/import kotlinx\.coroutines\.IO/d' "$KOTLIN_BINDINGS_FILE"
+rm -f "$KOTLIN_BINDINGS_FILE.bak"
+
 # Sync version from Cargo.toml
 echo "Syncing version from Cargo.toml..."
 CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/' | head -1)
