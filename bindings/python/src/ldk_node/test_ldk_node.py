@@ -97,13 +97,15 @@ def send_to_address(address, amount_sats):
 
 
 def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
+    mnemonic = generate_entropy_mnemonic(None)
+    node_entropy = NodeEntropy.from_bip39_mnemonic(mnemonic, None)
     config = default_config()
     builder = Builder.from_config(config)
     builder.set_storage_dir_path(tmp_dir)
     builder.set_chain_source_esplora(esplora_endpoint, None)
     builder.set_network(DEFAULT_TEST_NETWORK)
     builder.set_listening_addresses(listening_addresses)
-    return builder.build()
+    return builder.build(node_entropy)
 
 def get_esplora_endpoint():
     if os.environ.get('ESPLORA_ENDPOINT'):

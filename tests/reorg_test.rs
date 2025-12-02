@@ -31,7 +31,7 @@ proptest! {
 			macro_rules! config_node {
 				($chain_source: expr, $anchor_channels: expr) => {{
 					let config_a = random_config($anchor_channels);
-					let node = setup_node(&$chain_source, config_a, None);
+					let node = setup_node(&$chain_source, config_a);
 					node
 				}};
 			}

@@ -29,6 +29,7 @@ use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
+use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
@@ -287,11 +288,24 @@ impl Default for TestStoreType {
 	}
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TestConfig {
 	pub node_config: Config,
 	pub log_writer: TestLogWriter,
 	pub store_type: TestStoreType,
+	pub node_entropy: NodeEntropy,
+}
+
+impl Default for TestConfig {
+	fn default() -> Self {
+		let node_config = Default::default();
+		let log_writer = Default::default();
+		let store_type = Default::default();
+
+		let mnemonic = generate_entropy_mnemonic(None);
+		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+		TestConfig { node_config, log_writer, store_type, node_entropy }
+	}
 }
 
 macro_rules! setup_builder {
@@ -325,7 +339,7 @@ pub(crate) fn setup_two_nodes_with_store(
 	println!("== Node A ==");
 	let mut config_a = random_config(anchor_channels);
 	config_a.store_type = store_type;
-	let node_a = setup_node(chain_source, config_a, None);
+	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
@@ -342,18 +356,16 @@ pub(crate) fn setup_two_nodes_with_store(
 			.trusted_peers_no_reserve
 			.push(node_a.node_id());
 	}
-	let node_b = setup_node(chain_source, config_b, None);
+	let node_b = setup_node(chain_source, config_b);
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(
-	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
-) -> TestNode {
-	setup_node_for_async_payments(chain_source, config, seed_bytes, None)
+pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
+	setup_node_for_async_payments(chain_source, config, None)
 }
 
 pub(crate) fn setup_node_for_async_payments(
-	chain_source: &TestChainSource, config: TestConfig, seed_bytes: Option<Vec<u8>>,
+	chain_source: &TestChainSource, config: TestConfig,
 	async_payments_role: Option<AsyncPaymentsRole>,
 ) -> TestNode {
 	setup_builder!(builder, config.node_config);
@@ -407,27 +419,14 @@ pub(crate) fn setup_node_for_async_payments(
 		},
 	}
 
-	if let Some(seed) = seed_bytes {
-		#[cfg(feature = "uniffi")]
-		{
-			builder.set_entropy_seed_bytes(seed).unwrap();
-		}
-		#[cfg(not(feature = "uniffi"))]
-		{
-			let mut bytes = [0u8; 64];
-			bytes.copy_from_slice(&seed);
-			builder.set_entropy_seed_bytes(bytes);
-		}
-	}
-
 	builder.set_async_payments_role(async_payments_role).unwrap();
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
-			builder.build_with_store(kv_store).unwrap()
+			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
-		TestStoreType::Sqlite => builder.build().unwrap(),
+		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
 	};
 
 	node.start().unwrap();

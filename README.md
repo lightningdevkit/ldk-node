@@ -14,20 +14,26 @@ LDK Node is a self-custodial Lightning node in library form. Its central goal is
 The primary abstraction of the library is the [`Node`][api_docs_node], which can be retrieved by setting up and configuring a [`Builder`][api_docs_builder] to your liking and calling one of the `build` methods. `Node` can then be controlled via commands such as `start`, `stop`, `open_channel`, `send`, etc.
 
 ```rust
-use ldk_node::Builder;
-use ldk_node::lightning_invoice::Bolt11Invoice;
-use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Network;
+use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
+use ldk_node::lightning::ln::msgs::SocketAddress;
+use ldk_node::lightning_invoice::Bolt11Invoice;
+use ldk_node::Builder;
 use std::str::FromStr;
 
 fn main() {
 	let mut builder = Builder::new();
 	builder.set_network(Network::Testnet);
 	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
-	builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string());
+	builder.set_gossip_source_rgs(
+		"https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string(),
+	);
 
-	let node = builder.build().unwrap();
+
+	let mnemonic = generate_entropy_mnemonic(None);
+	let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+	let node = builder.build(node_entropy).unwrap();
 
 	node.start().unwrap();
 
