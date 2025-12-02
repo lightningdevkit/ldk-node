@@ -29,6 +29,22 @@
 - Added `SyncType` enum to distinguish between onchain wallet sync, Lightning
   wallet sync, and fee rate cache updates.
 - Balance tracking is now persisted in `NodeMetrics` to detect changes across restarts.
+- Added RBF (Replace-By-Fee) support via `OnchainPayment::bump_fee_by_rbf()` to replace
+  unconfirmed transactions with higher fee versions. Prevents RBF of channel funding
+  transactions to protect channel integrity.
+- Added CPFP (Child-Pays-For-Parent) support via `OnchainPayment::accelerate_by_cpfp()` and
+  `OnchainPayment::calculate_cpfp_fee_rate()` to accelerate unconfirmed transactions by
+  creating child transactions with higher effective fee rates.
+- Added UTXO management APIs:
+  - `OnchainPayment::list_spendable_outputs()`: Lists all UTXOs safe to spend (excludes channel funding UTXOs).
+  - `OnchainPayment::select_utxos_with_algorithm()`: Selects UTXOs using configurable coin selection algorithms (BranchAndBound, LargestFirst, OldestFirst, SingleRandomDraw).
+  - `SpendableUtxo` struct and `CoinSelectionAlgorithm` enum for UTXO management.
+- Added fee estimation APIs:
+  - `OnchainPayment::calculate_total_fee()`: Calculates transaction fees before sending.
+  - `Bolt11Payment::estimate_routing_fees()`: Estimates Lightning routing fees before sending.
+  - `Bolt11Payment::estimate_routing_fees_using_amount()`: Estimates fees for amount-less invoices.
+- Enhanced `OnchainPayment::send_to_address()` to accept optional `utxos_to_spend` parameter
+  for manual UTXO selection.
 
 ## Upstream v0.7.0 Release Notes
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
