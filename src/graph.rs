@@ -17,6 +17,9 @@ use lightning::routing::gossip::RoutingFees;
 #[cfg(not(feature = "uniffi"))]
 use lightning::routing::gossip::{ChannelInfo, NodeInfo};
 
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+
 use crate::types::Graph;
 
 /// Represents the network as nodes and channels between them.
@@ -47,6 +50,38 @@ impl NetworkGraph {
 	/// Returns information on a node with the given id.
 	pub fn node(&self, node_id: &NodeId) -> Option<NodeInfo> {
 		self.inner.read_only().nodes().get(node_id).cloned().map(|n| n.into())
+	}
+
+	/// Selects nodes with the highest total channel capacity in the network.
+	pub fn select_highest_capacity_nodes(&self, quantity_nodes: usize) -> Vec<NodeId> {
+		// Calculate total capacity for each node by summing all their channel capacities
+		let node_capacities = self.inner.read_only().channels().unordered_iter().fold(
+			HashMap::new(),
+			|mut acc, (_, chan_info)| {
+				let cap = chan_info.capacity_sats.unwrap_or(0);
+				*acc.entry(chan_info.node_one).or_insert(0) += cap;
+				*acc.entry(chan_info.node_two).or_insert(0) += cap;
+				acc
+			},
+		);
+
+		// Use a min-heap to efficiently track the top N nodes by capacity
+		node_capacities
+			.into_iter()
+			.fold(BinaryHeap::with_capacity(quantity_nodes), |mut top_heap, (node_id, cap)| {
+				if top_heap.len() < quantity_nodes {
+					top_heap.push(Reverse((cap, node_id)));
+				} else if let Some(Reverse((min_cap, _))) = top_heap.peek() {
+					if cap > *min_cap {
+						top_heap.pop();
+						top_heap.push(Reverse((cap, node_id)));
+					}
+				}
+				top_heap
+			})
+			.into_iter()
+			.map(|Reverse((_, node_id))| node_id)
+			.collect()
 	}
 }
 

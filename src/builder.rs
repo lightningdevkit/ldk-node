@@ -66,6 +66,7 @@ use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
+use crate::probing::{HighCapacityStrategy, ProbingService, ProbingStrategy};
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -127,6 +128,56 @@ struct LiquiditySourceConfig {
 	lsps2_client: Option<LSPS2ClientConfig>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
+}
+
+#[derive(Clone, Debug)]
+struct ProbingServiceConfig {
+	/// Time in seconds between consecutive probing attempts.
+	probing_interval_secs: u64,
+
+	/// Amount in milli-satoshis used for each probe.
+	probing_amount_msat: u64,
+
+	/// Configuration for the probing strategy as a shareable trait-object.
+	strategy: ProbingStrategyConfig,
+}
+
+pub enum ProbingStrategyConfig {
+	Custom { strategy: Arc<dyn ProbingStrategy + Send + Sync> },
+	HighCapacity { max_targets_per_cycle: usize, target_cache_reuse_limit: usize },
+}
+
+impl fmt::Debug for ProbingStrategyConfig {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Custom { .. } => {
+				f.debug_struct("Custom").field("strategy", &"<ProbingStrategy>").finish()
+			},
+			Self::HighCapacity {
+				max_targets_per_cycle: max_targets,
+				target_cache_reuse_limit: max_reloads,
+			} => f
+				.debug_struct("HighCapacity")
+				.field("max_targets", max_targets)
+				.field("max_reloads", max_reloads)
+				.finish(),
+		}
+	}
+}
+
+impl Clone for ProbingStrategyConfig {
+	fn clone(&self) -> Self {
+		match self {
+			Self::Custom { strategy } => Self::Custom { strategy: Arc::clone(strategy) },
+			Self::HighCapacity {
+				max_targets_per_cycle: max_targets,
+				target_cache_reuse_limit: max_reloads,
+			} => Self::HighCapacity {
+				max_targets_per_cycle: *max_targets,
+				target_cache_reuse_limit: *max_reloads,
+			},
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -253,6 +304,7 @@ pub struct NodeBuilder {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
+	probing_service_config: Option<ProbingServiceConfig>,
 }
 
 impl NodeBuilder {
@@ -271,6 +323,7 @@ impl NodeBuilder {
 		let log_writer_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
+		let probing_service_config = None;
 		Self {
 			config,
 			entropy_source_config,
@@ -281,6 +334,7 @@ impl NodeBuilder {
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
+			probing_service_config,
 		}
 	}
 
@@ -485,6 +539,55 @@ impl NodeBuilder {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
 		liquidity_source_config.lsps2_service = Some(service_config);
+		self
+	}
+
+	/// Configures the probing service with a custom target selection strategy.
+	///
+	/// This allows full control over how probing targets are selected by providing
+	/// a custom implementation of the [`ProbingStrategy`] trait.
+	///
+	/// # Parameters
+	/// * `probing_interval_secs` - Seconds between probing cycles
+	/// * `probing_amount_msat` - Amount in milli-satoshis per probe
+	/// * `strategy` - Custom [`ProbingStrategy`] implementation
+	///
+	/// [`ProbingStrategy`]: crate::probing::ProbingStrategy
+	pub fn set_probing_service_with_custom_strategy<T: ProbingStrategy + Send + Sync + 'static>(
+		&mut self, probing_interval_secs: u64, probing_amount_msat: u64, strategy: T,
+	) -> &mut Self {
+		self.probing_service_config = Some(ProbingServiceConfig {
+			probing_interval_secs,
+			probing_amount_msat,
+			strategy: ProbingStrategyConfig::Custom { strategy: Arc::new(strategy) },
+		});
+		self
+	}
+
+	/// Configures the probing service with the built-in high-capacity strategy.
+	///
+	/// Targets peers with the highest total channel capacity to assess liquidity
+	/// on the most significant network routes.
+	///
+	/// # Parameters
+	/// * `probing_interval_secs` - Seconds between probing cycles
+	/// * `probing_amount_msat` - Amount in milli-satoshis per probe
+	/// * `max_targets_per_cycle` - Maximum peers to probe each cycle
+	/// * `target_cache_reuse_limit` - Number of cycles to reuse targets before refreshing.
+	///   Acts as a cache: targets are reloaded from the network graph only after this many cycles,
+	///   reducing overhead while adapting to network changes.
+	pub fn set_probing_service_with_high_capacity_strategy(
+		&mut self, probing_interval_secs: u64, probing_amount_msat: u64,
+		max_targets_per_cycle: usize, target_cache_reuse_limit: usize,
+	) -> &mut Self {
+		self.probing_service_config = Some(ProbingServiceConfig {
+			probing_interval_secs,
+			probing_amount_msat,
+			strategy: ProbingStrategyConfig::HighCapacity {
+				max_targets_per_cycle,
+				target_cache_reuse_limit,
+			},
+		});
 		self
 	}
 
@@ -748,6 +851,7 @@ impl NodeBuilder {
 			runtime,
 			logger,
 			Arc::new(vss_store),
+			self.probing_service_config.as_ref(),
 		)
 	}
 
@@ -782,6 +886,7 @@ impl NodeBuilder {
 			runtime,
 			logger,
 			kv_store,
+			self.probing_service_config.as_ref(),
 		)
 	}
 }
@@ -981,6 +1086,51 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_liquidity_provider_lsps2(service_config);
 	}
 
+	/// Configures the probing service with a custom target selection strategy.
+	///
+	/// This allows full control over how probing targets are selected by providing
+	/// a custom implementation of the [`ProbingStrategy`] trait.
+	///
+	/// # Parameters
+	/// * `probing_interval_secs` - Seconds between probing cycles
+	/// * `probing_amount_msat` - Amount in milli-satoshis per probe
+	/// * `strategy` - Custom [`ProbingStrategy`] implementation
+	///
+	/// [`ProbingStrategy`]: crate::probing::ProbingStrategy
+	pub fn set_probing_service_with_custom_strategy<T: ProbingStrategy + Send + Sync + 'static>(
+		&self, probing_interval_secs: u64, probing_amount_msat: u64, strategy: T,
+	) {
+		self.inner.write().unwrap().set_probing_service_with_custom_strategy(
+			probing_interval_secs,
+			probing_amount_msat,
+			strategy,
+		);
+	}
+
+	/// Configures the probing service with the built-in high-capacity strategy.
+	///
+	/// Targets peers with the highest total channel capacity to assess liquidity
+	/// on the most significant network routes.
+	///
+	/// # Parameters
+	/// * `probing_interval_secs` - Seconds between probing cycles
+	/// * `probing_amount_msat` - Amount in milli-satoshis per probe
+	/// * `max_targets_per_cycle` - Maximum peers to probe each cycle
+	/// * `target_cache_reuse_limit` - Number of cycles to reuse targets before refreshing.
+	///   Acts as a cache: targets are reloaded from the network graph only after this many cycles,
+	///   reducing overhead while adapting to network changes.
+	pub fn set_probing_service_with_high_capacity_strategy(
+		&self, probing_interval_secs: u64, probing_amount_msat: u64, max_targets_per_cycle: usize,
+		target_cache_reuse_limit: usize,
+	) {
+		self.inner.write().unwrap().set_probing_service_with_high_capacity_strategy(
+			probing_interval_secs,
+			probing_amount_msat,
+			max_targets_per_cycle,
+			target_cache_reuse_limit,
+		);
+	}
+
 	/// Sets the used storage directory path.
 	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
 		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
@@ -1146,6 +1296,7 @@ fn build_with_store_internal(
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
 	logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	probing_service_config: Option<&ProbingServiceConfig>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1787,6 +1938,33 @@ fn build_with_store_internal(
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
 
+	let probing_service = if let Some(pro_ser) = probing_service_config {
+		let strategy: Arc<dyn ProbingStrategy + Send + Sync> = match &pro_ser.strategy {
+			ProbingStrategyConfig::Custom { strategy } => Arc::clone(strategy),
+			ProbingStrategyConfig::HighCapacity {
+				max_targets_per_cycle: max_targets,
+				target_cache_reuse_limit: max_reloads,
+			} => Arc::new(HighCapacityStrategy::new(
+				Arc::clone(&network_graph),
+				*max_targets,
+				*max_reloads,
+			)),
+		};
+		Some(Arc::new(ProbingService::new(
+			pro_ser.probing_interval_secs,
+			pro_ser.probing_amount_msat,
+			Arc::clone(&strategy),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			Arc::clone(&channel_manager),
+			Arc::clone(&keys_manager),
+			Arc::clone(&is_running),
+			Arc::clone(&payment_store),
+		)))
+	} else {
+		None
+	};
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1818,6 +1996,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		probing_service,
 	})
 }
 
