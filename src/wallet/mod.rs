@@ -67,7 +67,7 @@ use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
 use crate::types::{Broadcaster, ChannelManager, PaymentStore};
 use crate::Error;
 
-/// Minimum economical output value (dust limit)
+// Minimum economical output value (dust limit)
 const DUST_LIMIT_SATS: u64 = 546;
 
 #[derive(Clone, Copy)]
@@ -176,7 +176,6 @@ impl Wallet {
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
 	}
 
-	/// Get a drain script for change outputs
 	pub(crate) fn get_drain_script(&self) -> Result<ScriptBuf, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let change_address = locked_wallet.peek_address(KeychainKind::Internal, 0);
@@ -225,13 +224,8 @@ impl Wallet {
 		Ok(())
 	}
 
-	/// Bumps the fee of an existing transaction using Replace-By-Fee (RBF).
-	///
-	/// This allows a previously sent transaction to be replaced with a new version
-	/// that pays a higher fee. The original transaction must have been created with
-	/// RBF enabled (which is the default for transactions created by LDK).
-	///
-	/// Returns the txid of the new transaction if successful.
+	// Bumps the fee of an existing transaction using Replace-By-Fee (RBF).
+	// Returns the txid of the new transaction if successful.
 	pub(crate) fn bump_fee_by_rbf(
 		&self, txid: &Txid, fee_rate: FeeRate, channel_manager: &ChannelManager,
 	) -> Result<Txid, Error> {
@@ -389,12 +383,8 @@ impl Wallet {
 		Ok(new_txid)
 	}
 
-	/// Accelerates confirmation of a transaction using Child-Pays-For-Parent (CPFP).
-	///
-	/// This creates a new transaction (child) that spends an output from the
-	/// transaction to be accelerated (parent), with a high enough fee to pay for both.
-	///
-	/// Returns the txid of the child transaction if successful.
+	// Accelerates confirmation of a transaction using Child-Pays-For-Parent (CPFP).
+	// Returns the txid of the child transaction if successful.
 	pub(crate) fn accelerate_by_cpfp(
 		&self, txid: &Txid, fee_rate: FeeRate, destination_address: Option<Address>,
 	) -> Result<Txid, Error> {
@@ -592,10 +582,7 @@ impl Wallet {
 		Ok(child_txid)
 	}
 
-	/// Calculates an appropriate fee rate for a CPFP transaction to ensure
-	/// the parent transaction gets confirmed within the target number of blocks.
-	///
-	/// Returns the fee rate that should be used for the child transaction.
+	// Calculates an appropriate fee rate for a CPFP transaction.
 	pub(crate) fn calculate_cpfp_fee_rate(
 		&self, parent_txid: &Txid, urgent: bool,
 	) -> Result<FeeRate, Error> {
@@ -903,8 +890,6 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
-	/// Get transaction details including inputs, outputs, and net amount.
-	/// Returns None if the transaction is not found in the wallet.
 	pub(crate) fn get_tx_details(&self, txid: &Txid) -> Option<(i64, Vec<TxInput>, Vec<TxOutput>)> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let tx_node = locked_wallet.get_tx(*txid)?;
@@ -934,7 +919,6 @@ impl Wallet {
 			.map_err(|_| Error::InvalidAddress)
 	}
 
-	/// Returns all UTXOs that are safe to spend (excluding channel funding transactions).
 	pub fn get_spendable_utxos(
 		&self, channel_manager: &ChannelManager,
 	) -> Result<Vec<LocalOutput>, Error> {
@@ -972,19 +956,6 @@ impl Wallet {
 		Ok(spendable_utxos)
 	}
 
-	/// Select UTXOs using a specific coin selection algorithm.
-	///
-	/// # Arguments
-	/// * `target_amount` - The amount in satoshis to select for
-	/// * `available_utxos` - Pool of UTXOs to select from (will be filtered for safety)
-	/// * `fee_rate` - Fee rate to use for selection
-	/// * `algorithm` - Coin selection algorithm to use
-	/// * `drain_script` - Script to use for change output weight calculation
-	/// * `channel_manager` - Channel manager to check for funding transactions
-	///
-	/// # Returns
-	/// Selected UTXOs that meet the target amount plus fees and excludes
-	/// any channel funding transactions.
 	pub fn select_utxos_with_algorithm(
 		&self, target_amount: u64, available_utxos: Vec<LocalOutput>, fee_rate: FeeRate,
 		algorithm: CoinSelectionAlgorithm, drain_script: &Script, channel_manager: &ChannelManager,
@@ -1117,12 +1088,10 @@ impl Wallet {
 		Ok(selected_outputs.into_iter().map(|u| u.outpoint).collect())
 	}
 
-	/// Private helper that builds a transaction PSBT with all the shared logic
-	/// between send_to_address and calculate_transaction_fee
 	fn build_transaction_psbt(
 		&self, address: &Address, send_amount: OnchainSendAmount, fee_rate: FeeRate,
 		utxos_to_spend: Option<Vec<OutPoint>>, channel_manager: &ChannelManager,
-	) -> Result<(Psbt, MutexGuard<PersistedWallet<KVStoreWalletPersister>>), Error> {
+	) -> Result<(Psbt, MutexGuard<'_, PersistedWallet<KVStoreWalletPersister>>), Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 
 		// Validate and check UTXOs if provided

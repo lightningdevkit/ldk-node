@@ -35,7 +35,7 @@ use bdk_wallet::event::WalletEvent;
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
-	pub(super) esplora_client: EsploraAsyncClient,
+	esplora_client: EsploraAsyncClient,
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	tx_sync: Arc<EsploraSyncClient<Arc<Logger>>>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
@@ -88,11 +88,13 @@ impl EsploraChainSource {
 		};
 		if let Some(mut sync_receiver) = receiver_res {
 			log_info!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.recv().await.map_err(|e| {
+			sync_receiver.recv().await.map_err(|e| {
 				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
 				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
 				Error::WalletOperationFailed
-			})?;
+			})??;
+			// Return empty events since we're just waiting for another sync
+			return Ok(Vec::new());
 		}
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
@@ -433,6 +435,31 @@ impl EsploraChainSource {
 					);
 				},
 			}
+		}
+	}
+
+	pub(super) async fn get_address_balance(&self, address: &bitcoin::Address) -> Option<u64> {
+		let script = address.script_pubkey();
+		match self.esplora_client.scripthash_txs(&script, None).await {
+			Ok(txs) => {
+				let mut balance = 0i64;
+				for tx in txs {
+					for output in &tx.vout {
+						if output.scriptpubkey == script {
+							balance += output.value as i64;
+						}
+					}
+					for input in &tx.vin {
+						if let Some(prevout) = &input.prevout {
+							if prevout.scriptpubkey == script {
+								balance -= prevout.value as i64;
+							}
+						}
+					}
+				}
+				Some(balance.max(0) as u64)
+			},
+			Err(_) => None,
 		}
 	}
 }

@@ -71,8 +71,7 @@ impl OnchainPayment {
 	/// **Note:** This does not account for anchor channel reserves. When using these UTXOs
 	/// for transactions, ensure you maintain sufficient balance for any required reserves.
 	pub fn list_spendable_outputs(&self) -> Result<Vec<SpendableUtxo>, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -96,8 +95,7 @@ impl OnchainPayment {
 		&self, target_amount_sats: u64, fee_rate: Option<FeeRate>,
 		algorithm: CoinSelectionAlgorithm, utxos: Option<Vec<SpendableUtxo>>,
 	) -> Result<Vec<SpendableUtxo>, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -187,8 +185,7 @@ impl OnchainPayment {
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
 		utxos_to_spend: Option<Vec<SpendableUtxo>>,
 	) -> Result<u64, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -326,8 +323,7 @@ impl OnchainPayment {
 	/// * [`Error::InvalidFeeRate`] - If the new fee rate is not higher than the original
 	/// * [`Error::OnchainTxCreationFailed`] - If the new transaction couldn't be created
 	pub fn bump_fee_by_rbf(&self, txid: &Txid, fee_rate: FeeRate) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -365,8 +361,7 @@ impl OnchainPayment {
 	pub fn accelerate_by_cpfp(
 		&self, txid: &Txid, fee_rate: Option<FeeRate>, destination_address: Option<Address>,
 	) -> Result<Txid, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
@@ -412,8 +407,7 @@ impl OnchainPayment {
 	pub fn calculate_cpfp_fee_rate(
 		&self, parent_txid: &Txid, urgent: bool,
 	) -> Result<FeeRate, Error> {
-		let rt_lock = self.runtime.read().unwrap();
-		if rt_lock.is_none() {
+		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 

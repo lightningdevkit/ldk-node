@@ -48,7 +48,7 @@ const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 10;
 pub(super) struct ElectrumChainSource {
 	server_url: String,
 	pub(super) sync_config: ElectrumSyncConfig,
-	pub(super) electrum_runtime_status: RwLock<ElectrumRuntimeStatus>,
+	electrum_runtime_status: RwLock<ElectrumRuntimeStatus>,
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
@@ -309,6 +309,16 @@ impl ElectrumChainSource {
 			electrum_client.broadcast(tx).await;
 		}
 	}
+
+	pub(super) async fn get_address_balance(&self, address: &bitcoin::Address) -> Option<u64> {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				return None;
+			};
+		electrum_client.get_address_balance(address).await
+	}
 }
 
 impl Filter for ElectrumChainSource {
@@ -370,7 +380,7 @@ impl ElectrumRuntimeStatus {
 		*self = Self::new()
 	}
 
-	pub(super) fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
+	fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
 		match self {
 			Self::Started(client) => Some(Arc::clone(&client)),
 			Self::Stopped { .. } => None,
@@ -455,7 +465,7 @@ impl ElectrumRuntimeClient {
 		}
 	}
 
-	pub(crate) async fn sync_confirmables(
+	async fn sync_confirmables(
 		&self, confirmables: Vec<Arc<dyn Confirm + Sync + Send>>,
 	) -> Result<(), Error> {
 		let now = Instant::now();

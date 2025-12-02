@@ -14,7 +14,7 @@ use std::sync::Arc;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, ScriptBuf};
+use bitcoin::{Address, Amount, ScriptBuf, Txid};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
@@ -389,12 +389,12 @@ async fn onchain_send_receive() {
 
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None)
+		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None, None)
 	);
 
 	assert_eq!(
 		Err(NodeError::InvalidAddress),
-		node_a.onchain_payment().send_to_address(&addr_c, expected_node_a_balance + 1, None)
+		node_a.onchain_payment().send_to_address(&addr_c, expected_node_a_balance + 1, None, None)
 	);
 
 	assert_eq!(
@@ -404,7 +404,7 @@ async fn onchain_send_receive() {
 
 	let amount_to_send_sats = 54321;
 	let txid =
-		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None, None).unwrap();
 	wait_for_tx(&electrsd.client, txid).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
@@ -2574,11 +2574,9 @@ fn test_concurrent_event_emission() {
 
 	// Count the events - we should have multiple SyncCompleted events
 	let mut sync_completed_count = 0;
-	let mut event_count = 0;
 
 	for _ in 0..50 {
 		if let Some(event) = node.next_event() {
-			event_count += 1;
 			if matches!(event, Event::SyncCompleted { .. }) {
 				sync_completed_count += 1;
 			}

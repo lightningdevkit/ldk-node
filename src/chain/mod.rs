@@ -9,14 +9,12 @@ mod bitcoind;
 mod electrum;
 mod esplora;
 
-use crate::check_and_emit_balance_update;
-use crate::event::{Event, EventQueue, SyncType};
-
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use bdk_wallet::event::WalletEvent as BdkWalletEvent;
 use bitcoin::{Script, Txid};
 use lightning::chain::{BestBlock, Filter};
 use lightning_block_sync::gossip::UtxoSource;
@@ -28,14 +26,13 @@ use crate::config::{
 	BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
 	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
+use crate::event::{Event, EventQueue, SyncType, TransactionDetails};
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
-
-use bdk_wallet::event::WalletEvent as BdkWalletEvent;
+use crate::{check_and_emit_balance_update, Error, NodeMetrics};
 
 pub(crate) enum WalletSyncStatus {
 	Completed,
@@ -95,6 +92,7 @@ pub(crate) struct ChainSource {
 	tx_broadcaster: Arc<Broadcaster>,
 	logger: Arc<Logger>,
 	onchain_wallet: Arc<Mutex<Option<Arc<Wallet>>>>,
+	event_queue: Arc<Mutex<Option<Arc<EventQueue<Arc<Logger>>>>>>,
 }
 
 enum ChainSourceKind {
@@ -103,11 +101,9 @@ enum ChainSourceKind {
 	Bitcoind(BitcoindChainSource),
 }
 
-use crate::event::TransactionDetails;
-
-/// Check for evicted transactions by comparing unconfirmed txids before and after sync.
-/// Returns a list of txids that were unconfirmed before but are no longer unconfirmed
-/// and are not confirmed in the wallet.
+// Check for evicted transactions by comparing unconfirmed txids before and after sync.
+// Returns a list of txids that were unconfirmed before but are no longer unconfirmed
+// and are not confirmed in the wallet.
 fn check_evicted_transactions(
 	prev_unconfirmed_txids: Vec<Txid>, wallet: &crate::wallet::Wallet, logger: &Logger,
 ) -> Vec<Txid> {
@@ -138,7 +134,7 @@ fn check_evicted_transactions(
 	evicted_txids
 }
 
-/// Check for evicted transactions and emit events for them.
+// Check for evicted transactions and emit events for them.
 async fn check_and_emit_evicted_transactions<L2: Deref>(
 	prev_unconfirmed_txids: Vec<Txid>, wallet: &crate::wallet::Wallet,
 	event_queue: &EventQueue<L2>, logger: &Logger,
@@ -154,7 +150,7 @@ async fn check_and_emit_evicted_transactions<L2: Deref>(
 	}
 }
 
-/// Get transaction details including inputs and outputs.
+// Get transaction details including inputs and outputs.
 fn get_transaction_details(
 	txid: &bitcoin::Txid, wallet: &crate::wallet::Wallet,
 	_channel_manager: Option<&Arc<ChannelManager>>,
@@ -165,7 +161,7 @@ fn get_transaction_details(
 	Some(TransactionDetails { amount_sats, inputs, outputs })
 }
 
-/// Process BDK wallet events and emit corresponding ldk-node events via the event queue.
+// Process BDK wallet events and emit corresponding ldk-node events via the event queue.
 async fn process_wallet_events<L2: Deref>(
 	wallet_events: Vec<BdkWalletEvent>, wallet: &crate::wallet::Wallet,
 	event_queue: &EventQueue<L2>, logger: &Arc<Logger>,
@@ -299,7 +295,7 @@ impl ChainSource {
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Esplora(esplora_chain_source);
-		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)) }, None)
+		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)), event_queue: Arc::new(Mutex::new(None)) }, None)
 	}
 
 	pub(crate) fn new_electrum(
@@ -318,7 +314,7 @@ impl ChainSource {
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Electrum(electrum_chain_source);
-		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)) }, None)
+		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)), event_queue: Arc::new(Mutex::new(None)) }, None)
 	}
 
 	pub(crate) async fn new_bitcoind_rpc(
@@ -340,7 +336,7 @@ impl ChainSource {
 		);
 		let best_block = bitcoind_chain_source.poll_best_block().await.ok();
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)) }, best_block)
+		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)), event_queue: Arc::new(Mutex::new(None)) }, best_block)
 	}
 
 	pub(crate) async fn new_bitcoind_rest(
@@ -363,7 +359,7 @@ impl ChainSource {
 		);
 		let best_block = bitcoind_chain_source.poll_best_block().await.ok();
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)) }, best_block)
+		(Self { kind, tx_broadcaster, logger, onchain_wallet: Arc::new(Mutex::new(None)), event_queue: Arc::new(Mutex::new(None)) }, best_block)
 	}
 
 	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
@@ -396,6 +392,112 @@ impl ChainSource {
 		}
 	}
 
+	pub(crate) fn is_transaction_based(&self) -> bool {
+		match &self.kind {
+			ChainSourceKind::Esplora(_) => true,
+			ChainSourceKind::Electrum(_) => true,
+			ChainSourceKind::Bitcoind(_) => false,
+		}
+	}
+
+	pub(crate) async fn continuously_sync_wallets(
+		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) {
+		self.set_onchain_wallet(Arc::clone(&onchain_wallet));
+
+		match &self.kind {
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				if let Some(background_sync_config) =
+					esplora_chain_source.sync_config.background_sync_config.as_ref()
+				{
+					self.start_tx_based_sync_loop(
+						stop_sync_receiver,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+						background_sync_config,
+						Arc::clone(&self.logger),
+					)
+					.await
+				} else {
+					// Background syncing is disabled
+					log_info!(
+						self.logger,
+						"Background syncing is disabled. Manual syncing required for onchain wallet, lightning wallet, and fee rate updates.",
+					);
+					return;
+				}
+			},
+			ChainSourceKind::Electrum(electrum_chain_source) => {
+				if let Some(background_sync_config) =
+					electrum_chain_source.sync_config.background_sync_config.as_ref()
+				{
+					self.start_tx_based_sync_loop(
+						stop_sync_receiver,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+						background_sync_config,
+						Arc::clone(&self.logger),
+					)
+					.await
+				} else {
+					// Background syncing is disabled
+					log_info!(
+						self.logger,
+						"Background syncing is disabled. Manual syncing required for onchain wallet, lightning wallet, and fee rate updates.",
+					);
+					return;
+				}
+			},
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				bitcoind_chain_source
+					.continuously_sync_wallets(
+						stop_sync_receiver,
+						onchain_wallet,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+					)
+					.await
+			},
+		}
+	}
+
+	// Synchronize the onchain wallet via transaction-based protocols (Esplora, Electrum).
+	// If event_queue is set, emits onchain events.
+	pub(crate) async fn sync_onchain_wallet(&self, wallet: Arc<Wallet>) -> Result<(), Error> {
+		let event_queue = self.event_queue.lock().unwrap().clone();
+		if let Some(event_queue) = event_queue {
+			// Use event-emitting sync path
+			self.sync_onchain_wallet_with_events(
+				Some(&event_queue),
+				None,
+				None,
+				self.config(),
+			)
+			.await
+		} else {
+			// Simple sync without events (event_queue not set)
+			match &self.kind {
+				ChainSourceKind::Esplora(esplora_chain_source) => {
+					let _ = esplora_chain_source.sync_onchain_wallet(wallet).await?;
+					Ok(())
+				},
+				ChainSourceKind::Electrum(electrum_chain_source) => {
+					let _ = electrum_chain_source.sync_onchain_wallet(wallet).await?;
+					Ok(())
+				},
+				ChainSourceKind::Bitcoind(_) => {
+					// Bitcoind sync is handled differently
+					Ok(())
+				},
+			}
+		}
+	}
+
 	fn config(&self) -> Option<&Arc<Config>> {
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => Some(&esplora_chain_source.config),
@@ -404,14 +506,12 @@ impl ChainSource {
 		}
 	}
 
-	async fn start_tx_based_sync_loop<L: Deref>(
+	async fn start_tx_based_sync_loop(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>, background_sync_config: &BackgroundSyncConfig,
-		logger: Arc<Logger>, event_queue: Arc<EventQueue<L>>,
-	) where
-		L::Target: LdkLogger,
-	{
+		logger: Arc<Logger>,
+	) {
 		// Setup syncing intervals
 		let onchain_wallet_sync_interval_secs = background_sync_config
 			.onchain_wallet_sync_interval_secs
@@ -449,8 +549,10 @@ impl ChainSource {
 					return;
 				}
 				_ = onchain_wallet_sync_interval.tick() => {
-					let _ = self.sync_onchain_wallet(
-						Some(&*event_queue),
+					// Access event_queue from struct for event emission
+					let event_queue = self.event_queue.lock().unwrap().clone();
+					let _ = self.sync_onchain_wallet_with_events(
+						event_queue.as_ref(),
 						Some(&channel_manager),
 						Some(&chain_monitor),
 						self.config(),
@@ -470,20 +572,21 @@ impl ChainSource {
 		}
 	}
 
-	/// Set the onchain wallet for event processing.
 	pub(crate) fn set_onchain_wallet(&self, wallet: Arc<Wallet>) {
 		*self.onchain_wallet.lock().unwrap() = Some(wallet);
 	}
 
+	pub(crate) fn set_event_queue(&self, event_queue: Arc<EventQueue<Arc<Logger>>>) {
+		*self.event_queue.lock().unwrap() = Some(event_queue);
+	}
+
 	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum,
-	// etc.)
-	pub(crate) async fn sync_onchain_wallet<L: Deref>(
-		&self, event_queue: Option<&EventQueue<L>>, channel_manager: Option<&Arc<ChannelManager>>,
+	// etc.) with event emission support.
+	async fn sync_onchain_wallet_with_events(
+		&self, event_queue: Option<&Arc<EventQueue<Arc<Logger>>>>,
+		channel_manager: Option<&Arc<ChannelManager>>,
 		chain_monitor: Option<&Arc<ChainMonitor>>, config: Option<&Arc<Config>>,
-	) -> Result<(), Error>
-	where
-		L::Target: LdkLogger,
-	{
+	) -> Result<(), Error> {
 		let wallet = self.onchain_wallet.lock().unwrap().clone();
 		let wallet = wallet.ok_or(Error::WalletOperationFailed)?;
 
@@ -563,7 +666,7 @@ impl ChainSource {
 							event_queue,
 							&kv_store,
 							&self.logger,
-						)?;
+						).await?;
 					}
 				}
 				Ok(())
@@ -644,7 +747,7 @@ impl ChainSource {
 							event_queue,
 							&kv_store,
 							&self.logger,
-						)?;
+						).await?;
 					}
 				}
 				Ok(())
@@ -782,39 +885,13 @@ impl Filter for ChainSource {
 }
 
 impl ChainSource {
-	/// Get the current balance for an address from the chain source.
 	pub(crate) async fn get_address_balance(&self, address: &bitcoin::Address) -> Option<u64> {
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
-				let script = address.script_pubkey();
-				match esplora_chain_source.esplora_client.scripthash_txs(&script, None).await {
-					Ok(txs) => {
-						let mut balance = 0i64;
-						for tx in txs {
-							for output in &tx.vout {
-								if output.scriptpubkey == script {
-									balance += output.value as i64;
-								}
-							}
-							for input in &tx.vin {
-								if let Some(prevout) = &input.prevout {
-									if prevout.scriptpubkey == script {
-										balance -= prevout.value as i64;
-									}
-								}
-							}
-						}
-						Some(balance.max(0) as u64)
-					},
-					Err(_) => None,
-				}
+				esplora_chain_source.get_address_balance(address).await
 			},
 			ChainSourceKind::Electrum(electrum_chain_source) => {
-				if let Some(client) = electrum_chain_source.electrum_runtime_status.read().unwrap().client() {
-					client.get_address_balance(address).await
-				} else {
-					None
-				}
+				electrum_chain_source.get_address_balance(address).await
 			},
 			ChainSourceKind::Bitcoind(_) => {
 				// BitcoindRpc doesn't have a direct address balance query API
