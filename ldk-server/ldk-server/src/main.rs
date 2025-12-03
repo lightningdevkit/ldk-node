@@ -25,6 +25,7 @@ use crate::io::persist::{
 	PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::util::config::{load_config, ChainSource};
+use crate::util::logger::ServerLogger;
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use hex::DisplayHex;
 use ldk_node::config::Config;
@@ -32,6 +33,7 @@ use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_server_protos::events;
 use ldk_server_protos::events::{event_envelope, EventEnvelope};
 use ldk_server_protos::types::Payment;
+use log::{error, info};
 use prost::Message;
 use rand::Rng;
 use std::fs;
@@ -70,6 +72,25 @@ fn main() {
 		},
 	};
 
+	let log_file_path = config_file.log_file_path.map(|p| PathBuf::from(p)).unwrap_or_else(|| {
+		let mut default_log_path = PathBuf::from(&config_file.storage_dir_path);
+		default_log_path.push("ldk-server.log");
+		default_log_path
+	});
+
+	if log_file_path == PathBuf::from(&config_file.storage_dir_path) {
+		eprintln!("Log file path cannot be the same as storage directory path.");
+		std::process::exit(-1);
+	}
+
+	let logger = match ServerLogger::init(config_file.log_level, &log_file_path) {
+		Ok(logger) => logger,
+		Err(e) => {
+			eprintln!("Failed to initialize logger: {e}");
+			std::process::exit(-1);
+		},
+	};
+
 	ldk_node_config.storage_dir_path = config_file.storage_dir_path.clone();
 	ldk_node_config.listening_addresses = Some(vec![config_file.listening_addr]);
 	ldk_node_config.network = config_file.network;
@@ -79,7 +100,7 @@ fn main() {
 
 	if let Some(alias) = config_file.alias {
 		if let Err(e) = builder.set_node_alias(alias.to_string()) {
-			eprintln!("Failed to set node alias: {e}");
+			error!("Failed to set node alias: {e}");
 			std::process::exit(-1);
 		}
 	}
@@ -107,7 +128,7 @@ fn main() {
 	let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
 		Ok(runtime) => Arc::new(runtime),
 		Err(e) => {
-			eprintln!("Failed to setup tokio runtime: {}", e);
+			error!("Failed to setup tokio runtime: {e}");
 			std::process::exit(-1);
 		},
 	};
@@ -117,7 +138,7 @@ fn main() {
 	let node = match builder.build() {
 		Ok(node) => Arc::new(node),
 		Err(e) => {
-			eprintln!("Failed to build LDK Node: {}", e);
+			error!("Failed to build LDK Node: {e}");
 			std::process::exit(-1);
 		},
 	};
@@ -126,7 +147,7 @@ fn main() {
 		Arc::new(match SqliteStore::new(PathBuf::from(config_file.storage_dir_path), None, None) {
 			Ok(store) => store,
 			Err(e) => {
-				eprintln!("Failed to create SqliteStore: {:?}", e);
+				error!("Failed to create SqliteStore: {e:?}");
 				std::process::exit(-1);
 			},
 		});
@@ -142,26 +163,35 @@ fn main() {
 		Arc::new(RabbitMqEventPublisher::new(rabbitmq_config))
 	};
 
-	println!("Starting up...");
+	info!("Starting up...");
 	match node.start() {
 		Ok(()) => {},
 		Err(e) => {
-			eprintln!("Failed to start up LDK Node: {}", e);
+			error!("Failed to start up LDK Node: {e}");
 			std::process::exit(-1);
 		},
 	}
 
-	println!(
+	info!(
 		"CONNECTION_STRING: {}@{}",
 		node.node_id(),
 		node.config().listening_addresses.as_ref().unwrap().first().unwrap()
 	);
 
 	runtime.block_on(async {
+		// Register SIGHUP handler for log rotation
+		let mut sighup_stream = match tokio::signal::unix::signal(SignalKind::hangup()) {
+			Ok(stream) => stream,
+			Err(e) => {
+				error!("Failed to register SIGHUP handler: {e}");
+				std::process::exit(-1);
+			}
+		};
+
 		let mut sigterm_stream = match tokio::signal::unix::signal(SignalKind::terminate()) {
 			Ok(stream) => stream,
 			Err(e) => {
-				println!("Failed to register for SIGTERM stream: {}", e);
+				error!("Failed to register for SIGTERM stream: {e}");
 				std::process::exit(-1);
 			}
 		};
@@ -174,25 +204,25 @@ fn main() {
 				event = event_node.next_event_async() => {
 					match event {
 						Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
-							println!(
+							info!(
 								"CHANNEL_PENDING: {} from counterparty {}",
 								channel_id, counterparty_node_id
 							);
 							if let Err(e) = event_node.event_handled() {
-								eprintln!("Failed to mark event as handled: {e}");
+								error!("Failed to mark event as handled: {e}");
 							}
 						},
 						Event::ChannelReady { channel_id, counterparty_node_id, .. } => {
-							println!(
+							info!(
 								"CHANNEL_READY: {} from counterparty {:?}",
 								channel_id, counterparty_node_id
 							);
 							if let Err(e) = event_node.event_handled() {
-								eprintln!("Failed to mark event as handled: {e}");
+								error!("Failed to mark event as handled: {e}");
 							}
 						},
 						Event::PaymentReceived { payment_id, payment_hash, amount_msat, .. } => {
-							println!(
+							info!(
 								"PAYMENT_RECEIVED: with id {:?}, hash {}, amount_msat {}",
 								payment_id, payment_hash, amount_msat
 							);
@@ -233,7 +263,7 @@ fn main() {
 								let payment = payment_to_proto(payment_details);
 								upsert_payment_details(&event_node, Arc::clone(&paginated_store), &payment);
 							} else {
-								eprintln!("Unable to find payment with paymentId: {}", payment_id.to_string());
+								error!("Unable to find payment with paymentId: {}", payment_id.to_string());
 							}
 						},
 						Event::PaymentForwarded {
@@ -249,7 +279,7 @@ fn main() {
 							outbound_amount_forwarded_msat
 						} => {
 
-							println!("PAYMENT_FORWARDED: with outbound_amount_forwarded_msat {}, total_fee_earned_msat: {}, inbound channel: {}, outbound channel: {}",
+							info!("PAYMENT_FORWARDED: with outbound_amount_forwarded_msat {}, total_fee_earned_msat: {}, inbound channel: {}, outbound channel: {}",
 								outbound_amount_forwarded_msat.unwrap_or(0), total_fee_earned_msat.unwrap_or(0), prev_channel_id, next_channel_id
 							);
 
@@ -281,7 +311,7 @@ fn main() {
 							}).await {
 								Ok(_) => {},
 								Err(e) => {
-									println!("Failed to publish 'PaymentForwarded' event: {}", e);
+									error!("Failed to publish 'PaymentForwarded' event: {}", e);
 									continue;
 								}
 							};
@@ -293,17 +323,17 @@ fn main() {
 							) {
 								Ok(_) => {
 									if let Err(e) = event_node.event_handled() {
-										eprintln!("Failed to mark event as handled: {e}");
+										error!("Failed to mark event as handled: {e}");
 									}
 								}
 								Err(e) => {
-										println!("Failed to write forwarded payment to persistence: {}", e);
+										error!("Failed to write forwarded payment to persistence: {}", e);
 								}
 							}
 						},
 						_ => {
 							if let Err(e) = event_node.event_handled() {
-								eprintln!("Failed to mark event as handled: {e}");
+								error!("Failed to mark event as handled: {e}");
 							}
 						},
 					}
@@ -315,19 +345,24 @@ fn main() {
 							let node_service = NodeService::new(Arc::clone(&node), Arc::clone(&paginated_store));
 							runtime.spawn(async move {
 								if let Err(err) = http1::Builder::new().serve_connection(io_stream, node_service).await {
-									eprintln!("Failed to serve connection: {}", err);
+									error!("Failed to serve connection: {}", err);
 								}
 							});
 						},
-						Err(e) => eprintln!("Failed to accept connection: {}", e),
+						Err(e) => error!("Failed to accept connection: {}", e),
 					}
 				}
 				_ = tokio::signal::ctrl_c() => {
-					println!("Received CTRL-C, shutting down..");
+					info!("Received CTRL-C, shutting down..");
 					break;
 				}
+				_ = sighup_stream.recv() => {
+					if let Err(e) = logger.reopen() {
+						error!("Failed to reopen log file on SIGHUP: {e}");
+					}
+				}
 				_ = sigterm_stream.recv() => {
-					println!("Received SIGTERM, shutting down..");
+					info!("Received SIGTERM, shutting down..");
 					break;
 				}
 			}
@@ -335,7 +370,7 @@ fn main() {
 	});
 
 	node.stop().expect("Shutdown should always succeed.");
-	println!("Shutdown complete..");
+	info!("Shutdown complete..");
 }
 
 async fn publish_event_and_upsert_payment(
@@ -351,14 +386,14 @@ async fn publish_event_and_upsert_payment(
 		match event_publisher.publish(EventEnvelope { event: Some(event) }).await {
 			Ok(_) => {},
 			Err(e) => {
-				println!("Failed to publish '{}' event, : {}", event_name, e);
+				error!("Failed to publish '{event_name}' event, : {e}");
 				return;
 			},
 		};
 
 		upsert_payment_details(event_node, Arc::clone(&paginated_store), &payment);
 	} else {
-		eprintln!("Unable to find payment with paymentId: {}", payment_id);
+		error!("Unable to find payment with paymentId: {payment_id}");
 	}
 }
 
@@ -377,11 +412,11 @@ fn upsert_payment_details(
 	) {
 		Ok(_) => {
 			if let Err(e) = event_node.event_handled() {
-				eprintln!("Failed to mark event as handled: {e}");
+				error!("Failed to mark event as handled: {e}");
 			}
 		},
 		Err(e) => {
-			eprintln!("Failed to write payment to persistence: {}", e);
+			error!("Failed to write payment to persistence: {e}");
 		},
 	}
 }

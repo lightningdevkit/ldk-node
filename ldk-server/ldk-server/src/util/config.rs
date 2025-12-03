@@ -2,6 +2,7 @@ use ldk_node::bitcoin::Network;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::routing::gossip::NodeAlias;
 use ldk_node::liquidity::LSPS2ServiceConfig;
+use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -20,6 +21,8 @@ pub struct Config {
 	pub rabbitmq_connection_string: String,
 	pub rabbitmq_exchange_name: String,
 	pub lsps2_service_config: Option<LSPS2ServiceConfig>,
+	pub log_level: LevelFilter,
+	pub log_file_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -86,6 +89,21 @@ impl TryFrom<TomlConfig> for Config {
 			None
 		};
 
+		let log_level = toml_config
+			.log
+			.as_ref()
+			.and_then(|log_config| log_config.level.as_ref())
+			.map(|level_str| {
+				LevelFilter::from_str(level_str).map_err(|e| {
+					io::Error::new(
+						io::ErrorKind::InvalidInput,
+						format!("Invalid log level configured: {}", e),
+					)
+				})
+			})
+			.transpose()?
+			.unwrap_or(LevelFilter::Debug);
+
 		let (rabbitmq_connection_string, rabbitmq_exchange_name) = {
 			let rabbitmq = toml_config.rabbitmq.unwrap_or(RabbitmqConfig {
 				connection_string: String::new(),
@@ -122,6 +140,8 @@ impl TryFrom<TomlConfig> for Config {
 			rabbitmq_connection_string,
 			rabbitmq_exchange_name,
 			lsps2_service_config,
+			log_level,
+			log_file_path: toml_config.log.and_then(|l| l.file),
 		})
 	}
 }
@@ -135,6 +155,7 @@ pub struct TomlConfig {
 	esplora: Option<EsploraConfig>,
 	rabbitmq: Option<RabbitmqConfig>,
 	liquidity: Option<LiquidityConfig>,
+	log: Option<LogConfig>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -165,6 +186,12 @@ struct BitcoindConfig {
 #[derive(Deserialize, Serialize)]
 struct EsploraConfig {
 	server_url: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LogConfig {
+	level: Option<String>,
+	file: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -260,6 +287,10 @@ mod tests {
 			
 			[storage.disk]
 			dir_path = "/tmp"
+
+			[log]
+			level = "Trace"
+			file = "/var/log/ldk-server.log"
 			
 			[esplora]
 			server_url = "https://mempool.space/api"
@@ -310,6 +341,8 @@ mod tests {
 				max_payment_size_msat: 25000000000,
 				client_trusts_lsp: true,
 			}),
+			log_level: LevelFilter::Trace,
+			log_file_path: Some("/var/log/ldk-server.log".to_string()),
 		};
 
 		assert_eq!(config.listening_addr, expected.listening_addr);
@@ -339,6 +372,10 @@ mod tests {
 			
 			[storage.disk]
 			dir_path = "/tmp"
+
+			[log]
+			level = "Trace"
+			file = "/var/log/ldk-server.log"
 			
 			[bitcoind]
 			rpc_address = "127.0.0.1:8332"    # RPC endpoint
@@ -383,6 +420,10 @@ mod tests {
 			
 			[storage.disk]
 			dir_path = "/tmp"
+
+			[log]
+			level = "Trace"
+			file = "/var/log/ldk-server.log"
 			
 			[bitcoind]
 			rpc_address = "127.0.0.1:8332"    # RPC endpoint
