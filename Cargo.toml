@@ -1,6 +1,6 @@
 [package]
 name = "ldk-node"
-version = "0.7.0+git"
+version = "0.8.0+git"
 authors = ["Elias Rohrer <dev@tnull.de>"]
 homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
@@ -27,17 +27,17 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-#lightning = { version = "0.2.0-rc1", features = ["std"] }
-#lightning-types = { version = "0.3.0-rc1" }
-#lightning-invoice = { version = "0.34.0-rc1", features = ["std"] }
-#lightning-net-tokio = { version = "0.2.0-rc1" }
-#lightning-persister = { version = "0.2.0-rc1", features = ["tokio"] }
-#lightning-background-processor = { version = "0.2.0-rc1" }
-#lightning-rapid-gossip-sync = { version = "0.2.0-rc1" }
-#lightning-block-sync = { version = "0.2.0-rc1", features = ["rest-client", "rpc-client", "tokio"] }
-#lightning-transaction-sync = { version = "0.2.0-rc1", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
-#lightning-liquidity = { version = "0.2.0-rc1", features = ["std"] }
-#lightning-macros = { version = "0.2.0-rc1" }
+#lightning = { version = "0.2.0", features = ["std"] }
+#lightning-types = { version = "0.3.0" }
+#lightning-invoice = { version = "0.34.0", features = ["std"] }
+#lightning-net-tokio = { version = "0.2.0" }
+#lightning-persister = { version = "0.2.0", features = ["tokio"] }
+#lightning-background-processor = { version = "0.2.0" }
+#lightning-rapid-gossip-sync = { version = "0.2.0" }
+#lightning-block-sync = { version = "0.2.0", features = ["rest-client", "rpc-client", "tokio"] }
+#lightning-transaction-sync = { version = "0.2.0", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
+#lightning-liquidity = { version = "0.2.0", features = ["std"] }
+#lightning-macros = { version = "0.2.0" }
 
 lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "bb5504ec62d4b7e9d5626d8b1a6de60d71e8d370", features = ["std"] }
 lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "bb5504ec62d4b7e9d5626d8b1a6de60d71e8d370" }
