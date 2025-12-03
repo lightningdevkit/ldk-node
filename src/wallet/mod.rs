@@ -876,9 +876,15 @@ impl Wallet {
 	fn get_balances_inner(
 		&self, balance: Balance, total_anchor_channels_reserve_sats: u64,
 	) -> Result<(u64, u64), Error> {
+		let spendable_base = if self.config.include_untrusted_pending_in_spendable {
+			balance.trusted_spendable().to_sat() + balance.untrusted_pending.to_sat()
+		} else {
+			balance.trusted_spendable().to_sat()
+		};
+
 		let (total, spendable) = (
 			balance.total().to_sat(),
-			balance.trusted_spendable().to_sat().saturating_sub(total_anchor_channels_reserve_sats),
+			spendable_base.saturating_sub(total_anchor_channels_reserve_sats),
 		);
 
 		Ok((total, spendable))

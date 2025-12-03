@@ -184,6 +184,19 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// Whether to include unconfirmed funds from external sources in spendable balance.
+	///
+	/// If `true`, [`BalanceDetails::spendable_onchain_balance_sats`] will include
+	/// unconfirmed UTXOs received from external wallets (`untrusted_pending` in BDK terms).
+	///
+	/// Default is `false`, meaning only confirmed funds and unconfirmed change from your own
+	/// transactions are considered spendable.
+	///
+	/// **Warning:** Spending unconfirmed external funds is risky as the sender could
+	/// double-spend, causing your transaction to fail.
+	///
+	/// [`BalanceDetails::spendable_onchain_balance_sats`]: crate::BalanceDetails::spendable_onchain_balance_sats
+	pub include_untrusted_pending_in_spendable: bool,
 }
 
 impl Default for Config {
@@ -198,6 +211,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			include_untrusted_pending_in_spendable: false,
 		}
 	}
 }

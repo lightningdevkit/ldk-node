@@ -45,6 +45,12 @@
   - `Bolt11Payment::estimate_routing_fees_using_amount()`: Estimates fees for amount-less invoices.
 - Enhanced `OnchainPayment::send_to_address()` to accept optional `utxos_to_spend` parameter
   for manual UTXO selection.
+- Added `Config::include_untrusted_pending_in_spendable` option to control whether unconfirmed
+  funds from external sources are included in `spendable_onchain_balance_sats`. When set to `true`,
+  the spendable balance will include `untrusted_pending` UTXOs (unconfirmed transactions received
+  from external wallets). Default is `false` for safety, as spending unconfirmed external funds
+  carries risk of double-spending. This affects all balance reporting including `list_balances()`
+  and `BalanceChanged` events.
 
 ## Upstream v0.7.0 Release Notes
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
