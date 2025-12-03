@@ -105,6 +105,7 @@ mod scoring;
 mod tx_broadcaster;
 mod types;
 mod wallet;
+mod invoice;
 
 use std::default::Default;
 use std::net::ToSocketAddrs;
