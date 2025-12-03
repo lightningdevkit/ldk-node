@@ -1,4 +1,4 @@
-# 0.7.0 - TODO
+# 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 
 ## Feature and API updates
@@ -23,7 +23,8 @@ This seventh minor release introduces numerous new features, bug fixes, and API 
 
 ## Bug Fixes and Improvements
 - Robustness of the shutdown procedure has been improved, minimizing risk of blocking during `Node::stop`. (#592, #612, #619, #622)
-- The VSS storage backend now supports 'lazy' deletes, allowing it to avoid unnecessary remote calls for certain operations. (#689)
+- The VSS storage backend now supports 'lazy' deletes, allowing it to avoid
+  unnecessarily waiting on remote calls for certain operations. (#689, #722)
 - The encryption and obfuscation scheme used when storing data against a VSS backend has been improved. (#627)
 - Transient errors during `bitcoind` RPC chain synchronization are now retried with an exponential back-off. (#588)
 - Transactions evicted from the mempool are now correctly handled when syncing via `bitcoind` RPC/REST. (#605)
@@ -46,10 +47,23 @@ This seventh minor release introduces numerous new features, bug fixes, and API 
 - The `electrum-client` dependency has been bumped to v0.24.0. (#602)
 - For Kotlin/Android builds we now require 16kb page sizes, ensuring Play Store compatibility. (#625)
 
-In total, this release features TODO files changed, TODO insertions, TODO
-deletions in TODO commits from TODO authors in alphabetical order:
+In total, this release features 77 files changed, 12350 insertions, 5708
+deletions in 264 commits from 14 authors in alphabetical order:
 
-- TODO TODO
+- aagbotemi
+- alexanderwiederin
+- Andrei
+- Artur Gontijo
+- benthecarman
+- Chuks Agbakuru
+- coreyphillips
+- Elias Rohrer
+- Enigbe
+- Joost Jager
+- Jeffrey Czyz
+- moisesPomilio
+- Martin Saposnic
+- tosynthegeek
 
 # 0.6.2 - Aug. 14, 2025
 This patch release fixes a panic that could have been hit when syncing to a
