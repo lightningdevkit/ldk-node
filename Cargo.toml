@@ -1,6 +1,6 @@
 [package]
 name = "ldk-node"
-version = "0.7.0-rc.0"
+version = "0.7.0"
 authors = ["Elias Rohrer <dev@tnull.de>"]
 homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
@@ -29,17 +29,17 @@ panic = 'abort'     # Abort on panic
 default = []
 
 [dependencies]
-lightning = { version = "0.2.0-rc1", features = ["std"] }
-lightning-types = { version = "0.3.0-rc1" }
-lightning-invoice = { version = "0.34.0-rc1", features = ["std"] }
-lightning-net-tokio = { version = "0.2.0-rc1" }
-lightning-persister = { version = "0.2.0-rc1", features = ["tokio"] }
-lightning-background-processor = { version = "0.2.0-rc1" }
-lightning-rapid-gossip-sync = { version = "0.2.0-rc1" }
-lightning-block-sync = { version = "0.2.0-rc1", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { version = "0.2.0-rc1", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
-lightning-liquidity = { version = "0.2.0-rc1", features = ["std"] }
-lightning-macros = { version = "0.2.0-rc1" }
+lightning = { version = "0.2.0", features = ["std"] }
+lightning-types = { version = "0.3.0" }
+lightning-invoice = { version = "0.34.0", features = ["std"] }
+lightning-net-tokio = { version = "0.2.0" }
+lightning-persister = { version = "0.2.0", features = ["tokio"] }
+lightning-background-processor = { version = "0.2.0" }
+lightning-rapid-gossip-sync = { version = "0.2.0" }
+lightning-block-sync = { version = "0.2.0", features = ["rest-client", "rpc-client", "tokio"] }
+lightning-transaction-sync = { version = "0.2.0", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
+lightning-liquidity = { version = "0.2.0", features = ["std"] }
+lightning-macros = { version = "0.2.0" }
 
 bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
@@ -72,7 +72,7 @@ prost = { version = "0.11.6", default-features = false}
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.2.0-rc1", features = ["std", "_test_utils"] }
+lightning = { version = "0.2.0", features = ["std", "_test_utils"] }
 proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
