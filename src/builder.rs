@@ -18,6 +18,7 @@ use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::io::Cursor;
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
@@ -1479,6 +1480,8 @@ fn build_with_store_internal(
 		})?;
 	}
 
+	let hrn_resolver = Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph)));
+
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> =
 		if let Some(AsyncPaymentsRole::Server) = async_payments_role {
@@ -1490,7 +1493,7 @@ fn build_with_store_internal(
 				message_router,
 				Arc::clone(&channel_manager),
 				Arc::clone(&channel_manager),
-				IgnoringMessageHandler {},
+				Arc::clone(&hrn_resolver),
 				IgnoringMessageHandler {},
 			))
 		} else {
@@ -1502,7 +1505,7 @@ fn build_with_store_internal(
 				message_router,
 				Arc::clone(&channel_manager),
 				Arc::clone(&channel_manager),
-				IgnoringMessageHandler {},
+				Arc::clone(&hrn_resolver),
 				IgnoringMessageHandler {},
 			))
 		};
@@ -1634,6 +1637,12 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
+	let peer_manager_clone = Arc::clone(&peer_manager);
+
+	hrn_resolver.register_post_queue_action(Box::new(move || {
+		peer_manager_clone.process_events();
+	}));
+
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
 
 	gossip_source.set_gossip_verifier(
@@ -1741,6 +1750,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		hrn_resolver,
 	})
 }
 
