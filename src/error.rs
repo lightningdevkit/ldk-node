@@ -113,6 +113,8 @@ pub enum Error {
 	InvalidDateTime,
 	/// The given fee rate is invalid.
 	InvalidFeeRate,
+	/// The given script public key is invalid.
+	InvalidScriptPubKey,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
 	/// The provided offer was denonminated in an unsupported currency.
@@ -186,6 +188,7 @@ impl fmt::Display for Error {
 			Self::InvalidNodeAlias => write!(f, "The given node alias is invalid."),
 			Self::InvalidDateTime => write!(f, "The given date time is invalid."),
 			Self::InvalidFeeRate => write!(f, "The given fee rate is invalid."),
+			Self::InvalidScriptPubKey => write!(f, "The given script pubkey is invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
 			},

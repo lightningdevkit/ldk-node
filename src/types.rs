@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::OutPoint;
+use bitcoin::{OutPoint, ScriptBuf};
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
@@ -222,6 +222,15 @@ pub struct ChannelDetails {
 	/// state until the splice transaction reaches sufficient confirmations to be locked (and we
 	/// exchange `splice_locked` messages with our peer).
 	pub funding_txo: Option<OutPoint>,
+	/// The witness script that is used to lock the channel's funding output to commitment transactions.
+	///
+	/// This field will be `None` if we have not negotiated the funding transaction with our
+	/// counterparty already.
+	///
+	/// When a channel is spliced, this continues to refer to the original pre-splice channel
+	/// state until the splice transaction reaches sufficient confirmations to be locked (and we
+	/// exchange `splice_locked` messages with our peer).
+	pub funding_redeem_script: Option<ScriptBuf>,
 	/// The position of the funding transaction in the chain. None if the funding transaction has
 	/// not yet been confirmed and the channel fully opened.
 	///
@@ -378,6 +387,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			channel_id: value.channel_id,
 			counterparty_node_id: value.counterparty.node_id,
 			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
+			funding_redeem_script: value.funding_redeem_script,
 			short_channel_id: value.short_channel_id,
 			outbound_scid_alias: value.outbound_scid_alias,
 			inbound_scid_alias: value.inbound_scid_alias,

@@ -339,6 +339,7 @@ enum NodeError {
 	"InvalidNodeAlias",
 	"InvalidDateTime",
 	"InvalidFeeRate",
+	"InvalidScriptPubKey",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
@@ -575,6 +576,7 @@ dictionary ChannelDetails {
 	ChannelId channel_id;
 	PublicKey counterparty_node_id;
 	OutPoint? funding_txo;
+	ScriptBuf? funding_redeem_script;
 	u64? short_channel_id;
 	u64? outbound_scid_alias;
 	u64? inbound_scid_alias;
@@ -901,3 +903,6 @@ typedef string LSPS1OrderId;
 
 [Custom]
 typedef string LSPSDateTime;
+
+[Custom]
+typedef string ScriptBuf;
