@@ -147,19 +147,24 @@ pub(crate) fn payment_kind_to_proto(
 				secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
 			})),
 		},
-		PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits } => {
-			ldk_server_protos::types::PaymentKind {
-				kind: Some(Bolt11Jit(ldk_server_protos::types::Bolt11Jit {
-					hash: hash.to_string(),
-					preimage: preimage.map(|p| p.to_string()),
-					secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
-					lsp_fee_limits: Some(LspFeeLimits {
-						max_total_opening_fee_msat: lsp_fee_limits.max_total_opening_fee_msat,
-						max_proportional_opening_fee_ppm_msat: lsp_fee_limits
-							.max_proportional_opening_fee_ppm_msat,
-					}),
-				})),
-			}
+		PaymentKind::Bolt11Jit {
+			hash,
+			preimage,
+			secret,
+			lsp_fee_limits,
+			counterparty_skimmed_fee_msat,
+		} => ldk_server_protos::types::PaymentKind {
+			kind: Some(Bolt11Jit(ldk_server_protos::types::Bolt11Jit {
+				hash: hash.to_string(),
+				preimage: preimage.map(|p| p.to_string()),
+				secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
+				lsp_fee_limits: Some(LspFeeLimits {
+					max_total_opening_fee_msat: lsp_fee_limits.max_total_opening_fee_msat,
+					max_proportional_opening_fee_ppm_msat: lsp_fee_limits
+						.max_proportional_opening_fee_ppm_msat,
+				}),
+				counterparty_skimmed_fee_msat,
+			})),
 		},
 		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, payer_note, quantity } => {
 			ldk_server_protos::types::PaymentKind {

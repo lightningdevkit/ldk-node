@@ -101,6 +101,12 @@ message Bolt11Jit {
   // See [`LdkChannelConfig::accept_underpaying_htlcs`](https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.accept_underpaying_htlcs)
   // for more information.
   LSPFeeLimits lsp_fee_limits = 4;
+
+  // The value, in thousands of a satoshi, that was deducted from this payment as an extra
+  // fee taken by our channel counterparty.
+  //
+  // Will only be `Some` once we received the payment.
+  optional uint64 counterparty_skimmed_fee_msat = 5;
 }
 
 // Represents a BOLT 12 ‘offer’ payment, i.e., a payment for an Offer.
