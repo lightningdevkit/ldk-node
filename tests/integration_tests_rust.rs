@@ -995,7 +995,7 @@ async fn splice_channel() {
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
 	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
+	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
@@ -1006,11 +1006,16 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	let splice_in_fee_sat = 252;
+	let expected_splice_in_fee_sat = 252;
+
+	let payments = node_b.list_payments();
+	let payment =
+		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
+	assert_eq!(payment.fee_paid_msat, Some(expected_splice_in_fee_sat * 1_000));
 
 	assert_eq!(
 		node_b.list_balances().total_onchain_balance_sats,
-		premine_amount_sat - 4_000_000 - splice_in_fee_sat
+		premine_amount_sat - 4_000_000 - expected_splice_in_fee_sat
 	);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000);
 

@@ -1458,6 +1458,33 @@ where
 						counterparty_node_id,
 						funding_txo,
 					);
+
+					let chans =
+						self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+					let chan_output = chans
+						.iter()
+						.find(|c| c.user_channel_id == user_channel_id)
+						.and_then(|c| c.get_funding_output());
+					match chan_output {
+						None => {
+							log_error!(
+								self.logger,
+								"Failed to find channel info for pending channel {channel_id} with counterparty {counterparty_node_id}"
+							);
+							debug_assert!(false,
+								"Failed to find channel info for pending channel {channel_id} with counterparty {counterparty_node_id}"
+							);
+						},
+						Some(output) => {
+							if let Err(e) = self.wallet.insert_txo(funding_txo, output) {
+								log_error!(
+									self.logger,
+									"Failed to insert funding TXO into wallet: {e}"
+								);
+								return Err(ReplayEvent());
+							}
+						},
+					}
 				} else {
 					log_info!(
 						self.logger,
