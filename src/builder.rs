@@ -16,6 +16,7 @@ use std::{fmt, fs};
 use bdk_wallet::template::Bip84;
 use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
 use bitcoin::bip32::{ChildNumber, Xpriv};
+use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 use lightning::chain::{chainmonitor, BestBlock, Watch};
@@ -38,7 +39,7 @@ use lightning::util::persist::{
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
 use lightning_persister::fs_store::FilesystemStore;
-use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
+use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
 use crate::config::{
@@ -55,7 +56,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
 	read_external_pathfinding_scores_from_cache, read_node_metrics, write_node_metrics,
 };
-use crate::io::vss_store::VssStore;
+use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -76,8 +77,6 @@ use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics};
 
-const VSS_HARDENED_CHILD_INDEX: u32 = 877;
-const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
 
@@ -589,41 +588,14 @@ impl NodeBuilder {
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
-		use bitcoin::key::Secp256k1;
-
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_store = builder.build(lnurl_auth_server_url, fixed_headers).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
 
-		let seed_bytes = node_entropy.to_seed_bytes();
-		let config = Arc::new(self.config.clone());
-
-		let vss_xprv =
-			derive_xprv(config, &seed_bytes, VSS_HARDENED_CHILD_INDEX, Arc::clone(&logger))?;
-
-		let lnurl_auth_xprv = vss_xprv
-			.derive_priv(
-				&Secp256k1::new(),
-				&[ChildNumber::Hardened { index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX }],
-			)
-			.map_err(|e| {
-				log_error!(logger, "Failed to derive VSS secret: {}", e);
-				BuildError::KVStoreSetupFailed
-			})?;
-
-		let lnurl_auth_jwt_provider =
-			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers)
-				.map_err(|e| {
-					log_error!(logger, "Failed to create LnurlAuthToJwtProvider: {}", e);
-					BuildError::KVStoreSetupFailed
-				})?;
-
-		let header_provider = Arc::new(lnurl_auth_jwt_provider);
-
-		self.build_with_vss_store_and_header_provider(
-			node_entropy,
-			vss_url,
-			store_id,
-			header_provider,
-		)
+		self.build_with_store(node_entropy, Arc::new(vss_store))
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -638,18 +610,19 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [`FixedHeaders`]: vss_client::headers::FixedHeaders
 	pub fn build_with_vss_store_and_fixed_headers(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
-		let header_provider = Arc::new(FixedHeaders::new(fixed_headers));
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_store = builder.build_with_fixed_headers(fixed_headers).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
 
-		self.build_with_vss_store_and_header_provider(
-			node_entropy,
-			vss_url,
-			store_id,
-			header_provider,
-		)
+		self.build_with_store(node_entropy, Arc::new(vss_store))
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -668,24 +641,11 @@ impl NodeBuilder {
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
-
-		let seed_bytes = node_entropy.to_seed_bytes();
-		let config = Arc::new(self.config.clone());
-
-		let vss_xprv = derive_xprv(
-			config.clone(),
-			&seed_bytes,
-			VSS_HARDENED_CHILD_INDEX,
-			Arc::clone(&logger),
-		)?;
-
-		let vss_seed_bytes: [u8; 32] = vss_xprv.private_key.secret_bytes();
-
-		let vss_store =
-			VssStore::new(vss_url, store_id, vss_seed_bytes, header_provider).map_err(|e| {
-				log_error!(logger, "Failed to setup VSS store: {}", e);
-				BuildError::KVStoreSetupFailed
-			})?;
+		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_store = builder.build_with_header_provider(header_provider).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
 
 		self.build_with_store(node_entropy, Arc::new(vss_store))
 	}
@@ -1797,8 +1757,6 @@ fn setup_logger(
 fn derive_xprv(
 	config: Arc<Config>, seed_bytes: &[u8; 64], hardened_child_index: u32, logger: Arc<Logger>,
 ) -> Result<Xpriv, BuildError> {
-	use bitcoin::key::Secp256k1;
-
 	let xprv = Xpriv::new_master(config.network, seed_bytes).map_err(|e| {
 		log_error!(logger, "Failed to derive master secret: {}", e);
 		BuildError::WalletSetupFailed
