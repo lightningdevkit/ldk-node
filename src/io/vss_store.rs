@@ -875,15 +875,14 @@ impl VssStoreBuilder {
 	pub fn build(
 		&self, lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<VssStore, VssStoreBuildError> {
-		use bitcoin::key::Secp256k1;
-
+		let secp_ctx = Secp256k1::new();
 		let seed_bytes = self.node_entropy.to_seed_bytes();
 		let vss_xprv = Xpriv::new_master(self.network, &seed_bytes)
 			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
 			.and_then(|master| {
 				master
 					.derive_priv(
-						&Secp256k1::new(),
+						&secp_ctx,
 						&[ChildNumber::Hardened { index: VSS_HARDENED_CHILD_INDEX }],
 					)
 					.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
@@ -891,7 +890,7 @@ impl VssStoreBuilder {
 
 		let lnurl_auth_xprv = vss_xprv
 			.derive_priv(
-				&Secp256k1::new(),
+				&secp_ctx,
 				&[ChildNumber::Hardened { index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX }],
 			)
 			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)?;
