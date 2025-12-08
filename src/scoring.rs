@@ -12,7 +12,8 @@ use crate::config::{
 use crate::io::utils::write_external_pathfinding_scores_to_cache;
 use crate::logger::LdkLogger;
 use crate::runtime::Runtime;
-use crate::{write_node_metrics, DynStore, Logger, NodeMetrics, Scorer};
+use crate::types::DynStore;
+use crate::{write_node_metrics, Logger, NodeMetrics, Scorer};
 
 /// Start a background task that periodically downloads scores via an external url and merges them into the local
 /// pathfinding scores.

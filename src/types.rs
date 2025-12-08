@@ -6,6 +6,8 @@
 // accordance with one or both of these licenses.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use bitcoin::secp256k1::PublicKey;
@@ -48,8 +50,139 @@ where
 {
 }
 
-/// A type alias for [`SyncAndAsyncKVStore`] with `Sync`/`Send` markers;
-pub type DynStore = dyn SyncAndAsyncKVStore + Sync + Send;
+pub(crate) trait DynStoreTrait: Send + Sync {
+	fn read_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>>;
+	fn write_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>>;
+	fn remove_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>>;
+	fn list_async(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>>;
+
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, bitcoin::io::Error>;
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), bitcoin::io::Error>;
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), bitcoin::io::Error>;
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, bitcoin::io::Error>;
+}
+
+impl<'a> KVStore for dyn DynStoreTrait + 'a {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::read_async(self, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::write_async(self, primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::remove_async(self, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::list_async(self, primary_namespace, secondary_namespace)
+	}
+}
+
+impl<'a> KVStoreSync for dyn DynStoreTrait + 'a {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, bitcoin::io::Error> {
+		DynStoreTrait::read(self, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), bitcoin::io::Error> {
+		DynStoreTrait::write(self, primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), bitcoin::io::Error> {
+		DynStoreTrait::remove(self, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, bitcoin::io::Error> {
+		DynStoreTrait::list(self, primary_namespace, secondary_namespace)
+	}
+}
+
+pub(crate) type DynStore = dyn DynStoreTrait;
+
+pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub(crate) T);
+
+impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
+	fn read_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>> {
+		Box::pin(KVStore::read(&self.0, primary_namespace, secondary_namespace, key))
+	}
+
+	fn write_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>> {
+		Box::pin(KVStore::write(&self.0, primary_namespace, secondary_namespace, key, buf))
+	}
+
+	fn remove_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>> {
+		Box::pin(KVStore::remove(&self.0, primary_namespace, secondary_namespace, key, lazy))
+	}
+
+	fn list_async(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>> {
+		Box::pin(KVStore::list(&self.0, primary_namespace, secondary_namespace))
+	}
+
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, bitcoin::io::Error> {
+		KVStoreSync::read(&self.0, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), bitcoin::io::Error> {
+		KVStoreSync::write(&self.0, primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), bitcoin::io::Error> {
+		KVStoreSync::remove(&self.0, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, bitcoin::io::Error> {
+		KVStoreSync::list(&self.0, primary_namespace, secondary_namespace)
+	}
+}
 
 pub type Persister = MonitorUpdatingPersister<
 	Arc<DynStore>,

@@ -10,12 +10,10 @@
 
 pub(crate) mod logging;
 
-use std::boxed::Box;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -423,7 +421,7 @@ pub(crate) fn setup_node_for_async_payments(
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
-			let kv_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
+			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
@@ -1291,6 +1289,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 }
 
 // A `KVStore` impl for testing purposes that wraps all our `KVStore`s and asserts their synchronicity.
+#[derive(Clone)]
 pub(crate) struct TestSyncStore {
 	inner: Arc<TestSyncStoreInner>,
 }
@@ -1305,7 +1304,7 @@ impl TestSyncStore {
 impl KVStore for TestSyncStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
+	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -1313,16 +1312,16 @@ impl KVStore for TestSyncStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.read_internal(&primary_namespace, &secondary_namespace, &key)
 		});
-		Box::pin(async move {
+		async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		})
+		}
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -1330,16 +1329,16 @@ impl KVStore for TestSyncStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.write_internal(&primary_namespace, &secondary_namespace, &key, buf)
 		});
-		Box::pin(async move {
+		async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		})
+		}
 	}
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -1347,28 +1346,28 @@ impl KVStore for TestSyncStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy)
 		});
-		Box::pin(async move {
+		async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		})
+		}
 	}
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
+	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.list_internal(&primary_namespace, &secondary_namespace)
 		});
-		Box::pin(async move {
+		async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		})
+		}
 	}
 }
 

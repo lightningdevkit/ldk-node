@@ -158,12 +158,10 @@ use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
 use runtime::Runtime;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, KeysManager,
-	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
+	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{
-	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
-};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,

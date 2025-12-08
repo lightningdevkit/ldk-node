@@ -70,8 +70,8 @@ use crate::peer_store::PeerStore;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, GossipSync, Graph, KeysManager, MessageRouter,
-	OnionMessenger, PaymentStore, PeerManager, Persister,
+	ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph, KeysManager,
+	MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -544,14 +544,12 @@ impl NodeBuilder {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
-		let kv_store = Arc::new(
-			SqliteStore::new(
-				storage_dir_path.into(),
-				Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
-				Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
-			)
-			.map_err(|_| BuildError::KVStoreSetupFailed)?,
-		);
+		let kv_store = SqliteStore::new(
+			storage_dir_path.into(),
+			Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+			Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+		)
+		.map_err(|_| BuildError::KVStoreSetupFailed)?;
 		self.build_with_store(node_entropy, kv_store)
 	}
 
@@ -563,7 +561,7 @@ impl NodeBuilder {
 
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
-		let kv_store = Arc::new(FilesystemStore::new(storage_dir_path));
+		let kv_store = FilesystemStore::new(storage_dir_path);
 		self.build_with_store(node_entropy, kv_store)
 	}
 
@@ -595,7 +593,7 @@ impl NodeBuilder {
 			BuildError::KVStoreSetupFailed
 		})?;
 
-		self.build_with_store(node_entropy, Arc::new(vss_store))
+		self.build_with_store(node_entropy, vss_store)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -622,7 +620,7 @@ impl NodeBuilder {
 			BuildError::KVStoreSetupFailed
 		})?;
 
-		self.build_with_store(node_entropy, Arc::new(vss_store))
+		self.build_with_store(node_entropy, vss_store)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -647,12 +645,12 @@ impl NodeBuilder {
 			BuildError::KVStoreSetupFailed
 		})?;
 
-		self.build_with_store(node_entropy, Arc::new(vss_store))
+		self.build_with_store(node_entropy, vss_store)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store(
-		&self, node_entropy: NodeEntropy, kv_store: Arc<DynStore>,
+	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
@@ -678,7 +676,7 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			kv_store,
+			Arc::new(DynStoreWrapper(kv_store)),
 		)
 	}
 }
@@ -1014,8 +1012,10 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store(
-		&self, node_entropy: Arc<NodeEntropy>, kv_store: Arc<DynStore>,
+	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
+	// this so its not needed.
+	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(*node_entropy, kv_store).map(Arc::new)
 	}

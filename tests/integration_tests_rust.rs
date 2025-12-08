@@ -31,7 +31,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, DynStore, Event, NodeError};
+use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -252,15 +252,14 @@ async fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store: Arc<DynStore> =
-		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
+	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let node =
-		builder.build_with_store(config.node_entropy.into(), Arc::clone(&test_sync_store)).unwrap();
+		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -299,7 +298,7 @@ async fn start_stop_reinit() {
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let reinitialized_node =
-		builder.build_with_store(config.node_entropy.into(), Arc::clone(&test_sync_store)).unwrap();
+		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 

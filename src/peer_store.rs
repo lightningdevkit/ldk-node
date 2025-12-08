@@ -156,10 +156,11 @@ mod tests {
 
 	use super::*;
 	use crate::io::test_utils::InMemoryStore;
+	use crate::types::DynStoreWrapper;
 
 	#[test]
 	fn peer_info_persistence() {
-		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
 
