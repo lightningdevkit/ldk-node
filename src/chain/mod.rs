@@ -28,8 +28,8 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
+use crate::types::{Broadcaster, ChainMonitor, ChannelManager, Sweeper, Wallet};
+use crate::{DynStore, Error, NodeMetrics};
 
 pub(crate) enum WalletSyncStatus {
 	Completed,

@@ -47,8 +47,11 @@ where
 {
 }
 
+#[cfg(not(feature = "uniffi"))]
 /// A type alias for [`SyncAndAsyncKVStore`] with `Sync`/`Send` markers;
 pub type DynStore = dyn SyncAndAsyncKVStore + Sync + Send;
+#[cfg(feature = "uniffi")]
+pub(crate) use crate::DynStore;
 
 pub type Persister = MonitorUpdatingPersister<
 	Arc<DynStore>,
