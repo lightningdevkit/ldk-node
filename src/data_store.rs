@@ -177,6 +177,7 @@ mod tests {
 	use super::*;
 	use crate::hex_utils;
 	use crate::io::test_utils::InMemoryStore;
+	use crate::types::DynStoreWrapper;
 
 	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 	struct TestObjectId {
@@ -235,7 +236,7 @@ mod tests {
 
 	#[test]
 	fn data_is_persisted() {
-		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let primary_namespace = "datastore_test_primary".to_string();
 		let secondary_namespace = "datastore_test_secondary".to_string();

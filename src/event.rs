@@ -1801,10 +1801,11 @@ mod tests {
 
 	use super::*;
 	use crate::io::test_utils::InMemoryStore;
+	use crate::types::DynStoreWrapper;
 
 	#[tokio::test]
 	async fn event_queue_persistence() {
-		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
@@ -1842,7 +1843,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn event_queue_concurrency() {
-		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);

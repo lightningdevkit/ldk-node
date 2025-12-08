@@ -6,13 +6,14 @@
 // accordance with one or both of these licenses.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use bitcoin::{BlockHash, FeeRate, Network, Transaction, Txid};
+use bitcoin::{BlockHash, FeeRate, Network, OutPoint, Transaction, Txid};
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
 use lightning::chain::{BestBlock, Listen};
 use lightning::util::ser::Writeable;
@@ -23,7 +24,7 @@ use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 use lightning_block_sync::rest::RestClient;
 use lightning_block_sync::rpc::{RpcClient, RpcError};
 use lightning_block_sync::{
-	AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, BlockSourceErrorKind, Cache,
+	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind, Cache,
 	SpvClient,
 };
 use serde::Serialize;
@@ -117,7 +118,7 @@ impl BitcoindChainSource {
 		}
 	}
 
-	pub(super) fn as_utxo_source(&self) -> Arc<dyn UtxoSource> {
+	pub(super) fn as_utxo_source(&self) -> UtxoSourceClient {
 		self.api_client.utxo_source()
 	}
 
@@ -639,6 +640,78 @@ impl BitcoindChainSource {
 	}
 }
 
+#[derive(Clone)]
+pub(crate) enum UtxoSourceClient {
+	Rpc(Arc<RpcClient>),
+	Rest(Arc<RestClient>),
+}
+
+impl std::ops::Deref for UtxoSourceClient {
+	type Target = Self;
+	fn deref(&self) -> &Self {
+		self
+	}
+}
+
+impl BlockSource for UtxoSourceClient {
+	fn get_header<'a>(
+		&'a self, header_hash: &'a BlockHash, height_hint: Option<u32>,
+	) -> impl Future<Output = Result<BlockHeaderData, BlockSourceError>> + 'a {
+		async move {
+			match self {
+				Self::Rpc(client) => client.get_header(header_hash, height_hint).await,
+				Self::Rest(client) => client.get_header(header_hash, height_hint).await,
+			}
+		}
+	}
+
+	fn get_block<'a>(
+		&'a self, header_hash: &'a BlockHash,
+	) -> impl Future<Output = Result<BlockData, BlockSourceError>> + 'a {
+		async move {
+			match self {
+				Self::Rpc(client) => client.get_block(header_hash).await,
+				Self::Rest(client) => client.get_block(header_hash).await,
+			}
+		}
+	}
+
+	fn get_best_block<'a>(
+		&'a self,
+	) -> impl Future<Output = Result<(BlockHash, Option<u32>), BlockSourceError>> + 'a {
+		async move {
+			match self {
+				Self::Rpc(client) => client.get_best_block().await,
+				Self::Rest(client) => client.get_best_block().await,
+			}
+		}
+	}
+}
+
+impl UtxoSource for UtxoSourceClient {
+	fn get_block_hash_by_height<'a>(
+		&'a self, block_height: u32,
+	) -> impl Future<Output = Result<BlockHash, BlockSourceError>> + 'a {
+		async move {
+			match self {
+				Self::Rpc(client) => client.get_block_hash_by_height(block_height).await,
+				Self::Rest(client) => client.get_block_hash_by_height(block_height).await,
+			}
+		}
+	}
+
+	fn is_output_unspent<'a>(
+		&'a self, outpoint: OutPoint,
+	) -> impl Future<Output = Result<bool, BlockSourceError>> + 'a {
+		async move {
+			match self {
+				Self::Rpc(client) => client.is_output_unspent(outpoint).await,
+				Self::Rest(client) => client.is_output_unspent(outpoint).await,
+			}
+		}
+	}
+}
+
 pub enum BitcoindClient {
 	Rpc {
 		rpc_client: Arc<RpcClient>,
@@ -700,12 +773,10 @@ impl BitcoindClient {
 		}
 	}
 
-	pub(crate) fn utxo_source(&self) -> Arc<dyn UtxoSource> {
+	fn utxo_source(&self) -> UtxoSourceClient {
 		match self {
-			BitcoindClient::Rpc { rpc_client, .. } => Arc::clone(rpc_client) as Arc<dyn UtxoSource>,
-			BitcoindClient::Rest { rest_client, .. } => {
-				Arc::clone(rest_client) as Arc<dyn UtxoSource>
-			},
+			Self::Rpc { rpc_client, .. } => UtxoSourceClient::Rpc(Arc::clone(&rpc_client)),
+			Self::Rest { rest_client, .. } => UtxoSourceClient::Rest(Arc::clone(&rest_client)),
 		}
 	}
 
@@ -1189,38 +1260,40 @@ impl BitcoindClient {
 impl BlockSource for BitcoindClient {
 	fn get_header<'a>(
 		&'a self, header_hash: &'a bitcoin::BlockHash, height_hint: Option<u32>,
-	) -> AsyncBlockSourceResult<'a, BlockHeaderData> {
-		match self {
-			BitcoindClient::Rpc { rpc_client, .. } => {
-				Box::pin(async move { rpc_client.get_header(header_hash, height_hint).await })
-			},
-			BitcoindClient::Rest { rest_client, .. } => {
-				Box::pin(async move { rest_client.get_header(header_hash, height_hint).await })
-			},
+	) -> impl Future<Output = Result<BlockHeaderData, BlockSourceError>> + 'a {
+		async move {
+			match self {
+				BitcoindClient::Rpc { rpc_client, .. } => {
+					rpc_client.get_header(header_hash, height_hint).await
+				},
+				BitcoindClient::Rest { rest_client, .. } => {
+					rest_client.get_header(header_hash, height_hint).await
+				},
+			}
 		}
 	}
 
 	fn get_block<'a>(
 		&'a self, header_hash: &'a bitcoin::BlockHash,
-	) -> AsyncBlockSourceResult<'a, BlockData> {
-		match self {
-			BitcoindClient::Rpc { rpc_client, .. } => {
-				Box::pin(async move { rpc_client.get_block(header_hash).await })
-			},
-			BitcoindClient::Rest { rest_client, .. } => {
-				Box::pin(async move { rest_client.get_block(header_hash).await })
-			},
+	) -> impl Future<Output = Result<BlockData, BlockSourceError>> + 'a {
+		async move {
+			match self {
+				BitcoindClient::Rpc { rpc_client, .. } => rpc_client.get_block(header_hash).await,
+				BitcoindClient::Rest { rest_client, .. } => {
+					rest_client.get_block(header_hash).await
+				},
+			}
 		}
 	}
 
-	fn get_best_block(&self) -> AsyncBlockSourceResult<'_, (bitcoin::BlockHash, Option<u32>)> {
-		match self {
-			BitcoindClient::Rpc { rpc_client, .. } => {
-				Box::pin(async move { rpc_client.get_best_block().await })
-			},
-			BitcoindClient::Rest { rest_client, .. } => {
-				Box::pin(async move { rest_client.get_best_block().await })
-			},
+	fn get_best_block<'a>(
+		&'a self,
+	) -> impl Future<Output = Result<(bitcoin::BlockHash, Option<u32>), BlockSourceError>> + 'a {
+		async move {
+			match self {
+				BitcoindClient::Rpc { rpc_client, .. } => rpc_client.get_best_block().await,
+				BitcoindClient::Rest { rest_client, .. } => rest_client.get_best_block().await,
+			}
 		}
 	}
 }

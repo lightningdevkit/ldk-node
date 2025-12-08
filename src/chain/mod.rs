@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-mod bitcoind;
+pub(crate) mod bitcoind;
 mod electrum;
 mod esplora;
 
@@ -15,9 +15,8 @@ use std::time::Duration;
 
 use bitcoin::{Script, Txid};
 use lightning::chain::{BestBlock, Filter};
-use lightning_block_sync::gossip::UtxoSource;
 
-use crate::chain::bitcoind::BitcoindChainSource;
+use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
 use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
 use crate::config::{
@@ -202,7 +201,7 @@ impl ChainSource {
 		}
 	}
 
-	pub(crate) fn as_utxo_source(&self) -> Option<Arc<dyn UtxoSource>> {
+	pub(crate) fn as_utxo_source(&self) -> Option<UtxoSourceClient> {
 		match &self.kind {
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				Some(bitcoind_chain_source.as_utxo_source())

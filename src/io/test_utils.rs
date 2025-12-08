@@ -5,12 +5,10 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::boxed::Box;
 use std::collections::{hash_map, HashMap};
 use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Mutex;
 
 use lightning::events::ClosureReason;
@@ -106,27 +104,27 @@ impl InMemoryStore {
 impl KVStore for InMemoryStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send>> {
+	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
 		let res = self.read_internal(&primary_namespace, &secondary_namespace, &key);
-		Box::pin(async move { res })
+		async move { res }
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let res = self.write_internal(&primary_namespace, &secondary_namespace, &key, buf);
-		Box::pin(async move { res })
+		async move { res }
 	}
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let res = self.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy);
-		Box::pin(async move { res })
+		async move { res }
 	}
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
+	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
 		let res = self.list_internal(primary_namespace, secondary_namespace);
-		Box::pin(async move { res })
+		async move { res }
 	}
 }
 

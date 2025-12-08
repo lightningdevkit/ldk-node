@@ -7,7 +7,6 @@
 
 use std::future::Future;
 use std::ops::Deref;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -859,20 +858,18 @@ impl Listen for Wallet {
 impl WalletSource for Wallet {
 	fn list_confirmed_utxos<'a>(
 		&'a self,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<Utxo>, ()>> + Send + 'a>> {
-		Box::pin(async move { self.list_confirmed_utxos_inner() })
+	) -> impl Future<Output = Result<Vec<Utxo>, ()>> + Send + 'a {
+		async move { self.list_confirmed_utxos_inner() }
 	}
 
-	fn get_change_script<'a>(
-		&'a self,
-	) -> Pin<Box<dyn Future<Output = Result<ScriptBuf, ()>> + Send + 'a>> {
-		Box::pin(async move { self.get_change_script_inner() })
+	fn get_change_script<'a>(&'a self) -> impl Future<Output = Result<ScriptBuf, ()>> + Send + 'a {
+		async move { self.get_change_script_inner() }
 	}
 
 	fn sign_psbt<'a>(
 		&'a self, psbt: Psbt,
-	) -> Pin<Box<dyn Future<Output = Result<Transaction, ()>> + Send + 'a>> {
-		Box::pin(async move { self.sign_psbt_inner(psbt) })
+	) -> impl Future<Output = Result<Transaction, ()>> + Send + 'a {
+		async move { self.sign_psbt_inner(psbt) }
 	}
 }
 
@@ -1018,17 +1015,15 @@ impl SignerProvider for WalletKeysManager {
 impl ChangeDestinationSource for WalletKeysManager {
 	fn get_change_destination_script<'a>(
 		&'a self,
-	) -> Pin<Box<dyn Future<Output = Result<ScriptBuf, ()>> + Send + 'a>> {
-		let wallet = Arc::clone(&self.wallet);
-		let logger = Arc::clone(&self.logger);
-		Box::pin(async move {
-			wallet
+	) -> impl Future<Output = Result<ScriptBuf, ()>> + Send + 'a {
+		async move {
+			self.wallet
 				.get_new_internal_address()
 				.map_err(|e| {
-					log_error!(logger, "Failed to retrieve new address from wallet: {}", e);
+					log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
 				})
 				.map(|addr| addr.script_pubkey())
 				.map_err(|_| ())
-		})
+		}
 	}
 }
