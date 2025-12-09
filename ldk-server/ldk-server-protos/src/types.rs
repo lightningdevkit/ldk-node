@@ -1,5 +1,7 @@
 /// Represents a payment.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/payment/struct.PaymentDetails.html>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Payment {
@@ -28,6 +30,8 @@ pub struct Payment {
 	#[prost(uint64, tag = "6")]
 	pub latest_update_timestamp: u64,
 }
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentKind {
@@ -36,6 +40,8 @@ pub struct PaymentKind {
 }
 /// Nested message and enum types in `PaymentKind`.
 pub mod payment_kind {
+	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+	#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 	#[allow(clippy::derive_partial_eq_without_eq)]
 	#[derive(Clone, PartialEq, ::prost::Oneof)]
 	pub enum Kind {
@@ -54,6 +60,8 @@ pub mod payment_kind {
 	}
 }
 /// Represents an on-chain payment.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Onchain {
@@ -64,6 +72,8 @@ pub struct Onchain {
 	#[prost(message, optional, tag = "2")]
 	pub status: ::core::option::Option<ConfirmationStatus>,
 }
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConfirmationStatus {
@@ -72,6 +82,8 @@ pub struct ConfirmationStatus {
 }
 /// Nested message and enum types in `ConfirmationStatus`.
 pub mod confirmation_status {
+	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+	#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 	#[allow(clippy::derive_partial_eq_without_eq)]
 	#[derive(Clone, PartialEq, ::prost::Oneof)]
 	pub enum Status {
@@ -82,6 +94,8 @@ pub mod confirmation_status {
 	}
 }
 /// The on-chain transaction is confirmed in the best chain.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Confirmed {
@@ -96,10 +110,14 @@ pub struct Confirmed {
 	pub timestamp: u64,
 }
 /// The on-chain transaction is unconfirmed.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Unconfirmed {}
 /// Represents a BOLT 11 payment.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt11 {
@@ -114,6 +132,8 @@ pub struct Bolt11 {
 	pub secret: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Represents a BOLT 11 payment intended to open an LSPS 2 just-in-time channel.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt11Jit {
@@ -142,6 +162,8 @@ pub struct Bolt11Jit {
 	pub counterparty_skimmed_fee_msat: ::core::option::Option<u64>,
 }
 /// Represents a BOLT 12 ‘offer’ payment, i.e., a payment for an Offer.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt12Offer {
@@ -169,6 +191,8 @@ pub struct Bolt12Offer {
 	pub quantity: ::core::option::Option<u64>,
 }
 /// Represents a BOLT 12 ‘refund’ payment, i.e., a payment for a Refund.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt12Refund {
@@ -193,6 +217,8 @@ pub struct Bolt12Refund {
 	pub quantity: ::core::option::Option<u64>,
 }
 /// Represents a spontaneous (“keysend”) payment.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Spontaneous {
@@ -207,6 +233,8 @@ pub struct Spontaneous {
 /// See \[`LdkChannelConfig::accept_underpaying_htlcs`\] for more information.
 ///
 /// \[`LdkChannelConfig::accept_underpaying_htlcs`\]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LspFeeLimits {
@@ -221,6 +249,8 @@ pub struct LspFeeLimits {
 }
 /// A forwarded payment through our node.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ForwardedPayment {
@@ -271,6 +301,8 @@ pub struct ForwardedPayment {
 	#[prost(uint64, optional, tag = "8")]
 	pub outbound_amount_forwarded_msat: ::core::option::Option<u64>,
 }
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Channel {
@@ -403,6 +435,8 @@ pub struct Channel {
 }
 /// ChannelConfig represents the configuration settings for a channel in a Lightning Network node.
 /// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChannelConfig {
@@ -446,6 +480,8 @@ pub mod channel_config {
 	/// and fees on commitment transaction(s) broadcasted by our counterparty in excess of
 	/// our own fee estimate.
 	/// See more: <https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelConfig.html#structfield.max_dust_htlc_exposure>
+	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+	#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 	#[allow(clippy::derive_partial_eq_without_eq)]
 	#[derive(Clone, PartialEq, ::prost::Oneof)]
 	pub enum MaxDustHtlcExposure {
@@ -460,6 +496,8 @@ pub mod channel_config {
 	}
 }
 /// Represent a transaction outpoint.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OutPoint {
@@ -470,6 +508,8 @@ pub struct OutPoint {
 	#[prost(uint32, tag = "2")]
 	pub vout: u32,
 }
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BestBlock {
@@ -481,6 +521,8 @@ pub struct BestBlock {
 	pub height: u32,
 }
 /// Details about the status of a known Lightning balance.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LightningBalance {
@@ -489,6 +531,8 @@ pub struct LightningBalance {
 }
 /// Nested message and enum types in `LightningBalance`.
 pub mod lightning_balance {
+	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+	#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 	#[allow(clippy::derive_partial_eq_without_eq)]
 	#[derive(Clone, PartialEq, ::prost::Oneof)]
 	pub enum BalanceType {
@@ -509,6 +553,8 @@ pub mod lightning_balance {
 /// The channel is not yet closed (or the commitment or closing transaction has not yet appeared in a block).
 /// The given balance is claimable (less on-chain fees) if the channel is force-closed now.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ClaimableOnChannelClose>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClaimableOnChannelClose {
@@ -564,6 +610,8 @@ pub struct ClaimableOnChannelClose {
 }
 /// The channel has been closed, and the given balance is ours but awaiting confirmations until we consider it spendable.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ClaimableAwaitingConfirmations>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClaimableAwaitingConfirmations {
@@ -588,6 +636,8 @@ pub struct ClaimableAwaitingConfirmations {
 /// Once the spending transaction confirms, before it has reached enough confirmations to be considered safe from chain
 /// reorganizations, the balance will instead be provided via `LightningBalance::ClaimableAwaitingConfirmations`.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.ContentiousClaimable>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ContentiousClaimable {
@@ -614,6 +664,8 @@ pub struct ContentiousClaimable {
 /// HTLCs which we sent to our counterparty which are claimable after a timeout (less on-chain fees) if the counterparty
 /// does not know the preimage for the HTLCs. These are somewhat likely to be claimed by our counterparty before we do.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.MaybeTimeoutClaimableHTLC>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MaybeTimeoutClaimableHtlc {
@@ -641,6 +693,8 @@ pub struct MaybeTimeoutClaimableHtlc {
 /// This will only be claimable if we receive the preimage from the node to which we forwarded this HTLC before the
 /// timeout.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.MaybePreimageClaimableHTLC>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MaybePreimageClaimableHtlc {
@@ -667,6 +721,8 @@ pub struct MaybePreimageClaimableHtlc {
 /// Thus, we’re able to claim all outputs in the commitment transaction, one of which has the following amount.
 ///
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.LightningBalance.html#variant.CounterpartyRevokedOutputClaimable>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CounterpartyRevokedOutputClaimable {
@@ -681,6 +737,8 @@ pub struct CounterpartyRevokedOutputClaimable {
 	pub amount_satoshis: u64,
 }
 /// Details about the status of a known balance currently being swept to our on-chain wallet.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PendingSweepBalance {
@@ -689,6 +747,8 @@ pub struct PendingSweepBalance {
 }
 /// Nested message and enum types in `PendingSweepBalance`.
 pub mod pending_sweep_balance {
+	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+	#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 	#[allow(clippy::derive_partial_eq_without_eq)]
 	#[derive(Clone, PartialEq, ::prost::Oneof)]
 	pub enum BalanceType {
@@ -702,6 +762,8 @@ pub mod pending_sweep_balance {
 }
 /// The spendable output is about to be swept, but a spending transaction has yet to be generated and broadcast.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.PendingBroadcast>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PendingBroadcast {
@@ -714,6 +776,8 @@ pub struct PendingBroadcast {
 }
 /// A spending transaction has been generated and broadcast and is awaiting confirmation on-chain.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.BroadcastAwaitingConfirmation>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BroadcastAwaitingConfirmation {
@@ -734,6 +798,8 @@ pub struct BroadcastAwaitingConfirmation {
 ///
 /// It will be considered irrevocably confirmed after reaching `ANTI_REORG_DELAY`.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.PendingSweepBalance.html#variant.AwaitingThresholdConfirmations>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AwaitingThresholdConfirmations {
@@ -754,6 +820,8 @@ pub struct AwaitingThresholdConfirmations {
 	pub amount_satoshis: u64,
 }
 /// Token used to determine start of next page in paginated APIs.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PageToken {
@@ -762,6 +830,8 @@ pub struct PageToken {
 	#[prost(int64, tag = "2")]
 	pub index: i64,
 }
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Bolt11InvoiceDescription {
@@ -770,6 +840,8 @@ pub struct Bolt11InvoiceDescription {
 }
 /// Nested message and enum types in `Bolt11InvoiceDescription`.
 pub mod bolt11_invoice_description {
+	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+	#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 	#[allow(clippy::derive_partial_eq_without_eq)]
 	#[derive(Clone, PartialEq, ::prost::Oneof)]
 	pub enum Kind {
@@ -781,6 +853,8 @@ pub mod bolt11_invoice_description {
 }
 /// Configuration options for payment routing and pathfinding.
 /// See <https://docs.rs/lightning/0.2.0/lightning/routing/router/struct.RouteParametersConfig.html> for more details on each field.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RouteParametersConfig {
@@ -803,6 +877,8 @@ pub struct RouteParametersConfig {
 	pub max_channel_saturation_power_of_half: u32,
 }
 /// Represents the direction of a payment.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum PaymentDirection {
@@ -832,6 +908,8 @@ impl PaymentDirection {
 	}
 }
 /// Represents the current status of a payment.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum PaymentStatus {
