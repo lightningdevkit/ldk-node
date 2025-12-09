@@ -192,45 +192,14 @@ impl Wallet {
 					(PaymentStatus::Pending, ConfirmationStatus::Unconfirmed)
 				},
 			};
-			// TODO: It would be great to introduce additional variants for
-			// `ChannelFunding` and `ChannelClosing`. For the former, we could just
-			// take a reference to `ChannelManager` here and check against
-			// `list_channels`. But for the latter the best approach is much less
-			// clear: for force-closes/HTLC spends we should be good querying
-			// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
-			// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
-			// spent to a wallet address. The only solution I can come up with is to
-			// create and persist a list of 'static pending outputs' that we could use
-			// here to determine the `PaymentKind`, but that's not really satisfactory, so
-			// we're punting on it until we can come up with a better solution.
-			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
-			let fee = locked_wallet.calculate_fee(&wtx.tx_node.tx).unwrap_or(Amount::ZERO);
-			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
-			let (direction, amount_msat) = if sent > received {
-				let direction = PaymentDirection::Outbound;
-				let amount_msat = Some(
-					sent.to_sat().saturating_sub(fee.to_sat()).saturating_sub(received.to_sat())
-						* 1000,
-				);
-				(direction, amount_msat)
-			} else {
-				let direction = PaymentDirection::Inbound;
-				let amount_msat = Some(
-					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee.to_sat()))
-						* 1000,
-				);
-				(direction, amount_msat)
-			};
 
-			let fee_paid_msat = Some(fee.to_sat() * 1000);
-
-			let payment = PaymentDetails::new(
+			let payment = self.create_payment_from_tx(
+				locked_wallet,
+				txid,
 				id,
-				kind,
-				amount_msat,
-				fee_paid_msat,
-				direction,
+				&wtx.tx_node.tx,
 				payment_status,
+				confirmation_status,
 			);
 
 			self.payment_store.insert_or_update(payment)?;
@@ -805,6 +774,46 @@ impl Wallet {
 		})?;
 
 		Ok(tx)
+	}
+
+	fn create_payment_from_tx(
+		&self, locked_wallet: &PersistedWallet<KVStoreWalletPersister>, txid: Txid,
+		payment_id: PaymentId, tx: &Transaction, payment_status: PaymentStatus,
+		confirmation_status: ConfirmationStatus,
+	) -> PaymentDetails {
+		// TODO: It would be great to introduce additional variants for
+		// `ChannelFunding` and `ChannelClosing`. For the former, we could just
+		// take a reference to `ChannelManager` here and check against
+		// `list_channels`. But for the latter the best approach is much less
+		// clear: for force-closes/HTLC spends we should be good querying
+		// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
+		// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
+		// spent to a wallet address. The only solution I can come up with is to
+		// create and persist a list of 'static pending outputs' that we could use
+		// here to determine the `PaymentKind`, but that's not really satisfactory, so
+		// we're punting on it until we can come up with a better solution.
+
+		let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
+
+		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
+		let (sent, received) = locked_wallet.sent_and_received(tx);
+		let (direction, amount_msat) = if sent > received {
+			let direction = PaymentDirection::Outbound;
+			let amount_msat = Some(
+				sent.to_sat().saturating_sub(fee.to_sat()).saturating_sub(received.to_sat()) * 1000,
+			);
+			(direction, amount_msat)
+		} else {
+			let direction = PaymentDirection::Inbound;
+			let amount_msat = Some(
+				received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee.to_sat())) * 1000,
+			);
+			(direction, amount_msat)
+		};
+
+		let fee_paid_msat = Some(fee.to_sat() * 1000);
+
+		PaymentDetails::new(payment_id, kind, amount_msat, fee_paid_msat, direction, payment_status)
 	}
 }
 
