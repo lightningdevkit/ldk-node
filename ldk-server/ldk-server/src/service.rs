@@ -1,6 +1,6 @@
 use ldk_node::Node;
 
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::Service;
 use hyper::{Request, Response, StatusCode};
@@ -38,6 +38,10 @@ use crate::util::proto_adapter::to_error_response;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+
+// Maximum request body size: 10 MB
+// This prevents memory exhaustion from large requests
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct NodeService {
@@ -127,8 +131,23 @@ async fn handle_request<
 >(
 	context: Context, request: Request<Incoming>, handler: F,
 ) -> Result<<NodeService as Service<Request<Incoming>>>::Response, hyper::Error> {
-	// TODO: we should bound the amount of data we read to avoid allocating too much memory.
-	let bytes = request.into_body().collect().await?.to_bytes();
+	// Limit the size of the request body to prevent abuse
+	let limited_body = Limited::new(request.into_body(), MAX_BODY_SIZE);
+	let bytes = match limited_body.collect().await {
+		Ok(collected) => collected.to_bytes(),
+		Err(_) => {
+			let (error_response, status_code) = to_error_response(LdkServerError::new(
+				InvalidRequestError,
+				"Request body too large or failed to read.",
+			));
+			return Ok(Response::builder()
+				.status(status_code)
+				.body(Full::new(Bytes::from(error_response.encode_to_vec())))
+				// unwrap safety: body only errors when previous chained calls failed.
+				.unwrap());
+		},
+	};
+
 	match T::decode(bytes) {
 		Ok(request) => match handler(context, request) {
 			Ok(response) => Ok(Response::builder()
