@@ -18,6 +18,8 @@ rusqlite = { version = "0.31.0", features = ["bundled"] }
 rand = { version = "0.8.5", default-features = false }
 async-trait = { version = "0.1.85", default-features = false }
 toml = { version = "0.8.9", default-features = false, features = ["parse"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+log = "0.4.28"
 
 # Required for RabittMQ based EventPublisher. Only enabled for `events-rabbitmq` feature.
 lapin = { version = "2.4.0", features = ["rustls"], default-features = false, optional = true }

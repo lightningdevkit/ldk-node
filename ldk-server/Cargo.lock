@@ -1715,6 +1715,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
  "futures-util",
  "hex-conservative 0.2.1",
  "http-body-util",
@@ -1723,6 +1724,7 @@ dependencies = [
  "lapin",
  "ldk-node",
  "ldk-server-protos",
+ "log",
  "prost",
  "rand 0.8.5",
  "rusqlite",
