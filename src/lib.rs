@@ -138,7 +138,7 @@ use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
-use lightning::ln::chan_utils::{make_funding_redeemscript, FUNDING_TRANSACTION_WITNESS_WEIGHT};
+use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
@@ -1267,29 +1267,27 @@ impl Node {
 			const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
 				1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
 
-			// Used for creating a redeem script for the previous funding txo and the new funding
-			// txo. Only needed when selecting which UTXOs to include in the funding tx that would
-			// be sufficient to pay for fees. Hence, the value does not matter.
-			let dummy_pubkey = PublicKey::from_slice(&[2; 33]).unwrap();
-
 			let funding_txo = channel_details.funding_txo.ok_or_else(|| {
 				log_error!(self.logger, "Failed to splice channel: channel not yet ready",);
 				Error::ChannelSplicingFailed
 			})?;
 
+			let funding_output = channel_details.get_funding_output().ok_or_else(|| {
+				log_error!(self.logger, "Failed to splice channel: channel not yet ready");
+				Error::ChannelSplicingFailed
+			})?;
+
 			let shared_input = Input {
 				outpoint: funding_txo.into_bitcoin_outpoint(),
-				previous_utxo: bitcoin::TxOut {
-					value: Amount::from_sat(channel_details.channel_value_satoshis),
-					script_pubkey: make_funding_redeemscript(&dummy_pubkey, &dummy_pubkey)
-						.to_p2wsh(),
-				},
+				previous_utxo: funding_output.clone(),
 				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT + FUNDING_TRANSACTION_WITNESS_WEIGHT,
 			};
 
 			let shared_output = bitcoin::TxOut {
 				value: shared_input.previous_utxo.value + Amount::from_sat(splice_amount_sats),
-				script_pubkey: make_funding_redeemscript(&dummy_pubkey, &dummy_pubkey).to_p2wsh(),
+				// will not actually be the exact same script pubkey after splice
+				// but it is the same size and good enough for coin selection purposes
+				script_pubkey: funding_output.script_pubkey.clone(),
 			};
 
 			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
