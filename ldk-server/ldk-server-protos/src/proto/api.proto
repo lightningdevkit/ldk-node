@@ -138,6 +138,9 @@ message Bolt11SendRequest {
   // amount paid to be determined by the user.
   // This operation will fail if the amount specified is less than the value required by the given invoice.
   optional uint64 amount_msat = 2;
+  
+  // Configuration options for payment routing and pathfinding.
+  optional types.RouteParametersConfig route_parameters = 3;
 
 }
 
@@ -199,6 +202,9 @@ message Bolt12SendRequest {
 
   // If set, it will be seen by the recipient and reflected back in the invoice.
   optional string payer_note = 4;
+
+  // Configuration options for payment routing and pathfinding.
+  optional types.RouteParametersConfig route_parameters = 5;
 }
 
 // The response `content` for the `Bolt12Send` API, when HttpStatusCode is OK (200).

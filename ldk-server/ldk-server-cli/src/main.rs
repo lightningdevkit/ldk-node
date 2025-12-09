@@ -10,10 +10,18 @@ use ldk_server_client::ldk_server_protos::api::{
 	ListChannelsRequest, ListPaymentsRequest, OnchainReceiveRequest, OnchainSendRequest,
 	OpenChannelRequest,
 };
+use ldk_server_client::ldk_server_protos::types::RouteParametersConfig;
 use ldk_server_client::ldk_server_protos::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, PageToken, Payment,
 };
 use std::fmt::Debug;
+
+// Having these default values as constants in the Proto file and
+// importing/reusing them here might be better, but Proto3 removed
+// the ability to set default values.
+const DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA: u32 = 1008;
+const DEFAULT_MAX_PATH_COUNT: u32 = 10;
+const DEFAULT_MAX_CHANNEL_SATURATION_POWER_OF_HALF: u32 = 2;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -55,6 +63,14 @@ enum Commands {
 		invoice: String,
 		#[arg(long)]
 		amount_msat: Option<u64>,
+		#[arg(long)]
+		max_total_routing_fee_msat: Option<u64>,
+		#[arg(long)]
+		max_total_cltv_expiry_delta: Option<u32>,
+		#[arg(long)]
+		max_path_count: Option<u32>,
+		#[arg(long)]
+		max_channel_saturation_power_of_half: Option<u32>,
 	},
 	Bolt12Receive {
 		#[arg(short, long)]
@@ -75,6 +91,14 @@ enum Commands {
 		quantity: Option<u64>,
 		#[arg(short, long)]
 		payer_note: Option<String>,
+		#[arg(long)]
+		max_total_routing_fee_msat: Option<u64>,
+		#[arg(long)]
+		max_total_cltv_expiry_delta: Option<u32>,
+		#[arg(long)]
+		max_path_count: Option<u32>,
+		#[arg(long)]
+		max_channel_saturation_power_of_half: Option<u32>,
 	},
 	CloseChannel {
 		#[arg(short, long)]
@@ -161,9 +185,30 @@ async fn main() {
 
 			handle_response_result(client.bolt11_receive(request).await);
 		},
-		Commands::Bolt11Send { invoice, amount_msat } => {
+		Commands::Bolt11Send {
+			invoice,
+			amount_msat,
+			max_total_routing_fee_msat,
+			max_total_cltv_expiry_delta,
+			max_path_count,
+			max_channel_saturation_power_of_half,
+		} => {
+			let route_parameters = RouteParametersConfig {
+				max_total_routing_fee_msat,
+				max_total_cltv_expiry_delta: max_total_cltv_expiry_delta
+					.unwrap_or(DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA),
+				max_path_count: max_path_count.unwrap_or(DEFAULT_MAX_PATH_COUNT),
+				max_channel_saturation_power_of_half: max_channel_saturation_power_of_half
+					.unwrap_or(DEFAULT_MAX_CHANNEL_SATURATION_POWER_OF_HALF),
+			};
 			handle_response_result(
-				client.bolt11_send(Bolt11SendRequest { invoice, amount_msat }).await,
+				client
+					.bolt11_send(Bolt11SendRequest {
+						invoice,
+						amount_msat,
+						route_parameters: Some(route_parameters),
+					})
+					.await,
 			);
 		},
 		Commands::Bolt12Receive { description, amount_msat, expiry_secs, quantity } => {
@@ -178,10 +223,34 @@ async fn main() {
 					.await,
 			);
 		},
-		Commands::Bolt12Send { offer, amount_msat, quantity, payer_note } => {
+		Commands::Bolt12Send {
+			offer,
+			amount_msat,
+			quantity,
+			payer_note,
+			max_total_routing_fee_msat,
+			max_total_cltv_expiry_delta,
+			max_path_count,
+			max_channel_saturation_power_of_half,
+		} => {
+			let route_parameters = RouteParametersConfig {
+				max_total_routing_fee_msat,
+				max_total_cltv_expiry_delta: max_total_cltv_expiry_delta
+					.unwrap_or(DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA),
+				max_path_count: max_path_count.unwrap_or(DEFAULT_MAX_PATH_COUNT),
+				max_channel_saturation_power_of_half: max_channel_saturation_power_of_half
+					.unwrap_or(DEFAULT_MAX_CHANNEL_SATURATION_POWER_OF_HALF),
+			};
+
 			handle_response_result(
 				client
-					.bolt12_send(Bolt12SendRequest { offer, amount_msat, quantity, payer_note })
+					.bolt12_send(Bolt12SendRequest {
+						offer,
+						amount_msat,
+						quantity,
+						payer_note,
+						route_parameters: Some(route_parameters),
+					})
 					.await,
 			);
 		},
