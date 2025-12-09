@@ -167,6 +167,10 @@ where
 		})?;
 		Ok(())
 	}
+
+	pub(crate) fn contains_key(&self, id: &SO::Id) -> bool {
+		self.objects.lock().unwrap().contains_key(id)
+	}
 }
 
 #[cfg(test)]
