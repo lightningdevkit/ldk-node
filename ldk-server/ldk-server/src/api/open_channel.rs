@@ -5,8 +5,6 @@ use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_server_protos::api::{OpenChannelRequest, OpenChannelResponse};
 use std::str::FromStr;
 
-pub(crate) const OPEN_CHANNEL_PATH: &str = "OpenChannel";
-
 pub(crate) fn handle_open_channel(
 	context: Context, request: OpenChannelRequest,
 ) -> Result<OpenChannelResponse, LdkServerError> {

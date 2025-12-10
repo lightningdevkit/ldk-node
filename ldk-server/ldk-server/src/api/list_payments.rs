@@ -9,8 +9,6 @@ use ldk_server_protos::api::{ListPaymentsRequest, ListPaymentsResponse};
 use ldk_server_protos::types::{PageToken, Payment};
 use prost::Message;
 
-pub(crate) const LIST_PAYMENTS_PATH: &str = "ListPayments";
-
 pub(crate) fn handle_list_payments_request(
 	context: Context, request: ListPaymentsRequest,
 ) -> Result<ListPaymentsResponse, LdkServerError> {

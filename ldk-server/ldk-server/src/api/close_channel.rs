@@ -8,8 +8,6 @@ use ldk_server_protos::api::{
 };
 use std::str::FromStr;
 
-pub(crate) const CLOSE_CHANNEL_PATH: &str = "CloseChannel";
-
 pub(crate) fn handle_close_channel_request(
 	context: Context, request: CloseChannelRequest,
 ) -> Result<CloseChannelResponse, LdkServerError> {
@@ -20,8 +18,6 @@ pub(crate) fn handle_close_channel_request(
 
 	Ok(CloseChannelResponse {})
 }
-
-pub(crate) const FORCE_CLOSE_CHANNEL_PATH: &str = "ForceCloseChannel";
 
 pub(crate) fn handle_force_close_channel_request(
 	context: Context, request: ForceCloseChannelRequest,

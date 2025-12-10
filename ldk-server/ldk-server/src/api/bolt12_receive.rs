@@ -2,8 +2,6 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 use ldk_server_protos::api::{Bolt12ReceiveRequest, Bolt12ReceiveResponse};
 
-pub(crate) const BOLT12_RECEIVE_PATH: &str = "Bolt12Receive";
-
 pub(crate) fn handle_bolt12_receive_request(
 	context: Context, request: Bolt12ReceiveRequest,
 ) -> Result<Bolt12ReceiveResponse, LdkServerError> {

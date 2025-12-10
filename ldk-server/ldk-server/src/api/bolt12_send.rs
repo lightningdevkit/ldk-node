@@ -4,8 +4,6 @@ use ldk_node::lightning::offers::offer::Offer;
 use ldk_server_protos::api::{Bolt12SendRequest, Bolt12SendResponse};
 use std::str::FromStr;
 
-pub(crate) const BOLT12_SEND_PATH: &str = "Bolt12Send";
-
 pub(crate) fn handle_bolt12_send_request(
 	context: Context, request: Bolt12SendRequest,
 ) -> Result<Bolt12SendResponse, LdkServerError> {

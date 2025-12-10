@@ -8,8 +8,6 @@ use ldk_server_protos::api::{UpdateChannelConfigRequest, UpdateChannelConfigResp
 use ldk_server_protos::types::channel_config::MaxDustHtlcExposure;
 use std::str::FromStr;
 
-pub(crate) const UPDATE_CHANNEL_CONFIG_PATH: &str = "UpdateChannelConfig";
-
 pub(crate) fn handle_update_channel_config_request(
 	context: Context, request: UpdateChannelConfigRequest,
 ) -> Result<UpdateChannelConfigResponse, LdkServerError> {

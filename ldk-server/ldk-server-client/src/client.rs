@@ -13,25 +13,17 @@ use ldk_server_protos::api::{
 	OnchainReceiveRequest, OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse,
 	OpenChannelRequest, OpenChannelResponse,
 };
+use ldk_server_protos::endpoints::{
+	BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
+	CLOSE_CHANNEL_PATH, FORCE_CLOSE_CHANNEL_PATH, GET_BALANCES_PATH, GET_NODE_INFO_PATH,
+	LIST_CHANNELS_PATH, LIST_PAYMENTS_PATH, ONCHAIN_RECEIVE_PATH, ONCHAIN_SEND_PATH,
+	OPEN_CHANNEL_PATH,
+};
 use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 
 const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
-
-const GET_NODE_INFO_PATH: &str = "GetNodeInfo";
-const GET_BALANCES_PATH: &str = "GetBalances";
-const ONCHAIN_RECEIVE_PATH: &str = "OnchainReceive";
-const ONCHAIN_SEND_PATH: &str = "OnchainSend";
-const BOLT11_RECEIVE_PATH: &str = "Bolt11Receive";
-const BOLT11_SEND_PATH: &str = "Bolt11Send";
-const BOLT12_RECEIVE_PATH: &str = "Bolt12Receive";
-const BOLT12_SEND_PATH: &str = "Bolt12Send";
-const OPEN_CHANNEL_PATH: &str = "OpenChannel";
-const CLOSE_CHANNEL_PATH: &str = "CloseChannel";
-const FORCE_CLOSE_CHANNEL_PATH: &str = "ForceCloseChannel";
-const LIST_CHANNELS_PATH: &str = "ListChannels";
-const LIST_PAYMENTS_PATH: &str = "ListPayments";
 
 /// Client to access a hosted instance of LDK Server.
 #[derive(Clone)]
