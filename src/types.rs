@@ -321,6 +321,8 @@ pub(crate) type BumpTransactionEventHandler =
 
 pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>>;
 
+pub type LSPS5ServiceConfig = lightning_liquidity::lsps5::service::LSPS5ServiceConfig;
+
 /// A local, potentially user-provided, identifier of a channel.
 ///
 /// By default, this will be randomly generated for the user to ensure local uniqueness.
