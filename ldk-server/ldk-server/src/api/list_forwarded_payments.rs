@@ -10,8 +10,6 @@ use ldk_server_protos::api::{ListForwardedPaymentsRequest, ListForwardedPayments
 use ldk_server_protos::types::{ForwardedPayment, PageToken};
 use prost::Message;
 
-pub(crate) const LIST_FORWARDED_PAYMENTS_PATH: &str = "ListForwardedPayments";
-
 pub(crate) fn handle_list_forwarded_payments_request(
 	context: Context, request: ListForwardedPaymentsRequest,
 ) -> Result<ListForwardedPaymentsResponse, LdkServerError> {

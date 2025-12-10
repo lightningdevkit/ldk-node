@@ -4,8 +4,6 @@ use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_server_protos::api::{Bolt11SendRequest, Bolt11SendResponse};
 use std::str::FromStr;
 
-pub(crate) const BOLT11_SEND_PATH: &str = "Bolt11Send";
-
 pub(crate) fn handle_bolt11_send_request(
 	context: Context, request: Bolt11SendRequest,
 ) -> Result<Bolt11SendResponse, LdkServerError> {

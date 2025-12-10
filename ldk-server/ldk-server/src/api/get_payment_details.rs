@@ -6,8 +6,6 @@ use hex::FromHex;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_server_protos::api::{GetPaymentDetailsRequest, GetPaymentDetailsResponse};
 
-pub(crate) const GET_PAYMENT_DETAILS_PATH: &str = "GetPaymentDetails";
-
 pub(crate) fn handle_get_payment_details_request(
 	context: Context, request: GetPaymentDetailsRequest,
 ) -> Result<GetPaymentDetailsResponse, LdkServerError> {

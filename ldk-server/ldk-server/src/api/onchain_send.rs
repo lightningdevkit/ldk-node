@@ -5,8 +5,6 @@ use ldk_node::bitcoin::{Address, FeeRate};
 use ldk_server_protos::api::{OnchainSendRequest, OnchainSendResponse};
 use std::str::FromStr;
 
-pub(crate) const ONCHAIN_SEND_PATH: &str = "OnchainSend";
-
 pub(crate) fn handle_onchain_send_request(
 	context: Context, request: OnchainSendRequest,
 ) -> Result<OnchainSendResponse, LdkServerError> {
