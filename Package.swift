@@ -4,8 +4,7 @@
 import PackageDescription
 
 let tag = "v0.7.0"
-// TODO: Update checksum after releasing Synonym's v0.7.0 xcframework
-let checksum = "37e909987c285ddaaabf7caede58f0695491398acd4561987914996f4623a3c3"
+let checksum = "e6c60f728fbb49835738c35e713705841c1014f62cce2d2508f292fbe7220b06"
 let url = "https://github.com/synonymdev/ldk-node/releases/download/\(tag)/LDKNodeFFI.xcframework.zip"
 
 let package = Package(
@@ -28,7 +27,8 @@ let package = Package(
         ),
         .binaryTarget(
             name: "LDKNodeFFI",
-            path: "./bindings/swift/LDKNodeFFI.xcframework"
+            url: url,
+            checksum: checksum
             )
     ]
 )

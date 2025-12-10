@@ -1,4 +1,4 @@
-# 0.7.0 - Dec. 3, 2025 (Synonym Fork)
+# 0.7.0 (Synonym Fork)
 
 ## Synonym Fork Additions
 - Added reactive event system for wallet monitoring without polling:
@@ -52,7 +52,7 @@
   carries risk of double-spending. This affects all balance reporting including `list_balances()`
   and `BalanceChanged` events.
 
-## Upstream v0.7.0 Release Notes
+# 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 
 ## Feature and API updates
