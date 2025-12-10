@@ -11,7 +11,8 @@ use ldk_server_client::ldk_server_protos::api::{
 	OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_protos::types::{
-	bolt11_invoice_description, Bolt11InvoiceDescription, PageToken, Payment,
+	bolt11_invoice_description, channel_config, Bolt11InvoiceDescription, ChannelConfig, PageToken,
+	Payment,
 };
 use std::fmt::Debug;
 
@@ -101,6 +102,22 @@ enum Commands {
 		push_to_counterparty_msat: Option<u64>,
 		#[arg(long)]
 		announce_channel: bool,
+		// Channel config options
+		#[arg(
+			long,
+			help = "Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound over the channel. This can be updated by using update-channel-config."
+		)]
+		forwarding_fee_proportional_millionths: Option<u32>,
+		#[arg(
+			long,
+			help = "Amount (in milli-satoshi) charged for payments forwarded outbound over the channel, in excess of forwarding_fee_proportional_millionths. This can be updated by using update-channel-config."
+		)]
+		forwarding_fee_base_msat: Option<u32>,
+		#[arg(
+			long,
+			help = "The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over the channel. This can be updated by using update-channel-config."
+		)]
+		cltv_expiry_delta: Option<u32>,
 	},
 	ListChannels,
 	ListPayments {
@@ -213,7 +230,16 @@ async fn main() {
 			channel_amount_sats,
 			push_to_counterparty_msat,
 			announce_channel,
+			forwarding_fee_proportional_millionths,
+			forwarding_fee_base_msat,
+			cltv_expiry_delta,
 		} => {
+			let channel_config = build_open_channel_config(
+				forwarding_fee_proportional_millionths,
+				forwarding_fee_base_msat,
+				cltv_expiry_delta,
+			);
+
 			handle_response_result(
 				client
 					.open_channel(OpenChannelRequest {
@@ -221,7 +247,7 @@ async fn main() {
 						address,
 						channel_amount_sats,
 						push_to_counterparty_msat,
-						channel_config: None,
+						channel_config,
 						announce_channel,
 					})
 					.await,
@@ -234,6 +260,28 @@ async fn main() {
 			handle_response_result(list_n_payments(client, number_of_payments).await);
 		},
 	}
+}
+
+fn build_open_channel_config(
+	forwarding_fee_proportional_millionths: Option<u32>, forwarding_fee_base_msat: Option<u32>,
+	cltv_expiry_delta: Option<u32>,
+) -> Option<ChannelConfig> {
+	// Only create a config if at least one field is set
+	if forwarding_fee_proportional_millionths.is_none()
+		&& forwarding_fee_base_msat.is_none()
+		&& cltv_expiry_delta.is_none()
+	{
+		return None;
+	}
+
+	Some(ChannelConfig {
+		forwarding_fee_proportional_millionths,
+		forwarding_fee_base_msat,
+		cltv_expiry_delta,
+		force_close_avoidance_max_fee_satoshis: None,
+		accept_underpaying_htlcs: None,
+		max_dust_htlc_exposure: None,
+	})
 }
 
 async fn list_n_payments(
