@@ -36,6 +36,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lightning_liquidity::lsps5::service::LSPS5ServiceConfig;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
 
@@ -2296,4 +2297,323 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 			.confirmations,
 		Some(6)
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps5_client_webhook_integration() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	// Setup LSPS5 service provider node with custom HTTP client for testing
+	let test_http_client =
+		reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap();
+
+	// Setup LSPS5 service provider node
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let lsps5_service_config = LSPS5ServiceConfig { max_webhooks_per_client: 2 };
+	service_builder.set_liquidity_provider_lsps5(lsps5_service_config);
+	service_builder.set_liquidity_http_client(test_http_client);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	let service_socket_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Setup LSPS5 client node
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.set_liquidity_source_lsps5(service_node_id, service_socket_addr.clone());
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+	let client_node_id = client_node.node_id();
+	let client_addr = client_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr, client_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+
+	open_channel(&client_node, &service_node, 5_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+
+	// Setup certificate for HTTPS testing
+	let (cert_path, tls_acceptor) = setup_test_certificate();
+
+	// Setup HTTPS webhook server
+	let (mut webhook_rx, shutdown_tx) = setup_webhook_server(tls_acceptor).await;
+
+	// Test webhook registration
+	let lsps5_client = client_node.lsps5_liquidity();
+	let app_name_1 = "test-app".to_string();
+	let webhook_url_1 = "https://example.com/webhook".to_string();
+
+	// Register first webhook
+	let response = lsps5_client
+		.set_webhook(app_name_1.clone(), webhook_url_1.clone())
+		.expect("Failed to register webhook");
+	assert_eq!(response.num_webhooks, 1, "Expected 1 webhook after first registration");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+	assert!(!response.no_change);
+	expect_webhook_notification(&mut webhook_rx, "lsps5.webhook_registered").await;
+
+	// Register second webhook
+	let app_name_2 = "test-app-2".to_string();
+	let webhook_url_2 = "https://example.com/webhook-2".to_string();
+	let response = lsps5_client
+		.set_webhook(app_name_2.clone(), webhook_url_2.clone())
+		.expect("Failed to register webhook");
+	assert_eq!(response.num_webhooks, 2, "Expected 2 webhooks after second registration");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+	assert!(!response.no_change);
+	expect_webhook_notification(&mut webhook_rx, "lsps5.webhook_registered").await;
+
+	// Register the same webhook again, should return no_change=true
+	let response = lsps5_client
+		.set_webhook(app_name_2.clone(), webhook_url_2.clone())
+		.expect("Failed to register webhook again");
+	assert_eq!(response.num_webhooks, 2, "Expected 2 webhooks after registering same webhook");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+	assert!(response.no_change);
+
+	// Attempt to register a third webhook, which should fail due to max_webhooks_per_client=2
+	let app_name_3 = "test-app-3".to_string();
+	let webhook_url_3 = "https://example.com/webhook-3".to_string();
+	assert_eq!(
+		Err(NodeError::LiquiditySetWebhookFailed),
+		lsps5_client.set_webhook(app_name_3.clone(), webhook_url_3.clone())
+	);
+
+	// list registered webhooks
+	let registered_webhooks = lsps5_client.list_webhooks().expect("Failed to list webhooks");
+	assert_eq!(registered_webhooks.app_names.len(), 2, "Expected 2 registered webhooks");
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_1),
+		"Expected app_name_1 to be in registered webhooks"
+	);
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_2),
+		"Expected app_name_2 to be in registered webhooks"
+	);
+
+	// Delete non-existing webhook
+	let non_existing_app_name = "non-existing-app".to_string();
+	assert_eq!(
+		Err(NodeError::LiquidityRemoveWebhookFailed),
+		lsps5_client.remove_webhook(non_existing_app_name.clone())
+	);
+
+	// Delete a registered webhook
+	lsps5_client.remove_webhook(app_name_1.clone()).expect("Failed to delete first webhook");
+
+	// List registered webhooks after deletion
+	let registered_webhooks =
+		lsps5_client.list_webhooks().expect("Failed to list webhooks after deletion");
+	assert_eq!(registered_webhooks.app_names.len(), 1, "Expected 1 webhook after deletion");
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_2),
+		"Expected remaining webhook to be app_name_2"
+	);
+	assert!(
+		!registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_1),
+		"Expected app_name_1 to be removed from registered webhooks"
+	);
+
+	// Test each notification type
+	let lsps5_service = service_node.lsps5_liquidity();
+	lsps5_service.notify_payment_incoming(client_node_id).expect("notify_payment_incoming failed");
+	expect_webhook_notification(&mut webhook_rx, "lsps5.payment_incoming").await;
+
+	// Sleep for 65 seconds to ensure we're above the NOTIFICATION_COOLDOWN_TIME (60 seconds)
+	// This prevents NotificationRateLimitError
+	tokio::time::sleep(tokio::time::Duration::from_secs(65)).await;
+
+	lsps5_service
+		.notify_onion_message_incoming(client_node_id)
+		.expect("notify_onion_message_incoming failed");
+	expect_webhook_notification(&mut webhook_rx, "lsps5.onion_message_incoming").await;
+	// Sleep for 65 seconds to ensure we're above the NOTIFICATION_COOLDOWN_TIME (60 seconds)
+	// This prevents NotificationRateLimitError
+	tokio::time::sleep(tokio::time::Duration::from_secs(65)).await;
+
+	lsps5_service
+		.notify_liquidity_management_request(client_node_id)
+		.expect("notify_liquidity_management_request failed");
+	expect_webhook_notification(&mut webhook_rx, "lsps5.liquidity_management_request").await;
+	// Sleep for 65 seconds to ensure we're above the NOTIFICATION_COOLDOWN_TIME (60 seconds)
+	// This prevents NotificationRateLimitError
+	tokio::time::sleep(tokio::time::Duration::from_secs(65)).await;
+
+	lsps5_service.notify_expiry_soon(client_node_id, 3600).expect("notify_expiry_soon failed");
+	expect_webhook_notification(&mut webhook_rx, "lsps5.expiry_soon").await;
+
+	// Cleanup
+	// Shutdown webhook server
+	let _ = shutdown_tx.send(());
+
+	// Remove certificate file and env vars
+	std::env::remove_var("SSL_CERT_FILE");
+	std::env::remove_var("REQUESTS_CA_BUNDLE");
+	let _ = std::fs::remove_file(cert_path);
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+}
+
+fn setup_test_certificate() -> (std::path::PathBuf, tokio_rustls::TlsAcceptor) {
+	let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+	let rcgen::CertifiedKey { cert, signing_key } =
+		rcgen::generate_simple_self_signed(subject_alt_names)
+			.expect("Failed to generate certificate");
+
+	let cert_der = cert.der().to_vec();
+	let cert_pem = cert.pem();
+	let key_der = signing_key.serialize_der();
+
+	// Write cert to temporary file
+	let temp_dir = std::env::temp_dir();
+	let cert_path = temp_dir.join("test_webhook_cert.pem");
+	std::fs::write(&cert_path, cert_pem).expect("Failed to write certificate");
+
+	// Set environment variables for certificate
+	std::env::set_var("SSL_CERT_FILE", &cert_path);
+	std::env::set_var("REQUESTS_CA_BUNDLE", &cert_path);
+
+	// Configure TLS
+	let cert_chain = vec![rustls::pki_types::CertificateDer::from(cert_der)];
+	let private_key =
+		rustls::pki_types::PrivateKeyDer::try_from(key_der).expect("Failed to parse private key");
+
+	let tls_config = rustls::ServerConfig::builder()
+		.with_no_client_auth()
+		.with_single_cert(cert_chain, private_key)
+		.expect("Failed to configure TLS");
+
+	let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+
+	(cert_path, tls_acceptor)
+}
+
+async fn setup_webhook_server(
+	tls_acceptor: tokio_rustls::TlsAcceptor,
+) -> (tokio::sync::mpsc::Receiver<(String, String)>, tokio::sync::oneshot::Sender<()>) {
+	let listener =
+		tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("Failed to bind webhook server");
+
+	// Channel sends (method, body) tuples
+	let (tx, rx) = tokio::sync::mpsc::channel(10);
+	let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
+	tokio::spawn(async move {
+		loop {
+			tokio::select! {
+				_ = &mut shutdown_rx => {
+					println!("Webhook server shutting down");
+					break;
+				}
+				result = listener.accept() => {
+					match result {
+						Ok((socket, _)) => {
+							let tls_acceptor = tls_acceptor.clone();
+							let tx = tx.clone();
+
+							tokio::spawn(async move {
+								if let Err(e) = handle_webhook_connection(socket, tls_acceptor, tx).await {
+									eprintln!("Error handling webhook connection: {}", e);
+								}
+							});
+						}
+						Err(e) => {
+							eprintln!("Error accepting connection: {}", e);
+						}
+					}
+				}
+			}
+		}
+	});
+
+	// Give server time to start
+	tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+	(rx, shutdown_tx)
+}
+
+async fn handle_webhook_connection(
+	socket: tokio::net::TcpStream, tls_acceptor: tokio_rustls::TlsAcceptor,
+	tx: tokio::sync::mpsc::Sender<(String, String)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+	let mut tls_stream = tls_acceptor.accept(socket).await?;
+
+	// Read HTTP request
+	let mut buf = vec![0u8; 8192];
+	let n = tokio::io::AsyncReadExt::read(&mut tls_stream, &mut buf).await?;
+	buf.truncate(n);
+
+	let request_str = String::from_utf8_lossy(&buf);
+	println!("Received webhook HTTPS request:\n{}", request_str);
+
+	// Extract body
+	let body = if let Some(body_start) = request_str.find("\r\n\r\n") {
+		request_str[body_start + 4..].trim().to_string()
+	} else {
+		return Err("No body found in request".into());
+	};
+
+	// Parse JSON to get method
+	let json: serde_json::Value = serde_json::from_str(&body)?;
+	let method = json["method"].as_str().ok_or("Missing method field")?.to_string();
+
+	// Send (method, body) tuple
+	tx.send((method, body)).await?;
+
+	// Send HTTP response
+	let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+	tokio::io::AsyncWriteExt::write_all(&mut tls_stream, response.as_bytes()).await?;
+	tokio::io::AsyncWriteExt::flush(&mut tls_stream).await?;
+
+	Ok(())
+}
+
+async fn expect_webhook_notification(
+	rx: &mut tokio::sync::mpsc::Receiver<(String, String)>, expected_method: &str,
+) {
+	match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+		Ok(Some((method, body))) => {
+			assert_eq!(
+				method, expected_method,
+				"Expected method '{}' but got '{}'",
+				expected_method, method
+			);
+			assert!(!body.is_empty(), "Webhook body should not be empty");
+
+			// Verify JSON structure
+			let json: serde_json::Value =
+				serde_json::from_str(&body).expect("Body should be valid JSON");
+
+			assert_eq!(json["jsonrpc"], "2.0", "Expected JSON-RPC 2.0");
+			assert_eq!(json["method"], expected_method, "Method should match in body");
+
+			println!("✓ Verified notification: {}", expected_method);
+			println!("  Body: {}", body);
+		},
+		Ok(None) => {
+			panic!("Webhook channel closed before receiving '{}'", expected_method);
+		},
+		Err(_) => {
+			panic!("Timeout waiting for webhook notification '{}'", expected_method);
+		},
+	}
 }

@@ -86,6 +86,8 @@ lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "
 proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
+rcgen = "0.14.6"
+tokio-rustls = "0.26"
 
 [target.'cfg(not(no_download))'.dev-dependencies]
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }

@@ -346,6 +346,9 @@ enum NodeError {
 	"LiquidityFeeTooHigh",
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
+	"LiquiditySetWebhookFailed",
+	"LiquidityRemoveWebhookFailed",
+	"LiquidityListWebhooksFailed"
 };
 
 dictionary NodeStatus {
