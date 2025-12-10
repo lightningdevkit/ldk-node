@@ -1,6 +1,8 @@
+use crate::api::build_channel_config_from_proto;
 use crate::api::error::LdkServerError;
 use crate::service::Context;
 use ldk_node::bitcoin::secp256k1::PublicKey;
+use ldk_node::config::ChannelConfig;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_server_protos::api::{OpenChannelRequest, OpenChannelResponse};
 use std::str::FromStr;
@@ -15,14 +17,18 @@ pub(crate) fn handle_open_channel(
 	let address = SocketAddress::from_str(&request.address)
 		.map_err(|_| ldk_node::NodeError::InvalidSocketAddress)?;
 
+	let channel_config = request
+		.channel_config
+		.map(|proto_config| build_channel_config_from_proto(ChannelConfig::default(), proto_config))
+		.transpose()?;
+
 	let user_channel_id = if request.announce_channel {
 		context.node.open_announced_channel(
 			node_id,
 			address,
 			request.channel_amount_sats,
 			request.push_to_counterparty_msat,
-			// TODO: Allow setting ChannelConfig in open-channel.
-			None,
+			channel_config,
 		)?
 	} else {
 		context.node.open_channel(
@@ -30,7 +36,7 @@ pub(crate) fn handle_open_channel(
 			address,
 			request.channel_amount_sats,
 			request.push_to_counterparty_msat,
-			None,
+			channel_config,
 		)?
 	};
 
