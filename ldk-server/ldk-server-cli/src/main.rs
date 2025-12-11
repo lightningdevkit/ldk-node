@@ -8,7 +8,7 @@ use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
 	CloseChannelRequest, ForceCloseChannelRequest, GetBalancesRequest, GetNodeInfoRequest,
 	ListChannelsRequest, ListPaymentsRequest, OnchainReceiveRequest, OnchainSendRequest,
-	OpenChannelRequest, SpliceInRequest, SpliceOutRequest,
+	OpenChannelRequest, SpliceInRequest, SpliceOutRequest, UpdateChannelConfigRequest,
 };
 use ldk_server_client::ldk_server_protos::types::RouteParametersConfig;
 use ldk_server_client::ldk_server_protos::types::{
@@ -168,6 +168,27 @@ enum Commands {
 			help = "Minimum number of payments to return. If not provided, only the first page of the paginated list is returned."
 		)]
 		number_of_payments: Option<u64>,
+	},
+	UpdateChannelConfig {
+		#[arg(short, long)]
+		user_channel_id: String,
+		#[arg(short, long)]
+		counterparty_node_id: String,
+		#[arg(
+			long,
+			help = "Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound over the channel. This can be updated by using update-channel-config."
+		)]
+		forwarding_fee_proportional_millionths: Option<u32>,
+		#[arg(
+			long,
+			help = "Amount (in milli-satoshi) charged for payments forwarded outbound over the channel, in excess of forwarding_fee_proportional_millionths. This can be updated by using update-channel-config."
+		)]
+		forwarding_fee_base_msat: Option<u32>,
+		#[arg(
+			long,
+			help = "The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over the channel."
+		)]
+		cltv_expiry_delta: Option<u32>,
 	},
 }
 
@@ -373,6 +394,32 @@ async fn main() {
 		},
 		Commands::ListPayments { number_of_payments } => {
 			handle_response_result(list_n_payments(client, number_of_payments).await);
+		},
+		Commands::UpdateChannelConfig {
+			user_channel_id,
+			counterparty_node_id,
+			forwarding_fee_proportional_millionths,
+			forwarding_fee_base_msat,
+			cltv_expiry_delta,
+		} => {
+			let channel_config = ChannelConfig {
+				forwarding_fee_proportional_millionths,
+				forwarding_fee_base_msat,
+				cltv_expiry_delta,
+				force_close_avoidance_max_fee_satoshis: None,
+				accept_underpaying_htlcs: None,
+				max_dust_htlc_exposure: None,
+			};
+
+			handle_response_result(
+				client
+					.update_channel_config(UpdateChannelConfigRequest {
+						user_channel_id,
+						counterparty_node_id,
+						channel_config: Some(channel_config),
+					})
+					.await,
+			);
 		},
 	}
 }
