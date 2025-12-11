@@ -249,6 +249,55 @@ pub struct OpenChannelResponse {
 	#[prost(string, tag = "1")]
 	pub user_channel_id: ::prost::alloc::string::String,
 }
+/// Increases the channel balance by the given amount.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.splice_in_channel>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpliceInRequest {
+	/// The local `user_channel_id` of the channel.
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
+	/// The hex-encoded public key of the channel's counterparty node.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// The amount of sats to splice into the channel.
+	#[prost(uint64, tag = "3")]
+	pub splice_amount_sats: u64,
+}
+/// The response `content` for the `SpliceIn` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpliceInResponse {}
+/// Decreases the channel balance by the given amount.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.splice_out_channel>
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpliceOutRequest {
+	/// The local `user_channel_id` of this channel.
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
+	/// The hex-encoded public key of the channel's counterparty node.
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	/// A Bitcoin on-chain address to send the spliced-out funds.
+	///
+	/// If not set, an address from the node's on-chain wallet will be used.
+	#[prost(string, optional, tag = "3")]
+	pub address: ::core::option::Option<::prost::alloc::string::String>,
+	/// The amount of sats to splice out of the channel.
+	#[prost(uint64, tag = "4")]
+	pub splice_amount_sats: u64,
+}
+/// The response `content` for the `SpliceOut` API, when HttpStatusCode is OK (200).
+/// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpliceOutResponse {
+	/// The Bitcoin on-chain address where the funds will be sent.
+	#[prost(string, tag = "1")]
+	pub address: ::prost::alloc::string::String,
+}
 /// Update the config for a previously opened channel.
 /// See more: <https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.update_channel_config>
 #[allow(clippy::derive_partial_eq_without_eq)]

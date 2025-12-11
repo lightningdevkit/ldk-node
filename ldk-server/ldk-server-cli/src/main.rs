@@ -8,7 +8,7 @@ use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
 	CloseChannelRequest, ForceCloseChannelRequest, GetBalancesRequest, GetNodeInfoRequest,
 	ListChannelsRequest, ListPaymentsRequest, OnchainReceiveRequest, OnchainSendRequest,
-	OpenChannelRequest,
+	OpenChannelRequest, SpliceInRequest, SpliceOutRequest,
 };
 use ldk_server_client::ldk_server_protos::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, PageToken, Payment,
@@ -101,6 +101,24 @@ enum Commands {
 		push_to_counterparty_msat: Option<u64>,
 		#[arg(long)]
 		announce_channel: bool,
+	},
+	SpliceIn {
+		#[arg(short, long)]
+		user_channel_id: String,
+		#[arg(short, long)]
+		counterparty_node_id: String,
+		#[arg(long)]
+		splice_amount_sats: u64,
+	},
+	SpliceOut {
+		#[arg(short, long)]
+		user_channel_id: String,
+		#[arg(short, long)]
+		counterparty_node_id: String,
+		#[arg(short, long)]
+		address: Option<String>,
+		#[arg(long)]
+		splice_amount_sats: u64,
 	},
 	ListChannels,
 	ListPayments {
@@ -223,6 +241,34 @@ async fn main() {
 						push_to_counterparty_msat,
 						channel_config: None,
 						announce_channel,
+					})
+					.await,
+			);
+		},
+		Commands::SpliceIn { user_channel_id, counterparty_node_id, splice_amount_sats } => {
+			handle_response_result(
+				client
+					.splice_in(SpliceInRequest {
+						user_channel_id,
+						counterparty_node_id,
+						splice_amount_sats,
+					})
+					.await,
+			);
+		},
+		Commands::SpliceOut {
+			user_channel_id,
+			counterparty_node_id,
+			address,
+			splice_amount_sats,
+		} => {
+			handle_response_result(
+				client
+					.splice_out(SpliceOutRequest {
+						user_channel_id,
+						counterparty_node_id,
+						address,
+						splice_amount_sats,
 					})
 					.await,
 			);
