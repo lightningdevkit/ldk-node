@@ -141,6 +141,9 @@ pub struct Bolt11SendRequest {
 	/// This operation will fail if the amount specified is less than the value required by the given invoice.
 	#[prost(uint64, optional, tag = "2")]
 	pub amount_msat: ::core::option::Option<u64>,
+	/// Configuration options for payment routing and pathfinding.
+	#[prost(message, optional, tag = "3")]
+	pub route_parameters: ::core::option::Option<super::types::RouteParametersConfig>,
 }
 /// The response `content` for the `Bolt11Send` API, when HttpStatusCode is OK (200).
 /// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
@@ -205,6 +208,9 @@ pub struct Bolt12SendRequest {
 	/// If set, it will be seen by the recipient and reflected back in the invoice.
 	#[prost(string, optional, tag = "4")]
 	pub payer_note: ::core::option::Option<::prost::alloc::string::String>,
+	/// Configuration options for payment routing and pathfinding.
+	#[prost(message, optional, tag = "5")]
+	pub route_parameters: ::core::option::Option<super::types::RouteParametersConfig>,
 }
 /// The response `content` for the `Bolt12Send` API, when HttpStatusCode is OK (200).
 /// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.

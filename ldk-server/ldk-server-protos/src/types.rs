@@ -779,6 +779,29 @@ pub mod bolt11_invoice_description {
 		Hash(::prost::alloc::string::String),
 	}
 }
+/// Configuration options for payment routing and pathfinding.
+/// See <https://docs.rs/lightning/0.2.0/lightning/routing/router/struct.RouteParametersConfig.html> for more details on each field.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RouteParametersConfig {
+	/// The maximum total fees, in millisatoshi, that may accrue during route finding.
+	/// Defaults to 1% of the payment amount + 50 sats
+	#[prost(uint64, optional, tag = "1")]
+	pub max_total_routing_fee_msat: ::core::option::Option<u64>,
+	/// The maximum total CLTV delta we accept for the route.
+	/// Defaults to 1008.
+	#[prost(uint32, tag = "2")]
+	pub max_total_cltv_expiry_delta: u32,
+	/// The maximum number of paths that may be used by (MPP) payments.
+	/// Defaults to 10.
+	#[prost(uint32, tag = "3")]
+	pub max_path_count: u32,
+	/// Selects the maximum share of a channel's total capacity which will be
+	/// sent over a channel, as a power of 1/2.
+	/// Default value: 2
+	#[prost(uint32, tag = "4")]
+	pub max_channel_saturation_power_of_half: u32,
+}
 /// Represents the direction of a payment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
