@@ -11,16 +11,18 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::event::{TxInput, TxOutput};
-
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
+pub use bdk_wallet::coin_selection::CoinSelectionAlgorithm as BdkCoinSelectionAlgorithm;
+use bdk_wallet::coin_selection::{
+	BranchAndBoundCoinSelection, Excess, LargestFirstCoinSelection, OldestFirstCoinSelection,
+	SingleRandomDraw,
+};
 use bdk_wallet::descriptor::ExtendedDescriptor;
+use bdk_wallet::event::WalletEvent;
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
-use bdk_wallet::event::WalletEvent;
-use bdk_wallet::{
-	Balance, KeychainKind, LocalOutput, PersistedWallet, Update, WeightedUtxo,
-};
+use bdk_wallet::{Balance, KeychainKind, LocalOutput, PersistedWallet, Update, WeightedUtxo};
+use bip39::rand::rngs::OsRng;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -31,8 +33,8 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
-	Address, Amount, FeeRate, OutPoint, Script, ScriptBuf, Transaction, TxOut, Txid,
-	WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
+	Address, Amount, FeeRate, OutPoint, Script, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash,
+	Weight, WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
@@ -43,6 +45,7 @@ use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
+use lightning::log_warn;
 use lightning::sign::{
 	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
 	PeerStorageKey, Recipient, SignerProvider, SpendableOutputDescriptor,
@@ -51,15 +54,8 @@ use lightning::util::message_signing;
 use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
-pub use bdk_wallet::coin_selection::CoinSelectionAlgorithm as BdkCoinSelectionAlgorithm;
-use bdk_wallet::coin_selection::{
-	BranchAndBoundCoinSelection, Excess, LargestFirstCoinSelection, OldestFirstCoinSelection,
-	SingleRandomDraw,
-};
-use lightning::log_warn;
-use bip39::rand::rngs::OsRng;
-
 use crate::config::Config;
+use crate::event::{TxInput, TxOutput};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
@@ -176,6 +172,7 @@ impl Wallet {
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
 	}
 
+	// Get a drain script for change outputs.
 	pub(crate) fn get_drain_script(&self) -> Result<ScriptBuf, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let change_address = locked_wallet.peek_address(KeychainKind::Internal, 0);
@@ -662,7 +659,7 @@ impl Wallet {
 		let estimated_child_vbytes = estimated_child_weight_units / 4;
 
 		// Calculate the fee deficit for the parent (in sats)
-		//let parent_weight_units = parent_tx.weight().to_wu();
+		// let parent_weight_units = parent_tx.weight().to_wu();
 		let parent_vbytes = parent_tx.weight().to_vbytes_ceil();
 		let parent_fee_deficit = (target_fee_rate.to_sat_per_vb_ceil()
 			- parent_fee_rate.to_sat_per_vb_ceil())
@@ -896,6 +893,8 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
+	// Get transaction details including inputs, outputs, and net amount.
+	// Returns None if the transaction is not found in the wallet.
 	pub(crate) fn get_tx_details(&self, txid: &Txid) -> Option<(i64, Vec<TxInput>, Vec<TxOutput>)> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let tx_node = locked_wallet.get_tx(*txid)?;
@@ -925,6 +924,7 @@ impl Wallet {
 			.map_err(|_| Error::InvalidAddress)
 	}
 
+	// Returns all UTXOs that are safe to spend (excluding channel funding transactions).
 	pub fn get_spendable_utxos(
 		&self, channel_manager: &ChannelManager,
 	) -> Result<Vec<LocalOutput>, Error> {
@@ -962,6 +962,8 @@ impl Wallet {
 		Ok(spendable_utxos)
 	}
 
+	// Select UTXOs using a specific coin selection algorithm.
+	// Returns selected UTXOs that meet the target amount plus fees, excluding channel funding txs.
 	pub fn select_utxos_with_algorithm(
 		&self, target_amount: u64, available_utxos: Vec<LocalOutput>, fee_rate: FeeRate,
 		algorithm: CoinSelectionAlgorithm, drain_script: &Script, channel_manager: &ChannelManager,
@@ -1094,6 +1096,8 @@ impl Wallet {
 		Ok(selected_outputs.into_iter().map(|u| u.outpoint).collect())
 	}
 
+	// Helper that builds a transaction PSBT with shared logic for send_to_address
+	// and calculate_transaction_fee.
 	fn build_transaction_psbt(
 		&self, address: &Address, send_amount: OnchainSendAmount, fee_rate: FeeRate,
 		utxos_to_spend: Option<Vec<OutPoint>>, channel_manager: &ChannelManager,

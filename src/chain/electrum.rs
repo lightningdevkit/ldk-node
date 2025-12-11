@@ -14,6 +14,7 @@ use bdk_chain::bdk_core::spk_client::{
 	SyncRequest as BdkSyncRequest, SyncResponse as BdkSyncResponse,
 };
 use bdk_electrum::BdkElectrumClient;
+use bdk_wallet::event::WalletEvent;
 use bdk_wallet::{KeychainKind as BdkKeyChainKind, Update as BdkUpdate};
 use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{
@@ -38,8 +39,6 @@ use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
-
-use bdk_wallet::event::WalletEvent;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
@@ -103,21 +102,30 @@ impl ElectrumChainSource {
 		};
 		if let Some(mut sync_receiver) = receiver_res {
 			log_info!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.recv().await.map(|res| res.map(|_| Vec::new())).map_err(|e| {
-				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
-				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
-				Error::WalletOperationFailed
-			})?;
+			match sync_receiver.recv().await {
+				Ok(Ok(())) => return Ok(Vec::new()),
+				Ok(Err(e)) => return Err(e),
+				Err(e) => {
+					debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+					log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
+					return Err(Error::WalletOperationFailed);
+				},
+			}
 		}
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
-		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res.as_ref().map(|_| ()).map_err(|e| e.clone()));
+		self.onchain_wallet_sync_status
+			.lock()
+			.unwrap()
+			.propagate_result_to_subscribers(res.as_ref().map(|_| ()).map_err(|e| e.clone()));
 
 		res
 	}
 
-	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<Vec<WalletEvent>, Error> {
+	async fn sync_onchain_wallet_inner(
+		&self, onchain_wallet: Arc<Wallet>,
+	) -> Result<Vec<WalletEvent>, Error> {
 		let electrum_client: Arc<ElectrumRuntimeClient> =
 			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
 				Arc::clone(client)

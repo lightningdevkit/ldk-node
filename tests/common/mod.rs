@@ -47,16 +47,45 @@ use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 use serde_json::{json, Value};
 
+pub(crate) fn drain_all_events(node: &TestNode) {
+	while let Some(event) = node.next_event() {
+		println!("{} draining event {:?}", node.node_id(), event);
+		node.event_handled().unwrap();
+	}
+}
+
+pub(crate) fn is_informational_event(event: &Event) -> bool {
+	matches!(
+		event,
+		Event::OnchainTransactionConfirmed { .. }
+			| Event::OnchainTransactionReceived { .. }
+			| Event::OnchainTransactionReplaced { .. }
+			| Event::OnchainTransactionReorged { .. }
+			| Event::OnchainTransactionEvicted { .. }
+			| Event::SyncCompleted { .. }
+			| Event::SyncProgress { .. }
+			| Event::BalanceChanged { .. }
+	)
+}
+
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
-		match $node.next_event_async().await {
-			ref e @ Event::$event_type { .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				$node.event_handled().unwrap();
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			},
+		loop {
+			match $node.next_event_async().await {
+				ref e @ Event::$event_type { .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					break;
+				},
+				ref e if $crate::common::is_informational_event(e) => {
+					println!("{} skipping event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					continue;
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+				},
+			}
 		}
 	}};
 }
@@ -65,16 +94,23 @@ pub(crate) use expect_event;
 
 macro_rules! expect_channel_pending_event {
 	($node:expr, $counterparty_node_id:expr) => {{
-		match $node.next_event_async().await {
-			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(counterparty_node_id, $counterparty_node_id);
-				$node.event_handled().unwrap();
-				funding_txo
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			},
+		loop {
+			match $node.next_event_async().await {
+				ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					assert_eq!(counterparty_node_id, $counterparty_node_id);
+					$node.event_handled().unwrap();
+					break funding_txo;
+				},
+				ref e if $crate::common::is_informational_event(e) => {
+					println!("{} skipping event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					continue;
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+				},
+			}
 		}
 	}};
 }
@@ -83,16 +119,23 @@ pub(crate) use expect_channel_pending_event;
 
 macro_rules! expect_channel_ready_event {
 	($node:expr, $counterparty_node_id:expr) => {{
-		match $node.next_event_async().await {
-			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
-				$node.event_handled().unwrap();
-				user_channel_id
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			},
+		loop {
+			match $node.next_event_async().await {
+				ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					assert_eq!(counterparty_node_id, Some($counterparty_node_id));
+					$node.event_handled().unwrap();
+					break user_channel_id;
+				},
+				ref e if $crate::common::is_informational_event(e) => {
+					println!("{} skipping event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					continue;
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+				},
+			}
 		}
 	}};
 }
@@ -100,17 +143,24 @@ macro_rules! expect_channel_ready_event {
 pub(crate) use expect_channel_ready_event;
 
 macro_rules! expect_splice_pending_event {
-	($node: expr, $counterparty_node_id: expr) => {{
-		match $node.next_event_async().await {
-			ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(counterparty_node_id, $counterparty_node_id);
-				$node.event_handled().unwrap();
-				new_funding_txo
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			},
+	($node:expr, $counterparty_node_id:expr) => {{
+		loop {
+			match $node.next_event_async().await {
+				ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					assert_eq!(counterparty_node_id, $counterparty_node_id);
+					$node.event_handled().unwrap();
+					break new_funding_txo;
+				},
+				ref e if $crate::common::is_informational_event(e) => {
+					println!("{} skipping event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					continue;
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+				},
+			}
 		}
 	}};
 }
@@ -119,20 +169,27 @@ pub(crate) use expect_splice_pending_event;
 
 macro_rules! expect_payment_received_event {
 	($node:expr, $amount_msat:expr) => {{
-		match $node.next_event_async().await {
-			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(amount_msat, $amount_msat);
-				let payment = $node.payment(&payment_id.unwrap()).unwrap();
-				if !matches!(payment.kind, PaymentKind::Onchain { .. }) {
-					assert_eq!(payment.fee_paid_msat, None);
-				}
-				$node.event_handled().unwrap();
-				payment_id
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
-			},
+		loop {
+			match $node.next_event_async().await {
+				ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					assert_eq!(amount_msat, $amount_msat);
+					let payment = $node.payment(&payment_id.unwrap()).unwrap();
+					if !matches!(payment.kind, PaymentKind::Onchain { .. }) {
+						assert_eq!(payment.fee_paid_msat, None);
+					}
+					$node.event_handled().unwrap();
+					break payment_id;
+				},
+				ref e if $crate::common::is_informational_event(e) => {
+					println!("{} skipping event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					continue;
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+				},
+			}
 		}
 	}};
 }
@@ -141,23 +198,30 @@ pub(crate) use expect_payment_received_event;
 
 macro_rules! expect_payment_claimable_event {
 	($node:expr, $payment_id:expr, $payment_hash:expr, $claimable_amount_msat:expr) => {{
-		match $node.next_event_async().await {
-			ref e @ Event::PaymentClaimable {
-				payment_id,
-				payment_hash,
-				claimable_amount_msat,
-				..
-			} => {
-				println!("{} got event {:?}", std::stringify!($node), e);
-				assert_eq!(payment_hash, $payment_hash);
-				assert_eq!(payment_id, $payment_id);
-				assert_eq!(claimable_amount_msat, $claimable_amount_msat);
-				$node.event_handled().unwrap();
-				claimable_amount_msat
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
-			},
+		loop {
+			match $node.next_event_async().await {
+				ref e @ Event::PaymentClaimable {
+					payment_id,
+					payment_hash,
+					claimable_amount_msat,
+					..
+				} => {
+					println!("{} got event {:?}", std::stringify!($node), e);
+					assert_eq!(payment_hash, $payment_hash);
+					assert_eq!(payment_id, $payment_id);
+					assert_eq!(claimable_amount_msat, $claimable_amount_msat);
+					$node.event_handled().unwrap();
+					break claimable_amount_msat;
+				},
+				ref e if $crate::common::is_informational_event(e) => {
+					println!("{} skipping event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					continue;
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+				},
+			}
 		}
 	}};
 }
@@ -166,20 +230,28 @@ pub(crate) use expect_payment_claimable_event;
 
 macro_rules! expect_payment_successful_event {
 	($node:expr, $payment_id:expr, $fee_paid_msat:expr) => {{
-		match $node.next_event_async().await {
-			ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
-				println!("{} got event {:?}", $node.node_id(), e);
-				if let Some(fee_msat) = $fee_paid_msat {
-					assert_eq!(fee_paid_msat, fee_msat);
-				}
-				let payment = $node.payment(&$payment_id.unwrap()).unwrap();
-				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
-				assert_eq!(payment_id, $payment_id);
-				$node.event_handled().unwrap();
-			},
-			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
-			},
+		loop {
+			match $node.next_event_async().await {
+				ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					if let Some(fee_msat) = $fee_paid_msat {
+						assert_eq!(fee_paid_msat, fee_msat);
+					}
+					let payment = $node.payment(&$payment_id.unwrap()).unwrap();
+					assert_eq!(payment.fee_paid_msat, fee_paid_msat);
+					assert_eq!(payment_id, $payment_id);
+					$node.event_handled().unwrap();
+					break;
+				},
+				ref e if $crate::common::is_informational_event(e) => {
+					println!("{} skipping event {:?}", $node.node_id(), e);
+					$node.event_handled().unwrap();
+					continue;
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+				},
+			}
 		}
 	}};
 }
@@ -739,9 +811,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		0
 	);
 
-	// Check we haven't got any events yet
-	assert_eq!(node_a.next_event(), None);
-	assert_eq!(node_b.next_event(), None);
+	// Drain events from initial sync (OnchainTransactionConfirmed, SyncCompleted, etc.)
+	drain_all_events(&node_a);
+	drain_all_events(&node_b);
 
 	println!("\nA -- open_channel -> B");
 	let funding_amount_sat = 2_080_000;
@@ -1286,9 +1358,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		2
 	);
 
-	// Check we handled all events
-	assert_eq!(node_a.next_event(), None);
-	assert_eq!(node_b.next_event(), None);
+	// Drain any remaining events
+	drain_all_events(&node_a);
+	drain_all_events(&node_b);
 
 	node_a.stop().unwrap();
 	println!("\nA stopped");

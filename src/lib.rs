@@ -160,8 +160,8 @@ use types::{
 	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
-	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
-	WordCount,
+	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SpendableUtxo, SyncAndAsyncKVStore,
+	UserChannelId, WordCount,
 };
 pub use wallet::CoinSelectionAlgorithm;
 pub use {
@@ -965,8 +965,9 @@ impl Node {
 	/// Returns [`Error::InvalidAddress`] if the address string cannot be parsed or doesn't match
 	/// the node's network.
 	pub fn get_address_balance(&self, address_str: &str) -> Result<u64, Error> {
-		use bitcoin::address::NetworkUnchecked;
 		use std::str::FromStr;
+
+		use bitcoin::address::NetworkUnchecked;
 
 		let addr_unchecked = bitcoin::Address::<NetworkUnchecked>::from_str(address_str)
 			.map_err(|_| Error::InvalidAddress)?;
@@ -976,7 +977,8 @@ impl Node {
 			.map_err(|_| Error::InvalidAddress)?;
 
 		let chain_source = Arc::clone(&self.chain_source);
-		let balance = self.runtime
+		let balance = self
+			.runtime
 			.block_on(async move { chain_source.get_address_balance(&addr_checked).await });
 		Ok(balance.unwrap_or(0))
 	}
@@ -1484,9 +1486,15 @@ impl Node {
 			if chain_source.is_transaction_based() {
 				chain_source.update_fee_rate_estimates().await?;
 				chain_source
-					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.sync_lightning_wallet(
+						Arc::clone(&sync_cman),
+						Arc::clone(&sync_cmon),
+						Arc::clone(&sync_sweeper),
+					)
 					.await?;
-				chain_source.sync_onchain_wallet(sync_wallet).await?;
+				chain_source
+					.sync_onchain_wallet(sync_wallet, Some(sync_cman), Some(sync_cmon))
+					.await?;
 			} else {
 				chain_source.update_fee_rate_estimates().await?;
 				chain_source

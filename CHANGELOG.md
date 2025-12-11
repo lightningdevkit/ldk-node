@@ -1,4 +1,4 @@
-# 0.7.0 (Synonym Fork)
+# 0.7.0-rc.1 (Synonym Fork)
 
 ## Synonym Fork Additions
 - Added reactive event system for wallet monitoring without polling:

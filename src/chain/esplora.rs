@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_esplora::EsploraAsyncExt;
+use bdk_wallet::event::WalletEvent;
 use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
 use esplora_client::AsyncClient as EsploraAsyncClient;
 use lightning::chain::{Confirm, Filter, WatchedOutput};
@@ -30,8 +31,6 @@ use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
-
-use bdk_wallet::event::WalletEvent;
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
@@ -88,23 +87,30 @@ impl EsploraChainSource {
 		};
 		if let Some(mut sync_receiver) = receiver_res {
 			log_info!(self.logger, "Sync in progress, skipping.");
-			sync_receiver.recv().await.map_err(|e| {
-				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
-				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
-				Error::WalletOperationFailed
-			})??;
-			// Return empty events since we're just waiting for another sync
-			return Ok(Vec::new());
+			match sync_receiver.recv().await {
+				Ok(Ok(())) => return Ok(Vec::new()),
+				Ok(Err(e)) => return Err(e),
+				Err(e) => {
+					debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+					log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
+					return Err(Error::WalletOperationFailed);
+				},
+			}
 		}
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
-		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res.as_ref().map(|_| ()).map_err(|e| e.clone()));
+		self.onchain_wallet_sync_status
+			.lock()
+			.unwrap()
+			.propagate_result_to_subscribers(res.as_ref().map(|_| ()).map_err(|e| e.clone()));
 
 		res
 	}
 
-	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<Vec<WalletEvent>, Error> {
+	async fn sync_onchain_wallet_inner(
+		&self, onchain_wallet: Arc<Wallet>,
+	) -> Result<Vec<WalletEvent>, Error> {
 		// If this is our first sync, do a full scan with the configured gap limit.
 		// Otherwise just do an incremental sync.
 		let incremental_sync =

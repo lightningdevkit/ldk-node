@@ -903,31 +903,31 @@ impl_writeable_tlv_based_enum!(Event,
 		(6, confirmation_time, required),
 		(8, details, required),
 	},
-	(9, OnchainTransactionReceived) => {
+	(11, OnchainTransactionReceived) => {
 		(0, txid, required),
 		(2, details, required),
 	},
-	(10, OnchainTransactionReplaced) => {
+	(12, OnchainTransactionReplaced) => {
 		(0, txid, required),
 		(1, conflicts, required_vec),
 	},
-	(11, OnchainTransactionReorged) => {
+	(13, OnchainTransactionReorged) => {
 		(0, txid, required),
 	},
-	(13, OnchainTransactionEvicted) => {
+	(14, OnchainTransactionEvicted) => {
 		(0, txid, required),
 	},
-	(12, SyncProgress) => {
+	(15, SyncProgress) => {
 		(0, sync_type, required),
 		(2, progress_percent, required),
 		(4, current_block_height, required),
 		(6, target_block_height, required),
 	},
-	(14, SyncCompleted) => {
+	(16, SyncCompleted) => {
 		(0, sync_type, required),
 		(2, synced_block_height, required),
 	},
-	(15, BalanceChanged) => {
+	(17, BalanceChanged) => {
 		(0, old_spendable_onchain_balance_sats, required),
 		(2, new_spendable_onchain_balance_sats, required),
 		(4, old_total_onchain_balance_sats, required),
