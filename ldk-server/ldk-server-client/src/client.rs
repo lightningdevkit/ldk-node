@@ -12,13 +12,13 @@ use ldk_server_protos::api::{
 	ListChannelsRequest, ListChannelsResponse, ListPaymentsRequest, ListPaymentsResponse,
 	OnchainReceiveRequest, OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse,
 	OpenChannelRequest, OpenChannelResponse, SpliceInRequest, SpliceInResponse, SpliceOutRequest,
-	SpliceOutResponse,
+	SpliceOutResponse, UpdateChannelConfigRequest, UpdateChannelConfigResponse,
 };
 use ldk_server_protos::endpoints::{
 	BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
 	CLOSE_CHANNEL_PATH, FORCE_CLOSE_CHANNEL_PATH, GET_BALANCES_PATH, GET_NODE_INFO_PATH,
 	LIST_CHANNELS_PATH, LIST_PAYMENTS_PATH, ONCHAIN_RECEIVE_PATH, ONCHAIN_SEND_PATH,
-	OPEN_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
+	OPEN_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH, UPDATE_CHANNEL_CONFIG_PATH,
 };
 use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use reqwest::header::CONTENT_TYPE;
@@ -171,6 +171,15 @@ impl LdkServerClient {
 		&self, request: ListPaymentsRequest,
 	) -> Result<ListPaymentsResponse, LdkServerError> {
 		let url = format!("http://{}/{LIST_PAYMENTS_PATH}", self.base_url);
+		self.post_request(&request, &url).await
+	}
+
+	/// Updates the config for a previously opened channel.
+	/// For API contract/usage, refer to docs for [`UpdateChannelConfigRequest`] and [`UpdateChannelConfigResponse`].
+	pub async fn update_channel_config(
+		&self, request: UpdateChannelConfigRequest,
+	) -> Result<UpdateChannelConfigResponse, LdkServerError> {
+		let url = format!("http://{}/{UPDATE_CHANNEL_CONFIG_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
