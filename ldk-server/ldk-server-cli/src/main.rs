@@ -23,6 +23,7 @@ use std::fmt::Debug;
 const DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA: u32 = 1008;
 const DEFAULT_MAX_PATH_COUNT: u32 = 10;
 const DEFAULT_MAX_CHANNEL_SATURATION_POWER_OF_HALF: u32 = 2;
+const DEFAULT_EXPIRY_SECS: u32 = 86_400;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -55,7 +56,7 @@ enum Commands {
 		#[arg(long)]
 		description_hash: Option<String>,
 		#[arg(short, long)]
-		expiry_secs: u32,
+		expiry_secs: Option<u32>,
 		#[arg(long)]
 		amount_msat: Option<u64>,
 	},
@@ -236,6 +237,7 @@ async fn main() {
 				(None, None) => None,
 			};
 
+			let expiry_secs = expiry_secs.unwrap_or(DEFAULT_EXPIRY_SECS);
 			let request =
 				Bolt11ReceiveRequest { description: invoice_description, expiry_secs, amount_msat };
 
