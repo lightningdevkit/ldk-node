@@ -36,6 +36,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lightning_liquidity::lsps5::service::LSPS5ServiceConfig;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
 
@@ -2296,4 +2297,103 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 			.confirmations,
 		Some(6)
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps5_client_webhook_management() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	// Setup LSPS5 service provider node
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let lsps5_service_config = LSPS5ServiceConfig { max_webhooks_per_client: 2 };
+	service_builder.set_liquidity_provider_lsps5(lsps5_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Setup LSPS5 client node
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.set_liquidity_source_lsps5(service_node_id, service_addr.clone());
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	// Test webhook registration
+	let lsps5_client = client_node.lsps5_liquidity();
+	let app_name_1 = "test-app".to_string();
+	let webhook_url_1 = "https://example.com/webhook".to_string();
+
+	// Register first webhook
+	let response = lsps5_client
+		.set_webhook(app_name_1.clone(), webhook_url_1.clone())
+		.expect("Failed to register webhook");
+	assert_eq!(response.num_webhooks, 1, "Expected 1 webhook after first registration");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+
+	// Register second webhook
+	let app_name_2 = "test-app-2".to_string();
+	let webhook_url_2 = "https://example.com/webhook-2".to_string();
+	let response = lsps5_client
+		.set_webhook(app_name_2.clone(), webhook_url_2.clone())
+		.expect("Failed to register webhook");
+	assert_eq!(response.num_webhooks, 2, "Expected 2 webhooks after second registration");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+
+	// Attempt to register a third webhook, which should fail due to max_webhooks_per_client=2
+	let app_name_3 = "test-app-3".to_string();
+	let webhook_url_3 = "https://example.com/webhook-3".to_string();
+	assert_eq!(
+		Err(NodeError::LiquiditySetWebhookFailed),
+		lsps5_client.set_webhook(app_name_3.clone(), webhook_url_3.clone())
+	);
+
+	// list registered webhooks
+	let registered_webhooks = lsps5_client.list_webhooks().expect("Failed to list webhooks");
+	println!("Registered webhooks: {:?}", registered_webhooks.app_names);
+	assert_eq!(registered_webhooks.app_names.len(), 2, "Expected 2 registered webhooks");
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_1),
+		"Expected app_name_1 to be in registered webhooks"
+	);
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_2),
+		"Expected app_name_2 to be in registered webhooks"
+	);
+
+	// Delete non-existing webhook
+	let non_existing_app_name = "non-existing-app".to_string();
+	assert_eq!(
+		Err(NodeError::LiquidityRemoveWebhookFailed),
+		lsps5_client.remove_webhook(non_existing_app_name.clone())
+	);
+
+	// Delete a registered webhook
+	let delete_response =
+		lsps5_client.remove_webhook(app_name_1.clone()).expect("Failed to delete first webhook");
+	println!("Webhook deleted successfully: {:?}", delete_response);
+
+	// List registered webhooks after deletion
+	let registered_webhooks =
+		lsps5_client.list_webhooks().expect("Failed to list webhooks after deletion");
+
+	println!("Registered webhooks after deletion: {:?}", registered_webhooks.app_names);
+	assert_eq!(registered_webhooks.app_names.len(), 1, "Expected 1 webhook after deletion");
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_2),
+		"Expected remaining webhook to be app_name_2"
+	);
+	assert!(
+		!registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_1),
+		"Expected app_name_1 to be removed from registered webhooks"
+	);
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
 }
