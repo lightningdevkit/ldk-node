@@ -1,4 +1,6 @@
 /// EventEnvelope wraps different event types in a single message to be used by EventPublisher.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EventEnvelope {
@@ -7,6 +9,8 @@ pub struct EventEnvelope {
 }
 /// Nested message and enum types in `EventEnvelope`.
 pub mod event_envelope {
+	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+	#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 	#[allow(clippy::derive_partial_eq_without_eq)]
 	#[derive(Clone, PartialEq, ::prost::Oneof)]
 	pub enum Event {
@@ -21,6 +25,8 @@ pub mod event_envelope {
 	}
 }
 /// PaymentReceived indicates a payment has been received.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentReceived {
@@ -29,6 +35,8 @@ pub struct PaymentReceived {
 	pub payment: ::core::option::Option<super::types::Payment>,
 }
 /// PaymentSuccessful indicates a sent payment was successful.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentSuccessful {
@@ -37,6 +45,8 @@ pub struct PaymentSuccessful {
 	pub payment: ::core::option::Option<super::types::Payment>,
 }
 /// PaymentFailed indicates a sent payment has failed.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentFailed {
@@ -45,6 +55,8 @@ pub struct PaymentFailed {
 	pub payment: ::core::option::Option<super::types::Payment>,
 }
 /// PaymentForwarded indicates a payment was forwarded through the node.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentForwarded {

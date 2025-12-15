@@ -5,17 +5,20 @@ use ldk_server_client::error::LdkServerErrorCode::{
 	AuthError, InternalError, InternalServerError, InvalidRequestError, LightningError,
 };
 use ldk_server_client::ldk_server_protos::api::{
-	Bolt11ReceiveRequest, Bolt11SendRequest, Bolt12ReceiveRequest, Bolt12SendRequest,
-	CloseChannelRequest, ForceCloseChannelRequest, GetBalancesRequest, GetNodeInfoRequest,
-	ListChannelsRequest, ListPaymentsRequest, OnchainReceiveRequest, OnchainSendRequest,
-	OpenChannelRequest, SpliceInRequest, SpliceOutRequest, UpdateChannelConfigRequest,
+	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11SendRequest, Bolt11SendResponse,
+	Bolt12ReceiveRequest, Bolt12ReceiveResponse, Bolt12SendRequest, Bolt12SendResponse,
+	CloseChannelRequest, CloseChannelResponse, ForceCloseChannelRequest, ForceCloseChannelResponse,
+	GetBalancesRequest, GetBalancesResponse, GetNodeInfoRequest, GetNodeInfoResponse,
+	ListChannelsRequest, ListChannelsResponse, ListPaymentsRequest, ListPaymentsResponse,
+	OnchainReceiveRequest, OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse,
+	OpenChannelRequest, OpenChannelResponse, SpliceInRequest, SpliceInResponse, SpliceOutRequest,
+	SpliceOutResponse, UpdateChannelConfigRequest, UpdateChannelConfigResponse,
 };
-use ldk_server_client::ldk_server_protos::types::RouteParametersConfig;
 use ldk_server_client::ldk_server_protos::types::{
-	bolt11_invoice_description, channel_config, Bolt11InvoiceDescription, ChannelConfig, PageToken,
-	Payment,
+	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig, PageToken, Payment,
+	RouteParametersConfig,
 };
-use std::fmt::Debug;
+use serde::Serialize;
 
 // Having these default values as constants in the Proto file and
 // importing/reusing them here might be better, but Proto3 removed
@@ -200,16 +203,22 @@ async fn main() {
 
 	match cli.command {
 		Commands::GetNodeInfo => {
-			handle_response_result(client.get_node_info(GetNodeInfoRequest {}).await);
+			handle_response_result::<_, GetNodeInfoResponse>(
+				client.get_node_info(GetNodeInfoRequest {}).await,
+			);
 		},
 		Commands::GetBalances => {
-			handle_response_result(client.get_balances(GetBalancesRequest {}).await);
+			handle_response_result::<_, GetBalancesResponse>(
+				client.get_balances(GetBalancesRequest {}).await,
+			);
 		},
 		Commands::OnchainReceive => {
-			handle_response_result(client.onchain_receive(OnchainReceiveRequest {}).await);
+			handle_response_result::<_, OnchainReceiveResponse>(
+				client.onchain_receive(OnchainReceiveRequest {}).await,
+			);
 		},
 		Commands::OnchainSend { address, amount_sats, send_all, fee_rate_sat_per_vb } => {
-			handle_response_result(
+			handle_response_result::<_, OnchainSendResponse>(
 				client
 					.onchain_send(OnchainSendRequest {
 						address,
@@ -241,7 +250,9 @@ async fn main() {
 			let request =
 				Bolt11ReceiveRequest { description: invoice_description, expiry_secs, amount_msat };
 
-			handle_response_result(client.bolt11_receive(request).await);
+			handle_response_result::<_, Bolt11ReceiveResponse>(
+				client.bolt11_receive(request).await,
+			);
 		},
 		Commands::Bolt11Send {
 			invoice,
@@ -259,7 +270,7 @@ async fn main() {
 				max_channel_saturation_power_of_half: max_channel_saturation_power_of_half
 					.unwrap_or(DEFAULT_MAX_CHANNEL_SATURATION_POWER_OF_HALF),
 			};
-			handle_response_result(
+			handle_response_result::<_, Bolt11SendResponse>(
 				client
 					.bolt11_send(Bolt11SendRequest {
 						invoice,
@@ -270,7 +281,7 @@ async fn main() {
 			);
 		},
 		Commands::Bolt12Receive { description, amount_msat, expiry_secs, quantity } => {
-			handle_response_result(
+			handle_response_result::<_, Bolt12ReceiveResponse>(
 				client
 					.bolt12_receive(Bolt12ReceiveRequest {
 						description,
@@ -300,7 +311,7 @@ async fn main() {
 					.unwrap_or(DEFAULT_MAX_CHANNEL_SATURATION_POWER_OF_HALF),
 			};
 
-			handle_response_result(
+			handle_response_result::<_, Bolt12SendResponse>(
 				client
 					.bolt12_send(Bolt12SendRequest {
 						offer,
@@ -313,7 +324,7 @@ async fn main() {
 			);
 		},
 		Commands::CloseChannel { user_channel_id, counterparty_node_id } => {
-			handle_response_result(
+			handle_response_result::<_, CloseChannelResponse>(
 				client
 					.close_channel(CloseChannelRequest { user_channel_id, counterparty_node_id })
 					.await,
@@ -324,7 +335,7 @@ async fn main() {
 			counterparty_node_id,
 			force_close_reason,
 		} => {
-			handle_response_result(
+			handle_response_result::<_, ForceCloseChannelResponse>(
 				client
 					.force_close_channel(ForceCloseChannelRequest {
 						user_channel_id,
@@ -350,7 +361,7 @@ async fn main() {
 				cltv_expiry_delta,
 			);
 
-			handle_response_result(
+			handle_response_result::<_, OpenChannelResponse>(
 				client
 					.open_channel(OpenChannelRequest {
 						node_pubkey,
@@ -364,7 +375,7 @@ async fn main() {
 			);
 		},
 		Commands::SpliceIn { user_channel_id, counterparty_node_id, splice_amount_sats } => {
-			handle_response_result(
+			handle_response_result::<_, SpliceInResponse>(
 				client
 					.splice_in(SpliceInRequest {
 						user_channel_id,
@@ -380,7 +391,7 @@ async fn main() {
 			address,
 			splice_amount_sats,
 		} => {
-			handle_response_result(
+			handle_response_result::<_, SpliceOutResponse>(
 				client
 					.splice_out(SpliceOutRequest {
 						user_channel_id,
@@ -392,10 +403,17 @@ async fn main() {
 			);
 		},
 		Commands::ListChannels => {
-			handle_response_result(client.list_channels(ListChannelsRequest {}).await);
+			handle_response_result::<_, ListChannelsResponse>(
+				client.list_channels(ListChannelsRequest {}).await,
+			);
 		},
 		Commands::ListPayments { number_of_payments } => {
-			handle_response_result(list_n_payments(client, number_of_payments).await);
+			handle_response_result::<_, ListPaymentsResponse>(
+				list_n_payments(client, number_of_payments)
+					.await
+					// todo: handle pagination properly
+					.map(|payments| ListPaymentsResponse { payments, next_page_token: None }),
+			);
 		},
 		Commands::UpdateChannelConfig {
 			user_channel_id,
@@ -413,7 +431,7 @@ async fn main() {
 				max_dust_htlc_exposure: None,
 			};
 
-			handle_response_result(
+			handle_response_result::<_, UpdateChannelConfigResponse>(
 				client
 					.update_channel_config(UpdateChannelConfigRequest {
 						user_channel_id,
@@ -468,10 +486,21 @@ async fn list_n_payments(
 	Ok(payments)
 }
 
-fn handle_response_result<Rs: Debug>(response: Result<Rs, LdkServerError>) {
+fn handle_response_result<Rs, Js>(response: Result<Rs, LdkServerError>)
+where
+	Rs: Into<Js>,
+	Js: Serialize + std::fmt::Debug,
+{
 	match response {
 		Ok(response) => {
-			println!("Success: {:?}", response);
+			let json_response: Js = response.into();
+			match serde_json::to_string_pretty(&json_response) {
+				Ok(json) => println!("{json}"),
+				Err(e) => {
+					eprintln!("Error serializing response ({json_response:?}) to JSON: {e}");
+					std::process::exit(1);
+				},
+			}
 		},
 		Err(e) => {
 			handle_error(e);

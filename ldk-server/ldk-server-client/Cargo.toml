@@ -3,6 +3,10 @@ name = "ldk-server-client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+serde = ["ldk-server-protos/serde"]
+
 [dependencies]
 ldk-server-protos = { path = "../ldk-server-protos" }
 reqwest = { version = "0.11.13", default-features = false, features = ["rustls-tls"] }

@@ -14,6 +14,11 @@ fn main() {
 fn generate_protos() {
 	prost_build::Config::new()
 		.bytes(&["."])
+		.type_attribute(
+			".",
+			"#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]",
+		)
+		.type_attribute(".", "#[cfg_attr(feature = \"serde\", serde(rename_all = \"snake_case\"))]")
 		.compile_protos(
 			&[
 				"src/proto/api.proto",
