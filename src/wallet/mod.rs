@@ -25,7 +25,7 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
-	Address, Amount, FeeRate, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
+	Address, Amount, FeeRate, OutPoint, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
 	WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -142,6 +142,19 @@ impl Wallet {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
 		locked_wallet.apply_evicted_txs(evicted_txids);
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		Ok(())
+	}
+
+	pub(crate) fn insert_txo(&self, outpoint: OutPoint, txout: TxOut) -> Result<(), Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		locked_wallet.insert_txout(outpoint, txout);
 
 		let mut locked_persister = self.persister.lock().unwrap();
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {

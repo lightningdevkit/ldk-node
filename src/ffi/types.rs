@@ -20,7 +20,7 @@ pub use bip39::Mnemonic;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, Txid};
+pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 use lightning::ln::channelmanager::PaymentId;
@@ -99,6 +99,22 @@ impl UniffiCustomTypeConverter for Address {
 		}
 
 		Err(Error::InvalidAddress.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for ScriptBuf {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Ok(key) = ScriptBuf::from_hex(&val) {
+			return Ok(key);
+		}
+
+		Err(Error::InvalidScriptPubKey.into())
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
