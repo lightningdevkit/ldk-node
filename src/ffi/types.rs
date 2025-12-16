@@ -55,7 +55,10 @@ pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
-pub use crate::payment::QrPaymentResult;
+pub use crate::payment::UnifiedPaymentResult;
+
+use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
+
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
 
 impl UniffiCustomTypeConverter for PublicKey {
@@ -281,6 +284,72 @@ impl AsRef<LdkOffer> for Offer {
 impl std::fmt::Display for Offer {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "{}", self.inner)
+	}
+}
+
+/// A struct containing the two parts of a BIP 353 Human-Readable Name - the user and domain parts.
+///
+/// The `user` and `domain` parts combined cannot exceed 231 bytes in length;
+/// each DNS label within them must be non-empty and no longer than 63 bytes.
+///
+/// If you intend to handle non-ASCII `user` or `domain` parts, you must handle [Homograph Attacks]
+/// and do punycode en-/de-coding yourself. This struct will always handle only plain ASCII `user`
+/// and `domain` parts.
+///
+/// This struct can also be used for LN-Address recipients.
+///
+/// [Homograph Attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
+pub struct HumanReadableName {
+	pub(crate) inner: LdkHumanReadableName,
+}
+
+impl HumanReadableName {
+	/// Constructs a new [`HumanReadableName`] from the standard encoding - `user`@`domain`.
+	///
+	/// If `user` includes the standard BIP 353 ₿ prefix it is automatically removed as required by
+	/// BIP 353.
+	pub fn from_encoded(encoded: &str) -> Result<Self, Error> {
+		let hrn = match LdkHumanReadableName::from_encoded(encoded) {
+			Ok(hrn) => Ok(hrn),
+			Err(_) => Err(Error::HrnParsingFailed),
+		}?;
+
+		Ok(Self { inner: hrn })
+	}
+
+	/// Gets the `user` part of this Human-Readable Name
+	pub fn user(&self) -> String {
+		self.inner.user().to_string()
+	}
+
+	/// Gets the `domain` part of this Human-Readable Name
+	pub fn domain(&self) -> String {
+		self.inner.domain().to_string()
+	}
+}
+
+impl From<LdkHumanReadableName> for HumanReadableName {
+	fn from(ldk_hrn: LdkHumanReadableName) -> Self {
+		HumanReadableName { inner: ldk_hrn }
+	}
+}
+
+impl From<HumanReadableName> for LdkHumanReadableName {
+	fn from(wrapper: HumanReadableName) -> Self {
+		wrapper.inner
+	}
+}
+
+impl Deref for HumanReadableName {
+	type Target = LdkHumanReadableName;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<LdkHumanReadableName> for HumanReadableName {
+	fn as_ref(&self) -> &LdkHumanReadableName {
+		self.deref()
 	}
 }
 

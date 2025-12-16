@@ -129,6 +129,8 @@ pub enum Error {
 	InvalidBlindedPaths,
 	/// Asynchronous payment services are disabled.
 	AsyncPaymentServicesDisabled,
+	/// Parsing a Human-Readable Name has failed.
+	HrnParsingFailed,
 }
 
 impl fmt::Display for Error {
@@ -207,6 +209,9 @@ impl fmt::Display for Error {
 			Self::InvalidBlindedPaths => write!(f, "The given blinded paths are invalid."),
 			Self::AsyncPaymentServicesDisabled => {
 				write!(f, "Asynchronous payment services are disabled.")
+			},
+			Self::HrnParsingFailed => {
+				write!(f, "Failed to parse a human-readable name.")
 			},
 		}
 	}
