@@ -76,15 +76,14 @@ impl TryFrom<TomlConfig> for Config {
 			(None, None, None) => {
 				return Err(io::Error::new(
 					io::ErrorKind::InvalidInput,
-					format!(
 					"At least one chain source must be set, either esplora, electrum, or bitcoind"
-					),
+						.to_string(),
 				))
 			},
 			_ => {
 				return Err(io::Error::new(
 					io::ErrorKind::InvalidInput,
-					format!("Must set a single chain source, multiple were configured"),
+					"Must set a single chain source, multiple were configured".to_string(),
 				))
 			},
 		};
@@ -240,32 +239,32 @@ struct LSPS2ServiceTomlConfig {
 	require_token: Option<String>,
 }
 
-impl Into<LSPS2ServiceConfig> for LSPS2ServiceTomlConfig {
-	fn into(self) -> LSPS2ServiceConfig {
-		match self {
-			LSPS2ServiceTomlConfig {
-				advertise_service,
-				channel_opening_fee_ppm,
-				channel_over_provisioning_ppm,
-				min_channel_opening_fee_msat,
-				min_channel_lifetime,
-				max_client_to_self_delay,
-				min_payment_size_msat,
-				max_payment_size_msat,
-				client_trusts_lsp,
-				require_token,
-			} => LSPS2ServiceConfig {
-				advertise_service,
-				channel_opening_fee_ppm,
-				channel_over_provisioning_ppm,
-				min_channel_opening_fee_msat,
-				min_channel_lifetime,
-				min_payment_size_msat,
-				max_client_to_self_delay,
-				max_payment_size_msat,
-				client_trusts_lsp,
-				require_token,
-			},
+impl From<LSPS2ServiceTomlConfig> for LSPS2ServiceConfig {
+	fn from(val: LSPS2ServiceTomlConfig) -> Self {
+		let LSPS2ServiceTomlConfig {
+			advertise_service,
+			channel_opening_fee_ppm,
+			channel_over_provisioning_ppm,
+			min_channel_opening_fee_msat,
+			min_channel_lifetime,
+			max_client_to_self_delay,
+			min_payment_size_msat,
+			max_payment_size_msat,
+			client_trusts_lsp,
+			require_token,
+		} = val;
+
+		Self {
+			advertise_service,
+			channel_opening_fee_ppm,
+			channel_over_provisioning_ppm,
+			min_channel_opening_fee_msat,
+			min_channel_lifetime,
+			min_payment_size_msat,
+			max_client_to_self_delay,
+			max_payment_size_msat,
+			client_trusts_lsp,
+			require_token,
 		}
 	}
 }
@@ -285,7 +284,7 @@ pub fn load_config<P: AsRef<Path>>(config_path: P) -> io::Result<Config> {
 			format!("Config file contains invalid TOML format: {}", e),
 		)
 	})?;
-	Ok(Config::try_from(toml_config)?)
+	Config::try_from(toml_config)
 }
 
 #[cfg(test)]
@@ -336,7 +335,7 @@ mod tests {
 
 		let mut bytes = [0u8; 32];
 		let alias = "LDK Server";
-		bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+		bytes[..alias.len()].copy_from_slice(alias.as_bytes());
 
 		let config = load_config(storage_path.join(config_file_name)).unwrap();
 		let expected = Config {

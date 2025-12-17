@@ -28,9 +28,7 @@ pub(crate) fn handle_get_payment_details_request(
 
 	let payment_details = context.node.payment(&PaymentId(payment_id_bytes));
 
-	let response = GetPaymentDetailsResponse {
-		payment: payment_details.map(|payment| payment_to_proto(payment)),
-	};
+	let response = GetPaymentDetailsResponse { payment: payment_details.map(payment_to_proto) };
 
 	Ok(response)
 }

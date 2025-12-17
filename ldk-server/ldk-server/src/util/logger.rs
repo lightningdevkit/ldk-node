@@ -58,7 +58,7 @@ impl ServerLogger {
 		});
 
 		log::set_boxed_logger(Box::new(LoggerWrapper(Arc::clone(&logger))))
-			.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+			.map_err(io::Error::other)?;
 		log::set_max_level(level);
 		Ok(logger)
 	}
@@ -73,9 +73,7 @@ impl ServerLogger {
 				*file = new_file;
 				Ok(())
 			},
-			Err(e) => {
-				Err(io::Error::new(io::ErrorKind::Other, format!("Failed to acquire lock: {}", e)))
-			},
+			Err(e) => Err(io::Error::other(format!("Failed to acquire lock: {e}"))),
 		}
 	}
 }
@@ -93,9 +91,9 @@ impl Log for ServerLogger {
 			// Log to console
 			let _ = match record.level() {
 				Level::Error => {
-					write!(
+					writeln!(
 						io::stderr(),
-						"[{} {} {}:{}] {}\n",
+						"[{} {} {}:{}] {}",
 						format_timestamp(),
 						level_str,
 						record.target(),
@@ -104,9 +102,9 @@ impl Log for ServerLogger {
 					)
 				},
 				_ => {
-					write!(
+					writeln!(
 						io::stdout(),
-						"[{} {} {}:{}] {}\n",
+						"[{} {} {}:{}] {}",
 						format_timestamp(),
 						level_str,
 						record.target(),
@@ -118,9 +116,9 @@ impl Log for ServerLogger {
 
 			// Log to file
 			if let Ok(mut file) = self.file.lock() {
-				let _ = write!(
+				let _ = writeln!(
 					file,
-					"[{} {} {}:{}] {}\n",
+					"[{} {} {}:{}] {}",
 					format_timestamp(),
 					level_str,
 					record.target(),

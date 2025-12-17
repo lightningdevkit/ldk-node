@@ -58,25 +58,6 @@ pub trait PaginatedKVStore: Send + Sync {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, time: i64, buf: &[u8],
 	) -> Result<(), io::Error>;
 
-	/// Removes any data that had previously been persisted under the given `key`.
-	///
-	/// If the `lazy` flag is set to `true`, the backend implementation might choose to lazily
-	/// remove the given `key` at some point in time after the method returns, e.g., as part of an
-	/// eventual batch deletion of multiple keys. As a consequence, subsequent calls to
-	/// [`PaginatedKVStore::list`] might include the removed key until the changes are actually persisted.
-	///
-	/// Note that while setting the `lazy` flag reduces the I/O burden of multiple subsequent
-	/// `remove` calls, it also influences the atomicity guarantees as lazy `remove`s could
-	/// potentially get lost on crash after the method returns. Therefore, this flag should only be
-	/// set for `remove` operations that can be safely replayed at a later time.
-	///
-	/// Returns successfully if no data will be stored for the given `primary_namespace`,
-	/// `secondary_namespace`, and `key`, independently of whether it was present before its
-	/// invocation or not.
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> Result<(), io::Error>;
-
 	/// Returns a paginated list of keys that are stored under the given `secondary_namespace` in
 	/// `primary_namespace`, ordered in descending order of `time`.
 	///

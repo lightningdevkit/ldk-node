@@ -15,7 +15,7 @@ use ldk_server_protos::api::{ListChannelsRequest, ListChannelsResponse};
 pub(crate) fn handle_list_channels_request(
 	context: Context, _request: ListChannelsRequest,
 ) -> Result<ListChannelsResponse, LdkServerError> {
-	let channels = context.node.list_channels().into_iter().map(|c| channel_to_proto(c)).collect();
+	let channels = context.node.list_channels().into_iter().map(channel_to_proto).collect();
 
 	let response = ListChannelsResponse { channels };
 	Ok(response)
