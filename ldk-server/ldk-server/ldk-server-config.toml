@@ -3,6 +3,7 @@
 network = "regtest"                           # Bitcoin network to use
 listening_address = "localhost:3001"          # Lightning node listening address
 rest_service_address = "127.0.0.1:3002"       # LDK Server REST address
+api_key = "your-secret-api-key"               # API key for authenticating REST requests
 
 # Storage settings
 [storage.disk]

@@ -46,6 +46,9 @@ struct Cli {
 	#[arg(short, long, default_value = "localhost:3000")]
 	base_url: String,
 
+	#[arg(short, long, required(true))]
+	api_key: String,
+
 	#[command(subcommand)]
 	command: Commands,
 }
@@ -214,7 +217,7 @@ enum Commands {
 #[tokio::main]
 async fn main() {
 	let cli = Cli::parse();
-	let client = LdkServerClient::new(cli.base_url);
+	let client = LdkServerClient::new(cli.base_url, cli.api_key);
 
 	match cli.command {
 		Commands::GetNodeInfo => {

@@ -356,7 +356,7 @@ fn main() {
 					match res {
 						Ok((stream, _)) => {
 							let io_stream = TokioIo::new(stream);
-							let node_service = NodeService::new(Arc::clone(&node), Arc::clone(&paginated_store));
+							let node_service = NodeService::new(Arc::clone(&node), Arc::clone(&paginated_store), config_file.api_key.clone());
 							runtime.spawn(async move {
 								if let Err(err) = http1::Builder::new().serve_connection(io_stream, node_service).await {
 									error!("Failed to serve connection: {}", err);

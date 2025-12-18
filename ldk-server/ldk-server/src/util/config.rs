@@ -24,6 +24,7 @@ pub struct Config {
 	pub listening_addr: SocketAddress,
 	pub alias: Option<NodeAlias>,
 	pub network: Network,
+	pub api_key: String,
 	pub rest_service_addr: SocketAddr,
 	pub storage_dir_path: String,
 	pub chain_source: ChainSource,
@@ -149,6 +150,7 @@ impl TryFrom<TomlConfig> for Config {
 			network: toml_config.node.network,
 			alias,
 			rest_service_addr,
+			api_key: toml_config.node.api_key,
 			storage_dir_path: toml_config.storage.disk.dir_path,
 			chain_source,
 			rabbitmq_connection_string,
@@ -179,6 +181,7 @@ struct NodeConfig {
 	listening_address: String,
 	rest_service_address: String,
 	alias: Option<String>,
+	api_key: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -304,17 +307,18 @@ mod tests {
 			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			
+			api_key = "test_api_key"
+
 			[storage.disk]
 			dir_path = "/tmp"
 
 			[log]
 			level = "Trace"
 			file = "/var/log/ldk-server.log"
-			
+
 			[esplora]
 			server_url = "https://mempool.space/api"
-			
+
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
 			exchange_name = "rabbitmq_exchange_name"
@@ -343,6 +347,7 @@ mod tests {
 			alias: Some(NodeAlias(bytes)),
 			network: Network::Regtest,
 			rest_service_addr: SocketAddr::from_str("127.0.0.1:3002").unwrap(),
+			api_key: "test_api_key".to_string(),
 			storage_dir_path: "/tmp".to_string(),
 			chain_source: ChainSource::Esplora {
 				server_url: String::from("https://mempool.space/api"),
@@ -368,6 +373,7 @@ mod tests {
 		assert_eq!(config.listening_addr, expected.listening_addr);
 		assert_eq!(config.network, expected.network);
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
+		assert_eq!(config.api_key, expected.api_key);
 		assert_eq!(config.storage_dir_path, expected.storage_dir_path);
 		let ChainSource::Esplora { server_url } = config.chain_source else {
 			panic!("unexpected config chain source");
@@ -389,21 +395,22 @@ mod tests {
 			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			
+			api_key = "test_api_key"
+
 			[storage.disk]
 			dir_path = "/tmp"
 
 			[log]
 			level = "Trace"
 			file = "/var/log/ldk-server.log"
-			
+
 			[electrum]
 			server_url = "ssl://electrum.blockstream.info:50002"
-			
+
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
 			exchange_name = "rabbitmq_exchange_name"
-			
+
 			[liquidity.lsps2_service]
 			advertise_service = false
 			channel_opening_fee_ppm = 1000            # 0.1% fee
@@ -433,19 +440,20 @@ mod tests {
 			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			
+			api_key = "test_api_key"
+
 			[storage.disk]
 			dir_path = "/tmp"
 
 			[log]
 			level = "Trace"
 			file = "/var/log/ldk-server.log"
-			
+
 			[bitcoind]
 			rpc_address = "127.0.0.1:8332"    # RPC endpoint
 			rpc_user = "bitcoind-testuser"
 			rpc_password = "bitcoind-testpassword"
-			
+
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
 			exchange_name = "rabbitmq_exchange_name"
@@ -481,22 +489,23 @@ mod tests {
 			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			
+			api_key = "test_api_key"
+
 			[storage.disk]
 			dir_path = "/tmp"
 
 			[log]
 			level = "Trace"
 			file = "/var/log/ldk-server.log"
-			
+
 			[bitcoind]
 			rpc_address = "127.0.0.1:8332"    # RPC endpoint
 			rpc_user = "bitcoind-testuser"
 			rpc_password = "bitcoind-testpassword"
-			
+
 			[esplora]
 			server_url = "https://mempool.space/api"
-			
+
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
 			exchange_name = "rabbitmq_exchange_name"

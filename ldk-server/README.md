@@ -51,6 +51,6 @@ cargo run --bin ldk-server ./ldk-server/ldk-server-config.toml
 
 Interact with the node using CLI:
 ```
-./target/debug/ldk-server-cli -b localhost:3002 onchain-receive # To generate onchain-receive address.
-./target/debug/ldk-server-cli -b localhost:3002 help # To print help/available commands.
+./target/debug/ldk-server-cli -b localhost:3002 --api-key your-secret-api-key onchain-receive # To generate onchain-receive address.
+./target/debug/ldk-server-cli -b localhost:3002 --api-key your-secret-api-key help # To print help/available commands.
 ```
