@@ -13,6 +13,7 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bitcoin::secp256k1::PublicKey;
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
 use lightning::offers::contacts::ContactSecrets as LdkContactSecrets;
@@ -654,6 +655,74 @@ impl Bolt12Payment {
 			log_error!(self.logger, "Failed to create offer: {:?}", e);
 			Error::OfferCreationFailed
 		})?;
+
+		Ok(maybe_wrap(offer))
+	}
+
+	/// Creates a compact contact offer suitable for BLIP-42's `payer_offer` field.
+	///
+	/// Contact offers are designed to be embedded in invoice requests and should be
+	/// as compact as possible while still being payable. Unlike regular offers created
+	/// by [`receive`] or [`receive_variable_amount`], contact offers have minimal or
+	/// no blinded paths.
+	///
+	/// # Privacy Modes
+	///
+	/// - `intro_node: None` - Creates an offer with no blinded paths. The offer exposes
+	///   the node's derived signing pubkey directly. This is the most compact form but
+	///   provides no path privacy. Suitable when privacy is not a concern or when the
+	///   offer will only be shared with trusted contacts.
+	///
+	/// - `intro_node: Some(node_id)` - Creates an offer with a single blinded path through
+	///   the specified introduction node. The intro node should be a well-connected,
+	///   trusted peer that can route onion messages to this node.
+	///
+	/// # Example
+	///
+	/// ```ignore
+	/// // Create a compact contact offer (no privacy)
+	/// let contact_offer = node.bolt12_payment()
+	///     .create_contact_offer(None)
+	///     .unwrap();
+	///
+	/// // Create a contact offer with privacy through a trusted peer
+	/// let contact_offer = node.bolt12_payment()
+	///     .create_contact_offer(Some(trusted_peer_id))
+	///     .unwrap();
+	///
+	/// // Use it when paying someone with BLIP-42 contact info
+	/// let payment_id = node.bolt12_payment()
+	///     .send_with_contact(
+	///         &their_offer, None, None, None,
+	///         Some(contact_secrets),
+	///         Some(contact_offer),
+	///     )
+	///     .unwrap();
+	/// ```
+	///
+	/// See [BLIP-42](https://github.com/lightning/blips/blob/master/blip-0042.md) for more details.
+	///
+	/// [`receive`]: Self::receive
+	/// [`receive_variable_amount`]: Self::receive_variable_amount
+	pub fn create_contact_offer(&self, intro_node: Option<PublicKey>) -> Result<Offer, Error> {
+		let offer = self
+			.channel_manager
+			.create_compact_offer_builder(intro_node)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to create compact offer builder: {:?}", e);
+				Error::OfferCreationFailed
+			})?
+			.build()
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to build contact offer: {:?}", e);
+				Error::OfferCreationFailed
+			})?;
+
+		log_info!(
+			self.logger,
+			"Created contact offer with intro_node: {:?}",
+			intro_node.map(|n| n.to_string())
+		);
 
 		Ok(maybe_wrap(offer))
 	}

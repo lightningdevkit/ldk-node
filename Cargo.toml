@@ -129,6 +129,18 @@ name = "payments"
 harness = false
 
 #[patch.crates-io]
+#lightning = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-types = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-invoice = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-net-tokio = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-persister = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-background-processor = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-rapid-gossip-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-block-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-transaction-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-liquidity = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+#lightning-macros = { git = "https://github.com/vincenzopalazzo/rust-lightning", branch = "macros/blip02-prep-v2" }
+
 #lightning = { path = "../rust-lightning/lightning" }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
 #lightning-invoice = { path = "../rust-lightning/lightning-invoice" }

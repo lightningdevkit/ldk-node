@@ -237,6 +237,9 @@ interface Bolt12Payment {
 	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
 	Offer receive_variable_amount([ByRef]string description, u32? expiry_secs);
+	/// Creates a compact contact offer for BLIP-42's payer_offer field.
+	[Throws=NodeError]
+	Offer create_contact_offer(PublicKey? intro_node);
 	[Throws=NodeError]
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
 	[Throws=NodeError]
