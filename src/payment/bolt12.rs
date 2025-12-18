@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
+use lightning::offers::contacts::ContactSecrets as LdkContactSecrets;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
@@ -29,6 +30,12 @@ use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, PaymentStore};
+
+// For UniFFI, use the FFI wrapper type; otherwise use the LDK type directly
+#[cfg(not(feature = "uniffi"))]
+type ContactSecrets = LdkContactSecrets;
+#[cfg(feature = "uniffi")]
+type ContactSecrets = crate::types::ContactSecrets;
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt12Invoice = lightning::offers::invoice::Bolt12Invoice;
@@ -111,6 +118,9 @@ impl Bolt12Payment {
 			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config: route_parameters,
+			// BLIP-42 contact fields - set to None for basic send
+			contact_secrets: None,
+			payer_offer: None,
 		};
 		let res = if let Some(quantity) = quantity {
 			self.channel_manager
@@ -227,6 +237,9 @@ impl Bolt12Payment {
 			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config: route_parameters,
+			// BLIP-42 contact fields - set to None for basic send
+			contact_secrets: None,
+			payer_offer: None,
 		};
 		let res = if let Some(quantity) = quantity {
 			self.channel_manager.pay_for_offer_with_quantity(
@@ -272,6 +285,283 @@ impl Bolt12Payment {
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
+				match e {
+					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
+					_ => {
+						let kind = PaymentKind::Bolt12Offer {
+							hash: None,
+							preimage: None,
+							secret: None,
+							offer_id: offer.id(),
+							payer_note: payer_note.map(UntrustedString),
+							quantity,
+						};
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(amount_msat),
+							None,
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
+						self.payment_store.insert(payment)?;
+						Err(Error::PaymentSendingFailed)
+					},
+				}
+			},
+		}
+	}
+
+	/// Send a payment given an offer, including BLIP-42 contact information.
+	///
+	/// This is similar to [`send`] but additionally includes contact information that allows
+	/// the recipient to establish a bidirectional contact relationship with the payer.
+	///
+	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+	/// response.
+	///
+	/// If `quantity` is `Some` it represents the number of items requested.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	///
+	/// If `contact_secrets` is `Some`, the contact information will be included in the invoice
+	/// request, enabling BLIP-42 contact management.
+	///
+	/// If `payer_offer` is `Some`, the payer's BOLT12 offer will be included, allowing the
+	/// recipient to pay the sender back.
+	///
+	/// See [BLIP-42](https://github.com/lightning/blips/blob/master/blip-0042.md) for more details.
+	///
+	/// [`send`]: Self::send
+	pub fn send_with_contact(
+		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
+		route_parameters: Option<RouteParametersConfig>, contact_secrets: Option<ContactSecrets>,
+		payer_offer: Option<Offer>,
+	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let offer = maybe_deref(offer);
+		let payer_offer = payer_offer.map(|o| maybe_deref(&o).clone());
+
+		let mut random_bytes = [0u8; 32];
+		rand::rng().fill_bytes(&mut random_bytes);
+		let payment_id = PaymentId(random_bytes);
+		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
+
+		let offer_amount_msat = match offer.amount() {
+			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
+			Some(_) => {
+				log_error!(self.logger, "Failed to send payment as the provided offer was denominated in an unsupported currency.");
+				return Err(Error::UnsupportedCurrency);
+			},
+			None => {
+				log_error!(self.logger, "Failed to send payment due to the given offer being \"zero-amount\". Please use send_using_amount_with_contact instead.");
+				return Err(Error::InvalidOffer);
+			},
+		};
+
+		// Convert FFI ContactSecrets to LDK type if necessary
+		#[cfg(feature = "uniffi")]
+		let contact_secrets: Option<LdkContactSecrets> = contact_secrets.map(|s| s.into());
+		#[cfg(not(feature = "uniffi"))]
+		let contact_secrets = contact_secrets;
+
+		let params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
+			retry_strategy,
+			route_params_config: route_parameters,
+			contact_secrets,
+			payer_offer,
+		};
+		let res = if let Some(quantity) = quantity {
+			self.channel_manager
+				.pay_for_offer_with_quantity(&offer, None, payment_id, params, quantity)
+		} else {
+			self.channel_manager.pay_for_offer(&offer, None, payment_id, params)
+		};
+
+		match res {
+			Ok(()) => {
+				let payee_pubkey = offer.issuer_signing_pubkey();
+				log_info!(
+					self.logger,
+					"Initiated sending {}msat to {:?} with BLIP-42 contact info",
+					offer_amount_msat,
+					payee_pubkey
+				);
+
+				let kind = PaymentKind::Bolt12Offer {
+					hash: None,
+					preimage: None,
+					secret: None,
+					offer_id: offer.id(),
+					payer_note: payer_note.map(UntrustedString),
+					quantity,
+				};
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					Some(offer_amount_msat),
+					None,
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
+				self.payment_store.insert(payment)?;
+
+				Ok(payment_id)
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to send invoice request with contact: {:?}", e);
+				match e {
+					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
+					_ => {
+						let kind = PaymentKind::Bolt12Offer {
+							hash: None,
+							preimage: None,
+							secret: None,
+							offer_id: offer.id(),
+							payer_note: payer_note.map(UntrustedString),
+							quantity,
+						};
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(offer_amount_msat),
+							None,
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
+						self.payment_store.insert(payment)?;
+						Err(Error::InvoiceRequestCreationFailed)
+					},
+				}
+			},
+		}
+	}
+
+	/// Send a payment given an offer and an amount in millisatoshi, including BLIP-42 contact
+	/// information.
+	///
+	/// This is similar to [`send_using_amount`] but additionally includes contact information
+	/// that allows the recipient to establish a bidirectional contact relationship with the payer.
+	///
+	/// This will fail if the amount given is less than the value required by the given offer.
+	///
+	/// This can be used to pay a so-called "zero-amount" offers, i.e., an offer that leaves the
+	/// amount paid to be determined by the user.
+	///
+	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+	/// response.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	///
+	/// If `contact_secrets` is `Some`, the contact information will be included in the invoice
+	/// request, enabling BLIP-42 contact management.
+	///
+	/// If `payer_offer` is `Some`, the payer's BOLT12 offer will be included, allowing the
+	/// recipient to pay the sender back.
+	///
+	/// See [BLIP-42](https://github.com/lightning/blips/blob/master/blip-0042.md) for more details.
+	///
+	/// [`send_using_amount`]: Self::send_using_amount
+	pub fn send_using_amount_with_contact(
+		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
+		route_parameters: Option<RouteParametersConfig>, contact_secrets: Option<ContactSecrets>,
+		payer_offer: Option<Offer>,
+	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let offer = maybe_deref(offer);
+		let payer_offer = payer_offer.map(|o| maybe_deref(&o).clone());
+
+		let mut random_bytes = [0u8; 32];
+		rand::rng().fill_bytes(&mut random_bytes);
+		let payment_id = PaymentId(random_bytes);
+		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
+
+		let offer_amount_msat = match offer.amount() {
+			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
+			Some(_) => {
+				log_error!(self.logger, "Failed to send payment as the provided offer was denominated in an unsupported currency.");
+				return Err(Error::UnsupportedCurrency);
+			},
+			None => amount_msat,
+		};
+
+		if amount_msat < offer_amount_msat {
+			log_error!(
+				self.logger,
+				"Failed to pay as the given amount needs to be at least the offer amount: required {}msat, gave {}msat.", offer_amount_msat, amount_msat);
+			return Err(Error::InvalidAmount);
+		}
+
+		// Convert FFI ContactSecrets to LDK type if necessary
+		#[cfg(feature = "uniffi")]
+		let contact_secrets: Option<LdkContactSecrets> = contact_secrets.map(|s| s.into());
+		#[cfg(not(feature = "uniffi"))]
+		let contact_secrets = contact_secrets;
+
+		let params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
+			retry_strategy,
+			route_params_config: route_parameters,
+			contact_secrets,
+			payer_offer,
+		};
+		let res = if let Some(quantity) = quantity {
+			self.channel_manager.pay_for_offer_with_quantity(
+				&offer,
+				Some(amount_msat),
+				payment_id,
+				params,
+				quantity,
+			)
+		} else {
+			self.channel_manager.pay_for_offer(&offer, Some(amount_msat), payment_id, params)
+		};
+
+		match res {
+			Ok(()) => {
+				let payee_pubkey = offer.issuer_signing_pubkey();
+				log_info!(
+					self.logger,
+					"Initiated sending {}msat to {:?} with BLIP-42 contact info",
+					amount_msat,
+					payee_pubkey
+				);
+
+				let kind = PaymentKind::Bolt12Offer {
+					hash: None,
+					preimage: None,
+					secret: None,
+					offer_id: offer.id(),
+					payer_note: payer_note.map(UntrustedString),
+					quantity,
+				};
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					Some(amount_msat),
+					None,
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
+				self.payment_store.insert(payment)?;
+
+				Ok(payment_id)
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to send payment with contact: {:?}", e);
 				match e {
 					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
 					_ => {

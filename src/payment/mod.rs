@@ -23,3 +23,6 @@ pub use store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 };
 pub use unified_qr::{QrPaymentResult, UnifiedQrPayment};
+
+// Re-export BLIP-42 contact types for convenience
+pub use lightning::offers::contacts::{ContactSecret, ContactSecrets};

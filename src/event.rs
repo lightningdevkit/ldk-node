@@ -106,6 +106,25 @@ pub enum Event {
 		amount_msat: u64,
 		/// Custom TLV records received on the payment
 		custom_records: Vec<CustomTlvRecord>,
+		/// BLIP-42: The contact secret sent by the payer.
+		///
+		/// If present, this indicates the payer wants to establish a contact relationship.
+		/// The recipient can use this secret along with `payer_offer` to add the payer as a contact.
+		///
+		/// See [BLIP-42](https://github.com/lightning/blips/blob/master/blip-0042.md) for more details.
+		///
+		/// Will only be `Some` for BOLT12 payments where the payer included contact information.
+		/// The value is 32 bytes.
+		contact_secret: Option<Vec<u8>>,
+		/// BLIP-42: The payer's BOLT12 offer.
+		///
+		/// If present, this is the payer's offer that can be used to pay them back or establish
+		/// bidirectional contact. This is typically a compact offer with minimal blinded paths.
+		///
+		/// See [BLIP-42](https://github.com/lightning/blips/blob/master/blip-0042.md) for more details.
+		///
+		/// Will only be `Some` for BOLT12 payments where the payer included their offer.
+		payer_offer: Option<String>,
 	},
 	/// A payment has been forwarded.
 	PaymentForwarded {
@@ -275,6 +294,9 @@ impl_writeable_tlv_based_enum!(Event,
 		(1, payment_id, option),
 		(2, amount_msat, required),
 		(3, custom_records, optional_vec),
+		// BLIP-42 contact fields
+		(5, contact_secret, option),
+		(7, payer_offer, option),
 	},
 	(3, ChannelReady) => {
 		(0, channel_id, required),
@@ -938,6 +960,21 @@ where
 					amount_msat,
 				);
 
+				// Extract BLIP-42 contact fields from Bolt12 payments
+				let (contact_secret, payer_offer) = match &purpose {
+					PaymentPurpose::Bolt12OfferPayment { payment_context, .. } => {
+						let contact_secret =
+							payment_context.invoice_request.contact_secret.map(|s| s.to_vec());
+						let payer_offer = payment_context
+							.invoice_request
+							.payer_offer
+							.as_ref()
+							.map(|offer| offer.to_string());
+						(contact_secret, payer_offer)
+					},
+					_ => (None, None),
+				};
+
 				let update = match purpose {
 					PaymentPurpose::Bolt11InvoicePayment {
 						payment_preimage,
@@ -1008,6 +1045,8 @@ where
 					custom_records: onion_fields
 						.map(|cf| cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect())
 						.unwrap_or_default(),
+					contact_secret,
+					payer_offer,
 				};
 				match self.event_queue.add_event(event).await {
 					Ok(_) => return Ok(()),
