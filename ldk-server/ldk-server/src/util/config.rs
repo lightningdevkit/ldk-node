@@ -37,6 +37,7 @@ pub struct Config {
 #[derive(Debug)]
 pub enum ChainSource {
 	Rpc { rpc_address: SocketAddr, rpc_user: String, rpc_password: String },
+	Electrum { server_url: String },
 	Esplora { server_url: String },
 }
 
@@ -58,9 +59,12 @@ impl TryFrom<TomlConfig> for Config {
 					format!("Invalid rest service address configured: {}", e),
 				)
 			})?;
-		let chain_source = match (toml_config.esplora, toml_config.bitcoind) {
-			(Some(EsploraConfig { server_url }), None) => ChainSource::Esplora { server_url },
-			(None, Some(BitcoindConfig { rpc_address, rpc_user, rpc_password })) => {
+		let chain_source = match (toml_config.esplora, toml_config.electrum, toml_config.bitcoind) {
+			(Some(EsploraConfig { server_url }), None, None) => ChainSource::Esplora { server_url },
+			(None, Some(ElectrumConfig { server_url }), None) => {
+				ChainSource::Electrum { server_url }
+			},
+			(None, None, Some(BitcoindConfig { rpc_address, rpc_user, rpc_password })) => {
 				let rpc_address = SocketAddr::from_str(&rpc_address).map_err(|e| {
 					io::Error::new(
 						io::ErrorKind::InvalidInput,
@@ -69,16 +73,18 @@ impl TryFrom<TomlConfig> for Config {
 				})?;
 				ChainSource::Rpc { rpc_address, rpc_user, rpc_password }
 			},
-			(Some(_), Some(_)) => {
+			(None, None, None) => {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					format!(
+					"At least one chain source must be set, either esplora, electrum, or bitcoind"
+					),
+				))
+			},
+			_ => {
 				return Err(io::Error::new(
 					io::ErrorKind::InvalidInput,
 					format!("Must set a single chain source, multiple were configured"),
-				))
-			},
-			(None, None) => {
-				return Err(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					format!("At least one chain source must be set, either bitcoind or esplora"),
 				))
 			},
 		};
@@ -161,6 +167,7 @@ pub struct TomlConfig {
 	node: NodeConfig,
 	storage: StorageConfig,
 	bitcoind: Option<BitcoindConfig>,
+	electrum: Option<ElectrumConfig>,
 	esplora: Option<EsploraConfig>,
 	rabbitmq: Option<RabbitmqConfig>,
 	liquidity: Option<LiquidityConfig>,
@@ -190,6 +197,11 @@ struct BitcoindConfig {
 	rpc_address: String,
 	rpc_user: String,
 	rpc_password: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ElectrumConfig {
+	server_url: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -369,6 +381,50 @@ mod tests {
 		assert_eq!(config.rabbitmq_exchange_name, expected.rabbitmq_exchange_name);
 		#[cfg(feature = "experimental-lsps2-support")]
 		assert_eq!(config.lsps2_service_config.is_some(), expected.lsps2_service_config.is_some());
+
+		// Test case where only electrum is set
+
+		let toml_config = r#"
+			[node]
+			network = "regtest"
+			listening_address = "localhost:3001"
+			rest_service_address = "127.0.0.1:3002"
+			alias = "LDK Server"
+			
+			[storage.disk]
+			dir_path = "/tmp"
+
+			[log]
+			level = "Trace"
+			file = "/var/log/ldk-server.log"
+			
+			[electrum]
+			server_url = "ssl://electrum.blockstream.info:50002"
+			
+			[rabbitmq]
+			connection_string = "rabbitmq_connection_string"
+			exchange_name = "rabbitmq_exchange_name"
+			
+			[liquidity.lsps2_service]
+			advertise_service = false
+			channel_opening_fee_ppm = 1000            # 0.1% fee
+			channel_over_provisioning_ppm = 500000    # 50% extra capacity
+			min_channel_opening_fee_msat = 10000000   # 10,000 satoshis
+			min_channel_lifetime = 4320               # ~30 days
+			max_client_to_self_delay = 1440           # ~10 days
+			min_payment_size_msat = 10000000          # 10,000 satoshis
+			max_payment_size_msat = 25000000000       # 0.25 BTC
+			client_trusts_lsp = true
+			"#;
+
+		fs::write(storage_path.join(config_file_name), toml_config).unwrap();
+		let config = load_config(storage_path.join(config_file_name)).unwrap();
+
+		let ChainSource::Electrum { server_url } = config.chain_source else {
+			panic!("unexpected chain source");
+		};
+
+		assert_eq!(server_url, "ssl://electrum.blockstream.info:50002");
 
 		// Test case where only bitcoind is set
 
