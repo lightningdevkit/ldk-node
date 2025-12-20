@@ -123,6 +123,9 @@ fn main() {
 				rpc_password,
 			);
 		},
+		ChainSource::Electrum { server_url } => {
+			builder.set_chain_source_electrum(server_url, None);
+		},
 		ChainSource::Esplora { server_url } => {
 			builder.set_chain_source_esplora(server_url, None);
 		},

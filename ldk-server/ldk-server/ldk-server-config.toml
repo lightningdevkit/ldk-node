@@ -20,6 +20,11 @@ rpc_address = "127.0.0.1:18444"               # RPC endpoint
 rpc_user = "polaruser"                        # RPC username
 rpc_password = "polarpass"                    # RPC password
 
+# Electrum settings
+[electrum]
+server_url = "ssl://electrum.blockstream.info:50002"  # Electrum endpoint
+# server_url = "tcp://electrum.blockstream.info:50001"
+
 # Esplora settings
 [esplora]
 server_url = "https://mempool.space/api"      # Esplora endpoint
