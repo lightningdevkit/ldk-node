@@ -9,7 +9,7 @@
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -29,7 +29,7 @@ pub struct ServerLogger {
 	/// The maximum log level to display
 	level: LevelFilter,
 	/// The file to write logs to, protected by a mutex for thread-safe access
-	file: Mutex<BufWriter<File>>,
+	file: Mutex<File>,
 	/// Path to the log file for reopening on SIGHUP
 	log_file_path: PathBuf,
 }
@@ -155,9 +155,8 @@ fn format_level(level: Level) -> &'static str {
 	}
 }
 
-fn open_log_file(log_file_path: &Path) -> Result<BufWriter<File>, io::Error> {
-	let file = OpenOptions::new().create(true).append(true).open(log_file_path)?;
-	Ok(BufWriter::new(file))
+fn open_log_file(log_file_path: &Path) -> Result<File, io::Error> {
+	OpenOptions::new().create(true).append(true).open(log_file_path)
 }
 
 /// Wrapper to allow Arc<ServerLogger> to implement Log trait
