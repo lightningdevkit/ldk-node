@@ -313,6 +313,8 @@ interface BuilderInterface {
     
     fun `setChainSourceEsplora`(`serverUrl`: kotlin.String, `config`: EsploraSyncConfig?)
     
+    fun `setChannelDataMigration`(`migration`: ChannelDataMigration)
+    
     fun `setCustomLogger`(`logWriter`: LogWriter)
     
     fun `setEntropyBip39Mnemonic`(`mnemonic`: Mnemonic, `passphrase`: kotlin.String?)
@@ -706,6 +708,16 @@ data class ChannelConfig (
     val `maxDustHtlcExposure`: MaxDustHtlcExposure, 
     val `forceCloseAvoidanceMaxFeeSatoshis`: kotlin.ULong, 
     val `acceptUnderpayingHtlcs`: kotlin.Boolean
+) {
+    companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+data class ChannelDataMigration (
+    val `channelManager`: List<kotlin.UByte>?, 
+    val `channelMonitors`: List<List<kotlin.UByte>>
 ) {
     companion object
 }

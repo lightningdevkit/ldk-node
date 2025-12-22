@@ -77,6 +77,11 @@ interface LogWriter {
 	void log(LogRecord record);
 };
 
+dictionary ChannelDataMigration {
+	sequence<u8>? channel_manager;
+	sequence<sequence<u8>> channel_monitors;
+};
+
 interface Builder {
 	constructor();
 	[Name=from_config]
@@ -85,6 +90,7 @@ interface Builder {
 	[Throws=BuildError]
 	void set_entropy_seed_bytes(sequence<u8> seed_bytes);
 	void set_entropy_bip39_mnemonic(Mnemonic mnemonic, string? passphrase);
+	void set_channel_data_migration(ChannelDataMigration migration);
 	void set_chain_source_esplora(string server_url, EsploraSyncConfig? config);
 	void set_chain_source_electrum(string server_url, ElectrumSyncConfig? config);
 	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);

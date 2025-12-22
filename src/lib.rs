@@ -113,7 +113,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
-pub use builder::BuildError;
+pub use builder::{BuildError, ChannelDataMigration};
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;

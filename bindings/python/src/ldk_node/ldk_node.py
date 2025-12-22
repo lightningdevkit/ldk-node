@@ -609,6 +609,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_builder_set_chain_source_esplora() != 1781:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_builder_set_channel_data_migration() != 58453:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_builder_set_custom_logger() != 51232:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_builder_set_entropy_bip39_mnemonic() != 827:
@@ -1500,6 +1502,12 @@ _UniffiLib.uniffi_ldk_node_fn_method_builder_set_chain_source_esplora.argtypes =
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_builder_set_chain_source_esplora.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_builder_set_channel_data_migration.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_builder_set_channel_data_migration.restype = None
 _UniffiLib.uniffi_ldk_node_fn_method_builder_set_custom_logger.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
@@ -2807,6 +2815,9 @@ _UniffiLib.uniffi_ldk_node_checksum_method_builder_set_chain_source_electrum.res
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_set_chain_source_esplora.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_set_chain_source_esplora.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_builder_set_channel_data_migration.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_builder_set_channel_data_migration.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_set_custom_logger.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_set_custom_logger.restype = ctypes.c_uint16
@@ -4474,6 +4485,8 @@ class BuilderProtocol(typing.Protocol):
         raise NotImplementedError
     def set_chain_source_esplora(self, server_url: "str",config: "typing.Optional[EsploraSyncConfig]"):
         raise NotImplementedError
+    def set_channel_data_migration(self, migration: "ChannelDataMigration"):
+        raise NotImplementedError
     def set_custom_logger(self, log_writer: "LogWriter"):
         raise NotImplementedError
     def set_entropy_bip39_mnemonic(self, mnemonic: "Mnemonic",passphrase: "typing.Optional[str]"):
@@ -4704,6 +4717,17 @@ class Builder:
         _uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_method_builder_set_chain_source_esplora,self._uniffi_clone_pointer(),
         _UniffiConverterString.lower(server_url),
         _UniffiConverterOptionalTypeEsploraSyncConfig.lower(config))
+
+
+
+
+
+
+    def set_channel_data_migration(self, migration: "ChannelDataMigration") -> None:
+        _UniffiConverterTypeChannelDataMigration.check_lower(migration)
+        
+        _uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_method_builder_set_channel_data_migration,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeChannelDataMigration.lower(migration))
 
 
 
@@ -7236,6 +7260,42 @@ class _UniffiConverterTypeChannelConfig(_UniffiConverterRustBuffer):
         _UniffiConverterTypeMaxDustHtlcExposure.write(value.max_dust_htlc_exposure, buf)
         _UniffiConverterUInt64.write(value.force_close_avoidance_max_fee_satoshis, buf)
         _UniffiConverterBool.write(value.accept_underpaying_htlcs, buf)
+
+
+class ChannelDataMigration:
+    channel_manager: "typing.Optional[typing.List[int]]"
+    channel_monitors: "typing.List[typing.List[int]]"
+    def __init__(self, *, channel_manager: "typing.Optional[typing.List[int]]", channel_monitors: "typing.List[typing.List[int]]"):
+        self.channel_manager = channel_manager
+        self.channel_monitors = channel_monitors
+
+    def __str__(self):
+        return "ChannelDataMigration(channel_manager={}, channel_monitors={})".format(self.channel_manager, self.channel_monitors)
+
+    def __eq__(self, other):
+        if self.channel_manager != other.channel_manager:
+            return False
+        if self.channel_monitors != other.channel_monitors:
+            return False
+        return True
+
+class _UniffiConverterTypeChannelDataMigration(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ChannelDataMigration(
+            channel_manager=_UniffiConverterOptionalSequenceUInt8.read(buf),
+            channel_monitors=_UniffiConverterSequenceSequenceUInt8.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiConverterOptionalSequenceUInt8.check_lower(value.channel_manager)
+        _UniffiConverterSequenceSequenceUInt8.check_lower(value.channel_monitors)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiConverterOptionalSequenceUInt8.write(value.channel_manager, buf)
+        _UniffiConverterSequenceSequenceUInt8.write(value.channel_monitors, buf)
 
 
 class ChannelDetails:
@@ -15848,6 +15908,7 @@ __all__ = [
     "BalanceDetails",
     "BestBlock",
     "ChannelConfig",
+    "ChannelDataMigration",
     "ChannelDetails",
     "ChannelInfo",
     "ChannelUpdateInfo",

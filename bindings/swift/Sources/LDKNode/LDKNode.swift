@@ -1574,6 +1574,8 @@ public protocol BuilderProtocol: AnyObject {
 
     func setChainSourceEsplora(serverUrl: String, config: EsploraSyncConfig?)
 
+    func setChannelDataMigration(migration: ChannelDataMigration)
+
     func setCustomLogger(logWriter: LogWriter)
 
     func setEntropyBip39Mnemonic(mnemonic: Mnemonic, passphrase: String?)
@@ -1752,6 +1754,12 @@ open class Builder:
         uniffi_ldk_node_fn_method_builder_set_chain_source_esplora(self.uniffiClonePointer(),
                                                                    FfiConverterString.lower(serverUrl),
                                                                    FfiConverterOptionTypeEsploraSyncConfig.lower(config), $0)
+    }
+    }
+
+    open func setChannelDataMigration(migration: ChannelDataMigration) { try! rustCall {
+        uniffi_ldk_node_fn_method_builder_set_channel_data_migration(self.uniffiClonePointer(),
+                                                                     FfiConverterTypeChannelDataMigration.lower(migration), $0)
     }
     }
 
@@ -4314,6 +4322,67 @@ public func FfiConverterTypeChannelConfig_lift(_ buf: RustBuffer) throws -> Chan
 #endif
 public func FfiConverterTypeChannelConfig_lower(_ value: ChannelConfig) -> RustBuffer {
     return FfiConverterTypeChannelConfig.lower(value)
+}
+
+public struct ChannelDataMigration {
+    public var channelManager: [UInt8]?
+    public var channelMonitors: [[UInt8]]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channelManager: [UInt8]?, channelMonitors: [[UInt8]]) {
+        self.channelManager = channelManager
+        self.channelMonitors = channelMonitors
+    }
+}
+
+extension ChannelDataMigration: Equatable, Hashable {
+    public static func == (lhs: ChannelDataMigration, rhs: ChannelDataMigration) -> Bool {
+        if lhs.channelManager != rhs.channelManager {
+            return false
+        }
+        if lhs.channelMonitors != rhs.channelMonitors {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(channelManager)
+        hasher.combine(channelMonitors)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChannelDataMigration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChannelDataMigration {
+        return
+            try ChannelDataMigration(
+                channelManager: FfiConverterOptionSequenceUInt8.read(from: &buf),
+                channelMonitors: FfiConverterSequenceSequenceUInt8.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: ChannelDataMigration, into buf: inout [UInt8]) {
+        FfiConverterOptionSequenceUInt8.write(value.channelManager, into: &buf)
+        FfiConverterSequenceSequenceUInt8.write(value.channelMonitors, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChannelDataMigration_lift(_ buf: RustBuffer) throws -> ChannelDataMigration {
+    return try FfiConverterTypeChannelDataMigration.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChannelDataMigration_lower(_ value: ChannelDataMigration) -> RustBuffer {
+    return FfiConverterTypeChannelDataMigration.lower(value)
 }
 
 public struct ChannelDetails {
@@ -11854,6 +11923,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_builder_set_chain_source_esplora() != 1781 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_builder_set_channel_data_migration() != 58453 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_builder_set_custom_logger() != 51232 {
