@@ -1488,6 +1488,8 @@ internal typealias UniffiVTableCallbackInterfaceVssHeaderProviderUniffiByValue =
 
 
 
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1977,6 +1979,11 @@ internal interface UniffiLib : Library {
         `ptr`: Pointer?,
         `serverUrl`: RustBufferByValue,
         `config`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    fun uniffi_ldk_node_fn_method_builder_set_channel_data_migration(
+        `ptr`: Pointer?,
+        `migration`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Unit
     fun uniffi_ldk_node_fn_method_builder_set_custom_logger(
@@ -3015,6 +3022,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_ldk_node_checksum_method_builder_set_chain_source_esplora(
     ): Short
+    fun uniffi_ldk_node_checksum_method_builder_set_channel_data_migration(
+    ): Short
     fun uniffi_ldk_node_checksum_method_builder_set_custom_logger(
     ): Short
     fun uniffi_ldk_node_checksum_method_builder_set_entropy_bip39_mnemonic(
@@ -3476,6 +3485,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_builder_set_chain_source_esplora() != 1781.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_builder_set_channel_data_migration() != 58453.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_builder_set_custom_logger() != 51232.toShort()) {
@@ -5662,6 +5674,18 @@ open class Builder: Disposable, BuilderInterface {
                     it,
                     FfiConverterString.lower(`serverUrl`),
                     FfiConverterOptionalTypeEsploraSyncConfig.lower(`config`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
+    override fun `setChannelDataMigration`(`migration`: ChannelDataMigration) {
+        callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_builder_set_channel_data_migration(
+                    it,
+                    FfiConverterTypeChannelDataMigration.lower(`migration`),
                     uniffiRustCallStatus,
                 )
             }
@@ -8775,6 +8799,28 @@ object FfiConverterTypeChannelConfig: FfiConverterRustBuffer<ChannelConfig> {
         FfiConverterTypeMaxDustHTLCExposure.write(value.`maxDustHtlcExposure`, buf)
         FfiConverterULong.write(value.`forceCloseAvoidanceMaxFeeSatoshis`, buf)
         FfiConverterBoolean.write(value.`acceptUnderpayingHtlcs`, buf)
+    }
+}
+
+
+
+
+object FfiConverterTypeChannelDataMigration: FfiConverterRustBuffer<ChannelDataMigration> {
+    override fun read(buf: ByteBuffer): ChannelDataMigration {
+        return ChannelDataMigration(
+            FfiConverterOptionalSequenceUByte.read(buf),
+            FfiConverterSequenceSequenceUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ChannelDataMigration) = (
+            FfiConverterOptionalSequenceUByte.allocationSize(value.`channelManager`) +
+            FfiConverterSequenceSequenceUByte.allocationSize(value.`channelMonitors`)
+    )
+
+    override fun write(value: ChannelDataMigration, buf: ByteBuffer) {
+        FfiConverterOptionalSequenceUByte.write(value.`channelManager`, buf)
+        FfiConverterSequenceSequenceUByte.write(value.`channelMonitors`, buf)
     }
 }
 

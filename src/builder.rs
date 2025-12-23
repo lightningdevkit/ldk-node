@@ -19,22 +19,24 @@ use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
+use lightning::chain::channelmonitor::ChannelMonitor;
 use lightning::chain::{chainmonitor, BestBlock, Watch};
 use lightning::io::Cursor;
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
-use lightning::log_trace;
+use lightning::{log_info, log_trace};
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
 	CombinedScorer, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 	ProbabilisticScoringFeeParameters,
 };
-use lightning::sign::{EntropySource, NodeSigner};
+use lightning::sign::{EntropySource, InMemorySigner, NodeSigner};
 use lightning::util::persist::{
-	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStore, KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
@@ -134,6 +136,19 @@ enum LogWriterConfig {
 	File { log_file_path: Option<String>, max_log_level: Option<LogLevel> },
 	Log,
 	Custom(Arc<dyn LogWriter>),
+}
+
+/// Channel data to migrate from an external LDK implementation (e.g., react-native-ldk).
+///
+/// The data is written to the configured kv_store (including VSS) during the build process,
+/// before channel monitors are read. The storage key for each monitor is derived by
+/// deserializing the monitor and extracting the funding outpoint.
+#[derive(Debug, Clone, Default)]
+pub struct ChannelDataMigration {
+	/// Serialized ChannelManager bytes.
+	pub channel_manager: Option<Vec<u8>>,
+	/// Serialized channel monitor bytes.
+	pub channel_monitors: Vec<Vec<u8>>,
 }
 
 impl std::fmt::Debug for LogWriterConfig {
@@ -253,6 +268,7 @@ pub struct NodeBuilder {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
+	channel_data_migration: Option<ChannelDataMigration>,
 }
 
 impl NodeBuilder {
@@ -271,6 +287,7 @@ impl NodeBuilder {
 		let log_writer_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
+		let channel_data_migration = None;
 		Self {
 			config,
 			entropy_source_config,
@@ -281,6 +298,7 @@ impl NodeBuilder {
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
+			channel_data_migration,
 		}
 	}
 
@@ -318,6 +336,18 @@ impl NodeBuilder {
 	) -> &mut Self {
 		self.entropy_source_config =
 			Some(EntropySourceConfig::Bip39Mnemonic { mnemonic, passphrase });
+		self
+	}
+
+	/// Sets channel data to migrate from an external LDK implementation.
+	///
+	/// Used when migrating from react-native-ldk or similar. The channel data is
+	/// written to the configured kv_store (including VSS) during build, before
+	/// channel monitors are read. Storage keys are derived from the monitor data.
+	///
+	/// **Note:** The serialized data must be compatible with the current LDK version.
+	pub fn set_channel_data_migration(&mut self, migration: ChannelDataMigration) -> &mut Self {
+		self.channel_data_migration = Some(migration);
 		self
 	}
 
@@ -748,6 +778,7 @@ impl NodeBuilder {
 			runtime,
 			logger,
 			Arc::new(vss_store),
+			self.channel_data_migration.as_ref(),
 		)
 	}
 
@@ -782,6 +813,7 @@ impl NodeBuilder {
 			runtime,
 			logger,
 			kv_store,
+			self.channel_data_migration.as_ref(),
 		)
 	}
 }
@@ -842,6 +874,13 @@ impl ArcedNodeBuilder {
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
 	pub fn set_entropy_bip39_mnemonic(&self, mnemonic: Mnemonic, passphrase: Option<String>) {
 		self.inner.write().unwrap().set_entropy_bip39_mnemonic(mnemonic, passphrase);
+	}
+
+	/// Sets channel data to migrate from an external LDK implementation.
+	///
+	/// See [`NodeBuilder::set_channel_data_migration`] for details.
+	pub fn set_channel_data_migration(&self, migration: ChannelDataMigration) {
+		self.inner.write().unwrap().set_channel_data_migration(migration);
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -1146,6 +1185,7 @@ fn build_with_store_internal(
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
 	logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	channel_data_migration: Option<&ChannelDataMigration>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1382,6 +1422,60 @@ fn build_with_store_internal(
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
 	));
+
+	if let Some(migration) = channel_data_migration {
+		if let Some(manager_bytes) = &migration.channel_manager {
+			runtime.block_on(async {
+				KVStore::write(
+					&*kv_store,
+					CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+					CHANNEL_MANAGER_PERSISTENCE_KEY,
+					manager_bytes.clone(),
+				)
+				.await
+			})
+			.map_err(|e| {
+				log_error!(logger, "Failed to write migrated channel_manager: {}", e);
+				BuildError::WriteFailed
+			})?;
+		}
+
+		for monitor_data in &migration.channel_monitors {
+			let mut reader = lightning::io::Cursor::new(monitor_data);
+			let (_, channel_monitor) = match <(BlockHash, ChannelMonitor<InMemorySigner>)>::read(
+				&mut reader,
+				(&*keys_manager, &*keys_manager),
+			) {
+				Ok(monitor) => monitor,
+				Err(e) => {
+					log_error!(logger, "Failed to deserialize channel_monitor: {:?}", e);
+					return Err(BuildError::ReadFailed);
+				},
+			};
+
+			let funding_txo = channel_monitor.get_funding_txo();
+			let monitor_key = format!("{}_{}", funding_txo.txid, funding_txo.index);
+			log_info!(logger, "Migrating channel monitor: {}", monitor_key);
+
+			runtime.block_on(async {
+				KVStore::write(
+					&*kv_store,
+					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+					&monitor_key,
+					monitor_data.clone(),
+				)
+				.await
+			})
+			.map_err(|e| {
+				log_error!(logger, "Failed to write channel_monitor {}: {}", monitor_key, e);
+				BuildError::WriteFailed
+			})?;
+		}
+
+		log_info!(logger, "Applied channel migration: {} monitors", migration.channel_monitors.len());
+	}
 
 	// Read ChannelMonitor state from store
 	let channel_monitors = match persister.read_all_channel_monitors_with_updates() {

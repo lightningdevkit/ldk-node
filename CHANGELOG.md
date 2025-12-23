@@ -1,4 +1,4 @@
-# 0.7.0-rc.1 (Synonym Fork)
+# 0.7.0-rc.2 (Synonym Fork)
 
 ## Synonym Fork Additions
 - Added reactive event system for wallet monitoring without polling:
@@ -51,6 +51,10 @@
   from external wallets). Default is `false` for safety, as spending unconfirmed external funds
   carries risk of double-spending. This affects all balance reporting including `list_balances()`
   and `BalanceChanged` events.
+- Added `ChannelDataMigration` struct and `Builder::set_channel_data_migration()` method to migrate
+  channel data from external LDK implementations (e.g., react-native-ldk). The channel manager and
+  monitor data is written to the configured storage during build, before channel monitors are read.
+  Storage keys for monitors are derived from the funding outpoint.
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
