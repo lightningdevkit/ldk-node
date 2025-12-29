@@ -16,7 +16,8 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
 use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{
-	ClosureReason, Event as LdkEvent, PaymentFailureReason, PaymentPurpose, ReplayEvent,
+	ClosureReason, Event as LdkEvent, PaidBolt12Invoice, PaymentFailureReason, PaymentPurpose,
+	ReplayEvent,
 };
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
@@ -75,6 +76,17 @@ pub enum Event {
 		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
+		/// The BOLT12 invoice that was paid, serialized as bytes.
+		///
+		/// This is useful for proof of payment. A third party can verify that the payment was made
+		/// by checking that the `payment_hash` in the invoice matches `sha256(payment_preimage)`.
+		///
+		/// Will be `None` for non-BOLT12 payments, or for async payments (`StaticInvoice`)
+		/// where proof of payment is not possible.
+		///
+		/// To parse the invoice in native Rust, use `Bolt12Invoice::try_from(bytes)`.
+		/// In FFI bindings, hex-encode the bytes and use `Bolt12Invoice.from_str(hex_string)`.
+		bolt12_invoice: Option<Vec<u8>>,
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
@@ -264,6 +276,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(1, fee_paid_msat, option),
 		(3, payment_id, option),
 		(5, payment_preimage, option),
+		(7, bolt12_invoice, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, option),
@@ -1022,6 +1035,7 @@ where
 				payment_preimage,
 				payment_hash,
 				fee_paid_msat,
+				bolt12_invoice,
 				..
 			} => {
 				let payment_id = if let Some(id) = payment_id {
@@ -1062,11 +1076,20 @@ where
 						hex_utils::to_string(&payment_preimage.0)
 					);
 				});
+
+				// Serialize the BOLT12 invoice to bytes for proof of payment.
+				// Only Bolt12Invoice supports proof of payment; StaticInvoice does not.
+				let bolt12_invoice_bytes = bolt12_invoice.and_then(|inv| match inv {
+					PaidBolt12Invoice::Bolt12Invoice(invoice) => Some(invoice.encode()),
+					PaidBolt12Invoice::StaticInvoice(_) => None,
+				});
+
 				let event = Event::PaymentSuccessful {
 					payment_id: Some(payment_id),
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
+					bolt12_invoice: bolt12_invoice_bytes,
 				};
 
 				match self.event_queue.add_event(event).await {
