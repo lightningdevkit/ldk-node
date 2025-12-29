@@ -483,6 +483,52 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 	}
 );
 
+impl PaymentKind {
+	/// Returns the payment hash if this payment kind has one.
+	///
+	/// Returns `None` for on-chain payments or when the hash hasn't been set yet (e.g., for
+	/// outbound BOLT 12 payments before receiving an invoice).
+	pub fn payment_hash(&self) -> Option<PaymentHash> {
+		match self {
+			PaymentKind::Onchain { .. } => None,
+			PaymentKind::Bolt11 { hash, .. } => Some(*hash),
+			PaymentKind::Bolt11Jit { hash, .. } => Some(*hash),
+			PaymentKind::Bolt12Offer { hash, .. } => *hash,
+			PaymentKind::Bolt12Refund { hash, .. } => *hash,
+			PaymentKind::Spontaneous { hash, .. } => Some(*hash),
+		}
+	}
+
+	/// Returns the payment preimage if this payment kind has one.
+	///
+	/// Returns `None` for on-chain payments or when the preimage hasn't been set yet.
+	pub fn preimage(&self) -> Option<PaymentPreimage> {
+		match self {
+			PaymentKind::Onchain { .. } => None,
+			PaymentKind::Bolt11 { preimage, .. } => *preimage,
+			PaymentKind::Bolt11Jit { preimage, .. } => *preimage,
+			PaymentKind::Bolt12Offer { preimage, .. } => *preimage,
+			PaymentKind::Bolt12Refund { preimage, .. } => *preimage,
+			PaymentKind::Spontaneous { preimage, .. } => *preimage,
+		}
+	}
+
+	/// Returns the payment secret if this payment kind has one.
+	///
+	/// Returns `None` for on-chain payments, spontaneous payments, or when the secret hasn't been
+	/// set yet.
+	pub fn secret(&self) -> Option<PaymentSecret> {
+		match self {
+			PaymentKind::Onchain { .. } => None,
+			PaymentKind::Bolt11 { secret, .. } => *secret,
+			PaymentKind::Bolt11Jit { secret, .. } => *secret,
+			PaymentKind::Bolt12Offer { secret, .. } => *secret,
+			PaymentKind::Bolt12Refund { secret, .. } => *secret,
+			PaymentKind::Spontaneous { .. } => None,
+		}
+	}
+}
+
 /// Represents the confirmation status of a transaction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ConfirmationStatus {
@@ -561,14 +607,9 @@ impl PaymentDetailsUpdate {
 
 impl From<&PaymentDetails> for PaymentDetailsUpdate {
 	fn from(value: &PaymentDetails) -> Self {
-		let (hash, preimage, secret) = match value.kind {
-			PaymentKind::Bolt11 { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
-			PaymentKind::Bolt11Jit { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
-			PaymentKind::Bolt12Offer { hash, preimage, secret, .. } => (hash, preimage, secret),
-			PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => (hash, preimage, secret),
-			PaymentKind::Spontaneous { hash, preimage, .. } => (Some(hash), preimage, None),
-			_ => (None, None, None),
-		};
+		let hash = value.kind.payment_hash();
+		let preimage = value.kind.preimage();
+		let secret = value.kind.secret();
 
 		let confirmation_status = match value.kind {
 			PaymentKind::Onchain { status, .. } => Some(status),
@@ -767,5 +808,94 @@ mod tests {
 				},
 			}
 		}
+	}
+
+	#[test]
+	fn payment_kind_accessor_methods() {
+		use bitcoin::hashes::Hash;
+
+		let hash = PaymentHash([42u8; 32]);
+		let preimage = Some(PaymentPreimage([43u8; 32]));
+		let secret = Some(PaymentSecret([44u8; 32]));
+		let txid = bitcoin::Txid::from_byte_array([1u8; 32]);
+		let offer_id = OfferId([2u8; 32]);
+
+		// Test Onchain variant
+		let onchain_kind = PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed };
+		assert_eq!(onchain_kind.payment_hash(), None);
+		assert_eq!(onchain_kind.preimage(), None);
+		assert_eq!(onchain_kind.secret(), None);
+
+		// Test Bolt11 variant
+		let bolt11_kind = PaymentKind::Bolt11 { hash, preimage, secret };
+		assert_eq!(bolt11_kind.payment_hash(), Some(hash));
+		assert_eq!(bolt11_kind.preimage(), preimage);
+		assert_eq!(bolt11_kind.secret(), secret);
+
+		// Test Bolt11 variant without preimage/secret
+		let bolt11_kind_empty = PaymentKind::Bolt11 { hash, preimage: None, secret: None };
+		assert_eq!(bolt11_kind_empty.payment_hash(), Some(hash));
+		assert_eq!(bolt11_kind_empty.preimage(), None);
+		assert_eq!(bolt11_kind_empty.secret(), None);
+
+		// Test Bolt11Jit variant
+		let lsp_fee_limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(1000),
+			max_proportional_opening_fee_ppm_msat: Some(100),
+		};
+		let bolt11_jit_kind = PaymentKind::Bolt11Jit {
+			hash,
+			preimage,
+			secret,
+			counterparty_skimmed_fee_msat: Some(500),
+			lsp_fee_limits,
+		};
+		assert_eq!(bolt11_jit_kind.payment_hash(), Some(hash));
+		assert_eq!(bolt11_jit_kind.preimage(), preimage);
+		assert_eq!(bolt11_jit_kind.secret(), secret);
+
+		// Test Bolt12Offer variant with hash
+		let bolt12_offer_kind = PaymentKind::Bolt12Offer {
+			hash: Some(hash),
+			preimage,
+			secret,
+			offer_id,
+			payer_note: None,
+			quantity: None,
+		};
+		assert_eq!(bolt12_offer_kind.payment_hash(), Some(hash));
+		assert_eq!(bolt12_offer_kind.preimage(), preimage);
+		assert_eq!(bolt12_offer_kind.secret(), secret);
+
+		// Test Bolt12Offer variant without hash (e.g., before invoice received)
+		let bolt12_offer_kind_no_hash = PaymentKind::Bolt12Offer {
+			hash: None,
+			preimage: None,
+			secret: None,
+			offer_id,
+			payer_note: None,
+			quantity: None,
+		};
+		assert_eq!(bolt12_offer_kind_no_hash.payment_hash(), None);
+		assert_eq!(bolt12_offer_kind_no_hash.preimage(), None);
+		assert_eq!(bolt12_offer_kind_no_hash.secret(), None);
+
+		// Test Bolt12Refund variant
+		let bolt12_refund_kind = PaymentKind::Bolt12Refund {
+			hash: Some(hash),
+			preimage,
+			secret,
+			payer_note: None,
+			quantity: None,
+		};
+		assert_eq!(bolt12_refund_kind.payment_hash(), Some(hash));
+		assert_eq!(bolt12_refund_kind.preimage(), preimage);
+		assert_eq!(bolt12_refund_kind.secret(), secret);
+
+		// Test Spontaneous variant (no secret)
+		let spontaneous_kind = PaymentKind::Spontaneous { hash, preimage };
+		assert_eq!(spontaneous_kind.payment_hash(), Some(hash));
+		assert_eq!(spontaneous_kind.preimage(), preimage);
+		assert_eq!(spontaneous_kind.secret(), None);
 	}
 }
