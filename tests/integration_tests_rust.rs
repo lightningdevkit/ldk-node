@@ -1304,6 +1304,136 @@ async fn simple_bolt12_send_receive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn bolt12_with_blip42_contact() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Sleep until we broadcasted a node announcement.
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+	while node_a.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+
+	// Sleep one more sec to make sure the node announcements propagate.
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+	// Node B creates an offer to receive payment
+	let expected_amount_msat = 100_000_000;
+	let node_b_offer =
+		node_b.bolt12_payment().receive(expected_amount_msat, "test payment", None, Some(1)).unwrap();
+
+	// Node A creates a COMPACT contact offer for BLIP-42's payer_offer field.
+	// Using None for intro_node creates an offer with no blinded paths (maximum compactness).
+	// This is suitable for embedding in invoice requests per BLIP-42 specification.
+	let node_a_offer = node_a.bolt12_payment().create_contact_offer(None).unwrap();
+
+	// Verify the contact offer is compact (either no paths or single-hop paths)
+	assert!(
+		node_a_offer.paths().is_empty()
+			|| node_a_offer.paths().iter().all(|p| p.blinded_hops().len() <= 1),
+		"Contact offer should be compact with no paths or single-hop paths"
+	);
+
+	// Create a contact secret (32 random bytes)
+	use ldk_node::payment::{ContactSecret, ContactSecrets};
+	let contact_secret_bytes: [u8; 32] = std::array::from_fn(|i| i as u8);
+	let contact_secret = ContactSecret::new(contact_secret_bytes);
+	let contact_secrets = ContactSecrets::new(contact_secret);
+
+	// Node A sends payment to Node B with BLIP-42 contact info
+	let payment_id = node_a
+		.bolt12_payment()
+		.send_with_contact(
+			&node_b_offer,
+			Some(1),
+			Some("BLIP-42 test".to_string()),
+			None,
+			Some(contact_secrets),
+			Some(node_a_offer.clone()),
+		)
+		.unwrap();
+
+	expect_payment_successful_event!(node_a, Some(payment_id), None);
+
+	// Node B should receive the payment with BLIP-42 contact information
+	let event = node_b.next_event_async().await;
+	match event {
+		Event::PaymentReceived {
+			amount_msat,
+			contact_secret: received_contact_secret,
+			payer_offer: received_payer_offer,
+			..
+		} => {
+			println!("Node B received payment with BLIP-42 contact info");
+			assert_eq!(amount_msat, expected_amount_msat);
+
+			// Verify contact_secret is present and matches
+			assert!(received_contact_secret.is_some(), "Expected contact_secret to be Some");
+			assert_eq!(
+				received_contact_secret.unwrap(),
+				contact_secret_bytes.to_vec(),
+				"Contact secret mismatch"
+			);
+
+			// Verify payer_offer is present
+			assert!(received_payer_offer.is_some(), "Expected payer_offer to be Some");
+			let payer_offer_str = received_payer_offer.unwrap();
+
+			// Parse the payer_offer and verify it matches node_a's offer
+			let parsed_offer: lightning::offers::offer::Offer =
+				payer_offer_str.parse().expect("Failed to parse payer_offer");
+			assert_eq!(
+				parsed_offer.id(),
+				node_a_offer.id(),
+				"Parsed offer ID should match node A's offer"
+			);
+
+			node_b.event_handled().unwrap();
+		},
+		ref e => {
+			panic!("Expected PaymentReceived event, got: {:?}", e);
+		},
+	}
+
+	// Verify payment records
+	let node_a_payments =
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+	assert_eq!(node_a_payments.len(), 1);
+	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+	assert_eq!(node_a_payments.first().unwrap().status, PaymentStatus::Succeeded);
+
+	let node_b_payments =
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+	assert_eq!(node_b_payments.len(), 1);
+	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+	assert_eq!(node_b_payments.first().unwrap().status, PaymentStatus::Succeeded);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn async_payment() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);

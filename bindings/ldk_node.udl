@@ -227,10 +227,19 @@ interface Bolt12Payment {
 	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
+	/// Send a payment with BLIP-42 contact information for contact establishment.
+	[Throws=NodeError]
+	PaymentId send_with_contact([ByRef]Offer offer, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters, ContactSecrets? contact_secrets, Offer? payer_offer);
+	/// Send a payment with an explicit amount and BLIP-42 contact information.
+	[Throws=NodeError]
+	PaymentId send_using_amount_with_contact([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters, ContactSecrets? contact_secrets, Offer? payer_offer);
 	[Throws=NodeError]
 	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
 	Offer receive_variable_amount([ByRef]string description, u32? expiry_secs);
+	/// Creates a compact contact offer for BLIP-42's payer_offer field.
+	[Throws=NodeError]
+	Offer create_contact_offer(PublicKey? intro_node);
 	[Throws=NodeError]
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
 	[Throws=NodeError]
@@ -402,7 +411,7 @@ enum VssHeaderProviderError {
 interface Event {
 	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat);
 	PaymentFailed(PaymentId? payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
-	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat, sequence<CustomTlvRecord> custom_records);
+	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat, sequence<CustomTlvRecord> custom_records, sequence<u8>? contact_secret, string? payer_offer);
 	PaymentClaimable(PaymentId payment_id, PaymentHash payment_hash, u64 claimable_amount_msat, u32? claim_deadline, sequence<CustomTlvRecord> custom_records);
 	PaymentForwarded(ChannelId prev_channel_id, ChannelId next_channel_id, UserChannelId?
 	prev_user_channel_id, UserChannelId? next_user_channel_id, PublicKey? prev_node_id, PublicKey? next_node_id, u64? total_fee_earned_msat, u64? skimmed_fee_msat, boolean claim_from_onchain_tx, u64? outbound_amount_forwarded_msat);
@@ -761,6 +770,18 @@ dictionary RouteHintHop {
 	u64? htlc_minimum_msat;
 	u64? htlc_maximum_msat;
 	RoutingFees fees;
+};
+
+/// BLIP-42 Contact secrets used for mutual authentication in payments.
+///
+/// When sending payments with contact information, the primary secret is sent to establish
+/// the contact relationship. Additional remote secrets can be stored for recognizing
+/// payments from contacts who independently added us.
+dictionary ContactSecrets {
+	/// The primary secret (32 bytes) used when sending payments to identify ourselves.
+	sequence<u8> primary_secret;
+	/// Additional secrets received from contacts for recognizing their payments.
+	sequence<sequence<u8>> additional_remote_secrets;
 };
 
 [Traits=(Debug, Display, Eq)]

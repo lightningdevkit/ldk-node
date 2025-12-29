@@ -606,3 +606,52 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 		CustomTlvRecord { type_num: tlv.0, value: tlv.1.clone() }
 	}
 }
+
+/// BLIP-42 Contact secrets for payment identification.
+///
+/// Contact secrets are used to mutually authenticate payments between contacts.
+/// See [BLIP-42](https://github.com/lightning/blips/blob/master/blip-0042.md) for more details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactSecrets {
+	/// The primary secret (32 bytes) used when sending payments to identify ourselves.
+	pub primary_secret: Vec<u8>,
+	/// Additional secrets received from contacts for recognizing their payments.
+	pub additional_remote_secrets: Vec<Vec<u8>>,
+}
+
+impl From<ContactSecrets> for lightning::offers::contacts::ContactSecrets {
+	fn from(secrets: ContactSecrets) -> Self {
+		let primary: [u8; 32] = secrets
+			.primary_secret
+			.try_into()
+			.expect("primary_secret must be 32 bytes");
+		let primary_secret = lightning::offers::contacts::ContactSecret::new(primary);
+
+		let additional: Vec<lightning::offers::contacts::ContactSecret> = secrets
+			.additional_remote_secrets
+			.into_iter()
+			.map(|s| {
+				let arr: [u8; 32] = s.try_into().expect("each secret must be 32 bytes");
+				lightning::offers::contacts::ContactSecret::new(arr)
+			})
+			.collect();
+
+		lightning::offers::contacts::ContactSecrets::with_additional_secrets(
+			primary_secret,
+			additional,
+		)
+	}
+}
+
+impl From<&lightning::offers::contacts::ContactSecrets> for ContactSecrets {
+	fn from(secrets: &lightning::offers::contacts::ContactSecrets) -> Self {
+		ContactSecrets {
+			primary_secret: secrets.primary_secret().as_bytes().to_vec(),
+			additional_remote_secrets: secrets
+				.additional_remote_secrets()
+				.iter()
+				.map(|s| s.as_bytes().to_vec())
+				.collect(),
+		}
+	}
+}
