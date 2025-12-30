@@ -43,12 +43,21 @@ where
 	pub(crate) fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let mut locked_peers = self.peers.write().unwrap();
 
-		if locked_peers.contains_key(&peer_info.node_id) {
-			return Ok(());
+		match locked_peers.get_mut(&peer_info.node_id) {
+			Some(existing_peer) => {
+				if existing_peer.address != peer_info.address {
+					*existing_peer = peer_info;
+					self.persist_peers(&*locked_peers)?;
+				}
+			},
+
+			None => {
+				locked_peers.insert(peer_info.node_id, peer_info);
+				self.persist_peers(&*locked_peers)?;
+			},
 		}
 
-		locked_peers.insert(peer_info.node_id, peer_info);
-		self.persist_peers(&*locked_peers)
+		Ok(())
 	}
 
 	pub(crate) fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
@@ -194,5 +203,27 @@ mod tests {
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
 		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
+	}
+
+	#[test]
+	fn peer_address_is_updated_if_peer_exists() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+
+		let addr1 = SocketAddress::from_str("127.0.0.1:9738").unwrap();
+		let addr2 = SocketAddress::from_str("127.0.0.1:9739").unwrap();
+
+		peer_store.add_peer(PeerInfo { node_id, address: addr1 }).unwrap();
+
+		peer_store.add_peer(PeerInfo { node_id, address: addr2.clone() }).unwrap();
+
+		let peer = peer_store.get_peer(&node_id).unwrap();
+		assert_eq!(peer.address, addr2);
 	}
 }
