@@ -1684,6 +1684,18 @@ fn build_with_store_internal(
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
 
+	#[cfg(cycle_tests)]
+	let mut _leak_checker = crate::LeakChecker(Vec::new());
+	#[cfg(cycle_tests)]
+	{
+		use std::any::Any;
+		use std::sync::Weak;
+
+		_leak_checker.0.push(Arc::downgrade(&channel_manager) as Weak<dyn Any + Send + Sync>);
+		_leak_checker.0.push(Arc::downgrade(&network_graph) as Weak<dyn Any + Send + Sync>);
+		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
+	}
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1716,6 +1728,8 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver,
+		#[cfg(cycle_tests)]
+		_leak_checker,
 	})
 }
 
