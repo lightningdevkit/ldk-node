@@ -1603,7 +1603,7 @@ fn build_with_store_internal(
 		peer_manager_clone.process_events();
 	}));
 
-	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
+	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
 
 	gossip_source.set_gossip_verifier(
 		Arc::clone(&chain_source),
