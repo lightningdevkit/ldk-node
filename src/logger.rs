@@ -171,6 +171,14 @@ impl LogWriter for Writer {
 	}
 }
 
+#[cfg(cycle_tests)]
+/// Our log writer
+pub struct Logger {
+	/// Specifies the logger's writer.
+	writer: Writer,
+}
+
+#[cfg(not(cycle_tests))]
 pub(crate) struct Logger {
 	/// Specifies the logger's writer.
 	writer: Writer,
@@ -195,10 +203,12 @@ impl Logger {
 		Ok(Self { writer: Writer::FileWriter { file_path, max_log_level } })
 	}
 
+	/// Creates a new logger writing to the `log` crate
 	pub fn new_log_facade() -> Self {
 		Self { writer: Writer::LogFacadeWriter }
 	}
 
+	/// Creates a new logger writing to an underlying [`LogWriter`]
 	pub fn new_custom_writer(log_writer: Arc<dyn LogWriter>) -> Self {
 		Self { writer: Writer::CustomWriter(log_writer) }
 	}

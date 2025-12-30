@@ -1754,6 +1754,12 @@ impl Node {
 			Error::PersistenceFailed
 		})
 	}
+
+	#[cfg(cycle_tests)]
+	/// Fetch a reference to the inner NetworkGraph, for Arc cycle detection
+	pub fn fetch_ref(&self) -> std::sync::Weak<Graph> {
+		Arc::downgrade(&self.network_graph)
+	}
 }
 
 impl Drop for Node {
