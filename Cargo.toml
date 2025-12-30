@@ -124,6 +124,7 @@ check-cfg = [
 	"cfg(tokio_unstable)",
 	"cfg(cln_test)",
 	"cfg(lnd_test)",
+	"cfg(cycle_tests)",
 ]
 
 [[bench]]

@@ -80,11 +80,11 @@ jobs:
       - name: Test on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest'"
         run: |
-          RUSTFLAGS="--cfg no_download" cargo test
+          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
-          RUSTFLAGS="--cfg no_download" cargo test --features uniffi
+          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features uniffi
 
   doc:
     name: Documentation
