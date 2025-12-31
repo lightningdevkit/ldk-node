@@ -23,7 +23,8 @@ use common::{
 	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
 	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestNode,
+	TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -153,7 +154,7 @@ async fn multi_hop_sending() {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	// Setup and fund 5 nodes
-	let mut nodes = Vec::new();
+	let mut nodes: Vec<TestNode> = Vec::new();
 	for _ in 0..5 {
 		let config = random_config(true);
 		let sync_config = EsploraSyncConfig { background_sync_config: None };
@@ -161,7 +162,7 @@ async fn multi_hop_sending() {
 		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		let node = builder.build(config.node_entropy.into()).unwrap();
 		node.start().unwrap();
-		nodes.push(node);
+		nodes.push(node.into());
 	}
 
 	let addresses = nodes.iter().map(|n| n.onchain_payment().new_address().unwrap()).collect();
@@ -1728,7 +1729,8 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
-	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	let service_node: TestNode =
+		service_builder.build(service_config.node_entropy.into()).unwrap().into();
 	service_node.start().unwrap();
 
 	let service_node_id = service_node.node_id();
@@ -1738,13 +1740,15 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
-	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	let client_node: TestNode =
+		client_builder.build(client_config.node_entropy.into()).unwrap().into();
 	client_node.start().unwrap();
 
 	let payer_config = random_config(true);
 	setup_builder!(payer_builder, payer_config.node_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	let payer_node: TestNode =
+		payer_builder.build(payer_config.node_entropy.into()).unwrap().into();
 	payer_node.start().unwrap();
 
 	let service_addr = service_node.onchain_payment().new_address().unwrap();
@@ -2045,7 +2049,8 @@ async fn lsps2_client_trusts_lsp() {
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
-	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	let service_node: TestNode =
+		service_builder.build(service_config.node_entropy.into()).unwrap().into();
 	service_node.start().unwrap();
 	let service_node_id = service_node.node_id();
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
@@ -2054,14 +2059,16 @@ async fn lsps2_client_trusts_lsp() {
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
-	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	let client_node: TestNode =
+		client_builder.build(client_config.node_entropy.into()).unwrap().into();
 	client_node.start().unwrap();
 	let client_node_id = client_node.node_id();
 
 	let payer_config = random_config(true);
 	setup_builder!(payer_builder, payer_config.node_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	let payer_node: TestNode =
+		payer_builder.build(payer_config.node_entropy.into()).unwrap().into();
 	payer_node.start().unwrap();
 
 	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
@@ -2218,7 +2225,8 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
-	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	let service_node: TestNode =
+		service_builder.build(service_config.node_entropy.into()).unwrap().into();
 	service_node.start().unwrap();
 
 	let service_node_id = service_node.node_id();
@@ -2228,7 +2236,8 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
-	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	let client_node: TestNode =
+		client_builder.build(client_config.node_entropy.into()).unwrap().into();
 	client_node.start().unwrap();
 
 	let client_node_id = client_node.node_id();
@@ -2236,7 +2245,8 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let payer_config = random_config(true);
 	setup_builder!(payer_builder, payer_config.node_config);
 	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	let payer_node: TestNode =
+		payer_builder.build(payer_config.node_entropy.into()).unwrap().into();
 	payer_node.start().unwrap();
 
 	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
