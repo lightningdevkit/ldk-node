@@ -1474,8 +1474,12 @@ fn build_with_store_internal(
 
 	let gossip_source = match gossip_source_config {
 		GossipSourceConfig::P2PNetwork => {
-			let p2p_source =
-				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)));
+			let p2p_source = Arc::new(GossipSource::new_p2p(
+				Arc::clone(&network_graph),
+				Arc::clone(&chain_source),
+				Arc::clone(&runtime),
+				Arc::clone(&logger),
+			));
 
 			// Reset the RGS sync timestamp in case we somehow switch gossip sources
 			{
@@ -1595,12 +1599,6 @@ fn build_with_store_internal(
 	));
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
-
-	gossip_source.set_gossip_verifier(
-		Arc::clone(&chain_source),
-		Arc::clone(&peer_manager),
-		Arc::clone(&runtime),
-	);
 
 	let connection_manager =
 		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
