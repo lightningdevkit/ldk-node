@@ -56,7 +56,7 @@ async fn sync_external_scores(
 ) -> () {
 	let response = tokio::time::timeout(
 		Duration::from_secs(EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS),
-		reqwest::get(url),
+		bitreq::get(url).send_async(),
 	)
 	.await;
 
@@ -74,14 +74,11 @@ async fn sync_external_scores(
 			return;
 		},
 	};
-	let body = match response.bytes().await {
-		Ok(bytes) => bytes,
-		Err(e) => {
-			log_error!(logger, "Failed to read external scores update: {}", e);
-			return;
-		},
-	};
-	let mut reader = Cursor::new(body);
+	if response.status_code != 200 {
+		log_trace!(logger, "Failed to retrieve external scores update: HTTP {}", response.status_code);
+		return;
+	}
+	let mut reader = Cursor::new(response.as_bytes());
 	match ChannelLiquidities::read(&mut reader) {
 		Ok(liquidities) => {
 			if let Err(e) = write_external_pathfinding_scores_to_cache(

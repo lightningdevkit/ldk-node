@@ -92,7 +92,7 @@ impl GossipSource {
 
 				let response = tokio::time::timeout(
 					Duration::from_secs(RGS_SYNC_TIMEOUT_SECS),
-					reqwest::get(query_url),
+					bitreq::get(query_url).send_async(),
 				)
 				.await
 				.map_err(|e| {
@@ -104,15 +104,10 @@ impl GossipSource {
 					Error::GossipUpdateFailed
 				})?;
 
-				match response.error_for_status() {
-					Ok(res) => {
-						let update_data = res.bytes().await.map_err(|e| {
-							log_trace!(logger, "Failed to retrieve RGS gossip update: {}", e);
-							Error::GossipUpdateFailed
-						})?;
-
+				match response.status_code {
+					200 => {
 						let new_latest_sync_timestamp =
-							gossip_sync.update_network_graph(&update_data).map_err(|e| {
+							gossip_sync.update_network_graph(response.as_bytes()).map_err(|e| {
 								log_trace!(
 									logger,
 									"Failed to update network graph with RGS data: {:?}",
@@ -123,8 +118,8 @@ impl GossipSource {
 						latest_sync_timestamp.store(new_latest_sync_timestamp, Ordering::Release);
 						Ok(new_latest_sync_timestamp)
 					},
-					Err(e) => {
-						log_trace!(logger, "Failed to retrieve RGS gossip update: {}", e);
+					code => {
+						log_trace!(logger, "Failed to retrieve RGS gossip update: HTTP {}", code);
 						Err(Error::GossipUpdateFailed)
 					},
 				}
