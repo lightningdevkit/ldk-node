@@ -56,7 +56,7 @@ bdk_esplora = { version = "0.22.0", default-features = false, features = ["async
 bdk_electrum = { version = "0.23.0", default-features = false, features = ["use-rustls-ring"]}
 bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "keys-bip39"]}
 
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+bitreq = { version = "0.3", default-features = false, features = ["async-https"] }
 rustls = { version = "0.23", default-features = false }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 bitcoin = "0.32.7"
