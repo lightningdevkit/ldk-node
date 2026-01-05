@@ -45,7 +45,7 @@ use vss_client::headers::VssHeaderProvider;
 use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, PayjoinConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
@@ -56,12 +56,13 @@ use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
-	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
-	read_scorer, write_node_metrics,
+	read_node_metrics, read_output_sweeper, read_payjoin_sessions, read_payments, read_peer_info,
+	read_pending_payments, read_scorer, write_node_metrics,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
-	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	self, PAYJOIN_SESSION_STORE_PRIMARY_NAMESPACE, PAYJOIN_SESSION_STORE_SECONDARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -72,13 +73,14 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::payjoin::manager::PayjoinManager;
 use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
-	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
-	Persister, SyncAndAsyncKVStore,
+	KeysManager, MessageRouter, OnionMessenger, PayjoinSessionStore, PaymentStore, PeerManager,
+	PendingPaymentStore, Persister, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -549,6 +551,15 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Configures the [`Node`] instance to enable payjoin payments.
+	///
+	/// The `payjoin_config` specifies the PayJoin directory and OHTTP relay URLs required
+	/// for payjoin V2 protocol.
+	pub fn set_payjoin_config(&mut self, payjoin_config: PayjoinConfig) -> &mut Self {
+		self.config.payjoin_config = Some(payjoin_config);
+		self
+	}
+
 	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
 	/// historical wallet funds.
 	///
@@ -972,6 +983,14 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_async_payments_role(role).map(|_| ())
 	}
 
+	/// Configures the [`Node`] instance to enable payjoin payments.
+	///
+	/// The `payjoin_config` specifies the PayJoin directory and OHTTP relay URLs required
+	/// for payjoin V2 protocol.
+	pub fn set_payjoin_config(&self, payjoin_config: PayjoinConfig) {
+		self.inner.write().unwrap().set_payjoin_config(payjoin_config);
+	}
+
 	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
 	/// historical wallet funds.
 	///
@@ -1151,12 +1170,13 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res) =
+	let (payment_store_res, node_metris_res, pending_payment_store_res, payjoin_session_store_res) =
 		runtime.block_on(async move {
 			tokio::join!(
 				read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
 				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref))
+				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
+				read_payjoin_sessions(&*kv_store_ref, Arc::clone(&logger_ref))
 			)
 		});
 
@@ -1841,6 +1861,34 @@ fn build_with_store_internal(
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
 
+	let payjoin_session_store = match payjoin_session_store_res {
+		Ok(payjoin_sessions) => Arc::new(PayjoinSessionStore::new(
+			payjoin_sessions,
+			PAYJOIN_SESSION_STORE_PRIMARY_NAMESPACE.to_string(),
+			PAYJOIN_SESSION_STORE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read payjoin session data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
+	let payjoin_manager = Arc::new(PayjoinManager::new(
+		Arc::clone(&payjoin_session_store),
+		Arc::clone(&logger),
+		Arc::clone(&config),
+		Arc::clone(&wallet),
+		Arc::clone(&fee_estimator),
+		Arc::clone(&chain_source),
+		Arc::clone(&channel_manager),
+		stop_sender.subscribe(),
+		Arc::clone(&payment_store),
+		Arc::clone(&pending_payment_store),
+		Arc::clone(&tx_broadcaster),
+	));
+
 	#[cfg(cycle_tests)]
 	let mut _leak_checker = crate::LeakChecker(Vec::new());
 	#[cfg(cycle_tests)]
@@ -1888,6 +1936,7 @@ fn build_with_store_internal(
 		hrn_resolver,
 		#[cfg(cycle_tests)]
 		_leak_checker,
+		payjoin_manager,
 	})
 }
 
