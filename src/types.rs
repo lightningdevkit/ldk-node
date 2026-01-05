@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{OutPoint, ScriptBuf};
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
@@ -28,8 +29,6 @@ use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
-
-use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;

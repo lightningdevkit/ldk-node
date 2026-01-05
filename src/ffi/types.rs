@@ -29,6 +29,7 @@ use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
 use lightning::offers::refund::Refund as LdkRefund;
+use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
 use lightning::util::ser::Writeable;
@@ -56,9 +57,6 @@ pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
 pub use crate::payment::UnifiedPaymentResult;
-
-use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
-
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
 
 impl UniffiCustomTypeConverter for PublicKey {

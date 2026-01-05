@@ -236,22 +236,59 @@ where
 {
 	let mut res = Vec::new();
 
-	for stored_key in KVStore::list(
+	let mut stored_keys = KVStore::list(
 		&*kv_store,
 		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	)
-	.await?
-	{
-		let mut reader = Cursor::new(
-			KVStore::read(
+	.await?;
+
+	const BATCH_SIZE: usize = 50;
+
+	let mut set = tokio::task::JoinSet::new();
+
+	// Fill JoinSet with tasks if possible
+	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
 				&*kv_store,
 				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&stored_key,
-			)
-			.await?,
-		);
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+	}
+
+	while let Some(read_res) = set.join_next().await {
+		// Exit early if we get an IO error.
+		let read_res = read_res
+			.map_err(|e| {
+				log_error!(logger, "Failed to read PaymentDetails: {}", e);
+				set.abort_all();
+				e
+			})?
+			.map_err(|e| {
+				log_error!(logger, "Failed to read PaymentDetails: {}", e);
+				set.abort_all();
+				e
+			})?;
+
+		// Refill set for every finished future, if we still have something to do.
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
+				&*kv_store,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+
+		// Handle result.
+		let mut reader = Cursor::new(read_res);
 		let payment = PaymentDetails::read(&mut reader).map_err(|e| {
 			log_error!(logger, "Failed to deserialize PaymentDetails: {}", e);
 			std::io::Error::new(
@@ -261,6 +298,10 @@ where
 		})?;
 		res.push(payment);
 	}
+
+	debug_assert!(set.is_empty());
+	debug_assert!(stored_keys.is_empty());
+
 	Ok(res)
 }
 
