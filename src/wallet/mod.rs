@@ -1796,6 +1796,32 @@ impl Wallet {
 
 		Ok(new_txid)
 	}
+
+	/// Check if a script belongs to this wallet
+	pub fn is_mine(&self, script: ScriptBuf) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+		Ok(locked_wallet.is_mine(script))
+	}
+
+	#[allow(deprecated)]
+	pub fn process_psbt(&self, mut psbt: Psbt) -> Result<Psbt, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		locked_wallet.sign(&mut psbt, sign_options).map_err(|e| {
+			log_error!(self.logger, "Failed to sign PSBT: {}", e);
+			Error::WalletOperationFailed
+		})?;
+
+		// Return the signed PSBT (not extracted transaction)
+		Ok(psbt)
+	}
+
+	pub fn list_unspent_confirmed_utxos(&self) -> Result<Vec<Utxo>, Error> {
+		self.list_confirmed_utxos_inner().map_err(|()| Error::WalletOperationFailed)
+	}
 }
 
 struct LocalStakeAggregate {

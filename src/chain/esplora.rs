@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_esplora::EsploraAsyncExt;
 use bitcoin::transaction::Version;
-use bitcoin::{FeeRate, Network, Script, Txid};
+use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
 use esplora_client::AsyncClient as EsploraAsyncClient;
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
@@ -518,6 +518,13 @@ impl EsploraChainSource {
 				}
 			},
 		}
+	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		self.esplora_client.get_tx(txid).await.map_err(|e| {
+			log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+			Error::TxLookupFailed
+		})
 	}
 }
 

@@ -20,6 +20,7 @@ use bitcoin::transaction::Version;
 use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{
 	Batch, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
+	Error as ElectrumError,
 };
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
@@ -27,8 +28,8 @@ use lightning_transaction_sync::ElectrumSyncClient;
 
 use super::WalletSyncStatus;
 use crate::config::{
-	clamp_full_scan_stop_gap, Config, ElectrumSyncConfig, MAX_FULL_SCAN_STOP_GAP,
-	MIN_FULL_SCAN_STOP_GAP,
+	clamp_full_scan_stop_gap, Config, ElectrumSyncConfig, DEFAULT_TX_LOOKUP_TIMEOUT_SECS,
+	MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
 };
 use crate::error::Error;
 use crate::fee_estimator::{
@@ -374,6 +375,22 @@ impl ElectrumChainSource {
 				}
 			},
 		}
+	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+			self.electrum_runtime_status.read().expect("lock").client().as_ref()
+		{
+			Arc::clone(client)
+		} else {
+			debug_assert!(
+				false,
+				"We should have started the chain source before getting transactions"
+			);
+			return Err(Error::TxLookupFailed);
+		};
+
+		electrum_client.get_transaction(txid).await
 	}
 }
 
@@ -792,6 +809,37 @@ impl ElectrumRuntimeClient {
 		}
 
 		Ok(new_fee_rate_cache)
+	}
+
+	async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client = Arc::clone(&self.electrum_client);
+		let txid_copy = *txid;
+
+		let spawn_fut =
+			self.runtime.spawn_blocking(move || electrum_client.transaction_get(&txid_copy));
+		let timeout_fut =
+			tokio::time::timeout(Duration::from_secs(DEFAULT_TX_LOOKUP_TIMEOUT_SECS), spawn_fut);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(inner_res) => match inner_res {
+					Ok(tx) => Ok(Some(tx)),
+					Err(ElectrumError::Protocol(_)) => Ok(None),
+					Err(e) => {
+						log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+						Err(Error::TxLookupFailed)
+					},
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+					Err(Error::TxLookupFailed)
+				},
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to get transaction {} due to timeout: {}", txid, e);
+				Err(Error::TxLookupTimeout)
+			},
+		}
 	}
 }
 
