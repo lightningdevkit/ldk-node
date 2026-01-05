@@ -134,6 +134,8 @@ prost = { version = "0.11.6", default-features = false, optional = true}
 #bitcoin-payment-instructions = { version = "0.6" }
 bitcoin-payment-instructions = { git = "https://github.com/benthecarman/bitcoin-payment-instructions", rev = "632f2ce8de7ea2035d5c83d7d745a52ea3e1fe70", optional = true }
 
+payjoin = { version = "1.0.0", default-features = false, features = ["v2", "io"] }
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
 
