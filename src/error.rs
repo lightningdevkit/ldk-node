@@ -131,6 +131,8 @@ pub enum Error {
 	AsyncPaymentServicesDisabled,
 	/// Parsing a Human-Readable Name has failed.
 	HrnParsingFailed,
+	/// A transaction broadcast operation failed.
+	TxBroadcastFailed,
 }
 
 impl fmt::Display for Error {
@@ -213,6 +215,7 @@ impl fmt::Display for Error {
 			Self::HrnParsingFailed => {
 				write!(f, "Failed to parse a human-readable name.")
 			},
+			Self::TxBroadcastFailed => write!(f, "Failed to broadcast transaction."),
 		}
 	}
 }

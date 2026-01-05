@@ -284,7 +284,8 @@ impl StorableObject for PaymentDetails {
 
 		if let Some(confirmation_status) = update.confirmation_status {
 			match self.kind {
-				PaymentKind::Onchain { ref mut status, .. } => {
+				PaymentKind::Onchain { ref mut status, .. }
+				| PaymentKind::Payjoin { ref mut status, .. } => {
 					update_if_necessary!(*status, confirmation_status);
 				},
 				_ => {},
@@ -443,6 +444,18 @@ pub enum PaymentKind {
 		/// The pre-image used by the payment.
 		preimage: Option<PaymentPreimage>,
 	},
+	/// An on-chain Payjoin payment.
+	///
+	/// Payments of this kind will be considered pending until the respective transaction has
+	/// reached [`ANTI_REORG_DELAY`] confirmations on-chain.
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	Payjoin {
+		/// The transaction identifier of this payment.
+		txid: Txid,
+		/// The confirmation status of this payment.
+		status: ConfirmationStatus,
+	},
 }
 
 impl_writeable_tlv_based_enum!(PaymentKind,
@@ -480,7 +493,11 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(3, quantity, option),
 		(4, secret, option),
-	}
+	},
+	(11, Payjoin)=>{
+		(0, txid, required),
+		(2, status, required),
+	},
 );
 
 /// Represents the confirmation status of a transaction.
@@ -571,7 +588,9 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 		};
 
 		let confirmation_status = match value.kind {
-			PaymentKind::Onchain { status, .. } => Some(status),
+			PaymentKind::Onchain { status, .. } | PaymentKind::Payjoin { status, .. } => {
+				Some(status)
+			},
 			_ => None,
 		};
 

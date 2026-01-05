@@ -1002,6 +1002,99 @@ impl Wallet {
 
 		None
 	}
+
+	/// Check if a script belongs to this wallet
+	pub fn is_mine(&self, script: ScriptBuf) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		Ok(locked_wallet.is_mine(script))
+	}
+
+	#[allow(deprecated)]
+	pub fn process_psbt(&self, mut psbt: Psbt) -> Result<Psbt, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+
+		locked_wallet.sign(&mut psbt, sign_options).map_err(|e| {
+			log_error!(self.logger, "Failed to sign PSBT: {}", e);
+			Error::WalletOperationFailed
+		})?;
+
+		// Return the signed PSBT (not extracted transaction)
+		Ok(psbt)
+	}
+
+	pub fn list_unspent_utxos(&self) -> Result<Vec<Utxo>, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		let mut utxos = Vec::new();
+
+		for u in locked_wallet.list_unspent() {
+			let script_pubkey = &u.txout.script_pubkey;
+
+			match script_pubkey.witness_version() {
+				Some(version @ WitnessVersion::V0) => {
+					// P2WPKH handling
+					let witness_bytes = &script_pubkey.as_bytes()[2..];
+					let witness_program =
+						WitnessProgram::new(version, witness_bytes).map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							Error::InvalidAddress
+						})?;
+
+					let wpkh = WPubkeyHash::from_slice(&witness_program.program().as_bytes())
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							Error::InvalidAddress
+						})?;
+
+					let utxo = Utxo::new_v0_p2wpkh(u.outpoint, u.txout.value, &wpkh);
+					utxos.push(utxo);
+				},
+				Some(version @ WitnessVersion::V1) => {
+					// P2TR (Taproot) handling
+					let witness_bytes = &script_pubkey.as_bytes()[2..];
+					let witness_program =
+						WitnessProgram::new(version, witness_bytes).map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							Error::InvalidAddress
+						})?;
+
+					XOnlyPublicKey::from_slice(&witness_program.program().as_bytes()).map_err(
+						|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							Error::InvalidAddress
+						},
+					)?;
+
+					let utxo = Utxo {
+						outpoint: u.outpoint,
+						output: TxOut {
+							value: u.txout.value,
+							script_pubkey: ScriptBuf::new_witness_program(&witness_program),
+						},
+						satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
+                        1 /* witness items */ + 1 /* schnorr sig len */ + 64, // schnorr sig
+					};
+					utxos.push(utxo);
+				},
+				Some(version) => {
+					log_error!(self.logger, "Unexpected witness version: {}", version);
+					continue;
+				},
+				None => {
+					log_error!(
+						self.logger,
+						"Tried to use a non-witness script. This must never happen."
+					);
+					panic!("Tried to use a non-witness script. This must never happen.");
+				},
+			}
+		}
+
+		Ok(utxos)
+	}
 }
 
 impl Listen for Wallet {
