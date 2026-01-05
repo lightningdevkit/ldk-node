@@ -71,6 +71,7 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
+	PayjoinPayment payjoin_payment();
 	Liquidity liquidity();
 	ForwardingAnalytics forwarding_analytics();
 	[Throws=NodeError]
@@ -142,6 +143,8 @@ interface FeeRate {
 	u64 to_sat_per_vb_ceil();
 };
 
+typedef interface PayjoinPayment;
+
 typedef interface Liquidity;
 
 typedef interface ForwardingAnalytics;
@@ -172,6 +175,8 @@ enum NodeError {
 	"OnchainTxSigningFailed",
 	"TxSyncFailed",
 	"TxSyncTimeout",
+	"TxLookupFailed",
+	"TxLookupTimeout",
 	"GossipUpdateFailed",
 	"GossipUpdateTimeout",
 	"LiquidityRequestFailed",
@@ -215,6 +220,9 @@ enum NodeError {
 	"InvalidLnurl",
 	"ChainSourceNotSupported",
 	"InvalidPayerProof",
+	"PayjoinNotConfigured",
+	"PayjoinSessionCreationFailed",
+	"PayjoinSessionFailed",
 };
 
 typedef dictionary NodeStatus;
