@@ -13,6 +13,7 @@ mod bolt12;
 #[cfg(feature = "unified-payments")]
 mod hrn;
 mod onchain;
+pub(crate) mod payjoin;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
 pub(crate) mod store;
@@ -25,6 +26,7 @@ pub use bolt12::{Bolt12Payment, PayerProofOptions};
 #[cfg(feature = "unified-payments")]
 pub(crate) use hrn::HRNResolver;
 pub use onchain::OnchainPayment;
+pub use payjoin::PayjoinPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
 pub use store::{

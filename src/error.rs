@@ -65,6 +65,10 @@ pub enum Error {
 	TxSyncFailed,
 	/// A transaction sync operation timed out.
 	TxSyncTimeout,
+	/// A transaction lookup operation failed.
+	TxLookupFailed,
+	/// A transaction lookup operation timed out.
+	TxLookupTimeout,
 	/// A gossip updating operation failed.
 	GossipUpdateFailed,
 	/// A gossip updating operation timed out.
@@ -147,6 +151,12 @@ pub enum Error {
 	ChainSourceNotSupported,
 	/// The provided payer proof is invalid.
 	InvalidPayerProof,
+	/// Payjoin is not configured.
+	PayjoinNotConfigured,
+	/// Payjoin session creation failed.
+	PayjoinSessionCreationFailed,
+	/// Payjoin session failed.
+	PayjoinSessionFailed,
 }
 
 impl fmt::Display for Error {
@@ -182,6 +192,8 @@ impl fmt::Display for Error {
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::TxSyncTimeout => write!(f, "Syncing transactions timed out."),
+			Self::TxLookupFailed => write!(f, "Failed to look up transaction."),
+			Self::TxLookupTimeout => write!(f, "Transaction lookup timed out."),
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::GossipUpdateTimeout => write!(f, "Updating gossip data timed out."),
 			Self::LiquidityRequestFailed => write!(f, "Failed to request inbound liquidity."),
@@ -239,6 +251,9 @@ impl fmt::Display for Error {
 				write!(f, "The configured chain source is not supported.")
 			},
 			Self::InvalidPayerProof => write!(f, "The provided payer proof is invalid."),
+			Self::PayjoinNotConfigured => write!(f, "Payjoin is not configured."),
+			Self::PayjoinSessionCreationFailed => write!(f, "Payjoin session creation failed."),
+			Self::PayjoinSessionFailed => write!(f, "Payjoin session failed."),
 		}
 	}
 }
