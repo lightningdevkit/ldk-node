@@ -288,6 +288,21 @@ impl ElectrumChainSource {
 			electrum_client.broadcast(tx).await;
 		}
 	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(
+					false,
+					"We should have started the chain source before getting transactions"
+				);
+				return Err(Error::TxSyncFailed);
+			};
+
+		electrum_client.get_transaction(txid).await
+	}
 }
 
 impl Filter for ElectrumChainSource {
@@ -651,6 +666,48 @@ impl ElectrumRuntimeClient {
 		}
 
 		Ok(new_fee_rate_cache)
+	}
+
+	async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client = Arc::clone(&self.electrum_client);
+		let txid_copy = *txid;
+
+		let spawn_fut =
+			self.runtime.spawn_blocking(move || electrum_client.transaction_get(&txid_copy));
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(
+				self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs,
+			),
+			spawn_fut,
+		);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(inner_res) => match inner_res {
+					Ok(tx) => Ok(Some(tx)),
+					Err(e) => {
+						// Check if it's a "not found" error
+						let error_str = e.to_string();
+						if error_str.contains("No such mempool or blockchain transaction")
+							|| error_str.contains("not found")
+						{
+							Ok(None)
+						} else {
+							log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+							Err(Error::TxSyncFailed)
+						}
+					},
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+					Err(Error::TxSyncFailed)
+				},
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to get transaction {} due to timeout: {}", txid, e);
+				Err(Error::TxSyncTimeout)
+			},
+		}
 	}
 }
 

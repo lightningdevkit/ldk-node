@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use bitcoin::{Script, Txid};
+use bitcoin::{Script, Transaction, Txid};
 use lightning::chain::{BestBlock, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
@@ -467,6 +467,38 @@ impl ChainSource {
 				}
 			}
 		}
+	}
+
+	pub(crate) fn can_broadcast_transaction(&self, tx: &Transaction) -> Result<bool, Error> {
+		tokio::task::block_in_place(|| {
+			tokio::runtime::Handle::current().block_on(async {
+				match &self.kind {
+					ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+						bitcoind_chain_source.can_broadcast_transaction(tx).await
+					},
+					ChainSourceKind::Esplora{..} => {
+						// Esplora doesn't support testmempoolaccept equivalent.
+						unreachable!("Mempool accept testing is not supported with Esplora backend. Use BitcoindRpc for this functionality.")
+					},
+					ChainSourceKind::Electrum{..} => {
+						// Electrum doesn't support testmempoolaccept equivalent.
+						unreachable!("Mempool accept testing is not supported with Electrum backend. Use BitcoindRpc for this functionality.")
+					},
+				}
+			})
+		})
+	}
+
+	pub(crate) fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		tokio::task::block_in_place(|| {
+			tokio::runtime::Handle::current().block_on(async {
+				match &self.kind {
+					ChainSourceKind::Bitcoind(bitcoind) => bitcoind.get_transaction(txid).await,
+					ChainSourceKind::Esplora(esplora) => esplora.get_transaction(txid).await,
+					ChainSourceKind::Electrum(electrum) => electrum.get_transaction(txid).await,
+				}
+			})
+		})
 	}
 }
 
