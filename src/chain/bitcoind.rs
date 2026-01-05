@@ -33,7 +33,7 @@ use serde::Serialize;
 use super::WalletSyncStatus;
 use crate::config::{
 	BitcoindRestClientConfig, Config, DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
-	DEFAULT_TX_BROADCAST_TIMEOUT_SECS,
+	DEFAULT_TX_BROADCAST_TIMEOUT_SECS, DEFAULT_TX_LOOKUP_TIMEOUT_SECS,
 };
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
@@ -620,6 +620,57 @@ impl BitcoindChainSource {
 			}
 		}
 	}
+
+	pub(crate) async fn can_broadcast_transaction(&self, tx: &Transaction) -> Result<bool, Error> {
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(DEFAULT_TX_LOOKUP_TIMEOUT_SECS),
+			self.api_client.test_mempool_accept(tx),
+		);
+
+		match timeout_fut.await {
+			Ok(res) => res.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to test mempool accept for transaction {}: {}",
+					tx.compute_txid(),
+					e
+				);
+				Error::WalletOperationFailed
+			}),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to test mempool accept for transaction {} due to timeout: {}",
+					tx.compute_txid(),
+					e
+				);
+				log_trace!(
+					self.logger,
+					"Failed test mempool accept transaction bytes: {}",
+					log_bytes!(tx.encode())
+				);
+				Err(Error::WalletOperationTimeout)
+			},
+		}
+	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(DEFAULT_TX_LOOKUP_TIMEOUT_SECS),
+			self.api_client.get_raw_transaction(txid),
+		);
+
+		match timeout_fut.await {
+			Ok(res) => res.map_err(|e| {
+				log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+				Error::TxLookupFailed
+			}),
+			Err(e) => {
+				log_error!(self.logger, "Failed to get transaction {} due to timeout: {}", txid, e);
+				Err(Error::TxLookupTimeout)
+			},
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -1179,6 +1230,34 @@ impl BitcoindClient {
 			.collect();
 		Ok(evicted_txids)
 	}
+
+	/// Tests whether the provided transaction would be accepted by the mempool.
+	pub(crate) async fn test_mempool_accept(
+		&self, tx: &Transaction,
+	) -> Result<bool, RpcClientError> {
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::test_mempool_accept_inner(Arc::clone(rpc_client), tx).await
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				// We rely on the internal RPC client to make this call, as this
+				// operation is not supported by Bitcoin Core's REST interface.
+				Self::test_mempool_accept_inner(Arc::clone(rpc_client), tx).await
+			},
+		}
+	}
+
+	async fn test_mempool_accept_inner(
+		rpc_client: Arc<RpcClient>, tx: &Transaction,
+	) -> Result<bool, RpcClientError> {
+		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
+		let tx_array = serde_json::json!([tx_serialized]);
+
+		rpc_client
+			.call_method::<TestMempoolAcceptResponse>("testmempoolaccept", &[tx_array])
+			.await
+			.map(|resp| resp.0)
+	}
 }
 
 impl BlockSource for BitcoindClient {
@@ -1331,6 +1410,23 @@ impl TryInto<GetMempoolEntryResponse> for JsonResponse {
 		};
 
 		Ok(GetMempoolEntryResponse { time, height })
+	}
+}
+
+pub(crate) struct TestMempoolAcceptResponse(pub bool);
+
+impl TryInto<TestMempoolAcceptResponse> for JsonResponse {
+	type Error = String;
+	fn try_into(self) -> Result<TestMempoolAcceptResponse, String> {
+		let array =
+			self.0.as_array().ok_or("Failed to parse testmempoolaccept response".to_string())?;
+		let first =
+			array.first().ok_or("Empty array response from testmempoolaccept".to_string())?;
+		let allowed = first
+			.get("allowed")
+			.and_then(|v| v.as_bool())
+			.ok_or("Missing 'allowed' field in testmempoolaccept response".to_string())?;
+		Ok(TestMempoolAcceptResponse(allowed))
 	}
 }
 

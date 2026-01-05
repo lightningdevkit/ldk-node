@@ -166,8 +166,8 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedPayment,
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PayjoinPayment, PaymentDetails,
+	SpontaneousPayment, UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
@@ -180,6 +180,8 @@ use types::{
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
 pub use vss_client;
 
+use crate::config::{PAYJOIN_RESUME_INTERVAL, PAYJOIN_SESSION_CLEANUP_INTERVAL};
+use crate::payment::payjoin::manager::PayjoinManager;
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
 
@@ -241,6 +243,7 @@ pub struct Node {
 	hrn_resolver: Arc<HRNResolver>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
+	payjoin_manager: Option<Arc<PayjoinManager>>,
 }
 
 impl Node {
@@ -674,6 +677,52 @@ impl Node {
 			});
 		}
 
+		if let Some(ref payjoin_manager) = self.payjoin_manager {
+			// Periodically resume payjoin sessions.
+			let payjoin_manager = Arc::clone(payjoin_manager);
+			let resume_logger = Arc::clone(&self.logger);
+			let mut stop_resume = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut interval = tokio::time::interval(PAYJOIN_RESUME_INTERVAL);
+				interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				loop {
+					tokio::select! {
+						_ = stop_resume.changed() => {
+							log_debug!(resume_logger, "Stopping payjoin session resume task.");
+							return;
+						}
+						_ = interval.tick() => {
+							if let Err(e) = payjoin_manager.resume_payjoin_sessions().await {
+								log_error!(resume_logger, "Failed to resume payjoin sessions: {:?}", e);
+							}
+						}
+					}
+				}
+			});
+
+			// Periodically clean up old completed/failed payjoin sessions.
+			let cleanup_payjoin_manager = Arc::clone(&self.payjoin_manager.as_ref().unwrap());
+			let cleanup_logger = Arc::clone(&self.logger);
+			let mut stop_cleanup = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut interval = tokio::time::interval(PAYJOIN_SESSION_CLEANUP_INTERVAL);
+				interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				loop {
+					tokio::select! {
+						_ = stop_cleanup.changed() => {
+							log_debug!(cleanup_logger, "Stopping payjoin session cleanup task.");
+							return;
+						}
+						_ = interval.tick() => {
+							if let Err(e) = cleanup_payjoin_manager.cleanup_old_sessions() {
+								log_error!(cleanup_logger, "Failed to cleanup old payjoin sessions: {:?}", e);
+							}
+						}
+					}
+				}
+			});
+		}
+
 		log_info!(self.logger, "Startup complete.");
 		*is_running_lock = true;
 		Ok(())
@@ -1017,6 +1066,24 @@ impl Node {
 			Arc::clone(&self.logger),
 			Arc::clone(&self.hrn_resolver),
 		))
+	}
+
+	/// Returns a payment handler allowing to send and receive [Payjoin] payments.
+	///
+	/// [Payjoin]: https://payjoin.org
+	#[cfg(not(feature = "uniffi"))]
+	pub fn payjoin_payment(&self) -> Result<PayjoinPayment, Error> {
+		let manager = self.payjoin_manager.as_ref().ok_or(Error::PayjoinNotConfigured)?;
+		Ok(PayjoinPayment::new(Arc::clone(manager), Arc::clone(&self.is_running)))
+	}
+
+	/// Returns a payment handler allowing to send and receive [Payjoin] payments.
+	///
+	/// [Payjoin]: https://payjoin.org
+	#[cfg(feature = "uniffi")]
+	pub fn payjoin_payment(&self) -> Result<Arc<PayjoinPayment>, Error> {
+		let manager = self.payjoin_manager.as_ref().ok_or(Error::PayjoinNotConfigured)?;
+		Ok(Arc::new(PayjoinPayment::new(Arc::clone(manager), Arc::clone(&self.is_running))))
 	}
 
 	/// Authenticates the user via [LNURL-auth] for the given LNURL string.
