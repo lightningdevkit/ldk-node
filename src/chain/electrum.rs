@@ -15,7 +15,7 @@ use bdk_chain::bdk_core::spk_client::{
 };
 use bdk_electrum::BdkElectrumClient;
 use bdk_wallet::{KeychainKind as BdkKeyChainKind, Update as BdkUpdate};
-use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
+use bitcoin::{FeeRate, Network, OutPoint, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{
 	Batch, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
 };
@@ -287,6 +287,21 @@ impl ElectrumChainSource {
 		for tx in package {
 			electrum_client.broadcast(tx).await;
 		}
+	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(
+					false,
+					"We should have started the chain source before getting transactions"
+				);
+				return Err(Error::TxSyncFailed);
+			};
+
+		electrum_client.get_transaction(txid).await
 	}
 }
 
@@ -651,6 +666,125 @@ impl ElectrumRuntimeClient {
 		}
 
 		Ok(new_fee_rate_cache)
+	}
+
+	async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client = Arc::clone(&self.electrum_client);
+		let txid_copy = *txid;
+
+		let spawn_fut =
+			self.runtime.spawn_blocking(move || electrum_client.transaction_get(&txid_copy));
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(
+				self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs,
+			),
+			spawn_fut,
+		);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(inner_res) => match inner_res {
+					Ok(tx) => Ok(Some(tx)),
+					Err(e) => {
+						// Check if it's a "not found" error
+						let error_str = e.to_string();
+						if error_str.contains("No such mempool or blockchain transaction")
+							|| error_str.contains("not found")
+						{
+							Ok(None)
+						} else {
+							log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+							Err(Error::TxSyncFailed)
+						}
+					},
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+					Err(Error::TxSyncFailed)
+				},
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to get transaction {} due to timeout: {}", txid, e);
+				Err(Error::TxSyncTimeout)
+			},
+		}
+	}
+
+	async fn is_outpoint_spent(&self, outpoint: &OutPoint) -> Result<bool, Error> {
+		// First get the transaction to find the scriptPubKey of the output
+		let tx = match self.get_transaction(&outpoint.txid).await? {
+			Some(tx) => tx,
+			None => {
+				// Transaction doesn't exist, so outpoint can't be spent
+				// (or never existed)
+				return Ok(false);
+			},
+		};
+
+		// Check if the output index is valid
+		let vout = outpoint.vout as usize;
+		if vout >= tx.output.len() {
+			// Invalid output index
+			return Ok(false);
+		}
+
+		let script_pubkey = &tx.output[vout].script_pubkey;
+		let electrum_client = Arc::clone(&self.electrum_client);
+		let script_pubkey_clone = script_pubkey.clone();
+		let outpoint_txid = outpoint.txid;
+		let outpoint_vout = outpoint.vout;
+
+		let spawn_fut = self
+			.runtime
+			.spawn_blocking(move || electrum_client.script_list_unspent(&script_pubkey_clone));
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(
+				self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs,
+			),
+			spawn_fut,
+		);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(inner_res) => match inner_res {
+					Ok(unspent_list) => {
+						// Check if our outpoint is in the unspent list
+						let is_unspent = unspent_list.iter().any(|u| {
+							u.tx_hash == outpoint_txid && u.tx_pos == outpoint_vout as usize
+						});
+						// Return true if spent (not in unspent list)
+						Ok(!is_unspent)
+					},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Failed to check if outpoint {} is spent: {}",
+							outpoint,
+							e
+						);
+						Err(Error::TxSyncFailed)
+					},
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to check if outpoint {} is spent: {}",
+						outpoint,
+						e
+					);
+					Err(Error::TxSyncFailed)
+				},
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to check if outpoint {} is spent due to timeout: {}",
+					outpoint,
+					e
+				);
+				Err(Error::TxSyncTimeout)
+			},
+		}
 	}
 }
 

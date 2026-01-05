@@ -39,6 +39,7 @@ use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
+use crate::payment::payjoin_payment::payjoin_session::PayjoinSession;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
@@ -320,6 +321,8 @@ pub(crate) type BumpTransactionEventHandler =
 	>;
 
 pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>>;
+
+pub(crate) type PayjoinSessionStore = DataStore<PayjoinSession, Arc<Logger>>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///

@@ -12,6 +12,7 @@ mod bolt11;
 mod bolt12;
 mod onchain;
 pub(crate) mod pending_payment_store;
+pub(crate) mod payjoin_payment;
 mod spontaneous;
 pub(crate) mod store;
 mod unified;
