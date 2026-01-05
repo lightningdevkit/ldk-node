@@ -78,6 +78,8 @@ log = { version = "0.4.22", default-features = false, features = ["std"]}
 vss-client = { package = "vss-client-ng", version = "0.4" }
 prost = { version = "0.11.6", default-features = false}
 
+payjoin = { version = "0.24.0", default-features = false, features = ["v2", "io"] }
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
 

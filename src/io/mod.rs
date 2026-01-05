@@ -78,3 +78,7 @@ pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 ///
 /// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 pub(crate) const STATIC_INVOICE_STORE_PRIMARY_NAMESPACE: &str = "static_invoices";
+
+/// The payjoin sessions will be persisted under this key.
+pub(crate) const PAYJOIN_SESSION_STORE_PRIMARY_NAMESPACE: &str = "payjoin_sessions";
+pub(crate) const PAYJOIN_SESSION_STORE_SECONDARY_NAMESPACE: &str = "";
