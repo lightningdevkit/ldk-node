@@ -5,6 +5,13 @@ edition = "2021"
 
 build = "build.rs"
 
+# We use a cfg instead of a feature for genproto to prevent it from being
+# enabled with --all-features. Proto generation is a developer-only tool that
+# requires external dependencies (protoc) and shouldn't be triggered accidentally.
+# This lint configuration tells Cargo that genproto is an expected custom cfg.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(genproto)'] }
+
 [features]
 default = []
 serde = ["dep:serde", "dep:bytes"]

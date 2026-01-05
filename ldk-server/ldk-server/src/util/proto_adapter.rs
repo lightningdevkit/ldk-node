@@ -9,7 +9,7 @@
 
 use crate::api::error::LdkServerError;
 use crate::api::error::LdkServerErrorCode::{
-	AuthError, InternalServerError, InvalidRequestError, LightningError,
+	InternalServerError, InvalidRequestError, LightningError,
 };
 use bytes::Bytes;
 use hex::prelude::*;
@@ -105,37 +105,33 @@ pub(crate) fn channel_config_to_proto(
 }
 
 pub(crate) fn payment_to_proto(payment: PaymentDetails) -> Payment {
-	match payment {
-		PaymentDetails {
-			id,
-			kind,
-			amount_msat,
-			fee_paid_msat,
-			direction,
-			status,
-			latest_update_timestamp,
-		} => Payment {
-			id: id.to_string(),
-			kind: Some(payment_kind_to_proto(kind)),
-			amount_msat,
-			fee_paid_msat,
-			direction: match direction {
-				PaymentDirection::Inbound => {
-					ldk_server_protos::types::PaymentDirection::Inbound.into()
-				},
-				PaymentDirection::Outbound => {
-					ldk_server_protos::types::PaymentDirection::Outbound.into()
-				},
+	let PaymentDetails {
+		id,
+		kind,
+		amount_msat,
+		fee_paid_msat,
+		direction,
+		status,
+		latest_update_timestamp,
+	} = payment;
+
+	Payment {
+		id: id.to_string(),
+		kind: Some(payment_kind_to_proto(kind)),
+		amount_msat,
+		fee_paid_msat,
+		direction: match direction {
+			PaymentDirection::Inbound => ldk_server_protos::types::PaymentDirection::Inbound.into(),
+			PaymentDirection::Outbound => {
+				ldk_server_protos::types::PaymentDirection::Outbound.into()
 			},
-			status: match status {
-				PaymentStatus::Pending => ldk_server_protos::types::PaymentStatus::Pending.into(),
-				PaymentStatus::Succeeded => {
-					ldk_server_protos::types::PaymentStatus::Succeeded.into()
-				},
-				PaymentStatus::Failed => ldk_server_protos::types::PaymentStatus::Failed.into(),
-			},
-			latest_update_timestamp,
 		},
+		status: match status {
+			PaymentStatus::Pending => ldk_server_protos::types::PaymentStatus::Pending.into(),
+			PaymentStatus::Succeeded => ldk_server_protos::types::PaymentStatus::Succeeded.into(),
+			PaymentStatus::Failed => ldk_server_protos::types::PaymentStatus::Failed.into(),
+		},
+		latest_update_timestamp,
 	}
 }
 
@@ -387,6 +383,7 @@ pub(crate) fn pending_sweep_balance_to_proto(
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn forwarded_payment_to_proto(
 	prev_channel_id: ChannelId, next_channel_id: ChannelId,
 	prev_user_channel_id: Option<UserChannelId>, next_user_channel_id: Option<UserChannelId>,
@@ -446,14 +443,12 @@ pub(crate) fn proto_to_bolt11_description(
 pub(crate) fn to_error_response(ldk_error: LdkServerError) -> (ErrorResponse, StatusCode) {
 	let error_code = match ldk_error.error_code {
 		InvalidRequestError => ErrorCode::InvalidRequestError,
-		AuthError => ErrorCode::AuthError,
 		LightningError => ErrorCode::LightningError,
 		InternalServerError => ErrorCode::InternalServerError,
 	} as i32;
 
 	let status = match ldk_error.error_code {
 		InvalidRequestError => StatusCode::BAD_REQUEST,
-		AuthError => StatusCode::UNAUTHORIZED,
 		LightningError => StatusCode::INTERNAL_SERVER_ERROR,
 		InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
 	};

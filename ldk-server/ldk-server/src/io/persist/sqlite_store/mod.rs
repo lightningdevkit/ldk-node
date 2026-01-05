@@ -29,7 +29,6 @@ const LIST_KEYS_MAX_PAGE_SIZE: i32 = 100;
 
 pub struct SqliteStore {
 	connection: Arc<Mutex<Connection>>,
-	data_dir: PathBuf,
 	paginated_kv_table_name: String,
 }
 
@@ -53,18 +52,18 @@ impl SqliteStore {
 				data_dir.display(),
 				e
 			);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})?;
-		let mut db_file_path = data_dir.clone();
+		let mut db_file_path = data_dir;
 		db_file_path.push(db_file_name);
 
 		let connection = Connection::open(db_file_path.clone()).map_err(|e| {
 			let msg =
 				format!("Failed to open/create database file {}: {}", db_file_path.display(), e);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})?;
 
-		let sql = format!("SELECT user_version FROM pragma_user_version");
+		let sql = "SELECT user_version FROM pragma_user_version".to_string();
 		let version_res: u16 = connection.query_row(&sql, [], |row| row.get(0)).unwrap();
 
 		if version_res == 0 {
@@ -78,14 +77,14 @@ impl SqliteStore {
 				)
 				.map_err(|e| {
 					let msg = format!("Failed to set PRAGMA user_version: {}", e);
-					io::Error::new(io::ErrorKind::Other, msg)
+					io::Error::other(msg)
 				})?;
 		} else if version_res > SCHEMA_USER_VERSION {
 			let msg = format!(
 				"Failed to open database: incompatible schema version {}. Expected: {}",
 				version_res, SCHEMA_USER_VERSION
 			);
-			return Err(io::Error::new(io::ErrorKind::Other, msg));
+			return Err(io::Error::other(msg));
 		}
 
 		let create_paginated_kv_table_sql = format!(
@@ -101,7 +100,7 @@ impl SqliteStore {
 
 		connection.execute(&create_paginated_kv_table_sql, []).map_err(|e| {
 			let msg = format!("Failed to create table {}: {}", paginated_kv_table_name, e);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})?;
 
 		let index_creation_time_sql = format!(
@@ -114,16 +113,11 @@ impl SqliteStore {
 				"Failed to create index on creation_time, table {}: {}",
 				paginated_kv_table_name, e
 			);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})?;
 
 		let connection = Arc::new(Mutex::new(connection));
-		Ok(Self { connection, data_dir, paginated_kv_table_name })
-	}
-
-	/// Returns the data directory.
-	pub fn get_data_dir(&self) -> PathBuf {
-		self.data_dir.clone()
+		Ok(Self { connection, paginated_kv_table_name })
 	}
 
 	fn read_internal(
@@ -138,7 +132,7 @@ impl SqliteStore {
 
 		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
 			let msg = format!("Failed to prepare statement: {}", e);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})?;
 
 		let res = stmt
@@ -168,42 +162,10 @@ impl SqliteStore {
 						PrintableString(key),
 						e
 					);
-					io::Error::new(io::ErrorKind::Other, msg)
+					io::Error::other(msg)
 				},
 			})?;
 		Ok(res)
-	}
-
-	fn remove_internal(
-		&self, kv_table_name: &str, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<()> {
-		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
-
-		let locked_conn = self.connection.lock().unwrap();
-
-		let sql = format!("DELETE FROM {} WHERE primary_namespace=:primary_namespace AND secondary_namespace=:secondary_namespace AND key=:key;", kv_table_name);
-
-		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
-			let msg = format!("Failed to prepare statement: {}", e);
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
-
-		stmt.execute(named_params! {
-			":primary_namespace": primary_namespace,
-			":secondary_namespace": secondary_namespace,
-			":key": key,
-		})
-		.map_err(|e| {
-			let msg = format!(
-				"Failed to delete key {}/{}/{}: {}",
-				PrintableString(primary_namespace),
-				PrintableString(secondary_namespace),
-				PrintableString(key),
-				e
-			);
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
-		Ok(())
 	}
 }
 
@@ -236,7 +198,7 @@ impl PaginatedKVStore for SqliteStore {
 
 		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
 			let msg = format!("Failed to prepare statement: {}", e);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})?;
 
 		stmt.execute(named_params! {
@@ -255,19 +217,8 @@ impl PaginatedKVStore for SqliteStore {
 				PrintableString(key),
 				e
 			);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
-	) -> io::Result<()> {
-		self.remove_internal(
-			&self.paginated_kv_table_name,
-			primary_namespace,
-			secondary_namespace,
-			key,
-		)
 	}
 
 	fn list(
@@ -287,7 +238,7 @@ impl PaginatedKVStore for SqliteStore {
 
 		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
 			let msg = format!("Failed to prepare statement: {}", e);
-			io::Error::new(io::ErrorKind::Other, msg)
+			io::Error::other(msg)
 		})?;
 
 		let mut keys: Vec<String> = Vec::new();
@@ -310,14 +261,14 @@ impl PaginatedKVStore for SqliteStore {
 			)
 			.map_err(|e| {
 				let msg = format!("Failed to retrieve queried rows: {}", e);
-				io::Error::new(io::ErrorKind::Other, msg)
+				io::Error::other(msg)
 			})?;
 
 		let mut last_creation_time: Option<i64> = None;
 		for r in rows_iter {
 			let (k, ct) = r.map_err(|e| {
 				let msg = format!("Failed to retrieve queried rows: {}", e);
-				io::Error::new(io::ErrorKind::Other, msg)
+				io::Error::other(msg)
 			})?;
 			keys.push(k);
 			last_creation_time = Some(ct);
@@ -341,15 +292,6 @@ mod tests {
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng};
 	use std::panic::RefUnwindSafe;
-
-	impl Drop for SqliteStore {
-		fn drop(&mut self) {
-			match fs::remove_dir_all(&self.data_dir) {
-				Err(e) => println!("Failed to remove test store directory: {}", e),
-				_ => {},
-			}
-		}
-	}
 
 	#[test]
 	fn read_write_remove_list_persist() {
@@ -422,14 +364,8 @@ mod tests {
 		let read_data = kv_store.read(primary_namespace, secondary_namespace, testkey).unwrap();
 		assert_eq!(data, &*read_data);
 
-		kv_store.remove(primary_namespace, secondary_namespace, testkey, false).unwrap();
-
-		let listed_keys = list_all_keys(primary_namespace, secondary_namespace);
-		assert_eq!(listed_keys.len(), 109);
-
 		// Ensure we have no issue operating with primary_namespace/secondary_namespace/key being KVSTORE_NAMESPACE_KEY_MAX_LEN
-		let max_chars: String =
-			std::iter::repeat('A').take(KVSTORE_NAMESPACE_KEY_MAX_LEN).collect();
+		let max_chars: String = "A".repeat(KVSTORE_NAMESPACE_KEY_MAX_LEN);
 		kv_store.write(&max_chars, &max_chars, &max_chars, 0, &data).unwrap();
 
 		println!("{:?}", listed_keys);
@@ -440,10 +376,5 @@ mod tests {
 
 		let read_data = kv_store.read(&max_chars, &max_chars, &max_chars).unwrap();
 		assert_eq!(data, &*read_data);
-
-		kv_store.remove(&max_chars, &max_chars, &max_chars, false).unwrap();
-
-		let listed_keys = list_all_keys(&max_chars, &max_chars);
-		assert_eq!(listed_keys.len(), 0);
 	}
 }

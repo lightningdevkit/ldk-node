@@ -18,7 +18,7 @@ use std::str::FromStr;
 pub(crate) fn handle_bolt11_send_request(
 	context: Context, request: Bolt11SendRequest,
 ) -> Result<Bolt11SendResponse, LdkServerError> {
-	let invoice = Bolt11Invoice::from_str(&request.invoice.as_str())
+	let invoice = Bolt11Invoice::from_str(request.invoice.as_str())
 		.map_err(|_| ldk_node::NodeError::InvalidInvoice)?;
 
 	let route_parameters = match request.route_parameters {

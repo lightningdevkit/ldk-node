@@ -27,7 +27,7 @@ pub(crate) fn handle_onchain_send_request(
 			)
 		})?;
 
-	let fee_rate = request.fee_rate_sat_per_vb.map(FeeRate::from_sat_per_vb).flatten();
+	let fee_rate = request.fee_rate_sat_per_vb.and_then(FeeRate::from_sat_per_vb);
 	let txid = match (request.amount_sats, request.send_all) {
 		(Some(amount_sats), None) => {
 			context.node.onchain_payment().send_to_address(&address, amount_sats, fee_rate)?

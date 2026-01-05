@@ -19,7 +19,7 @@ pub(crate) fn handle_bolt12_send_request(
 	context: Context, request: Bolt12SendRequest,
 ) -> Result<Bolt12SendResponse, LdkServerError> {
 	let offer =
-		Offer::from_str(&request.offer.as_str()).map_err(|_| ldk_node::NodeError::InvalidOffer)?;
+		Offer::from_str(request.offer.as_str()).map_err(|_| ldk_node::NodeError::InvalidOffer)?;
 
 	let route_parameters = match request.route_parameters {
 		Some(params) => {

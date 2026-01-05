@@ -22,7 +22,7 @@ use tokio::signal::unix::SignalKind;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 
-use crate::io::events::event_publisher::{EventPublisher, NoopEventPublisher};
+use crate::io::events::event_publisher::EventPublisher;
 use crate::io::events::get_event_name;
 #[cfg(feature = "events-rabbitmq")]
 use crate::io::events::rabbitmq::{RabbitMqConfig, RabbitMqEventPublisher};
@@ -81,7 +81,7 @@ fn main() {
 		},
 	};
 
-	let log_file_path = config_file.log_file_path.map(|p| PathBuf::from(p)).unwrap_or_else(|| {
+	let log_file_path = config_file.log_file_path.map(PathBuf::from).unwrap_or_else(|| {
 		let mut default_log_path = PathBuf::from(&config_file.storage_dir_path);
 		default_log_path.push("ldk-server.log");
 		default_log_path
@@ -164,7 +164,9 @@ fn main() {
 			},
 		});
 
-	let event_publisher: Arc<dyn EventPublisher> = Arc::new(NoopEventPublisher);
+	#[cfg(not(feature = "events-rabbitmq"))]
+	let event_publisher: Arc<dyn EventPublisher> =
+		Arc::new(crate::io::events::event_publisher::NoopEventPublisher);
 
 	#[cfg(feature = "events-rabbitmq")]
 	let event_publisher: Arc<dyn EventPublisher> = {
@@ -275,7 +277,7 @@ fn main() {
 								let payment = payment_to_proto(payment_details);
 								upsert_payment_details(&event_node, Arc::clone(&paginated_store), &payment);
 							} else {
-								error!("Unable to find payment with paymentId: {}", payment_id.to_string());
+								error!("Unable to find payment with paymentId: {payment_id}");
 							}
 						},
 						Event::PaymentForwarded {

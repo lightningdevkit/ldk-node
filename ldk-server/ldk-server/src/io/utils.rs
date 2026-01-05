@@ -32,7 +32,7 @@ pub(crate) fn check_namespace_key_validity(
 				PrintableString(secondary_namespace),
 				PrintableString(key)
 			);
-			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+			return Err(std::io::Error::other(msg));
 		}
 
 		if primary_namespace.is_empty() && !secondary_namespace.is_empty() {
@@ -45,7 +45,7 @@ pub(crate) fn check_namespace_key_validity(
 				"Failed to {} {}/{}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.", operation,
 				PrintableString(primary_namespace), PrintableString(secondary_namespace), PrintableString(key)
 			);
-			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+			return Err(std::io::Error::other(msg));
 		}
 
 		if !is_valid_kvstore_str(primary_namespace)
@@ -67,7 +67,7 @@ pub(crate) fn check_namespace_key_validity(
 				PrintableString(secondary_namespace),
 				PrintableString(key)
 			);
-			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+			return Err(std::io::Error::other(msg));
 		}
 	} else {
 		if primary_namespace.is_empty() && !secondary_namespace.is_empty() {
@@ -79,7 +79,7 @@ pub(crate) fn check_namespace_key_validity(
 				"Failed to {} {}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.",
 				operation, PrintableString(primary_namespace), PrintableString(secondary_namespace)
 			);
-			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+			return Err(std::io::Error::other(msg));
 		}
 		if !is_valid_kvstore_str(primary_namespace) || !is_valid_kvstore_str(secondary_namespace) {
 			debug_assert!(
@@ -95,7 +95,7 @@ pub(crate) fn check_namespace_key_validity(
 				PrintableString(primary_namespace),
 				PrintableString(secondary_namespace)
 			);
-			return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+			return Err(std::io::Error::other(msg));
 		}
 	}
 
