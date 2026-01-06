@@ -182,12 +182,12 @@ impl UnifiedPayment {
 
 		let resolved = match instructions {
 			PaymentInstructions::ConfigurableAmount(instr) => {
-				let amount = amount_msat.ok_or_else(|| {
+				let amount_msat = amount_msat.ok_or_else(|| {
 					log_error!(self.logger, "No amount specified. Aborting the payment.");
 					Error::InvalidAmount
 				})?;
 
-				let amt = BPIAmount::from_milli_sats(amount).map_err(|e| {
+				let amt = BPIAmount::from_milli_sats(amount_msat).map_err(|e| {
 					log_error!(self.logger, "Error while converting amount : {:?}", e);
 					Error::InvalidAmount
 				})?;
@@ -210,8 +210,8 @@ impl UnifiedPayment {
 					})?
 			},
 			PaymentInstructions::FixedAmount(instr) => {
-				if let Some(user_amount) = amount_msat {
-					if instr.max_amount().map_or(false, |amt| user_amount < amt.milli_sats()) {
+				if let Some(user_amount_msat) = amount_msat {
+					if instr.max_amount().map_or(false, |amt| user_amount_msat < amt.milli_sats()) {
 						log_error!(self.logger, "Amount specified is less than the amount in the parsed URI. Aborting the payment.");
 						return Err(Error::InvalidAmount);
 					}
