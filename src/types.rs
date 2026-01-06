@@ -29,6 +29,8 @@ use lightning_block_sync::gossip::GossipVerifier;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
+
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
 use crate::config::ChannelConfig;
@@ -276,9 +278,11 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<MessageRouter>,
 	Arc<ChannelManager>,
 	Arc<ChannelManager>,
-	IgnoringMessageHandler,
+	Arc<HRNResolver>,
 	IgnoringMessageHandler,
 >;
+
+pub(crate) type HRNResolver = LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
