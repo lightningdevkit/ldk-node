@@ -941,10 +941,10 @@ impl Node {
 		))
 	}
 
-	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
-	/// and [BOLT 12] payment options.
+	/// Returns a payment handler that supports creating and paying to [BIP 21] URIs with on-chain,
+	/// [BOLT 11], and [BOLT 12] payment options.
 	///
-	/// This handler allows you to send payments to these URIs as well as [BIP 353] HRNs.
+	/// Also supports sending payments to [BIP 353] Human-Readable Names.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
@@ -962,10 +962,10 @@ impl Node {
 		)
 	}
 
-	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
-	/// and [BOLT 12] payment options.
+	/// Returns a payment handler that supports creating and paying to [BIP 21] URIs with on-chain,
+	/// [BOLT 11], and [BOLT 12] payment options.
 	///
-	/// This handler allows you to send payments to these URIs as well as [BIP 353] HRNs.
+	/// Also supports sending payments to [BIP 353] Human-Readable Names.
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md

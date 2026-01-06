@@ -5,10 +5,10 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Holds a payment handler allowing to create [BIP 21] URIs with on-chain, [BOLT 11], and [BOLT 12] payment
-//! options.
+//! Holds a payment handler that supports creating and paying to [BIP 21] URIs with on-chain, [BOLT 11],
+//! and [BOLT 12] payment options.
 //!
-//! It also supports sending payments to these URIs as well as to [BIP 353] Human-Readable Names.
+//! Also supports sending payments to [BIP 353] Human-Readable Names.
 //!
 //! [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 //! [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
@@ -44,12 +44,12 @@ struct Extras {
 	bolt12_offer: Option<Offer>,
 }
 
-/// A payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
-/// option.
+/// A payment handler that supports creating and paying to [BIP 21] URIs with on-chain, [BOLT 11],
+/// and [BOLT 12] payment options.
+///
+/// Also supports sending payments to [BIP 353] Human-Readable Names.
 ///
 /// Should be retrieved by calling [`Node::unified_payment`]
-///
-/// It also supports sending payments to these URIs as well as to [BIP 353] Human-Readable Names.
 ///
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 /// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
@@ -147,7 +147,7 @@ impl UnifiedPayment {
 	/// has an offer and or invoice, it will try to pay the offer first followed by the invoice.
 	/// If they both fail, the on-chain payment will be paid.
 	///
-	/// Returns a `UnifiedPaymentResult` indicating the outcome of the payment. If an error
+	/// Returns a [`UnifiedPaymentResult`] indicating the outcome of the payment. If an error
 	/// occurs, an `Error` is returned detailing the issue encountered.
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
