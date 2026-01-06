@@ -15,6 +15,7 @@
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use std::sync::Arc;
+use std::time::Duration;
 use std::vec::IntoIter;
 
 use bip21::de::ParamKind;
@@ -29,6 +30,7 @@ use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
+use crate::config::HRN_RESOLUTION_TIMEOUT_SECS;
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
@@ -159,17 +161,24 @@ impl UnifiedPayment {
 		&self, uri_str: &str, amount_msat: Option<u64>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<UnifiedPaymentResult, Error> {
-		let instructions = PaymentInstructions::parse(
+		let parse_fut = PaymentInstructions::parse(
 			uri_str,
 			self.config.network,
 			self.hrn_resolver.as_ref(),
 			false,
-		)
-		.await
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
-			Error::UriParameterParsingFailed
-		})?;
+		);
+
+		let instructions =
+			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
+				.await
+				.map_err(|e| {
+					log_error!(self.logger, "Payment instructions resolution timed out: {:?}", e);
+					Error::UriParameterParsingFailed
+				})?
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
+					Error::UriParameterParsingFailed
+				})?;
 
 		let resolved = match instructions {
 			PaymentInstructions::ConfigurableAmount(instr) => {
@@ -183,10 +192,22 @@ impl UnifiedPayment {
 					Error::InvalidAmount
 				})?;
 
-				instr.set_amount(amt, self.hrn_resolver.as_ref()).await.map_err(|e| {
-					log_error!(self.logger, "Failed to set amount: {:?}", e);
-					Error::InvalidAmount
-				})?
+				let fut = instr.set_amount(amt, self.hrn_resolver.as_ref());
+
+				tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), fut)
+					.await
+					.map_err(|e| {
+						log_error!(
+							self.logger,
+							"Payment instructions resolution timed out: {:?}",
+							e
+						);
+						Error::UriParameterParsingFailed
+					})?
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to set amount: {:?}", e);
+						Error::InvalidAmount
+					})?
 			},
 			PaymentInstructions::FixedAmount(instr) => {
 				if let Some(user_amount) = amount_msat {

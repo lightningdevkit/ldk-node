@@ -96,6 +96,9 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 // The timeout after which we abort a external scores sync operation.
 pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 
+// The timeout after which we abort a parsing/looking up an HRN resolution.
+pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
+
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
 ///
