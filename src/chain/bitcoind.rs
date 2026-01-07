@@ -205,14 +205,10 @@ impl BitcoindChainSource {
 							unix_time_secs_opt;
 						locked_node_metrics.latest_onchain_wallet_sync_timestamp =
 							unix_time_secs_opt;
-						write_node_metrics(
-							&*locked_node_metrics,
-							Arc::clone(&self.kv_store),
-							Arc::clone(&self.logger),
-						)
-						.unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to persist node metrics: {}", e);
-						});
+						write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to persist node metrics: {}", e);
+							});
 					}
 					break;
 				},
@@ -420,11 +416,11 @@ impl BitcoindChainSource {
 				*self.latest_chain_tip.write().unwrap() = Some(tip);
 
 				periodically_archive_fully_resolved_monitors(
-					Arc::clone(&channel_manager),
-					chain_monitor,
-					Arc::clone(&self.kv_store),
-					Arc::clone(&self.logger),
-					Arc::clone(&self.node_metrics),
+					&*channel_manager,
+					&*chain_monitor,
+					&*self.kv_store,
+					&*self.logger,
+					&*self.node_metrics,
 				)?;
 			},
 			Ok(_) => {},
@@ -469,11 +465,7 @@ impl BitcoindChainSource {
 		locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
 		locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
 
-		write_node_metrics(
-			&*locked_node_metrics,
-			Arc::clone(&self.kv_store),
-			Arc::clone(&self.logger),
-		)?;
+		write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
 
 		Ok(())
 	}
@@ -586,11 +578,7 @@ impl BitcoindChainSource {
 		{
 			let mut locked_node_metrics = self.node_metrics.write().unwrap();
 			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
-			write_node_metrics(
-				&*locked_node_metrics,
-				Arc::clone(&self.kv_store),
-				Arc::clone(&self.logger),
-			)?;
+			write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
 		}
 
 		Ok(())

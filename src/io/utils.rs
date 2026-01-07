@@ -88,7 +88,7 @@ pub(crate) fn read_or_generate_seed_file(
 
 /// Read a previously persisted [`NetworkGraph`] from the store.
 pub(crate) async fn read_network_graph<L: Deref + Clone>(
-	kv_store: Arc<DynStore>, logger: L,
+	kv_store: &DynStore, logger: L,
 ) -> Result<NetworkGraph<L>, std::io::Error>
 where
 	L::Target: LdkLogger,
@@ -108,7 +108,7 @@ where
 
 /// Read a previously persisted [`ProbabilisticScorer`] from the store.
 pub(crate) async fn read_scorer<G: Deref<Target = NetworkGraph<L>>, L: Deref + Clone>(
-	kv_store: Arc<DynStore>, network_graph: G, logger: L,
+	kv_store: &DynStore, network_graph: G, logger: L,
 ) -> Result<ProbabilisticScorer<G, L>, std::io::Error>
 where
 	L::Target: LdkLogger,
@@ -130,7 +130,7 @@ where
 
 /// Read previously persisted external pathfinding scores from the cache.
 pub(crate) async fn read_external_pathfinding_scores_from_cache<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
+	kv_store: &DynStore, logger: L,
 ) -> Result<ChannelLiquidities, std::io::Error>
 where
 	L::Target: LdkLogger,
@@ -150,7 +150,7 @@ where
 
 /// Persist external pathfinding scores to the cache.
 pub(crate) async fn write_external_pathfinding_scores_to_cache<L: Deref>(
-	kv_store: Arc<DynStore>, data: &ChannelLiquidities, logger: L,
+	kv_store: &DynStore, data: &ChannelLiquidities, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
@@ -218,7 +218,7 @@ where
 
 /// Read previously persisted payments information from the store.
 pub(crate) async fn read_payments<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
+	kv_store: &DynStore, logger: L,
 ) -> Result<Vec<PaymentDetails>, std::io::Error>
 where
 	L::Target: LdkLogger,
@@ -323,7 +323,7 @@ pub(crate) async fn read_output_sweeper(
 }
 
 pub(crate) async fn read_node_metrics<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
+	kv_store: &DynStore, logger: L,
 ) -> Result<NodeMetrics, std::io::Error>
 where
 	L::Target: LdkLogger,
@@ -342,7 +342,7 @@ where
 }
 
 pub(crate) fn write_node_metrics<L: Deref>(
-	node_metrics: &NodeMetrics, kv_store: Arc<DynStore>, logger: L,
+	node_metrics: &NodeMetrics, kv_store: &DynStore, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
@@ -469,7 +469,7 @@ macro_rules! impl_read_write_change_set_type {
 		$key:expr
 	) => {
 		pub(crate) fn $read_name<L: Deref>(
-			kv_store: Arc<DynStore>, logger: L,
+			kv_store: &DynStore, logger: L,
 		) -> Result<Option<$change_set_type>, std::io::Error>
 		where
 			L::Target: LdkLogger,
@@ -510,7 +510,7 @@ macro_rules! impl_read_write_change_set_type {
 		}
 
 		pub(crate) fn $write_name<L: Deref>(
-			value: &$change_set_type, kv_store: Arc<DynStore>, logger: L,
+			value: &$change_set_type, kv_store: &DynStore, logger: L,
 		) -> Result<(), std::io::Error>
 		where
 			L::Target: LdkLogger,
@@ -588,41 +588,35 @@ impl_read_write_change_set_type!(
 
 // Reads the full BdkWalletChangeSet or returns default fields
 pub(crate) fn read_bdk_wallet_change_set(
-	kv_store: Arc<DynStore>, logger: Arc<Logger>,
+	kv_store: &DynStore, logger: &Logger,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 
 	// We require a descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(descriptor) =
-		read_bdk_wallet_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
-	{
+	if let Some(descriptor) = read_bdk_wallet_descriptor(kv_store, logger)? {
 		change_set.descriptor = Some(descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a change_descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(change_descriptor) =
-		read_bdk_wallet_change_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
-	{
+	if let Some(change_descriptor) = read_bdk_wallet_change_descriptor(kv_store, logger)? {
 		change_set.change_descriptor = Some(change_descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a network and return `None` to signal creation of a new wallet otherwise.
-	if let Some(network) = read_bdk_wallet_network(Arc::clone(&kv_store), Arc::clone(&logger))? {
+	if let Some(network) = read_bdk_wallet_network(kv_store, logger)? {
 		change_set.network = Some(network);
 	} else {
 		return Ok(None);
 	}
 
-	read_bdk_wallet_local_chain(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_local_chain(&*kv_store, logger)?
 		.map(|local_chain| change_set.local_chain = local_chain);
-	read_bdk_wallet_tx_graph(Arc::clone(&kv_store), Arc::clone(&logger))?
-		.map(|tx_graph| change_set.tx_graph = tx_graph);
-	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger))?
-		.map(|indexer| change_set.indexer = indexer);
+	read_bdk_wallet_tx_graph(&*kv_store, logger)?.map(|tx_graph| change_set.tx_graph = tx_graph);
+	read_bdk_wallet_indexer(&*kv_store, logger)?.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }
 

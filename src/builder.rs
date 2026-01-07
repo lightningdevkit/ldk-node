@@ -1053,7 +1053,7 @@ fn build_with_store_internal(
 
 	// Initialize the status fields.
 	let node_metrics = match runtime
-		.block_on(async { read_node_metrics(Arc::clone(&kv_store), Arc::clone(&logger)).await })
+		.block_on(async { read_node_metrics(&*kv_store, Arc::clone(&logger)).await })
 	{
 		Ok(metrics) => Arc::new(RwLock::new(metrics)),
 		Err(e) => {
@@ -1068,21 +1068,20 @@ fn build_with_store_internal(
 	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
 	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 
-	let payment_store = match runtime
-		.block_on(async { read_payments(Arc::clone(&kv_store), Arc::clone(&logger)).await })
-	{
-		Ok(payments) => Arc::new(PaymentStore::new(
-			payments,
-			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
-			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
-			Arc::clone(&kv_store),
-			Arc::clone(&logger),
-		)),
-		Err(e) => {
-			log_error!(logger, "Failed to read payment data from store: {}", e);
-			return Err(BuildError::ReadFailed);
-		},
-	};
+	let payment_store =
+		match runtime.block_on(async { read_payments(&*kv_store, Arc::clone(&logger)).await }) {
+			Ok(payments) => Arc::new(PaymentStore::new(
+				payments,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+				Arc::clone(&kv_store),
+				Arc::clone(&logger),
+			)),
+			Err(e) => {
+				log_error!(logger, "Failed to read payment data from store: {}", e);
+				return Err(BuildError::ReadFailed);
+			},
+		};
 
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
@@ -1298,7 +1297,7 @@ fn build_with_store_internal(
 
 	// Initialize the network graph, scorer, and router
 	let network_graph = match runtime
-		.block_on(async { read_network_graph(Arc::clone(&kv_store), Arc::clone(&logger)).await })
+		.block_on(async { read_network_graph(&*kv_store, Arc::clone(&logger)).await })
 	{
 		Ok(graph) => Arc::new(graph),
 		Err(e) => {
@@ -1312,7 +1311,7 @@ fn build_with_store_internal(
 	};
 
 	let local_scorer = match runtime.block_on(async {
-		read_scorer(Arc::clone(&kv_store), Arc::clone(&network_graph), Arc::clone(&logger)).await
+		read_scorer(&*kv_store, Arc::clone(&network_graph), Arc::clone(&logger)).await
 	}) {
 		Ok(scorer) => scorer,
 		Err(e) => {
@@ -1330,8 +1329,7 @@ fn build_with_store_internal(
 
 	// Restore external pathfinding scores from cache if possible.
 	match runtime.block_on(async {
-		read_external_pathfinding_scores_from_cache(Arc::clone(&kv_store), Arc::clone(&logger))
-			.await
+		read_external_pathfinding_scores_from_cache(&*kv_store, Arc::clone(&logger)).await
 	}) {
 		Ok(external_scores) => {
 			scorer.lock().unwrap().merge(external_scores, cur_time);
@@ -1490,15 +1488,11 @@ fn build_with_store_internal(
 			{
 				let mut locked_node_metrics = node_metrics.write().unwrap();
 				locked_node_metrics.latest_rgs_snapshot_timestamp = None;
-				write_node_metrics(
-					&*locked_node_metrics,
-					Arc::clone(&kv_store),
-					Arc::clone(&logger),
-				)
-				.map_err(|e| {
-					log_error!(logger, "Failed writing to store: {}", e);
-					BuildError::WriteFailed
-				})?;
+				write_node_metrics(&*locked_node_metrics, &*kv_store, Arc::clone(&logger))
+					.map_err(|e| {
+						log_error!(logger, "Failed writing to store: {}", e);
+						BuildError::WriteFailed
+					})?;
 			}
 			p2p_source
 		},

@@ -291,7 +291,7 @@ impl Node {
 									{
 										let mut locked_node_metrics = gossip_node_metrics.write().unwrap();
 										locked_node_metrics.latest_rgs_snapshot_timestamp = Some(updated_timestamp);
-										write_node_metrics(&*locked_node_metrics, Arc::clone(&gossip_sync_store), Arc::clone(&gossip_sync_logger))
+										write_node_metrics(&*locked_node_metrics, &*gossip_sync_store, Arc::clone(&gossip_sync_logger))
 											.unwrap_or_else(|e| {
 												log_error!(gossip_sync_logger, "Persistence failed: {}", e);
 											});
@@ -507,7 +507,7 @@ impl Node {
 								{
 									let mut locked_node_metrics = bcast_node_metrics.write().unwrap();
 									locked_node_metrics.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt;
-									write_node_metrics(&*locked_node_metrics, Arc::clone(&bcast_store), Arc::clone(&bcast_logger))
+									write_node_metrics(&*locked_node_metrics, &*bcast_store, Arc::clone(&bcast_logger))
 										.unwrap_or_else(|e| {
 											log_error!(bcast_logger, "Persistence failed: {}", e);
 										});
