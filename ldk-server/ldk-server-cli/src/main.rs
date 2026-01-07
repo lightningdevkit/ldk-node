@@ -24,10 +24,13 @@ use ldk_server_client::ldk_server_protos::api::{
 	SpliceOutResponse, UpdateChannelConfigRequest, UpdateChannelConfigResponse,
 };
 use ldk_server_client::ldk_server_protos::types::{
-	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig, PageToken, Payment,
+	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig, PageToken,
 	RouteParametersConfig,
 };
 use serde::Serialize;
+use types::CliListPaymentsResponse;
+
+mod types;
 
 // Having these default values as constants in the Proto file and
 // importing/reusing them here might be better, but Proto3 removed
@@ -178,9 +181,12 @@ enum Commands {
 	ListPayments {
 		#[arg(short, long)]
 		#[arg(
-			help = "Minimum number of payments to return. If not provided, only the first page of the paginated list is returned."
+			help = "Fetch at least this many payments by iterating through multiple pages. Returns combined results with the last page token. If not provided, returns only a single page."
 		)]
 		number_of_payments: Option<u64>,
+		#[arg(long)]
+		#[arg(help = "Page token to continue from a previous page (format: token:index)")]
+		page_token: Option<String>,
 	},
 	UpdateChannelConfig {
 		#[arg(short, long)]
@@ -416,12 +422,15 @@ async fn main() {
 				client.list_channels(ListChannelsRequest {}).await,
 			);
 		},
-		Commands::ListPayments { number_of_payments } => {
-			handle_response_result::<_, ListPaymentsResponse>(
-				list_n_payments(client, number_of_payments)
-					.await
-					// todo: handle pagination properly
-					.map(|payments| ListPaymentsResponse { payments, next_page_token: None }),
+		Commands::ListPayments { number_of_payments, page_token } => {
+			let page_token = if let Some(token_str) = page_token {
+				Some(parse_page_token(&token_str).unwrap_or_else(|e| handle_error(e)))
+			} else {
+				None
+			};
+
+			handle_response_result::<_, CliListPaymentsResponse>(
+				handle_list_payments(client, number_of_payments, page_token).await,
 			);
 		},
 		Commands::UpdateChannelConfig {
@@ -475,24 +484,37 @@ fn build_open_channel_config(
 	})
 }
 
+async fn handle_list_payments(
+	client: LdkServerClient, number_of_payments: Option<u64>, initial_page_token: Option<PageToken>,
+) -> Result<ListPaymentsResponse, LdkServerError> {
+	if let Some(count) = number_of_payments {
+		list_n_payments(client, count, initial_page_token).await
+	} else {
+		// Fetch single page
+		client.list_payments(ListPaymentsRequest { page_token: initial_page_token }).await
+	}
+}
+
 async fn list_n_payments(
-	client: LdkServerClient, number_of_payments: Option<u64>,
-) -> Result<Vec<Payment>, LdkServerError> {
-	let mut payments = Vec::new();
-	let mut page_token: Option<PageToken> = None;
-	// If no count is specified, just list the first page.
-	let target_count = number_of_payments.unwrap_or(0);
+	client: LdkServerClient, target_count: u64, initial_page_token: Option<PageToken>,
+) -> Result<ListPaymentsResponse, LdkServerError> {
+	let mut payments = Vec::with_capacity(target_count as usize);
+	let mut page_token = initial_page_token;
+	let mut next_page_token;
 
 	loop {
 		let response = client.list_payments(ListPaymentsRequest { page_token }).await?;
 
 		payments.extend(response.payments);
-		if payments.len() >= target_count as usize || response.next_page_token.is_none() {
+		next_page_token = response.next_page_token;
+
+		if payments.len() >= target_count as usize || next_page_token.is_none() {
 			break;
 		}
-		page_token = response.next_page_token;
+		page_token = next_page_token;
 	}
-	Ok(payments)
+
+	Ok(ListPaymentsResponse { payments, next_page_token })
 }
 
 fn handle_response_result<Rs, Js>(response: Result<Rs, LdkServerError>)
@@ -515,6 +537,20 @@ where
 			handle_error(e);
 		},
 	}
+}
+
+fn parse_page_token(token_str: &str) -> Result<PageToken, LdkServerError> {
+	let parts: Vec<&str> = token_str.split(':').collect();
+	if parts.len() != 2 {
+		return Err(LdkServerError::new(
+			InternalError,
+			"Page token must be in format 'token:index'".to_string(),
+		));
+	}
+	let index = parts[1]
+		.parse::<i64>()
+		.map_err(|_| LdkServerError::new(InternalError, "Invalid page token index".to_string()))?;
+	Ok(PageToken { token: parts[0].to_string(), index })
 }
 
 fn handle_error(e: LdkServerError) -> ! {
