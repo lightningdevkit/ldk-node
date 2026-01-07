@@ -23,7 +23,8 @@ use common::{
 	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
 	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
+	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType,
+	TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -2316,4 +2317,122 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 			.confirmations,
 		Some(6)
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn payment_persistence_after_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	// Setup nodes manually so we can restart node_a with the same config
+	println!("== Node A ==");
+	let mut config_a = random_config(true);
+	config_a.store_type = TestStoreType::Sqlite;
+
+	let num_payments = 200;
+	let payment_amount_msat = 1_000_000; // 1000 sats per payment
+
+	{
+		let node_a = setup_node(&chain_source, config_a.clone());
+
+		println!("\n== Node B ==");
+		let config_b = random_config(true);
+		let node_b = setup_node(&chain_source, config_b);
+
+		let addr_a = node_a.onchain_payment().new_address().unwrap();
+		let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+		// Premine sufficient funds for a large channel and many payments
+		let premine_amount_sat = 10_000_000;
+		premine_and_distribute_funds(
+			&bitcoind.client,
+			&electrsd.client,
+			vec![addr_a, addr_b],
+			Amount::from_sat(premine_amount_sat),
+		)
+		.await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+		assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+		assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+		// Open a large channel from node_a to node_b
+		let channel_amount_sat = 5_000_000;
+		open_channel(&node_a, &node_b, channel_amount_sat, true, &electrsd).await;
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+		expect_channel_ready_event!(node_a, node_b.node_id());
+		expect_channel_ready_event!(node_b, node_a.node_id());
+
+		// Send 200 payments from node_a to node_b
+		println!("\nSending {} payments from A to B...", num_payments);
+		let invoice_description =
+			Bolt11InvoiceDescription::Direct(Description::new(String::from("test")).unwrap());
+
+		for i in 0..num_payments {
+			let invoice = node_b
+				.bolt11_payment()
+				.receive(payment_amount_msat, &invoice_description.clone().into(), 3600)
+				.unwrap();
+			let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+			expect_event!(node_a, PaymentSuccessful);
+			expect_event!(node_b, PaymentReceived);
+
+			if (i + 1) % 50 == 0 {
+				println!("Completed {} payments", i + 1);
+			}
+
+			// Verify payment succeeded
+			assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+		}
+		println!("All {} payments completed successfully", num_payments);
+
+		// Verify node_a has 200 outbound Bolt11 payments before shutdown
+		let outbound_payments_before = node_a.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Bolt11 { .. })
+		});
+		assert_eq!(outbound_payments_before.len(), num_payments);
+
+		// Shut down both nodes
+		println!("\nShutting down nodes...");
+		node_a.stop().unwrap();
+		node_b.stop().unwrap();
+	}
+
+	// Restart node_a with the same config
+	println!("\nRestarting node A...");
+	let restarted_node_a = setup_node(&chain_source, config_a);
+
+	// Assert all 200 payments are still in the store
+	let outbound_payments_after = restarted_node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
+	});
+	assert_eq!(
+		outbound_payments_after.len(),
+		num_payments,
+		"Expected {} payments after restart, found {}",
+		num_payments,
+		outbound_payments_after.len()
+	);
+
+	// Verify all payments have the correct status
+	for payment in &outbound_payments_after {
+		assert_eq!(
+			payment.status,
+			PaymentStatus::Succeeded,
+			"Payment {:?} has unexpected status {:?}",
+			payment.id,
+			payment.status
+		);
+		assert_eq!(payment.amount_msat, Some(payment_amount_msat));
+	}
+
+	println!(
+		"Successfully verified {} payments persisted after restart",
+		outbound_payments_after.len()
+	);
+
+	restarted_node_a.stop().unwrap();
 }
