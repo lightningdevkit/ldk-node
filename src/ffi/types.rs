@@ -53,6 +53,7 @@ pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, Nod
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
+	payment_kind_get_payment_hash, payment_kind_get_preimage, payment_kind_get_secret,
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
 pub use crate::payment::QrPaymentResult;

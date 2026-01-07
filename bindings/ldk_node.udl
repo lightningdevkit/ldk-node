@@ -1,6 +1,11 @@
 namespace ldk_node {
 	Mnemonic generate_entropy_mnemonic(WordCount? word_count);
 	Config default_config();
+
+	// PaymentKind Accessors
+	PaymentHash? payment_kind_get_payment_hash(PaymentKind kind);
+	PaymentPreimage? payment_kind_get_preimage(PaymentKind kind);
+	PaymentSecret? payment_kind_get_secret(PaymentKind kind);
 };
 
 dictionary Config {

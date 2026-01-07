@@ -529,6 +529,24 @@ impl PaymentKind {
 	}
 }
 
+#[cfg(feature = "uniffi")]
+#[doc(hidden)]
+pub fn payment_kind_get_payment_hash(kind: PaymentKind) -> Option<PaymentHash> {
+	kind.payment_hash()
+}
+
+#[cfg(feature = "uniffi")]
+#[doc(hidden)]
+pub fn payment_kind_get_preimage(kind: PaymentKind) -> Option<PaymentPreimage> {
+	kind.preimage()
+}
+
+#[cfg(feature = "uniffi")]
+#[doc(hidden)]
+pub fn payment_kind_get_secret(kind: PaymentKind) -> Option<PaymentSecret> {
+	kind.secret()
+}
+
 /// Represents the confirmation status of a transaction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ConfirmationStatus {
