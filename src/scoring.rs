@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -74,15 +73,14 @@ async fn sync_external_scores(
 			return;
 		},
 	};
-	let body = match response.bytes().await {
+	let reader = match response.bytes().await {
 		Ok(bytes) => bytes,
 		Err(e) => {
 			log_error!(logger, "Failed to read external scores update: {}", e);
 			return;
 		},
 	};
-	let mut reader = Cursor::new(body);
-	match ChannelLiquidities::read(&mut reader) {
+	match ChannelLiquidities::read(&mut &*reader) {
 		Ok(liquidities) => {
 			if let Err(e) = write_external_pathfinding_scores_to_cache(
 				Arc::clone(&kv_store),

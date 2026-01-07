@@ -605,7 +605,6 @@ impl StorableObjectUpdate<PaymentDetails> for PaymentDetailsUpdate {
 
 #[cfg(test)]
 mod tests {
-	use bitcoin::io::Cursor;
 	use lightning::util::ser::Readable;
 
 	use super::*;
@@ -657,16 +656,12 @@ mod tests {
 			let old_bolt11_encoded = old_bolt11_payment.encode();
 			assert_eq!(
 				old_bolt11_payment,
-				OldPaymentDetails::read(&mut Cursor::new(old_bolt11_encoded.clone())).unwrap()
+				OldPaymentDetails::read(&mut &*old_bolt11_encoded.clone()).unwrap()
 			);
 
-			let bolt11_decoded =
-				PaymentDetails::read(&mut Cursor::new(old_bolt11_encoded)).unwrap();
+			let bolt11_decoded = PaymentDetails::read(&mut &*old_bolt11_encoded).unwrap();
 			let bolt11_reencoded = bolt11_decoded.encode();
-			assert_eq!(
-				bolt11_decoded,
-				PaymentDetails::read(&mut Cursor::new(bolt11_reencoded)).unwrap()
-			);
+			assert_eq!(bolt11_decoded, PaymentDetails::read(&mut &*bolt11_reencoded).unwrap());
 
 			match bolt11_decoded.kind {
 				PaymentKind::Bolt11 { hash: h, preimage: p, secret: s } => {
@@ -700,15 +695,14 @@ mod tests {
 			let old_bolt11_jit_encoded = old_bolt11_jit_payment.encode();
 			assert_eq!(
 				old_bolt11_jit_payment,
-				OldPaymentDetails::read(&mut Cursor::new(old_bolt11_jit_encoded.clone())).unwrap()
+				OldPaymentDetails::read(&mut &*old_bolt11_jit_encoded.clone()).unwrap()
 			);
 
-			let bolt11_jit_decoded =
-				PaymentDetails::read(&mut Cursor::new(old_bolt11_jit_encoded)).unwrap();
+			let bolt11_jit_decoded = PaymentDetails::read(&mut &*old_bolt11_jit_encoded).unwrap();
 			let bolt11_jit_reencoded = bolt11_jit_decoded.encode();
 			assert_eq!(
 				bolt11_jit_decoded,
-				PaymentDetails::read(&mut Cursor::new(bolt11_jit_reencoded)).unwrap()
+				PaymentDetails::read(&mut &*bolt11_jit_reencoded).unwrap()
 			);
 
 			match bolt11_jit_decoded.kind {
@@ -746,15 +740,14 @@ mod tests {
 			let old_spontaneous_encoded = old_spontaneous_payment.encode();
 			assert_eq!(
 				old_spontaneous_payment,
-				OldPaymentDetails::read(&mut Cursor::new(old_spontaneous_encoded.clone())).unwrap()
+				OldPaymentDetails::read(&mut &*old_spontaneous_encoded.clone()).unwrap()
 			);
 
-			let spontaneous_decoded =
-				PaymentDetails::read(&mut Cursor::new(old_spontaneous_encoded)).unwrap();
+			let spontaneous_decoded = PaymentDetails::read(&mut &*old_spontaneous_encoded).unwrap();
 			let spontaneous_reencoded = spontaneous_decoded.encode();
 			assert_eq!(
 				spontaneous_decoded,
-				PaymentDetails::read(&mut Cursor::new(spontaneous_reencoded)).unwrap()
+				PaymentDetails::read(&mut &*spontaneous_reencoded).unwrap()
 			);
 
 			match spontaneous_decoded.kind {

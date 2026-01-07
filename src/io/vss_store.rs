@@ -745,11 +745,10 @@ async fn determine_and_write_schema_version(
 			})?
 			.0;
 
-		let schema_version: VssSchemaVersion = Readable::read(&mut io::Cursor::new(decrypted))
-			.map_err(|e| {
-				let msg = format!("Failed to decode schema version: {}", e);
-				Error::new(ErrorKind::Other, msg)
-			})?;
+		let schema_version: VssSchemaVersion = Readable::read(&mut &*decrypted).map_err(|e| {
+			let msg = format!("Failed to decode schema version: {}", e);
+			Error::new(ErrorKind::Other, msg)
+		})?;
 		Ok(schema_version)
 	} else {
 		// The schema version wasn't present, this either means we're running for the first time *or* it's V0 pre-migration (predating writing of the schema version).

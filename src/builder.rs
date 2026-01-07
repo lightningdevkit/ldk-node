@@ -21,7 +21,6 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::{chainmonitor, BestBlock, Watch};
-use lightning::io::Cursor;
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
@@ -1386,13 +1385,12 @@ fn build_with_store_internal(
 
 	// Initialize the ChannelManager
 	let channel_manager = {
-		if let Ok(res) = KVStoreSync::read(
+		if let Ok(reader) = KVStoreSync::read(
 			&*kv_store,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		) {
-			let mut reader = Cursor::new(res);
 			let channel_monitor_references =
 				channel_monitors.iter().map(|(_, chanmon)| chanmon).collect();
 			let read_args = ChannelManagerReadArgs::new(
@@ -1409,7 +1407,7 @@ fn build_with_store_internal(
 				channel_monitor_references,
 			);
 			let (_hash, channel_manager) =
-				<(BlockHash, ChannelManager)>::read(&mut reader, read_args).map_err(|e| {
+				<(BlockHash, ChannelManager)>::read(&mut &*reader, read_args).map_err(|e| {
 					log_error!(logger, "Failed to read channel manager from store: {}", e);
 					BuildError::ReadFailed
 				})?;
