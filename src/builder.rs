@@ -1597,10 +1597,11 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
-	let peer_manager_clone = Arc::clone(&peer_manager);
-
+	let peer_manager_clone = Arc::downgrade(&peer_manager);
 	hrn_resolver.register_post_queue_action(Box::new(move || {
-		peer_manager_clone.process_events();
+		if let Some(upgraded_pointer) = peer_manager_clone.upgrade() {
+			upgraded_pointer.process_events();
+		}
 	}));
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
