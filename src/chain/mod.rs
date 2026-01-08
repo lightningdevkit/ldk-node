@@ -21,10 +21,9 @@ use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
 use crate::config::{
 	BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::io::utils::write_node_metrics;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
@@ -485,23 +484,4 @@ impl Filter for ChainSource {
 			ChainSourceKind::Bitcoind { .. } => (),
 		}
 	}
-}
-
-fn periodically_archive_fully_resolved_monitors(
-	channel_manager: &ChannelManager, chain_monitor: &ChainMonitor, kv_store: &DynStore,
-	logger: &Logger, node_metrics: &RwLock<NodeMetrics>,
-) -> Result<(), Error> {
-	let mut locked_node_metrics = node_metrics.write().unwrap();
-	let cur_height = channel_manager.current_best_block().height;
-	let should_archive = locked_node_metrics
-		.latest_channel_monitor_archival_height
-		.as_ref()
-		.map_or(true, |h| cur_height >= h + RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL);
-
-	if should_archive {
-		chain_monitor.archive_fully_resolved_channel_monitors();
-		locked_node_metrics.latest_channel_monitor_archival_height = Some(cur_height);
-		write_node_metrics(&*locked_node_metrics, kv_store, logger)?;
-	}
-	Ok(())
 }

@@ -728,8 +728,6 @@ impl Node {
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp;
 		let latest_node_announcement_broadcast_timestamp =
 			locked_node_metrics.latest_node_announcement_broadcast_timestamp;
-		let latest_channel_monitor_archival_height =
-			locked_node_metrics.latest_channel_monitor_archival_height;
 
 		NodeStatus {
 			is_running,
@@ -740,7 +738,6 @@ impl Node {
 			latest_rgs_snapshot_timestamp,
 			latest_pathfinding_scores_sync_timestamp,
 			latest_node_announcement_broadcast_timestamp,
-			latest_channel_monitor_archival_height,
 		}
 	}
 
@@ -1806,10 +1803,6 @@ pub struct NodeStatus {
 	///
 	/// Will be `None` if we have no public channels or we haven't broadcasted yet.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
-	/// The block height when we last archived closed channel monitor data.
-	///
-	/// Will be `None` if we haven't archived any monitors of closed channels yet.
-	pub latest_channel_monitor_archival_height: Option<u32>,
 }
 
 /// Status fields that are persisted across restarts.
@@ -1821,7 +1814,6 @@ pub(crate) struct NodeMetrics {
 	latest_rgs_snapshot_timestamp: Option<u32>,
 	latest_pathfinding_scores_sync_timestamp: Option<u64>,
 	latest_node_announcement_broadcast_timestamp: Option<u64>,
-	latest_channel_monitor_archival_height: Option<u32>,
 }
 
 impl Default for NodeMetrics {
@@ -1833,7 +1825,6 @@ impl Default for NodeMetrics {
 			latest_rgs_snapshot_timestamp: None,
 			latest_pathfinding_scores_sync_timestamp: None,
 			latest_node_announcement_broadcast_timestamp: None,
-			latest_channel_monitor_archival_height: None,
 		}
 	}
 }
@@ -1845,7 +1836,8 @@ impl_writeable_tlv_based!(NodeMetrics, {
 	(4, latest_fee_rate_cache_update_timestamp, option),
 	(6, latest_rgs_snapshot_timestamp, option),
 	(8, latest_node_announcement_broadcast_timestamp, option),
-	(10, latest_channel_monitor_archival_height, option),
+	// 10 used to be latest_channel_monitor_archival_height
+	(10, _legacy_latest_channel_monitor_archival_height, (legacy, Option<u32>, |_: &NodeMetrics| None::<Option<u32>> )),
 });
 
 pub(crate) fn total_anchor_channels_reserve_sats(

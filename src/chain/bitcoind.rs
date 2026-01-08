@@ -29,7 +29,7 @@ use lightning_block_sync::{
 };
 use serde::Serialize;
 
-use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
+use super::WalletSyncStatus;
 use crate::config::{
 	BitcoindRestClientConfig, Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
@@ -414,14 +414,6 @@ impl BitcoindChainSource {
 					now.elapsed().unwrap().as_millis()
 				);
 				*self.latest_chain_tip.write().unwrap() = Some(tip);
-
-				periodically_archive_fully_resolved_monitors(
-					&*channel_manager,
-					&*chain_monitor,
-					&*self.kv_store,
-					&*self.logger,
-					&*self.node_metrics,
-				)?;
 			},
 			Ok(_) => {},
 			Err(e) => {
