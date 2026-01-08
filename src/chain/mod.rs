@@ -488,8 +488,8 @@ impl Filter for ChainSource {
 }
 
 fn periodically_archive_fully_resolved_monitors(
-	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-	kv_store: Arc<DynStore>, logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+	channel_manager: &ChannelManager, chain_monitor: &ChainMonitor, kv_store: &DynStore,
+	logger: &Logger, node_metrics: &RwLock<NodeMetrics>,
 ) -> Result<(), Error> {
 	let mut locked_node_metrics = node_metrics.write().unwrap();
 	let cur_height = channel_manager.current_best_block().height;

@@ -38,10 +38,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			return Ok(latest_change_set.clone());
 		}
 
-		let change_set_opt = read_bdk_wallet_change_set(
-			Arc::clone(&persister.kv_store),
-			Arc::clone(&persister.logger),
-		)?;
+		let change_set_opt = read_bdk_wallet_change_set(&*persister.kv_store, &*persister.logger)?;
 
 		let change_set = match change_set_opt {
 			Some(persisted_change_set) => persisted_change_set,
@@ -87,11 +84,7 @@ impl WalletPersister for KVStoreWalletPersister {
 				));
 			} else {
 				latest_change_set.descriptor = Some(descriptor.clone());
-				write_bdk_wallet_descriptor(
-					&descriptor,
-					Arc::clone(&persister.kv_store),
-					Arc::clone(&persister.logger),
-				)?;
+				write_bdk_wallet_descriptor(&descriptor, &*persister.kv_store, &*persister.logger)?;
 			}
 		}
 
@@ -112,8 +105,8 @@ impl WalletPersister for KVStoreWalletPersister {
 				latest_change_set.change_descriptor = Some(change_descriptor.clone());
 				write_bdk_wallet_change_descriptor(
 					&change_descriptor,
-					Arc::clone(&persister.kv_store),
-					Arc::clone(&persister.logger),
+					&*persister.kv_store,
+					&*persister.logger,
 				)?;
 			}
 		}
@@ -131,11 +124,7 @@ impl WalletPersister for KVStoreWalletPersister {
 				));
 			} else {
 				latest_change_set.network = Some(network);
-				write_bdk_wallet_network(
-					&network,
-					Arc::clone(&persister.kv_store),
-					Arc::clone(&persister.logger),
-				)?;
+				write_bdk_wallet_network(&network, &*persister.kv_store, &*persister.logger)?;
 			}
 		}
 
@@ -157,7 +146,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			latest_change_set.indexer.merge(change_set.indexer.clone());
 			write_bdk_wallet_indexer(
 				&latest_change_set.indexer,
-				Arc::clone(&persister.kv_store),
+				&*persister.kv_store,
 				Arc::clone(&persister.logger),
 			)?;
 		}
@@ -166,7 +155,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			latest_change_set.tx_graph.merge(change_set.tx_graph.clone());
 			write_bdk_wallet_tx_graph(
 				&latest_change_set.tx_graph,
-				Arc::clone(&persister.kv_store),
+				&*persister.kv_store,
 				Arc::clone(&persister.logger),
 			)?;
 		}
@@ -175,7 +164,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			latest_change_set.local_chain.merge(change_set.local_chain.clone());
 			write_bdk_wallet_local_chain(
 				&latest_change_set.local_chain,
-				Arc::clone(&persister.kv_store),
+				&*persister.kv_store,
 				Arc::clone(&persister.logger),
 			)?;
 		}

@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -74,22 +73,17 @@ async fn sync_external_scores(
 			return;
 		},
 	};
-	let body = match response.bytes().await {
+	let reader = match response.bytes().await {
 		Ok(bytes) => bytes,
 		Err(e) => {
 			log_error!(logger, "Failed to read external scores update: {}", e);
 			return;
 		},
 	};
-	let mut reader = Cursor::new(body);
-	match ChannelLiquidities::read(&mut reader) {
+	match ChannelLiquidities::read(&mut &*reader) {
 		Ok(liquidities) => {
-			if let Err(e) = write_external_pathfinding_scores_to_cache(
-				Arc::clone(&kv_store),
-				&liquidities,
-				logger,
-			)
-			.await
+			if let Err(e) =
+				write_external_pathfinding_scores_to_cache(&*kv_store, &liquidities, logger).await
 			{
 				log_error!(logger, "Failed to persist external scores to cache: {}", e);
 			}
@@ -100,10 +94,9 @@ async fn sync_external_scores(
 			let mut locked_node_metrics = node_metrics.write().unwrap();
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
 				Some(duration_since_epoch.as_secs());
-			write_node_metrics(&*locked_node_metrics, Arc::clone(&kv_store), logger)
-				.unwrap_or_else(|e| {
-					log_error!(logger, "Persisting node metrics failed: {}", e);
-				});
+			write_node_metrics(&*locked_node_metrics, &*kv_store, logger).unwrap_or_else(|e| {
+				log_error!(logger, "Persisting node metrics failed: {}", e);
+			});
 			log_trace!(logger, "External scores merged successfully");
 		},
 		Err(e) => {

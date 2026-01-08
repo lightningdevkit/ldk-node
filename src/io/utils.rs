@@ -18,7 +18,6 @@ use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bitcoin::Network;
-use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::{
@@ -88,59 +87,62 @@ pub(crate) fn read_or_generate_seed_file(
 }
 
 /// Read a previously persisted [`NetworkGraph`] from the store.
-pub(crate) fn read_network_graph<L: Deref + Clone>(
-	kv_store: Arc<DynStore>, logger: L,
+pub(crate) async fn read_network_graph<L: Deref + Clone>(
+	kv_store: &DynStore, logger: L,
 ) -> Result<NetworkGraph<L>, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(KVStoreSync::read(
+	let reader = KVStore::read(
 		&*kv_store,
 		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 		NETWORK_GRAPH_PERSISTENCE_KEY,
-	)?);
-	NetworkGraph::read(&mut reader, logger.clone()).map_err(|e| {
+	)
+	.await?;
+	NetworkGraph::read(&mut &*reader, logger.clone()).map_err(|e| {
 		log_error!(logger, "Failed to deserialize NetworkGraph: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NetworkGraph")
 	})
 }
 
 /// Read a previously persisted [`ProbabilisticScorer`] from the store.
-pub(crate) fn read_scorer<G: Deref<Target = NetworkGraph<L>>, L: Deref + Clone>(
-	kv_store: Arc<DynStore>, network_graph: G, logger: L,
+pub(crate) async fn read_scorer<G: Deref<Target = NetworkGraph<L>>, L: Deref + Clone>(
+	kv_store: &DynStore, network_graph: G, logger: L,
 ) -> Result<ProbabilisticScorer<G, L>, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
 	let params = ProbabilisticScoringDecayParameters::default();
-	let mut reader = Cursor::new(KVStoreSync::read(
+	let reader = KVStore::read(
 		&*kv_store,
 		SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 		SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 		SCORER_PERSISTENCE_KEY,
-	)?);
+	)
+	.await?;
 	let args = (params, network_graph, logger.clone());
-	ProbabilisticScorer::read(&mut reader, args).map_err(|e| {
+	ProbabilisticScorer::read(&mut &*reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize scorer: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize Scorer")
 	})
 }
 
 /// Read previously persisted external pathfinding scores from the cache.
-pub(crate) fn read_external_pathfinding_scores_from_cache<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
+pub(crate) async fn read_external_pathfinding_scores_from_cache<L: Deref>(
+	kv_store: &DynStore, logger: L,
 ) -> Result<ChannelLiquidities, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(KVStoreSync::read(
+	let reader = KVStore::read(
 		&*kv_store,
 		SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 		SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 		EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
-	)?);
-	ChannelLiquidities::read(&mut reader).map_err(|e| {
+	)
+	.await?;
+	ChannelLiquidities::read(&mut &*reader).map_err(|e| {
 		log_error!(logger, "Failed to deserialize scorer: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize Scorer")
 	})
@@ -148,7 +150,7 @@ where
 
 /// Persist external pathfinding scores to the cache.
 pub(crate) async fn write_external_pathfinding_scores_to_cache<L: Deref>(
-	kv_store: Arc<DynStore>, data: &ChannelLiquidities, logger: L,
+	kv_store: &DynStore, data: &ChannelLiquidities, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
@@ -175,64 +177,107 @@ where
 }
 
 /// Read previously persisted events from the store.
-pub(crate) fn read_event_queue<L: Deref + Clone>(
+pub(crate) async fn read_event_queue<L: Deref + Clone>(
 	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<EventQueue<L>, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(KVStoreSync::read(
+	let reader = KVStore::read(
 		&*kv_store,
 		EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 		EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 		EVENT_QUEUE_PERSISTENCE_KEY,
-	)?);
-	EventQueue::read(&mut reader, (kv_store, logger.clone())).map_err(|e| {
+	)
+	.await?;
+	EventQueue::read(&mut &*reader, (kv_store, logger.clone())).map_err(|e| {
 		log_error!(logger, "Failed to deserialize event queue: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize EventQueue")
 	})
 }
 
 /// Read previously persisted peer info from the store.
-pub(crate) fn read_peer_info<L: Deref + Clone>(
+pub(crate) async fn read_peer_info<L: Deref + Clone>(
 	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<PeerStore<L>, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(KVStoreSync::read(
+	let reader = KVStore::read(
 		&*kv_store,
 		PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 		PEER_INFO_PERSISTENCE_KEY,
-	)?);
-	PeerStore::read(&mut reader, (kv_store, logger.clone())).map_err(|e| {
+	)
+	.await?;
+	PeerStore::read(&mut &*reader, (kv_store, logger.clone())).map_err(|e| {
 		log_error!(logger, "Failed to deserialize peer store: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize PeerStore")
 	})
 }
 
 /// Read previously persisted payments information from the store.
-pub(crate) fn read_payments<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
+pub(crate) async fn read_payments<L: Deref>(
+	kv_store: &DynStore, logger: L,
 ) -> Result<Vec<PaymentDetails>, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
 	let mut res = Vec::new();
 
-	for stored_key in KVStoreSync::list(
+	let mut stored_keys = KVStore::list(
 		&*kv_store,
 		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-	)? {
-		let mut reader = Cursor::new(KVStoreSync::read(
-			&*kv_store,
-			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-			&stored_key,
-		)?);
-		let payment = PaymentDetails::read(&mut reader).map_err(|e| {
+	)
+	.await?;
+
+	const BATCH_SIZE: usize = 50;
+
+	let mut set = tokio::task::JoinSet::new();
+
+	// Fill JoinSet with tasks if possible
+	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
+				&*kv_store,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+	}
+
+	while let Some(read_res) = set.join_next().await {
+		// Exit early if we get an IO error.
+		let reader = read_res
+			.map_err(|e| {
+				log_error!(logger, "Failed to read PaymentDetails: {}", e);
+				set.abort_all();
+				e
+			})?
+			.map_err(|e| {
+				log_error!(logger, "Failed to read PaymentDetails: {}", e);
+				set.abort_all();
+				e
+			})?;
+
+		// Refill set for every finished future, if we still have something to do.
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
+				&*kv_store,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+
+		// Handle result.
+		let payment = PaymentDetails::read(&mut &*reader).map_err(|e| {
 			log_error!(logger, "Failed to deserialize PaymentDetails: {}", e);
 			std::io::Error::new(
 				std::io::ErrorKind::InvalidData,
@@ -241,21 +286,26 @@ where
 		})?;
 		res.push(payment);
 	}
+
+	debug_assert!(set.is_empty());
+	debug_assert!(stored_keys.is_empty());
+
 	Ok(res)
 }
 
 /// Read `OutputSweeper` state from the store.
-pub(crate) fn read_output_sweeper(
+pub(crate) async fn read_output_sweeper(
 	broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
 	chain_data_source: Arc<ChainSource>, keys_manager: Arc<KeysManager>, kv_store: Arc<DynStore>,
 	logger: Arc<Logger>,
 ) -> Result<Sweeper, std::io::Error> {
-	let mut reader = Cursor::new(KVStoreSync::read(
+	let reader = KVStore::read(
 		&*kv_store,
 		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
 		OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
 		OUTPUT_SWEEPER_PERSISTENCE_KEY,
-	)?);
+	)
+	.await?;
 	let args = (
 		broadcaster,
 		fee_estimator,
@@ -265,33 +315,34 @@ pub(crate) fn read_output_sweeper(
 		kv_store,
 		logger.clone(),
 	);
-	let (_, sweeper) = <(_, Sweeper)>::read(&mut reader, args).map_err(|e| {
+	let (_, sweeper) = <(_, Sweeper)>::read(&mut &*reader, args).map_err(|e| {
 		log_error!(logger, "Failed to deserialize OutputSweeper: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize OutputSweeper")
 	})?;
 	Ok(sweeper)
 }
 
-pub(crate) fn read_node_metrics<L: Deref>(
-	kv_store: Arc<DynStore>, logger: L,
+pub(crate) async fn read_node_metrics<L: Deref>(
+	kv_store: &DynStore, logger: L,
 ) -> Result<NodeMetrics, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
-	let mut reader = Cursor::new(KVStoreSync::read(
+	let reader = KVStore::read(
 		&*kv_store,
 		NODE_METRICS_PRIMARY_NAMESPACE,
 		NODE_METRICS_SECONDARY_NAMESPACE,
 		NODE_METRICS_KEY,
-	)?);
-	NodeMetrics::read(&mut reader).map_err(|e| {
+	)
+	.await?;
+	NodeMetrics::read(&mut &*reader).map_err(|e| {
 		log_error!(logger, "Failed to deserialize NodeMetrics: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NodeMetrics")
 	})
 }
 
 pub(crate) fn write_node_metrics<L: Deref>(
-	node_metrics: &NodeMetrics, kv_store: Arc<DynStore>, logger: L,
+	node_metrics: &NodeMetrics, kv_store: &DynStore, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
@@ -418,12 +469,12 @@ macro_rules! impl_read_write_change_set_type {
 		$key:expr
 	) => {
 		pub(crate) fn $read_name<L: Deref>(
-			kv_store: Arc<DynStore>, logger: L,
+			kv_store: &DynStore, logger: L,
 		) -> Result<Option<$change_set_type>, std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
-			let bytes =
+			let reader =
 				match KVStoreSync::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
 				{
 					Ok(bytes) => bytes,
@@ -444,9 +495,8 @@ macro_rules! impl_read_write_change_set_type {
 					},
 				};
 
-			let mut reader = Cursor::new(bytes);
 			let res: Result<ChangeSetDeserWrapper<$change_set_type>, DecodeError> =
-				Readable::read(&mut reader);
+				Readable::read(&mut &*reader);
 			match res {
 				Ok(res) => Ok(Some(res.0)),
 				Err(e) => {
@@ -460,7 +510,7 @@ macro_rules! impl_read_write_change_set_type {
 		}
 
 		pub(crate) fn $write_name<L: Deref>(
-			value: &$change_set_type, kv_store: Arc<DynStore>, logger: L,
+			value: &$change_set_type, kv_store: &DynStore, logger: L,
 		) -> Result<(), std::io::Error>
 		where
 			L::Target: LdkLogger,
@@ -538,41 +588,35 @@ impl_read_write_change_set_type!(
 
 // Reads the full BdkWalletChangeSet or returns default fields
 pub(crate) fn read_bdk_wallet_change_set(
-	kv_store: Arc<DynStore>, logger: Arc<Logger>,
+	kv_store: &DynStore, logger: &Logger,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 
 	// We require a descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(descriptor) =
-		read_bdk_wallet_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
-	{
+	if let Some(descriptor) = read_bdk_wallet_descriptor(kv_store, logger)? {
 		change_set.descriptor = Some(descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a change_descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(change_descriptor) =
-		read_bdk_wallet_change_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
-	{
+	if let Some(change_descriptor) = read_bdk_wallet_change_descriptor(kv_store, logger)? {
 		change_set.change_descriptor = Some(change_descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a network and return `None` to signal creation of a new wallet otherwise.
-	if let Some(network) = read_bdk_wallet_network(Arc::clone(&kv_store), Arc::clone(&logger))? {
+	if let Some(network) = read_bdk_wallet_network(kv_store, logger)? {
 		change_set.network = Some(network);
 	} else {
 		return Ok(None);
 	}
 
-	read_bdk_wallet_local_chain(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_local_chain(&*kv_store, logger)?
 		.map(|local_chain| change_set.local_chain = local_chain);
-	read_bdk_wallet_tx_graph(Arc::clone(&kv_store), Arc::clone(&logger))?
-		.map(|tx_graph| change_set.tx_graph = tx_graph);
-	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger))?
-		.map(|indexer| change_set.indexer = indexer);
+	read_bdk_wallet_tx_graph(&*kv_store, logger)?.map(|tx_graph| change_set.tx_graph = tx_graph);
+	read_bdk_wallet_indexer(&*kv_store, logger)?.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }
 
