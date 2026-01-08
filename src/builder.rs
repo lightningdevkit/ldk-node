@@ -1438,8 +1438,8 @@ fn build_with_store_internal(
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
 		let channel_id = channel_monitor.channel_id();
-		chain_monitor.watch_channel(channel_id, channel_monitor).map_err(|e| {
-			log_error!(logger, "Failed to watch channel monitor: {:?}", e);
+		chain_monitor.load_existing_monitor(channel_id, channel_monitor).map_err(|e| {
+			log_error!(logger, "Failed to load channel monitor: {:?}", e);
 			BuildError::InvalidChannelMonitor
 		})?;
 	}
