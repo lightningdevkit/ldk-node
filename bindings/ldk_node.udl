@@ -359,7 +359,6 @@ dictionary NodeStatus {
 	u64? latest_rgs_snapshot_timestamp;
 	u64? latest_pathfinding_scores_sync_timestamp;
 	u64? latest_node_announcement_broadcast_timestamp;
-	u32? latest_channel_monitor_archival_height;
 };
 
 dictionary BestBlock {

@@ -16,7 +16,7 @@ use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::EsploraSyncClient;
 
-use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
+use super::WalletSyncStatus;
 use crate::config::{
 	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS,
@@ -261,14 +261,6 @@ impl EsploraChainSource {
 							unix_time_secs_opt;
 						write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
 					}
-
-					periodically_archive_fully_resolved_monitors(
-						&*channel_manager,
-						&*chain_monitor,
-						&*self.kv_store,
-						&*self.logger,
-						&*self.node_metrics,
-					)?;
 					Ok(())
 				},
 				Err(e) => {
