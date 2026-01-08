@@ -69,11 +69,12 @@ use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph, KeysManager,
-	MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister, SyncAndAsyncKVStore,
+	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
+	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister,
+	SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1261,8 +1262,9 @@ fn build_with_store_internal(
 	));
 
 	let peer_storage_key = keys_manager.get_peer_storage_key();
-	let persister = Arc::new(Persister::new(
+	let monitor_reader = Arc::new(AsyncPersister::new(
 		Arc::clone(&kv_store),
+		RuntimeSpawner::new(Arc::clone(&runtime)),
 		Arc::clone(&logger),
 		PERSISTER_MAX_PENDING_UPDATES,
 		Arc::clone(&keys_manager),
@@ -1272,7 +1274,9 @@ fn build_with_store_internal(
 	));
 
 	// Read ChannelMonitor state from store
-	let channel_monitors = match persister.read_all_channel_monitors_with_updates() {
+	let monitor_read_result =
+		runtime.block_on(monitor_reader.read_all_channel_monitors_with_updates_parallel());
+	let channel_monitors = match monitor_read_result {
 		Ok(monitors) => monitors,
 		Err(e) => {
 			if e.kind() == lightning::io::ErrorKind::NotFound {
@@ -1283,6 +1287,16 @@ fn build_with_store_internal(
 			}
 		},
 	};
+
+	let persister = Arc::new(Persister::new(
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+		PERSISTER_MAX_PENDING_UPDATES,
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
+	));
 
 	// Initialize the ChainMonitor
 	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(

@@ -23,7 +23,9 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersister};
+use lightning::util::persist::{
+	KVStore, KVStoreSync, MonitorUpdatingPersister, MonitorUpdatingPersisterAsync,
+};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
@@ -184,6 +186,16 @@ impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> 
 		KVStoreSync::list(&self.0, primary_namespace, secondary_namespace)
 	}
 }
+
+pub(crate) type AsyncPersister = MonitorUpdatingPersisterAsync<
+	Arc<DynStore>,
+	RuntimeSpawner,
+	Arc<Logger>,
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<Broadcaster>,
+	Arc<OnchainFeeEstimator>,
+>;
 
 pub type Persister = MonitorUpdatingPersister<
 	Arc<DynStore>,
