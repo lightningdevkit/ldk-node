@@ -20,7 +20,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
-use lightning::chain::{chainmonitor, BestBlock, Watch};
+use lightning::chain::{chainmonitor, BestBlock};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
@@ -1481,8 +1481,12 @@ fn build_with_store_internal(
 
 	let gossip_source = match gossip_source_config {
 		GossipSourceConfig::P2PNetwork => {
-			let p2p_source =
-				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)));
+			let p2p_source = Arc::new(GossipSource::new_p2p(
+				Arc::clone(&network_graph),
+				Arc::clone(&chain_source),
+				Arc::clone(&runtime),
+				Arc::clone(&logger),
+			));
 
 			// Reset the RGS sync timestamp in case we somehow switch gossip sources
 			{
@@ -1605,12 +1609,6 @@ fn build_with_store_internal(
 	}));
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
-
-	gossip_source.set_gossip_verifier(
-		Arc::clone(&chain_source),
-		Arc::clone(&peer_manager),
-		Arc::clone(&runtime),
-	);
 
 	let connection_manager =
 		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));

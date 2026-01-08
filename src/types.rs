@@ -254,7 +254,7 @@ pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
 
-pub(crate) type UtxoLookup = GossipVerifier<RuntimeSpawner, Arc<UtxoSourceClient>, Arc<Logger>>;
+pub(crate) type UtxoLookup = GossipVerifier<RuntimeSpawner, Arc<UtxoSourceClient>>;
 
 pub(crate) type P2PGossipSync =
 	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<Logger>>;
