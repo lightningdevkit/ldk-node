@@ -33,12 +33,16 @@ use ldk_server_protos::endpoints::{
 };
 use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use reqwest::header::CONTENT_TYPE;
-use reqwest::Client;
+use reqwest::{Certificate, Client};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 
 /// Client to access a hosted instance of LDK Server.
+///
+/// The client requires the server's TLS certificate to be provided for verification.
+/// This certificate can be found at `<server_storage_dir>/tls_cert.pem` after the
+/// server generates it on first startup.
 #[derive(Clone)]
 pub struct LdkServerClient {
 	base_url: String,
@@ -48,9 +52,21 @@ pub struct LdkServerClient {
 
 impl LdkServerClient {
 	/// Constructs a [`LdkServerClient`] using `base_url` as the ldk-server endpoint.
+	///
+	/// `base_url` should not include the scheme, e.g., `localhost:3000`.
 	/// `api_key` is used for HMAC-based authentication.
-	pub fn new(base_url: String, api_key: String) -> Self {
-		Self { base_url, client: Client::new(), api_key }
+	/// `server_cert_pem` is the server's TLS certificate in PEM format. This can be
+	/// found at `<server_storage_dir>/tls_cert.pem` after the server starts.
+	pub fn new(base_url: String, api_key: String, server_cert_pem: &[u8]) -> Result<Self, String> {
+		let cert = Certificate::from_pem(server_cert_pem)
+			.map_err(|e| format!("Failed to parse server certificate: {e}"))?;
+
+		let client = Client::builder()
+			.add_root_certificate(cert)
+			.build()
+			.map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+		Ok(Self { base_url, client, api_key })
 	}
 
 	/// Computes the HMAC-SHA256 authentication header value.
@@ -75,7 +91,7 @@ impl LdkServerClient {
 	pub async fn get_node_info(
 		&self, request: GetNodeInfoRequest,
 	) -> Result<GetNodeInfoResponse, LdkServerError> {
-		let url = format!("http://{}/{GET_NODE_INFO_PATH}", self.base_url);
+		let url = format!("https://{}/{GET_NODE_INFO_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -84,7 +100,7 @@ impl LdkServerClient {
 	pub async fn get_balances(
 		&self, request: GetBalancesRequest,
 	) -> Result<GetBalancesResponse, LdkServerError> {
-		let url = format!("http://{}/{GET_BALANCES_PATH}", self.base_url);
+		let url = format!("https://{}/{GET_BALANCES_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -93,7 +109,7 @@ impl LdkServerClient {
 	pub async fn onchain_receive(
 		&self, request: OnchainReceiveRequest,
 	) -> Result<OnchainReceiveResponse, LdkServerError> {
-		let url = format!("http://{}/{ONCHAIN_RECEIVE_PATH}", self.base_url);
+		let url = format!("https://{}/{ONCHAIN_RECEIVE_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -102,7 +118,7 @@ impl LdkServerClient {
 	pub async fn onchain_send(
 		&self, request: OnchainSendRequest,
 	) -> Result<OnchainSendResponse, LdkServerError> {
-		let url = format!("http://{}/{ONCHAIN_SEND_PATH}", self.base_url);
+		let url = format!("https://{}/{ONCHAIN_SEND_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -111,7 +127,7 @@ impl LdkServerClient {
 	pub async fn bolt11_receive(
 		&self, request: Bolt11ReceiveRequest,
 	) -> Result<Bolt11ReceiveResponse, LdkServerError> {
-		let url = format!("http://{}/{BOLT11_RECEIVE_PATH}", self.base_url);
+		let url = format!("https://{}/{BOLT11_RECEIVE_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -120,7 +136,7 @@ impl LdkServerClient {
 	pub async fn bolt11_send(
 		&self, request: Bolt11SendRequest,
 	) -> Result<Bolt11SendResponse, LdkServerError> {
-		let url = format!("http://{}/{BOLT11_SEND_PATH}", self.base_url);
+		let url = format!("https://{}/{BOLT11_SEND_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -129,7 +145,7 @@ impl LdkServerClient {
 	pub async fn bolt12_receive(
 		&self, request: Bolt12ReceiveRequest,
 	) -> Result<Bolt12ReceiveResponse, LdkServerError> {
-		let url = format!("http://{}/{BOLT12_RECEIVE_PATH}", self.base_url);
+		let url = format!("https://{}/{BOLT12_RECEIVE_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -138,7 +154,7 @@ impl LdkServerClient {
 	pub async fn bolt12_send(
 		&self, request: Bolt12SendRequest,
 	) -> Result<Bolt12SendResponse, LdkServerError> {
-		let url = format!("http://{}/{BOLT12_SEND_PATH}", self.base_url);
+		let url = format!("https://{}/{BOLT12_SEND_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -147,7 +163,7 @@ impl LdkServerClient {
 	pub async fn open_channel(
 		&self, request: OpenChannelRequest,
 	) -> Result<OpenChannelResponse, LdkServerError> {
-		let url = format!("http://{}/{OPEN_CHANNEL_PATH}", self.base_url);
+		let url = format!("https://{}/{OPEN_CHANNEL_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -156,7 +172,7 @@ impl LdkServerClient {
 	pub async fn splice_in(
 		&self, request: SpliceInRequest,
 	) -> Result<SpliceInResponse, LdkServerError> {
-		let url = format!("http://{}/{SPLICE_IN_PATH}", self.base_url);
+		let url = format!("https://{}/{SPLICE_IN_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -165,7 +181,7 @@ impl LdkServerClient {
 	pub async fn splice_out(
 		&self, request: SpliceOutRequest,
 	) -> Result<SpliceOutResponse, LdkServerError> {
-		let url = format!("http://{}/{SPLICE_OUT_PATH}", self.base_url);
+		let url = format!("https://{}/{SPLICE_OUT_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -174,7 +190,7 @@ impl LdkServerClient {
 	pub async fn close_channel(
 		&self, request: CloseChannelRequest,
 	) -> Result<CloseChannelResponse, LdkServerError> {
-		let url = format!("http://{}/{CLOSE_CHANNEL_PATH}", self.base_url);
+		let url = format!("https://{}/{CLOSE_CHANNEL_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -183,7 +199,7 @@ impl LdkServerClient {
 	pub async fn force_close_channel(
 		&self, request: ForceCloseChannelRequest,
 	) -> Result<ForceCloseChannelResponse, LdkServerError> {
-		let url = format!("http://{}/{FORCE_CLOSE_CHANNEL_PATH}", self.base_url);
+		let url = format!("https://{}/{FORCE_CLOSE_CHANNEL_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -192,7 +208,7 @@ impl LdkServerClient {
 	pub async fn list_channels(
 		&self, request: ListChannelsRequest,
 	) -> Result<ListChannelsResponse, LdkServerError> {
-		let url = format!("http://{}/{LIST_CHANNELS_PATH}", self.base_url);
+		let url = format!("https://{}/{LIST_CHANNELS_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -201,7 +217,7 @@ impl LdkServerClient {
 	pub async fn list_payments(
 		&self, request: ListPaymentsRequest,
 	) -> Result<ListPaymentsResponse, LdkServerError> {
-		let url = format!("http://{}/{LIST_PAYMENTS_PATH}", self.base_url);
+		let url = format!("https://{}/{LIST_PAYMENTS_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -210,7 +226,7 @@ impl LdkServerClient {
 	pub async fn update_channel_config(
 		&self, request: UpdateChannelConfigRequest,
 	) -> Result<UpdateChannelConfigResponse, LdkServerError> {
-		let url = format!("http://{}/{UPDATE_CHANNEL_CONFIG_PATH}", self.base_url);
+		let url = format!("https://{}/{UPDATE_CHANNEL_CONFIG_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
