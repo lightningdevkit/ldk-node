@@ -5,16 +5,17 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Holds a payment handler allowing to create [BIP 21] URIs with on-chain, [BOLT 11], and [BOLT 12] payment
-//! options.
+//! Holds a payment handler that supports creating and paying to [BIP 21] URIs with on-chain, [BOLT 11],
+//! and [BOLT 12] payment options.
 //!
-//! It also supports sending payments to these URIs as well as to [BIP 353] Human-Readable Names.
+//! Also supports sending payments to [BIP 353] Human-Readable Names.
 //!
 //! [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 //! [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 use std::sync::Arc;
+use std::time::Duration;
 use std::vec::IntoIter;
 
 use bip21::de::ParamKind;
@@ -29,6 +30,7 @@ use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 
+use crate::config::HRN_RESOLUTION_TIMEOUT_SECS;
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
@@ -44,12 +46,12 @@ struct Extras {
 	bolt12_offer: Option<Offer>,
 }
 
-/// A payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11], and [BOLT 12] payment
-/// option.
+/// A payment handler that supports creating and paying to [BIP 21] URIs with on-chain, [BOLT 11],
+/// and [BOLT 12] payment options.
+///
+/// Also supports sending payments to [BIP 353] Human-Readable Names.
 ///
 /// Should be retrieved by calling [`Node::unified_payment`]
-///
-/// It also supports sending payments to these URIs as well as to [BIP 353] Human-Readable Names.
 ///
 /// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 /// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
@@ -147,7 +149,7 @@ impl UnifiedPayment {
 	/// has an offer and or invoice, it will try to pay the offer first followed by the invoice.
 	/// If they both fail, the on-chain payment will be paid.
 	///
-	/// Returns a `UnifiedPaymentResult` indicating the outcome of the payment. If an error
+	/// Returns a [`UnifiedPaymentResult`] indicating the outcome of the payment. If an error
 	/// occurs, an `Error` is returned detailing the issue encountered.
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
@@ -159,38 +161,57 @@ impl UnifiedPayment {
 		&self, uri_str: &str, amount_msat: Option<u64>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<UnifiedPaymentResult, Error> {
-		let instructions = PaymentInstructions::parse(
+		let parse_fut = PaymentInstructions::parse(
 			uri_str,
 			self.config.network,
 			self.hrn_resolver.as_ref(),
 			false,
-		)
-		.await
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
-			Error::UriParameterParsingFailed
-		})?;
+		);
+
+		let instructions =
+			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
+				.await
+				.map_err(|e| {
+					log_error!(self.logger, "Payment instructions resolution timed out: {:?}", e);
+					Error::UriParameterParsingFailed
+				})?
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to parse payment instructions: {:?}", e);
+					Error::UriParameterParsingFailed
+				})?;
 
 		let resolved = match instructions {
 			PaymentInstructions::ConfigurableAmount(instr) => {
-				let amount = amount_msat.ok_or_else(|| {
+				let amount_msat = amount_msat.ok_or_else(|| {
 					log_error!(self.logger, "No amount specified. Aborting the payment.");
 					Error::InvalidAmount
 				})?;
 
-				let amt = BPIAmount::from_milli_sats(amount).map_err(|e| {
+				let amt = BPIAmount::from_milli_sats(amount_msat).map_err(|e| {
 					log_error!(self.logger, "Error while converting amount : {:?}", e);
 					Error::InvalidAmount
 				})?;
 
-				instr.set_amount(amt, self.hrn_resolver.as_ref()).await.map_err(|e| {
-					log_error!(self.logger, "Failed to set amount: {:?}", e);
-					Error::InvalidAmount
-				})?
+				let fut = instr.set_amount(amt, self.hrn_resolver.as_ref());
+
+				tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), fut)
+					.await
+					.map_err(|e| {
+						log_error!(
+							self.logger,
+							"Payment instructions resolution timed out: {:?}",
+							e
+						);
+						Error::UriParameterParsingFailed
+					})?
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to set amount: {:?}", e);
+						Error::InvalidAmount
+					})?
 			},
 			PaymentInstructions::FixedAmount(instr) => {
-				if let Some(user_amount) = amount_msat {
-					if instr.max_amount().map_or(false, |amt| user_amount < amt.milli_sats()) {
+				if let Some(user_amount_msat) = amount_msat {
+					if instr.max_amount().map_or(false, |amt| user_amount_msat < amt.milli_sats()) {
 						log_error!(self.logger, "Amount specified is less than the amount in the parsed URI. Aborting the payment.");
 						return Err(Error::InvalidAmount);
 					}
