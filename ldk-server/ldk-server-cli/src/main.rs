@@ -423,11 +423,8 @@ async fn main() {
 			);
 		},
 		Commands::ListPayments { number_of_payments, page_token } => {
-			let page_token = if let Some(token_str) = page_token {
-				Some(parse_page_token(&token_str).unwrap_or_else(|e| handle_error(e)))
-			} else {
-				None
-			};
+			let page_token = page_token
+				.map(|token_str| parse_page_token(&token_str).unwrap_or_else(|e| handle_error(e)));
 
 			handle_response_result::<_, CliListPaymentsResponse>(
 				handle_list_payments(client, number_of_payments, page_token).await,
