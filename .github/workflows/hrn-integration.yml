@@ -1,0 +1,46 @@
+name: CI Checks - HRN Integration Tests
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hrn_integration:
+    name: HRN Tests - Ubuntu Stable
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+
+      - name: Install Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Enable caching for bitcoind/electrs
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: bin/
+          key: hrn-deps-${{ runner.os }}-${{ hashFiles('scripts/download_bitcoind_electrs.sh') }}
+
+      - name: Download bitcoind/electrs
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          source ./scripts/download_bitcoind_electrs.sh
+          mkdir -p bin
+          mv "$BITCOIND_EXE" bin/bitcoind
+          mv "$ELECTRS_EXE" bin/electrs
+        
+      - name: Set environment variables
+        run: |
+          echo "BITCOIND_EXE=$(pwd)/bin/bitcoind" >> "$GITHUB_ENV"
+          echo "ELECTRS_EXE=$(pwd)/bin/electrs" >> "$GITHUB_ENV"
+
+      - name: Run HRN Integration Tests
+        env:
+          RUSTFLAGS: "--cfg no_download --cfg hrn_tests"
+        run: cargo test --test integration_tests_hrn
