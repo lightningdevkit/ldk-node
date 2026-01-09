@@ -5,11 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
 use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
@@ -77,7 +80,11 @@ pub(crate) fn read_or_generate_seed_file(
 			fs::create_dir_all(parent_dir)?;
 		}
 
-		let mut f = fs::File::create(keys_seed_path)?;
+		#[cfg(unix)]
+		let mut f = OpenOptions::new().write(true).create_new(true).mode(0o400).open(keys_seed_path)?;
+
+		#[cfg(not(unix))]
+		let mut f = OpenOptions::new().write(true).create_new(true).open(keys_seed_path)?;
 
 		f.write_all(&key)?;
 
