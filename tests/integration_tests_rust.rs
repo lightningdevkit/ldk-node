@@ -27,6 +27,7 @@ use common::{
 	TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
+use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -2435,4 +2436,62 @@ async fn payment_persistence_after_restart() {
 	);
 
 	restarted_node_a.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn persistence_backwards_compatibility() {
+	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
+	let seed_bytes = [42u8; 64];
+	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
+
+	// Setup a v0.6.2 `Node`
+	let (old_balance, old_node_id) = {
+		let mut builder_old = ldk_node_062::Builder::new();
+		builder_old.set_network(bitcoin::Network::Regtest);
+		builder_old.set_storage_dir_path(storage_path.clone());
+		builder_old.set_entropy_seed_bytes(seed_bytes);
+		builder_old.set_chain_source_esplora(esplora_url.clone(), None);
+		let node_old = builder_old.build().unwrap();
+
+		node_old.start().unwrap();
+		let addr_old = node_old.onchain_payment().new_address().unwrap();
+		common::premine_and_distribute_funds(
+			&bitcoind.client,
+			&electrsd.client,
+			vec![addr_old],
+			bitcoin::Amount::from_sat(100_000),
+		)
+		.await;
+		node_old.sync_wallets().unwrap();
+
+		let balance = node_old.list_balances().spendable_onchain_balance_sats;
+		assert!(balance > 0);
+		let node_id = node_old.node_id();
+
+		node_old.stop().unwrap();
+
+		(balance, node_id)
+	};
+
+	// Now ensure we can still reinit from the same backend.
+	let mut builder_new = Builder::new();
+	builder_new.set_network(bitcoin::Network::Regtest);
+	builder_new.set_storage_dir_path(storage_path);
+	builder_new.set_chain_source_esplora(esplora_url, None);
+
+	let node_new = builder_new.build(node_entropy).unwrap();
+
+	node_new.start().unwrap();
+	node_new.sync_wallets().unwrap();
+
+	let new_balance = node_new.list_balances().spendable_onchain_balance_sats;
+	let new_node_id = node_new.node_id();
+
+	assert_eq!(old_node_id, new_node_id);
+	assert_eq!(old_balance, new_balance);
+
+	node_new.stop().unwrap();
 }

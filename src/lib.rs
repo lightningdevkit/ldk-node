@@ -1837,7 +1837,7 @@ impl_writeable_tlv_based!(NodeMetrics, {
 	(6, latest_rgs_snapshot_timestamp, option),
 	(8, latest_node_announcement_broadcast_timestamp, option),
 	// 10 used to be latest_channel_monitor_archival_height
-	(10, _legacy_latest_channel_monitor_archival_height, (legacy, Option<u32>, |_: &NodeMetrics| None::<Option<u32>> )),
+	(10, _legacy_latest_channel_monitor_archival_height, (legacy, u32, |_: &NodeMetrics| None::<Option<u32>> )),
 });
 
 pub(crate) fn total_anchor_channels_reserve_sats(

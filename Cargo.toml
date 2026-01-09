@@ -88,6 +88,7 @@ lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "
 proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
+ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
 
 [target.'cfg(not(no_download))'.dev-dependencies]
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
@@ -102,9 +103,6 @@ clightningrpc = { version = "0.3.0-beta.8", default-features = false }
 [target.'cfg(lnd_test)'.dev-dependencies]
 lnd_grpc_rust = { version = "2.10.0", default-features = false }
 tokio = { version = "1.37", features = ["fs"] }
-
-[target.'cfg(vss_test)'.dev-dependencies]
-ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
 
 [build-dependencies]
 uniffi = { version = "0.28.3", features = ["build"], optional = true }

@@ -20,7 +20,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
-use lightning::chain::{chainmonitor, BestBlock, Watch};
+use lightning::chain::{chainmonitor, BestBlock};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
