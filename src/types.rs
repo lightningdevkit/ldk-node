@@ -23,7 +23,9 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersister};
+use lightning::util::persist::{
+	KVStore, KVStoreSync, MonitorUpdatingPersister, MonitorUpdatingPersisterAsync,
+};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
@@ -185,6 +187,16 @@ impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> 
 	}
 }
 
+pub(crate) type AsyncPersister = MonitorUpdatingPersisterAsync<
+	Arc<DynStore>,
+	RuntimeSpawner,
+	Arc<Logger>,
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<Broadcaster>,
+	Arc<OnchainFeeEstimator>,
+>;
+
 pub type Persister = MonitorUpdatingPersister<
 	Arc<DynStore>,
 	Arc<Logger>,
@@ -254,7 +266,7 @@ pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
 
-pub(crate) type UtxoLookup = GossipVerifier<RuntimeSpawner, Arc<UtxoSourceClient>, Arc<Logger>>;
+pub(crate) type UtxoLookup = GossipVerifier<RuntimeSpawner, Arc<UtxoSourceClient>>;
 
 pub(crate) type P2PGossipSync =
 	lightning::routing::gossip::P2PGossipSync<Arc<Graph>, Arc<UtxoLookup>, Arc<Logger>>;

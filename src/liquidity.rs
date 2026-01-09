@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use bitcoin::hashes::{sha256, Hash};
@@ -291,7 +291,7 @@ where
 	lsps2_service: Option<LSPS2Service>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
-	peer_manager: RwLock<Option<Arc<PeerManager>>>,
+	peer_manager: RwLock<Option<Weak<PeerManager>>>,
 	keys_manager: Arc<KeysManager>,
 	liquidity_manager: Arc<LiquidityManager>,
 	config: Arc<Config>,
@@ -302,7 +302,7 @@ impl<L: Deref> LiquiditySource<L>
 where
 	L::Target: LdkLogger,
 {
-	pub(crate) fn set_peer_manager(&self, peer_manager: Arc<PeerManager>) {
+	pub(crate) fn set_peer_manager(&self, peer_manager: Weak<PeerManager>) {
 		*self.peer_manager.write().unwrap() = Some(peer_manager);
 	}
 
@@ -715,8 +715,8 @@ where
 					return;
 				};
 
-				let init_features = if let Some(peer_manager) =
-					self.peer_manager.read().unwrap().as_ref()
+				let init_features = if let Some(Some(peer_manager)) =
+					self.peer_manager.read().unwrap().as_ref().map(|weak| weak.upgrade())
 				{
 					// Fail if we're not connected to the prospective channel partner.
 					if let Some(peer) = peer_manager.peer_by_node_id(&their_network_key) {

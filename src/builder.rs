@@ -33,7 +33,7 @@ use lightning::routing::scoring::{
 };
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::persist::{
-	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
@@ -51,7 +51,7 @@ use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::gossip::GossipSource;
+use crate::gossip::{GossipSource, RuntimeSpawner};
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
@@ -72,8 +72,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph, KeysManager,
-	MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister, SyncAndAsyncKVStore,
+	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
+	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister,
+	SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1051,10 +1052,20 @@ fn build_with_store_internal(
 		}
 	}
 
+	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
+	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
+
+	let kv_store_ref = Arc::clone(&kv_store);
+	let logger_ref = Arc::clone(&logger);
+	let (payment_store_res, node_metris_res) = runtime.block_on(async move {
+		tokio::join!(
+			read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
+			read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
+		)
+	});
+
 	// Initialize the status fields.
-	let node_metrics = match runtime
-		.block_on(async { read_node_metrics(&*kv_store, Arc::clone(&logger)).await })
-	{
+	let node_metrics = match node_metris_res {
 		Ok(metrics) => Arc::new(RwLock::new(metrics)),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
@@ -1065,23 +1076,20 @@ fn build_with_store_internal(
 			}
 		},
 	};
-	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
-	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 
-	let payment_store =
-		match runtime.block_on(async { read_payments(&*kv_store, Arc::clone(&logger)).await }) {
-			Ok(payments) => Arc::new(PaymentStore::new(
-				payments,
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
-				Arc::clone(&kv_store),
-				Arc::clone(&logger),
-			)),
-			Err(e) => {
-				log_error!(logger, "Failed to read payment data from store: {}", e);
-				return Err(BuildError::ReadFailed);
-			},
-		};
+	let payment_store = match payment_store_res {
+		Ok(payments) => Arc::new(PaymentStore::new(
+			payments,
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read payment data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
 
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
@@ -1261,8 +1269,9 @@ fn build_with_store_internal(
 	));
 
 	let peer_storage_key = keys_manager.get_peer_storage_key();
-	let persister = Arc::new(Persister::new(
+	let monitor_reader = Arc::new(AsyncPersister::new(
 		Arc::clone(&kv_store),
+		RuntimeSpawner::new(Arc::clone(&runtime)),
 		Arc::clone(&logger),
 		PERSISTER_MAX_PENDING_UPDATES,
 		Arc::clone(&keys_manager),
@@ -1271,8 +1280,18 @@ fn build_with_store_internal(
 		Arc::clone(&fee_estimator),
 	));
 
+	// Read ChannelMonitors and the NetworkGraph
+	let kv_store_ref = Arc::clone(&kv_store);
+	let logger_ref = Arc::clone(&logger);
+	let (monitor_read_res, network_graph_res) = runtime.block_on(async move {
+		tokio::join!(
+			monitor_reader.read_all_channel_monitors_with_updates_parallel(),
+			read_network_graph(&*kv_store_ref, logger_ref),
+		)
+	});
+
 	// Read ChannelMonitor state from store
-	let channel_monitors = match persister.read_all_channel_monitors_with_updates() {
+	let channel_monitors = match monitor_read_res {
 		Ok(monitors) => monitors,
 		Err(e) => {
 			if e.kind() == lightning::io::ErrorKind::NotFound {
@@ -1283,6 +1302,16 @@ fn build_with_store_internal(
 			}
 		},
 	};
+
+	let persister = Arc::new(Persister::new(
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+		PERSISTER_MAX_PENDING_UPDATES,
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
+	));
 
 	// Initialize the ChainMonitor
 	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
@@ -1296,9 +1325,7 @@ fn build_with_store_internal(
 	));
 
 	// Initialize the network graph, scorer, and router
-	let network_graph = match runtime
-		.block_on(async { read_network_graph(&*kv_store, Arc::clone(&logger)).await })
-	{
+	let network_graph = match network_graph_res {
 		Ok(graph) => Arc::new(graph),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
@@ -1310,9 +1337,42 @@ fn build_with_store_internal(
 		},
 	};
 
-	let local_scorer = match runtime.block_on(async {
-		read_scorer(&*kv_store, Arc::clone(&network_graph), Arc::clone(&logger)).await
-	}) {
+	// Read various smaller LDK and ldk-node objects from the store
+	let kv_store_ref = Arc::clone(&kv_store);
+	let logger_ref = Arc::clone(&logger);
+	let network_graph_ref = Arc::clone(&network_graph);
+	let output_sweeper_future = read_output_sweeper(
+		Arc::clone(&tx_broadcaster),
+		Arc::clone(&fee_estimator),
+		Arc::clone(&chain_source),
+		Arc::clone(&keys_manager),
+		Arc::clone(&kv_store_ref),
+		Arc::clone(&logger_ref),
+	);
+	let (
+		scorer_res,
+		external_scores_res,
+		channel_manager_bytes_res,
+		sweeper_bytes_res,
+		event_queue_res,
+		peer_info_res,
+	) = runtime.block_on(async move {
+		tokio::join!(
+			read_scorer(&*kv_store_ref, network_graph_ref, Arc::clone(&logger_ref)),
+			read_external_pathfinding_scores_from_cache(&*kv_store_ref, Arc::clone(&logger_ref)),
+			KVStore::read(
+				&*kv_store_ref,
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			),
+			output_sweeper_future,
+			read_event_queue(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
+			read_peer_info(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
+		)
+	});
+
+	let local_scorer = match scorer_res {
 		Ok(scorer) => scorer,
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
@@ -1328,9 +1388,7 @@ fn build_with_store_internal(
 	let scorer = Arc::new(Mutex::new(CombinedScorer::new(local_scorer)));
 
 	// Restore external pathfinding scores from cache if possible.
-	match runtime.block_on(async {
-		read_external_pathfinding_scores_from_cache(&*kv_store, Arc::clone(&logger)).await
-	}) {
+	match external_scores_res {
 		Ok(external_scores) => {
 			scorer.lock().unwrap().merge(external_scores, cur_time);
 			log_trace!(logger, "External scores from cache merged successfully");
@@ -1383,12 +1441,7 @@ fn build_with_store_internal(
 
 	// Initialize the ChannelManager
 	let channel_manager = {
-		if let Ok(reader) = KVStoreSync::read(
-			&*kv_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-		) {
+		if let Ok(reader) = channel_manager_bytes_res {
 			let channel_monitor_references =
 				channel_monitors.iter().map(|(_, chanmon)| chanmon).collect();
 			let read_args = ChannelManagerReadArgs::new(
@@ -1481,8 +1534,12 @@ fn build_with_store_internal(
 
 	let gossip_source = match gossip_source_config {
 		GossipSourceConfig::P2PNetwork => {
-			let p2p_source =
-				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)));
+			let p2p_source = Arc::new(GossipSource::new_p2p(
+				Arc::clone(&network_graph),
+				Arc::clone(&chain_source),
+				Arc::clone(&runtime),
+				Arc::clone(&logger),
+			));
 
 			// Reset the RGS sync timestamp in case we somehow switch gossip sources
 			{
@@ -1597,34 +1654,19 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
-	let peer_manager_clone = Arc::clone(&peer_manager);
-
+	let peer_manager_clone = Arc::downgrade(&peer_manager);
 	hrn_resolver.register_post_queue_action(Box::new(move || {
-		peer_manager_clone.process_events();
+		if let Some(upgraded_pointer) = peer_manager_clone.upgrade() {
+			upgraded_pointer.process_events();
+		}
 	}));
 
-	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
-
-	gossip_source.set_gossip_verifier(
-		Arc::clone(&chain_source),
-		Arc::clone(&peer_manager),
-		Arc::clone(&runtime),
-	);
+	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
 
 	let connection_manager =
 		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
 
-	let output_sweeper = match runtime.block_on(async {
-		read_output_sweeper(
-			Arc::clone(&tx_broadcaster),
-			Arc::clone(&fee_estimator),
-			Arc::clone(&chain_source),
-			Arc::clone(&keys_manager),
-			Arc::clone(&kv_store),
-			Arc::clone(&logger),
-		)
-		.await
-	}) {
+	let output_sweeper = match sweeper_bytes_res {
 		Ok(output_sweeper) => Arc::new(output_sweeper),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
@@ -1645,9 +1687,7 @@ fn build_with_store_internal(
 		},
 	};
 
-	let event_queue = match runtime
-		.block_on(async { read_event_queue(Arc::clone(&kv_store), Arc::clone(&logger)).await })
-	{
+	let event_queue = match event_queue_res {
 		Ok(event_queue) => Arc::new(event_queue),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
@@ -1659,9 +1699,7 @@ fn build_with_store_internal(
 		},
 	};
 
-	let peer_store = match runtime
-		.block_on(async { read_peer_info(Arc::clone(&kv_store), Arc::clone(&logger)).await })
-	{
+	let peer_store = match peer_info_res {
 		Ok(peer_store) => Arc::new(peer_store),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {

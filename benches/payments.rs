@@ -8,7 +8,7 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::Amount;
 use common::{
 	expect_channel_ready_event, generate_blocks_and_wait, premine_and_distribute_funds,
-	setup_bitcoind_and_electrsd, setup_two_nodes_with_store, TestChainSource,
+	setup_bitcoind_and_electrsd, setup_two_nodes_with_store, TestChainSource, TestNode,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use ldk_node::{Event, Node};
@@ -18,7 +18,7 @@ use tokio::task::{self};
 
 use crate::common::open_channel_push_amt;
 
-fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, amount_msat: u64) {
+fn spawn_payment(node_a: Arc<TestNode>, node_b: Arc<TestNode>, amount_msat: u64) {
 	let mut preimage_bytes = [0u8; 32];
 	rand::rng().fill_bytes(&mut preimage_bytes);
 	let preimage = PaymentPreimage(preimage_bytes);
@@ -61,7 +61,7 @@ fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, amount_msat: u64) {
 	});
 }
 
-async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Duration {
+async fn send_payments(node_a: Arc<TestNode>, node_b: Arc<TestNode>) -> std::time::Duration {
 	let start = Instant::now();
 
 	let total_payments = 1000;
