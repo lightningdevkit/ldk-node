@@ -463,6 +463,8 @@ def _uniffi_check_contract_api_version(lib):
 def _uniffi_check_api_checksums(lib):
     if lib.uniffi_ldk_node_checksum_func_default_config() != 55381:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic() != 15067:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_func_generate_entropy_mnemonic() != 48014:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_bolt11invoice_amount_milli_satoshis() != 50823:
@@ -2320,6 +2322,12 @@ _UniffiLib.uniffi_ldk_node_fn_func_default_config.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_func_default_config.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_ldk_node_fn_func_derive_node_secret_from_mnemonic.argtypes = (
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_func_derive_node_secret_from_mnemonic.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_ldk_node_fn_func_generate_entropy_mnemonic.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2596,6 +2604,9 @@ _UniffiLib.ffi_ldk_node_rust_future_complete_void.restype = None
 _UniffiLib.uniffi_ldk_node_checksum_func_default_config.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_func_default_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_func_generate_entropy_mnemonic.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_func_generate_entropy_mnemonic.restype = ctypes.c_uint16
@@ -11996,6 +12007,11 @@ class NodeError:  # type: ignore
         def __repr__(self):
             return "NodeError.CoinSelectionFailed({})".format(repr(str(self)))
     _UniffiTempNodeError.CoinSelectionFailed = CoinSelectionFailed # type: ignore
+    class InvalidMnemonic(_UniffiTempNodeError):
+
+        def __repr__(self):
+            return "NodeError.InvalidMnemonic({})".format(repr(str(self)))
+    _UniffiTempNodeError.InvalidMnemonic = InvalidMnemonic # type: ignore
 
 NodeError = _UniffiTempNodeError # type: ignore
 del _UniffiTempNodeError
@@ -12249,6 +12265,10 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             return NodeError.CoinSelectionFailed(
                 _UniffiConverterString.read(buf),
             )
+        if variant == 62:
+            return NodeError.InvalidMnemonic(
+                _UniffiConverterString.read(buf),
+            )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
@@ -12375,6 +12395,8 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             return
         if isinstance(value, NodeError.CoinSelectionFailed):
             return
+        if isinstance(value, NodeError.InvalidMnemonic):
+            return
 
     @staticmethod
     def write(value, buf):
@@ -12500,6 +12522,8 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             buf.write_i32(60)
         if isinstance(value, NodeError.CoinSelectionFailed):
             buf.write_i32(61)
+        if isinstance(value, NodeError.InvalidMnemonic):
+            buf.write_i32(62)
 
 
 
@@ -15869,6 +15893,16 @@ def default_config() -> "Config":
     return _UniffiConverterTypeConfig.lift(_uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_func_default_config,))
 
 
+def derive_node_secret_from_mnemonic(mnemonic: "str",passphrase: "typing.Optional[str]") -> "typing.List[int]":
+    _UniffiConverterString.check_lower(mnemonic)
+    
+    _UniffiConverterOptionalString.check_lower(passphrase)
+    
+    return _UniffiConverterSequenceUInt8.lift(_uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_func_derive_node_secret_from_mnemonic,
+        _UniffiConverterString.lower(mnemonic),
+        _UniffiConverterOptionalString.lower(passphrase)))
+
+
 def generate_entropy_mnemonic(word_count: "typing.Optional[WordCount]") -> "Mnemonic":
     _UniffiConverterOptionalTypeWordCount.check_lower(word_count)
     
@@ -15939,6 +15973,7 @@ __all__ = [
     "TxInput",
     "TxOutput",
     "default_config",
+    "derive_node_secret_from_mnemonic",
     "generate_entropy_mnemonic",
     "Bolt11Invoice",
     "Bolt11Payment",

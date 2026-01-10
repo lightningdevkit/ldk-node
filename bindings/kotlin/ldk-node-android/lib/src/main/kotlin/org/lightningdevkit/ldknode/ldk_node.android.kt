@@ -1490,6 +1490,8 @@ internal typealias UniffiVTableCallbackInterfaceVssHeaderProviderUniffiByValue =
 
 
 
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -2658,6 +2660,11 @@ internal interface UniffiLib : Library {
     fun uniffi_ldk_node_fn_func_default_config(
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
+    fun uniffi_ldk_node_fn_func_derive_node_secret_from_mnemonic(
+        `mnemonic`: RustBufferByValue,
+        `passphrase`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
     fun uniffi_ldk_node_fn_func_generate_entropy_mnemonic(
         `wordCount`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -2875,6 +2882,8 @@ internal interface UniffiLib : Library {
         uniffiCallStatus: UniffiRustCallStatus,
     ): Unit
     fun uniffi_ldk_node_checksum_func_default_config(
+    ): Short
+    fun uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic(
     ): Short
     fun uniffi_ldk_node_checksum_func_generate_entropy_mnemonic(
     ): Short
@@ -3266,6 +3275,9 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_ldk_node_checksum_func_default_config() != 55381.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic() != 15067.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_func_generate_entropy_mnemonic() != 48014.toShort()) {
@@ -11054,6 +11066,7 @@ object FfiConverterTypeNodeError : FfiConverterRustBuffer<NodeException> {
             59 -> NodeException.TransactionAlreadyConfirmed(FfiConverterString.read(buf))
             60 -> NodeException.NoSpendableOutputs(FfiConverterString.read(buf))
             61 -> NodeException.CoinSelectionFailed(FfiConverterString.read(buf))
+            62 -> NodeException.InvalidMnemonic(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -11306,6 +11319,10 @@ object FfiConverterTypeNodeError : FfiConverterRustBuffer<NodeException> {
             }
             is NodeException.CoinSelectionFailed -> {
                 buf.putInt(61)
+                Unit
+            }
+            is NodeException.InvalidMnemonic -> {
+                buf.putInt(62)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -13767,6 +13784,17 @@ typealias FfiConverterTypeUserChannelId = FfiConverterString
 fun `defaultConfig`(): Config {
     return FfiConverterTypeConfig.lift(uniffiRustCall { uniffiRustCallStatus ->
         UniffiLib.INSTANCE.uniffi_ldk_node_fn_func_default_config(
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+@Throws(NodeException::class)
+fun `deriveNodeSecretFromMnemonic`(`mnemonic`: kotlin.String, `passphrase`: kotlin.String?): List<kotlin.UByte> {
+    return FfiConverterSequenceUByte.lift(uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+        UniffiLib.INSTANCE.uniffi_ldk_node_fn_func_derive_node_secret_from_mnemonic(
+            FfiConverterString.lower(`mnemonic`),
+            FfiConverterOptionalString.lower(`passphrase`),
             uniffiRustCallStatus,
         )
     })

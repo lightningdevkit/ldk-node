@@ -8190,6 +8190,8 @@ public enum NodeError {
     case NoSpendableOutputs(message: String)
 
     case CoinSelectionFailed(message: String)
+
+    case InvalidMnemonic(message: String)
 }
 
 #if swift(>=5.8)
@@ -8445,6 +8447,10 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
+        case 62: return try .InvalidMnemonic(
+                message: FfiConverterString.read(from: &buf)
+            )
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -8573,6 +8579,8 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(60))
         case .CoinSelectionFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(61))
+        case .InvalidMnemonic(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(62))
         }
     }
 }
@@ -11679,6 +11687,15 @@ public func defaultConfig() -> Config {
     })
 }
 
+public func deriveNodeSecretFromMnemonic(mnemonic: String, passphrase: String?) throws -> [UInt8] {
+    return try FfiConverterSequenceUInt8.lift(rustCallWithError(FfiConverterTypeNodeError.lift) {
+        uniffi_ldk_node_fn_func_derive_node_secret_from_mnemonic(
+            FfiConverterString.lower(mnemonic),
+            FfiConverterOptionString.lower(passphrase), $0
+        )
+    })
+}
+
 public func generateEntropyMnemonic(wordCount: WordCount?) -> Mnemonic {
     return try! FfiConverterTypeMnemonic.lift(try! rustCall {
         uniffi_ldk_node_fn_func_generate_entropy_mnemonic(
@@ -11704,6 +11721,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if uniffi_ldk_node_checksum_func_default_config() != 55381 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic() != 15067 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_func_generate_entropy_mnemonic() != 48014 {

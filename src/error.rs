@@ -139,6 +139,8 @@ pub enum Error {
 	NoSpendableOutputs,
 	/// Coin selection failed to find suitable UTXOs.
 	CoinSelectionFailed,
+	/// The given mnemonic is invalid.
+	InvalidMnemonic,
 }
 
 impl fmt::Display for Error {
@@ -227,6 +229,7 @@ impl fmt::Display for Error {
 			},
 			Self::NoSpendableOutputs => write!(f, "The transaction has no spendable outputs."),
 			Self::CoinSelectionFailed => write!(f, "Coin selection failed to find suitable UTXOs."),
+			Self::InvalidMnemonic => write!(f, "The given mnemonic is invalid."),
 		}
 	}
 }

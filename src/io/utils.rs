@@ -68,6 +68,29 @@ pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 	Mnemonic::generate(word_count).expect("Failed to generate mnemonic")
 }
 
+/// Derives the node secret key from a BIP39 mnemonic.
+///
+/// This is the same key that would be used by a [`Node`] built with this mnemonic via
+/// [`Builder::set_entropy_bip39_mnemonic`].
+///
+/// [`Node`]: crate::Node
+/// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
+pub fn derive_node_secret_from_mnemonic(
+	mnemonic: String, passphrase: Option<String>,
+) -> Result<Vec<u8>, crate::Error> {
+	use bitcoin::bip32::Xpriv;
+
+	let parsed_mnemonic =
+		Mnemonic::parse(&mnemonic).map_err(|_| crate::Error::InvalidMnemonic)?;
+
+	let seed = parsed_mnemonic.to_seed(passphrase.as_deref().unwrap_or(""));
+
+	let xpriv = Xpriv::new_master(Network::Bitcoin, &seed)
+		.map_err(|_| crate::Error::InvalidMnemonic)?;
+
+	Ok(xpriv.private_key.secret_bytes().to_vec())
+}
+
 pub(crate) fn read_or_generate_seed_file<L: Deref>(
 	keys_seed_path: &str, logger: L,
 ) -> std::io::Result<[u8; WALLET_KEYS_SEED_LEN]>
