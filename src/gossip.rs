@@ -17,7 +17,7 @@ use crate::chain::ChainSource;
 use crate::config::RGS_SYNC_TIMEOUT_SECS;
 use crate::logger::{log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::types::{GossipSync, Graph, P2PGossipSync, PeerManager, RapidGossipSync, UtxoLookup};
+use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync};
 use crate::Error;
 
 pub(crate) enum GossipSource {
@@ -33,12 +33,15 @@ pub(crate) enum GossipSource {
 }
 
 impl GossipSource {
-	pub fn new_p2p(network_graph: Arc<Graph>, logger: Arc<Logger>) -> Self {
-		let gossip_sync = Arc::new(P2PGossipSync::new(
-			network_graph,
-			None::<Arc<UtxoLookup>>,
-			Arc::clone(&logger),
-		));
+	pub fn new_p2p(
+		network_graph: Arc<Graph>, chain_source: Arc<ChainSource>, runtime: Arc<Runtime>,
+		logger: Arc<Logger>,
+	) -> Self {
+		let verifier = chain_source.as_utxo_source().map(|utxo_source| {
+			Arc::new(GossipVerifier::new(Arc::new(utxo_source), RuntimeSpawner::new(runtime)))
+		});
+
+		let gossip_sync = Arc::new(P2PGossipSync::new(network_graph, verifier, logger));
 		Self::P2PNetwork { gossip_sync }
 	}
 
@@ -59,27 +62,6 @@ impl GossipSource {
 		match self {
 			Self::RapidGossipSync { gossip_sync, .. } => GossipSync::Rapid(Arc::clone(gossip_sync)),
 			Self::P2PNetwork { gossip_sync, .. } => GossipSync::P2P(Arc::clone(gossip_sync)),
-		}
-	}
-
-	pub(crate) fn set_gossip_verifier(
-		&self, chain_source: Arc<ChainSource>, peer_manager: Arc<PeerManager>,
-		runtime: Arc<Runtime>,
-	) {
-		match self {
-			Self::P2PNetwork { gossip_sync } => {
-				if let Some(utxo_source) = chain_source.as_utxo_source() {
-					let spawner = RuntimeSpawner::new(Arc::clone(&runtime));
-					let gossip_verifier = Arc::new(GossipVerifier::new(
-						Arc::new(utxo_source),
-						spawner,
-						Arc::clone(gossip_sync),
-						peer_manager,
-					));
-					gossip_sync.add_utxo_lookup(Some(gossip_verifier));
-				}
-			},
-			_ => (),
 		}
 	}
 

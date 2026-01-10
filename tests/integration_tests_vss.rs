@@ -24,28 +24,30 @@ async fn channel_full_cycle_with_vss_store() {
 	let mut builder_a = Builder::from_config(config_a.node_config);
 	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
-	let node_a = builder_a
+	let node_a: common::TestNode = builder_a
 		.build_with_vss_store_and_fixed_headers(
 			config_a.node_entropy,
 			vss_base_url.clone(),
 			"node_1_store".to_string(),
 			HashMap::new(),
 		)
-		.unwrap();
+		.unwrap()
+		.into();
 	node_a.start().unwrap();
 
 	println!("\n== Node B ==");
 	let config_b = common::random_config(true);
 	let mut builder_b = Builder::from_config(config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
-	let node_b = builder_b
+	let node_b: common::TestNode = builder_b
 		.build_with_vss_store_and_fixed_headers(
 			config_b.node_entropy,
 			vss_base_url,
 			"node_2_store".to_string(),
 			HashMap::new(),
 		)
-		.unwrap();
+		.unwrap()
+		.into();
 	node_b.start().unwrap();
 
 	common::do_channel_full_cycle(

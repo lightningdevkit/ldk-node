@@ -13,6 +13,7 @@ pub(crate) mod logging;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -261,10 +262,55 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 	TestConfig { node_config, ..Default::default() }
 }
 
+pub struct TestNode {
+	#[cfg(feature = "uniffi")]
+	inner: Option<Arc<Node>>,
+	#[cfg(not(feature = "uniffi"))]
+	inner: Option<Node>,
+}
+
 #[cfg(feature = "uniffi")]
-type TestNode = Arc<Node>;
+impl From<Arc<Node>> for TestNode {
+	fn from(inner: Arc<Node>) -> Self {
+		Self { inner: Some(inner) }
+	}
+}
+
 #[cfg(not(feature = "uniffi"))]
-type TestNode = Node;
+impl From<Node> for TestNode {
+	fn from(inner: Node) -> Self {
+		Self { inner: Some(inner) }
+	}
+}
+
+impl Deref for TestNode {
+	type Target = Node;
+	fn deref(&self) -> &Node {
+		#[cfg(feature = "uniffi")]
+		{
+			self.inner.as_ref().unwrap().deref()
+		}
+		#[cfg(not(feature = "uniffi"))]
+		{
+			&self.inner.as_ref().unwrap()
+		}
+	}
+}
+
+#[cfg(cycle_tests)]
+impl Drop for TestNode {
+	fn drop(&mut self) {
+		if !std::thread::panicking() {
+			let leak_checks = (**self).leak_checker();
+			match self.inner.take().unwrap().stop() {
+				Ok(()) => {},
+				Err(e) if e == NodeError::NotRunning => {},
+				Err(e) => panic!("{e:?}"),
+			}
+			leak_checks.assert_no_leaks();
+		}
+	}
+}
 
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
@@ -430,7 +476,7 @@ pub(crate) fn setup_node_for_async_payments(
 	node.start().unwrap();
 	assert!(node.status().is_running);
 	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
-	node
+	node.into()
 }
 
 pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
