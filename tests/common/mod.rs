@@ -301,9 +301,13 @@ impl Deref for TestNode {
 impl Drop for TestNode {
 	fn drop(&mut self) {
 		if !std::thread::panicking() {
-			let graph_ref = (**self).fetch_ref();
-			self.inner.take();
-			assert_eq!(graph_ref.strong_count(), 0);
+			let leak_checks = (**self).leak_checker();
+			match self.inner.take().unwrap().stop() {
+				Ok(()) => {},
+				Err(e) if e == NodeError::NotRunning => {},
+				Err(e) => panic!("{e:?}"),
+			}
+			leak_checks.assert_no_leaks();
 		}
 	}
 }

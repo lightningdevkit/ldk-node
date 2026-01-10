@@ -110,6 +110,8 @@ use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(cycle_tests)]
+use std::{any::Any, sync::Weak};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
@@ -1763,15 +1765,31 @@ impl Node {
 	}
 
 	#[cfg(cycle_tests)]
-	/// Fetch a reference to the inner NetworkGraph, for Arc cycle detection
-	pub fn fetch_ref(&self) -> std::sync::Weak<Graph> {
-		Arc::downgrade(&self.network_graph)
+	/// Fetch a [`LeakChecker`] which can be used to ensure that the inner fields of this object
+	/// are released.
+	///
+	/// Call [`LeakChecker::assert_no_leaks`] after this [`Node`] has been `drop`ped (otherwise it
+	/// will assume that all fields have leaked).
+	pub fn leak_checker(&self) -> LeakChecker {
+		let graph = Arc::downgrade(&self.network_graph) as Weak<dyn Any>;
+		LeakChecker(vec![graph])
 	}
 }
 
-impl Drop for Node {
-	fn drop(&mut self) {
-		let _ = self.stop();
+#[cfg(cycle_tests)]
+/// A list of [`Weak`]s which can be used to check that a [`Node`]'s inner fields are being
+/// properly released after the [`Node`] is dropped.
+pub struct LeakChecker(Vec<Weak<dyn Any>>);
+
+#[cfg(cycle_tests)]
+impl LeakChecker {
+	/// Asserts that all the stored [`Weak`]s point to contents which have been freed.
+	///
+	/// This will (obviously) panic if the [`Node`] has not yet been dropped.
+	pub fn assert_no_leaks(&self) {
+		for weak in self.0.iter() {
+			assert_eq!(weak.strong_count(), 0);
+		}
 	}
 }
 
