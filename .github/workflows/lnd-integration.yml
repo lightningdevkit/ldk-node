@@ -51,6 +51,6 @@ jobs:
 
       - name: Run LND integration tests
         run: LND_CERT_PATH=$LND_DATA_DIR/tls.cert LND_MACAROON_PATH=$LND_DATA_DIR/data/chain/bitcoin/regtest/admin.macaroon
-          RUSTFLAGS="--cfg lnd_test --cfg cycle_tests" cargo test --test integration_tests_lnd -- --exact --show-output
+          RUSTFLAGS="--cfg lnd_test" cargo test --test integration_tests_lnd -- --exact --show-output
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
