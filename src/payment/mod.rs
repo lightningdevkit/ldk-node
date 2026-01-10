@@ -23,3 +23,7 @@ pub use store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 };
 pub use unified::{UnifiedPayment, UnifiedPaymentResult};
+
+pub use crate::types::PaidBolt12Invoice;
+#[cfg(feature = "uniffi")]
+pub use crate::types::{Bolt12Invoice, StaticInvoice};

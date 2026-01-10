@@ -621,3 +621,12 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 		CustomTlvRecord { type_num: tlv.0, value: tlv.1.clone() }
 	}
 }
+
+// Re-export the invoice types. When UniFFI is enabled, we use the types from ffi::types
+// which have additional UniFFI-specific implementations. Otherwise, we re-export LDK's
+// types directly to avoid unnecessary wrappers and serialization reimplementation.
+#[cfg(not(feature = "uniffi"))]
+pub use lightning::events::PaidBolt12Invoice;
+
+#[cfg(feature = "uniffi")]
+pub use crate::ffi::{Bolt12Invoice, PaidBolt12Invoice, StaticInvoice};

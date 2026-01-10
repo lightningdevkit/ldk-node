@@ -48,7 +48,9 @@ use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::runtime::Runtime;
-use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
+use crate::types::{
+	CustomTlvRecord, DynStore, OnionMessenger, PaidBolt12Invoice, PaymentStore, Sweeper, Wallet,
+};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -75,6 +77,17 @@ pub enum Event {
 		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
+		/// The BOLT12 invoice that was paid.
+		///
+		/// This is useful for proof of payment. A third party can verify that the payment was made
+		/// by checking that the `payment_hash` in the invoice matches `sha256(payment_preimage)`.
+		///
+		/// Will be `None` for non-BOLT12 payments.
+		///
+		/// Note that static invoices (indicated by [`PaidBolt12Invoice::StaticInvoice`], used for
+		/// async payments) do not support proof of payment as the payment hash is not derived
+		/// from a preimage known only to the recipient.
+		bolt12_invoice: Option<PaidBolt12Invoice>,
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
@@ -264,6 +277,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(1, fee_paid_msat, option),
 		(3, payment_id, option),
 		(5, payment_preimage, option),
+		(7, bolt12_invoice, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, option),
@@ -1022,6 +1036,7 @@ where
 				payment_preimage,
 				payment_hash,
 				fee_paid_msat,
+				bolt12_invoice,
 				..
 			} => {
 				let payment_id = if let Some(id) = payment_id {
@@ -1062,11 +1077,18 @@ where
 						hex_utils::to_string(&payment_preimage.0)
 					);
 				});
+
+				// For UniFFI builds, convert LDK's PaidBolt12Invoice to our wrapped type.
+				// For non-UniFFI builds, we use LDK's type directly.
+				#[cfg(feature = "uniffi")]
+				let bolt12_invoice = bolt12_invoice.map(PaidBolt12Invoice::from);
+
 				let event = Event::PaymentSuccessful {
 					payment_id: Some(payment_id),
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
+					bolt12_invoice,
 				};
 
 				match self.event_queue.add_event(event).await {
