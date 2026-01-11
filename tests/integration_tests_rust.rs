@@ -2445,6 +2445,9 @@ async fn persistence_backwards_compatibility() {
 
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
 	let seed_bytes = [42u8; 64];
+	#[cfg(feature = "uniffi")]
+	let node_entropy = Arc::new(NodeEntropy::from_seed_bytes(seed_bytes.to_vec()).unwrap());
+	#[cfg(not(feature = "uniffi"))]
 	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup a v0.6.2 `Node`
