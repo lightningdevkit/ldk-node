@@ -13,6 +13,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
+	HumanReadableNamesConfig? hrn_config;
 };
 
 dictionary AnchorChannelsConfig {
@@ -348,6 +349,7 @@ enum NodeError {
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
 	"HrnParsingFailed",
+	"HrnResolverNotConfigured",
 };
 
 dictionary NodeStatus {
@@ -382,6 +384,7 @@ enum BuildError {
 	"LoggerSetupFailed",
 	"NetworkMismatch",
 	"AsyncPaymentsConfigMismatch",
+	"DNSResolverSetupFailed",
 };
 
 [Trait]
@@ -499,6 +502,12 @@ dictionary RouteParametersConfig {
 	u32 max_total_cltv_expiry_delta;
 	u8 max_path_count;
 	u8 max_channel_saturation_power_of_half;
+};
+
+dictionary HumanReadableNamesConfig {
+	sequence<PublicKey> default_dns_resolvers;
+	boolean is_hrn_resolver;
+	string dns_server_address;
 };
 
 dictionary CustomTlvRecord {

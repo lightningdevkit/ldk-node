@@ -85,6 +85,14 @@ jobs:
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
           RUSTFLAGS="--cfg no_download" cargo test --features uniffi
+      - name: Test with HRN overrides (No UniFFI) on Rust ${{ matrix.toolchain }}
+        if: "matrix.platform == 'ubuntu-latest' && matrix.toolchain == 'stable'"
+        run: |
+          RUSTFLAGS="--cfg no_download" cargo test --features hrn_tests
+      - name: Test with UniFFI and HRN overrides on Rust ${{ matrix.toolchain }}
+        if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
+        run: |
+          RUSTFLAGS="--cfg no_download" cargo test --features uniffi,hrn_tests    
 
   doc:
     name: Documentation
