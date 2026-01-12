@@ -18,6 +18,7 @@ use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bip39::Mnemonic;
+use bitcoin::bip32::Xpriv;
 use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
@@ -77,16 +78,13 @@ pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 /// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
 pub fn derive_node_secret_from_mnemonic(
 	mnemonic: String, passphrase: Option<String>,
-) -> Result<Vec<u8>, crate::Error> {
-	use bitcoin::bip32::Xpriv;
-
-	let parsed_mnemonic =
-		Mnemonic::parse(&mnemonic).map_err(|_| crate::Error::InvalidMnemonic)?;
+) -> Result<Vec<u8>, Error> {
+	let parsed_mnemonic = Mnemonic::parse(&mnemonic).map_err(|_| Error::InvalidMnemonic)?;
 
 	let seed = parsed_mnemonic.to_seed(passphrase.as_deref().unwrap_or(""));
 
-	let xpriv = Xpriv::new_master(Network::Bitcoin, &seed)
-		.map_err(|_| crate::Error::InvalidMnemonic)?;
+	let xpriv =
+		Xpriv::new_master(Network::Bitcoin, &seed).map_err(|_| Error::InvalidMnemonic)?;
 
 	Ok(xpriv.private_key.secret_bytes().to_vec())
 }
