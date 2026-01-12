@@ -1,6 +1,8 @@
 namespace ldk_node {
 	Mnemonic generate_entropy_mnemonic(WordCount? word_count);
 	Config default_config();
+	[Throws=NodeError]
+	sequence<u8> derive_node_secret_from_mnemonic(string mnemonic, string? passphrase);
 };
 
 dictionary Config {
@@ -380,6 +382,7 @@ enum NodeError {
     "TransactionAlreadyConfirmed",
     "NoSpendableOutputs",
     "CoinSelectionFailed",
+	"InvalidMnemonic",
 };
 
 dictionary NodeStatus {

@@ -1781,6 +1781,8 @@ sealed class NodeException(message: String): kotlin.Exception(message) {
     
     class CoinSelectionFailed(message: String) : NodeException(message)
     
+    class InvalidMnemonic(message: String) : NodeException(message)
+    
 }
 
 

@@ -18,6 +18,7 @@ use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bip39::Mnemonic;
+use bitcoin::bip32::Xpriv;
 use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
@@ -66,6 +67,26 @@ pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_sc
 pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 	let word_count = word_count.unwrap_or(WordCount::Words24).word_count();
 	Mnemonic::generate(word_count).expect("Failed to generate mnemonic")
+}
+
+/// Derives the node secret key from a BIP39 mnemonic.
+///
+/// This is the same key that would be used by a [`Node`] built with this mnemonic via
+/// [`Builder::set_entropy_bip39_mnemonic`].
+///
+/// [`Node`]: crate::Node
+/// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
+pub fn derive_node_secret_from_mnemonic(
+	mnemonic: String, passphrase: Option<String>,
+) -> Result<Vec<u8>, Error> {
+	let parsed_mnemonic = Mnemonic::parse(&mnemonic).map_err(|_| Error::InvalidMnemonic)?;
+
+	let seed = parsed_mnemonic.to_seed(passphrase.as_deref().unwrap_or(""));
+
+	let xpriv =
+		Xpriv::new_master(Network::Bitcoin, &seed).map_err(|_| Error::InvalidMnemonic)?;
+
+	Ok(xpriv.private_key.secret_bytes().to_vec())
 }
 
 pub(crate) fn read_or_generate_seed_file<L: Deref>(

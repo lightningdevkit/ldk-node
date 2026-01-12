@@ -131,7 +131,7 @@ use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
-pub use io::utils::generate_entropy_mnemonic;
+pub use io::utils::{derive_node_secret_from_mnemonic, generate_entropy_mnemonic};
 use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
