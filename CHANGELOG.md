@@ -1,3 +1,15 @@
+# 0.7.0-rc.6 (Synonym Fork)
+
+## Bug Fixes
+- Fixed `derive_node_secret_from_mnemonic` to correctly match LDK's KeysManager node_secret derivation:
+  - BIP39 seed (64 bytes) → BIP32 master key (32 bytes)
+  - Those 32 bytes as new seed → BIP32 master → derive m/0' → node_secret
+  - This ensures the derived key matches what a running Node instance would use, enabling proper backup authentication before the node starts
+- Added verification tests that compare derived secret against LDK's KeysManager output
+
+## Code Quality
+- Cleaned up `derive_node_secret_from_mnemonic` with better variable naming and moved imports to file top
+
 # 0.7.0-rc.2 (Synonym Fork)
 
 ## Synonym Fork Additions
