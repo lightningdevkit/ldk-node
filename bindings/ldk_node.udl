@@ -83,6 +83,9 @@ dictionary LogRecord {
 	string args;
 	string module_path;
 	u32 line;
+	PublicKey? peer_id;
+	ChannelId? channel_id;
+	PaymentHash? payment_hash;
 };
 
 [Trait, WithForeign]
