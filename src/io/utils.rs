@@ -18,7 +18,8 @@ use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bip39::Mnemonic;
-use bitcoin::bip32::Xpriv;
+use bitcoin::bip32::{ChildNumber, Xpriv};
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
@@ -83,24 +84,19 @@ pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 pub fn derive_node_secret_from_mnemonic(
 	mnemonic: String, passphrase: Option<String>,
 ) -> Result<Vec<u8>, Error> {
-	use bitcoin::bip32::ChildNumber;
-	use bitcoin::secp256k1::Secp256k1;
-
 	let parsed_mnemonic = Mnemonic::parse(&mnemonic).map_err(|_| Error::InvalidMnemonic)?;
 	let seed = parsed_mnemonic.to_seed(passphrase.as_deref().unwrap_or(""));
 
-	// First BIP32 derivation: 64-byte BIP39 seed → 32-byte master private key
-	let xpriv =
+	let master_xpriv =
 		Xpriv::new_master(Network::Bitcoin, &seed).map_err(|_| Error::InvalidMnemonic)?;
-	let ldk_seed: [u8; 32] = xpriv.private_key.secret_bytes();
 
-	// Second BIP32 derivation: KeysManager treats the 32-byte key as a new seed
-	// and derives node_secret at path m/0'
-	let secp = Secp256k1::new();
-	let keys_master =
-		Xpriv::new_master(Network::Bitcoin, &ldk_seed).map_err(|_| Error::InvalidMnemonic)?;
-	let node_secret_xpriv = keys_master
-		.derive_priv(&secp, &[ChildNumber::from_hardened_idx(0).unwrap()])
+	let ldk_seed_bytes: [u8; 32] = master_xpriv.private_key.secret_bytes();
+
+	let keys_manager_master = Xpriv::new_master(Network::Bitcoin, &ldk_seed_bytes)
+		.map_err(|_| Error::InvalidMnemonic)?;
+
+	let node_secret_xpriv = keys_manager_master
+		.derive_priv(&Secp256k1::new(), &[ChildNumber::from_hardened_idx(0).unwrap()])
 		.map_err(|_| Error::InvalidMnemonic)?;
 
 	Ok(node_secret_xpriv.private_key.secret_bytes().to_vec())
