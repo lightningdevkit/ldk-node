@@ -13,6 +13,8 @@ use crate::error::LdkServerError;
 use crate::error::LdkServerErrorCode::{
 	AuthError, InternalError, InternalServerError, InvalidRequestError, LightningError,
 };
+use bitcoin_hashes::hmac::{Hmac, HmacEngine};
+use bitcoin_hashes::{sha256, Hash, HashEngine};
 use ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11SendRequest, Bolt11SendResponse,
 	Bolt12ReceiveRequest, Bolt12ReceiveResponse, Bolt12SendRequest, Bolt12SendResponse,
@@ -32,6 +34,7 @@ use ldk_server_protos::endpoints::{
 use ldk_server_protos::error::{ErrorCode, ErrorResponse};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 
@@ -40,12 +43,31 @@ const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 pub struct LdkServerClient {
 	base_url: String,
 	client: Client,
+	api_key: String,
 }
 
 impl LdkServerClient {
 	/// Constructs a [`LdkServerClient`] using `base_url` as the ldk-server endpoint.
-	pub fn new(base_url: String) -> Self {
-		Self { base_url, client: Client::new() }
+	/// `api_key` is used for HMAC-based authentication.
+	pub fn new(base_url: String, api_key: String) -> Self {
+		Self { base_url, client: Client::new(), api_key }
+	}
+
+	/// Computes the HMAC-SHA256 authentication header value.
+	/// Format: "HMAC <timestamp>:<hmac_hex>"
+	fn compute_auth_header(&self, body: &[u8]) -> String {
+		let timestamp = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.expect("System time should be after Unix epoch")
+			.as_secs();
+
+		// Compute HMAC-SHA256(api_key, timestamp_bytes || body)
+		let mut hmac_engine: HmacEngine<sha256::Hash> = HmacEngine::new(self.api_key.as_bytes());
+		hmac_engine.input(&timestamp.to_be_bytes());
+		hmac_engine.input(body);
+		let hmac_result = Hmac::<sha256::Hash>::from_engine(hmac_engine);
+
+		format!("HMAC {}:{}", timestamp, hmac_result)
 	}
 
 	/// Retrieve the latest node info like `node_id`, `current_best_block` etc.
@@ -196,10 +218,12 @@ impl LdkServerClient {
 		&self, request: &Rq, url: &str,
 	) -> Result<Rs, LdkServerError> {
 		let request_body = request.encode_to_vec();
+		let auth_header = self.compute_auth_header(&request_body);
 		let response_raw = self
 			.client
 			.post(url)
 			.header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
+			.header("X-Auth", auth_header)
 			.body(request_body)
 			.send()
 			.await

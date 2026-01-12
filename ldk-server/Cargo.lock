@@ -1717,6 +1717,7 @@ name = "ldk-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.21.7",
  "bytes",
  "chrono",
  "futures-util",
@@ -1751,6 +1752,7 @@ dependencies = [
 name = "ldk-server-client"
 version = "0.1.0"
 dependencies = [
+ "bitcoin_hashes 0.14.0",
  "ldk-server-protos",
  "prost",
  "reqwest 0.11.27",

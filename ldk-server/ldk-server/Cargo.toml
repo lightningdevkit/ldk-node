@@ -20,6 +20,7 @@ async-trait = { version = "0.1.85", default-features = false }
 toml = { version = "0.8.9", default-features = false, features = ["parse"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 log = "0.4.28"
+base64 = { version = "0.21", default-features = false, features = ["std"] }
 
 # Required for RabittMQ based EventPublisher. Only enabled for `events-rabbitmq` feature.
 lapin = { version = "2.4.0", features = ["rustls"], default-features = false, optional = true }
