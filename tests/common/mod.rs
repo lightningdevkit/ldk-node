@@ -1288,18 +1288,6 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nB stopped");
 }
 
-// Helper to unify entropy creation
-pub(crate) fn create_test_entropy(seed: [u8; 64]) -> NodeEntropy {
-	#[cfg(feature = "uniffi")]
-	{
-		NodeEntropy::from_seed_bytes(seed.to_vec()).unwrap()
-	}
-	#[cfg(not(feature = "uniffi"))]
-	{
-		NodeEntropy::from_seed_bytes(seed)
-	}
-}
-
 // A `KVStore` impl for testing purposes that wraps all our `KVStore`s and asserts their synchronicity.
 #[derive(Clone)]
 pub(crate) struct TestSyncStore {
