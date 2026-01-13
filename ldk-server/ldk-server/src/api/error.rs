@@ -93,7 +93,6 @@ impl From<NodeError> for LdkServerError {
 			| NodeError::AsyncPaymentServicesDisabled => {
 				(error.to_string(), LdkServerErrorCode::InvalidRequestError)
 			},
-
 			NodeError::ConnectionFailed
 			| NodeError::InvoiceCreationFailed
 			| NodeError::InvoiceRequestCreationFailed
@@ -109,8 +108,8 @@ impl From<NodeError> for LdkServerError {
 			| NodeError::DuplicatePayment
 			| NodeError::InsufficientFunds
 			| NodeError::UnsupportedCurrency
+			| NodeError::HrnParsingFailed
 			| NodeError::LiquidityFeeTooHigh => (error.to_string(), LdkServerErrorCode::LightningError),
-
 			NodeError::AlreadyRunning
 			| NodeError::NotRunning
 			| NodeError::PersistenceFailed
@@ -125,6 +124,7 @@ impl From<NodeError> for LdkServerError {
 			| NodeError::OnchainTxCreationFailed
 			| NodeError::OnchainTxSigningFailed
 			| NodeError::TxSyncFailed
+			| NodeError::InvalidScriptPubKey
 			| NodeError::TxSyncTimeout => (error.to_string(), LdkServerErrorCode::InternalServerError),
 		};
 		LdkServerError::new(error_code, message)
