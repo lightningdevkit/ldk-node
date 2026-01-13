@@ -233,7 +233,17 @@ impl RuntimeSpawner {
 }
 
 impl FutureSpawner for RuntimeSpawner {
-	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
-		self.runtime.spawn_cancellable_background_task(future);
+	type E = tokio::sync::oneshot::error::RecvError;
+	type SpawnedFutureResult<O> = tokio::sync::oneshot::Receiver<O>;
+	fn spawn<O: Send + 'static, F: Future<Output = O> + Send + 'static>(
+		&self, future: F,
+	) -> Self::SpawnedFutureResult<O> {
+		let (result, output) = tokio::sync::oneshot::channel();
+		self.runtime.spawn_cancellable_background_task(async move {
+			// We don't care if the send works or not, if the receiver is dropped its not our
+			// problem.
+			let _ = result.send(future.await);
+		});
+		output
 	}
 }
