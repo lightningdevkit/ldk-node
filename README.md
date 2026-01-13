@@ -67,7 +67,7 @@ LDK Node currently comes with a decidedly opinionated set of design choices:
 - Entropy for the Lightning and on-chain wallets may be sourced from raw bytes or a [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki) mnemonic. In addition, LDK Node offers the means to generate and persist the entropy bytes to disk.
 
 ## Language Support
-LDK Node itself is written in [Rust][rust] and may therefore be natively added as a library dependency to any `std` Rust program. However, beyond its Rust API it also offers language bindings for [Swift][swift], [Kotlin][kotlin], and [Python][python] based on the [UniFFI](https://github.com/mozilla/uniffi-rs/). Moreover, [Flutter bindings][flutter_bindings] are also available.
+LDK Node itself is written in [Rust][rust] and may therefore be natively added as a library dependency to any `std` Rust program. However, beyond its Rust API it also offers language bindings for [Swift][swift], [Kotlin][kotlin], and [Python][python] based on the [UniFFI](https://github.com/mozilla/uniffi-rs/).
 
 ## MSRV
 The Minimum Supported Rust Version (MSRV) is currently 1.85.0.
@@ -85,4 +85,3 @@ The Minimum Supported Rust Version (MSRV) is currently 1.85.0.
 [swift]: https://www.swift.org/
 [kotlin]: https://kotlinlang.org/
 [python]: https://www.python.org/
-[flutter_bindings]: https://github.com/LtbLightning/ldk-node-flutter
