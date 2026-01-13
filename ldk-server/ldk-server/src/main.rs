@@ -14,6 +14,7 @@ mod util;
 
 use crate::service::NodeService;
 
+use ldk_node::entropy::NodeEntropy;
 use ldk_node::{Builder, Event, Node};
 
 use tokio::net::TcpListener;
@@ -147,7 +148,16 @@ fn main() {
 
 	builder.set_runtime(runtime.handle().clone());
 
-	let node = match builder.build() {
+	let seed_path = format!("{}/keys_seed", config_file.storage_dir_path);
+	let node_entropy = match NodeEntropy::from_seed_path(seed_path) {
+		Ok(entropy) => entropy,
+		Err(e) => {
+			error!("Failed to load or generate seed: {e}");
+			std::process::exit(-1);
+		},
+	};
+
+	let node = match builder.build(node_entropy) {
 		Ok(node) => Arc::new(node),
 		Err(e) => {
 			error!("Failed to build LDK Node: {e}");
