@@ -17,8 +17,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
-	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
-	expect_channel_pending_event, expect_channel_ready_event, expect_event,
+	bump_fee_and_broadcast, create_test_entropy, distribute_funds_unconfirmed,
+	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
 	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
@@ -27,7 +27,6 @@ use common::{
 	TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
-use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -2445,7 +2444,8 @@ async fn persistence_backwards_compatibility() {
 
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
 	let seed_bytes = [42u8; 64];
-	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
+
+	let node_entropy = create_test_entropy(seed_bytes);
 
 	// Setup a v0.6.2 `Node`
 	let (old_balance, old_node_id) = {
@@ -2482,7 +2482,7 @@ async fn persistence_backwards_compatibility() {
 	builder_new.set_storage_dir_path(storage_path);
 	builder_new.set_chain_source_esplora(esplora_url, None);
 
-	let node_new = builder_new.build(node_entropy).unwrap();
+	let node_new = builder_new.build(node_entropy.into()).unwrap();
 
 	node_new.start().unwrap();
 	node_new.sync_wallets().unwrap();
