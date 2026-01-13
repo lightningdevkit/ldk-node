@@ -9,6 +9,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lightning::util::native_async::FutureSpawner;
+
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::config::{
@@ -218,4 +220,30 @@ impl Runtime {
 enum RuntimeMode {
 	Owned(tokio::runtime::Runtime),
 	Handle(tokio::runtime::Handle),
+}
+
+pub(crate) struct RuntimeSpawner {
+	runtime: Arc<Runtime>,
+}
+
+impl RuntimeSpawner {
+	pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
+		Self { runtime }
+	}
+}
+
+impl FutureSpawner for RuntimeSpawner {
+	type E = tokio::sync::oneshot::error::RecvError;
+	type SpawnedFutureResult<O> = tokio::sync::oneshot::Receiver<O>;
+	fn spawn<O: Send + 'static, F: Future<Output = O> + Send + 'static>(
+		&self, future: F,
+	) -> Self::SpawnedFutureResult<O> {
+		let (result, output) = tokio::sync::oneshot::channel();
+		self.runtime.spawn_cancellable_background_task(async move {
+			// We don't care if the send works or not, if the receiver is dropped its not our
+			// problem.
+			let _ = result.send(future.await);
+		});
+		output
+	}
 }

@@ -5,18 +5,16 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use lightning::util::native_async::FutureSpawner;
 use lightning_block_sync::gossip::GossipVerifier;
 
 use crate::chain::ChainSource;
 use crate::config::RGS_SYNC_TIMEOUT_SECS;
 use crate::logger::{log_trace, LdkLogger, Logger};
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync};
 use crate::Error;
 
@@ -112,21 +110,5 @@ impl GossipSource {
 				}
 			},
 		}
-	}
-}
-
-pub(crate) struct RuntimeSpawner {
-	runtime: Arc<Runtime>,
-}
-
-impl RuntimeSpawner {
-	pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
-		Self { runtime }
-	}
-}
-
-impl FutureSpawner for RuntimeSpawner {
-	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
-		self.runtime.spawn_cancellable_background_task(future);
 	}
 }

@@ -23,7 +23,9 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersister};
+use lightning::util::persist::{
+	KVStore, KVStoreSync, MonitorUpdatingPersister, MonitorUpdatingPersisterAsync,
+};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
@@ -35,10 +37,10 @@ use crate::chain::ChainSource;
 use crate::config::ChannelConfig;
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::gossip::RuntimeSpawner;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::PaymentDetails;
+use crate::runtime::RuntimeSpawner;
 
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
 /// same time.
@@ -184,6 +186,16 @@ impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> 
 		KVStoreSync::list(&self.0, primary_namespace, secondary_namespace)
 	}
 }
+
+pub(crate) type AsyncPersister = MonitorUpdatingPersisterAsync<
+	Arc<DynStore>,
+	RuntimeSpawner,
+	Arc<Logger>,
+	Arc<KeysManager>,
+	Arc<KeysManager>,
+	Arc<Broadcaster>,
+	Arc<OnchainFeeEstimator>,
+>;
 
 pub type Persister = MonitorUpdatingPersister<
 	Arc<DynStore>,
