@@ -1,4 +1,4 @@
-# 0.7.0-rc.2 (Synonym Fork)
+# 0.7.0-rc.6 (Synonym Fork)
 
 ## Synonym Fork Additions
 - Added reactive event system for wallet monitoring without polling:
@@ -55,6 +55,10 @@
   channel data from external LDK implementations (e.g., react-native-ldk). The channel manager and
   monitor data is written to the configured storage during build, before channel monitors are read.
   Storage keys for monitors are derived from the funding outpoint.
+- Added `derive_node_secret_from_mnemonic()` utility function to derive the node's secret key from a
+  BIP39 mnemonic, matching LDK's KeysManager derivation path (m/0'). This enables backup authentication
+  and key verification before the node starts, using the same derivation that a running Node instance
+  would use internally.
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.

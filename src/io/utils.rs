@@ -18,7 +18,8 @@ use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bip39::Mnemonic;
-use bitcoin::bip32::Xpriv;
+use bitcoin::bip32::{ChildNumber, Xpriv};
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin::Network;
 use lightning::io::Cursor;
 use lightning::ln::msgs::DecodeError;
@@ -74,19 +75,31 @@ pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 /// This is the same key that would be used by a [`Node`] built with this mnemonic via
 /// [`Builder::set_entropy_bip39_mnemonic`].
 ///
+/// The derivation follows LDK's KeysManager behavior:
+/// 1. BIP39 seed (64 bytes) → BIP32 master key (32 bytes)
+/// 2. Those 32 bytes as new seed → BIP32 master → derive m/0' → node_secret
+///
 /// [`Node`]: crate::Node
 /// [`Builder::set_entropy_bip39_mnemonic`]: crate::Builder::set_entropy_bip39_mnemonic
 pub fn derive_node_secret_from_mnemonic(
 	mnemonic: String, passphrase: Option<String>,
 ) -> Result<Vec<u8>, Error> {
 	let parsed_mnemonic = Mnemonic::parse(&mnemonic).map_err(|_| Error::InvalidMnemonic)?;
-
 	let seed = parsed_mnemonic.to_seed(passphrase.as_deref().unwrap_or(""));
 
-	let xpriv =
+	let master_xpriv =
 		Xpriv::new_master(Network::Bitcoin, &seed).map_err(|_| Error::InvalidMnemonic)?;
 
-	Ok(xpriv.private_key.secret_bytes().to_vec())
+	let ldk_seed_bytes: [u8; 32] = master_xpriv.private_key.secret_bytes();
+
+	let keys_manager_master = Xpriv::new_master(Network::Bitcoin, &ldk_seed_bytes)
+		.map_err(|_| Error::InvalidMnemonic)?;
+
+	let node_secret_xpriv = keys_manager_master
+		.derive_priv(&Secp256k1::new(), &[ChildNumber::from_hardened_idx(0).unwrap()])
+		.map_err(|_| Error::InvalidMnemonic)?;
+
+	Ok(node_secret_xpriv.private_key.secret_bytes().to_vec())
 }
 
 pub(crate) fn read_or_generate_seed_file<L: Deref>(
@@ -645,6 +658,7 @@ pub(crate) fn read_bdk_wallet_change_set(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use lightning::sign::KeysManager as LdkKeysManager;
 
 	#[test]
 	fn mnemonic_to_entropy_to_mnemonic() {
@@ -678,5 +692,47 @@ mod tests {
 			};
 			assert_eq!(mnemonic.word_count(), expected_words);
 		}
+	}
+
+	#[test]
+	fn derive_node_secret_matches_keys_manager() {
+		// Standard test mnemonic (BIP39 test vector)
+		let mnemonic =
+			"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+		// Derive using our function
+		let derived_secret =
+			derive_node_secret_from_mnemonic(mnemonic.to_string(), None).unwrap();
+
+		// Derive using LDK's KeysManager (same flow as Builder)
+		let parsed = Mnemonic::parse(mnemonic).unwrap();
+		let seed = parsed.to_seed("");
+		let xpriv = Xpriv::new_master(Network::Bitcoin, &seed).unwrap();
+		let ldk_seed: [u8; 32] = xpriv.private_key.secret_bytes();
+
+		let keys_manager = LdkKeysManager::new(&ldk_seed, 0, 0, false);
+		let expected_secret = keys_manager.get_node_secret_key();
+
+		assert_eq!(derived_secret, expected_secret.secret_bytes().to_vec());
+	}
+
+	#[test]
+	fn derive_node_secret_with_passphrase() {
+		let mnemonic =
+			"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+		let passphrase = Some("test_passphrase".to_string());
+
+		let derived_secret =
+			derive_node_secret_from_mnemonic(mnemonic.to_string(), passphrase).unwrap();
+
+		let parsed = Mnemonic::parse(mnemonic).unwrap();
+		let seed = parsed.to_seed("test_passphrase");
+		let xpriv = Xpriv::new_master(Network::Bitcoin, &seed).unwrap();
+		let ldk_seed: [u8; 32] = xpriv.private_key.secret_bytes();
+
+		let keys_manager = LdkKeysManager::new(&ldk_seed, 0, 0, false);
+		let expected_secret = keys_manager.get_node_secret_key();
+
+		assert_eq!(derived_secret, expected_secret.secret_bytes().to_vec());
 	}
 }
