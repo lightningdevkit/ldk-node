@@ -25,6 +25,7 @@ pub struct Config {
 	pub alias: Option<NodeAlias>,
 	pub network: Network,
 	pub api_key: String,
+	pub tls_config: Option<TlsConfig>,
 	pub rest_service_addr: SocketAddr,
 	pub storage_dir_path: String,
 	pub chain_source: ChainSource,
@@ -33,6 +34,13 @@ pub struct Config {
 	pub lsps2_service_config: Option<LSPS2ServiceConfig>,
 	pub log_level: LevelFilter,
 	pub log_file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsConfig {
+	pub cert_path: Option<String>,
+	pub key_path: Option<String>,
+	pub hosts: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -145,6 +153,12 @@ impl TryFrom<TomlConfig> for Config {
 			))?
 			.into());
 
+		let tls_config = toml_config.tls.map(|tls| TlsConfig {
+			cert_path: tls.cert_path,
+			key_path: tls.key_path,
+			hosts: tls.hosts.unwrap_or_default(),
+		});
+
 		Ok(Config {
 			listening_addr,
 			network: toml_config.node.network,
@@ -158,6 +172,7 @@ impl TryFrom<TomlConfig> for Config {
 			lsps2_service_config,
 			log_level,
 			log_file_path: toml_config.log.and_then(|l| l.file),
+			tls_config,
 		})
 	}
 }
@@ -173,6 +188,7 @@ pub struct TomlConfig {
 	rabbitmq: Option<RabbitmqConfig>,
 	liquidity: Option<LiquidityConfig>,
 	log: Option<LogConfig>,
+	tls: Option<TomlTlsConfig>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -221,6 +237,13 @@ struct LogConfig {
 struct RabbitmqConfig {
 	connection_string: String,
 	exchange_name: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TomlTlsConfig {
+	cert_path: Option<String>,
+	key_path: Option<String>,
+	hosts: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -309,6 +332,11 @@ mod tests {
 			alias = "LDK Server"
 			api_key = "test_api_key"
 
+			[tls]
+			cert_path = "/path/to/tls.crt"
+			key_path = "/path/to/tls.key"
+			hosts = ["example.com", "ldk-server.local"]
+
 			[storage.disk]
 			dir_path = "/tmp"
 
@@ -349,6 +377,11 @@ mod tests {
 			rest_service_addr: SocketAddr::from_str("127.0.0.1:3002").unwrap(),
 			api_key: "test_api_key".to_string(),
 			storage_dir_path: "/tmp".to_string(),
+			tls_config: Some(TlsConfig {
+				cert_path: Some("/path/to/tls.crt".to_string()),
+				key_path: Some("/path/to/tls.key".to_string()),
+				hosts: vec!["example.com".to_string(), "ldk-server.local".to_string()],
+			}),
 			chain_source: ChainSource::Esplora {
 				server_url: String::from("https://mempool.space/api"),
 			},
@@ -375,6 +408,7 @@ mod tests {
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
 		assert_eq!(config.api_key, expected.api_key);
 		assert_eq!(config.storage_dir_path, expected.storage_dir_path);
+		assert_eq!(config.tls_config, expected.tls_config);
 		let ChainSource::Esplora { server_url } = config.chain_source else {
 			panic!("unexpected config chain source");
 		};

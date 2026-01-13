@@ -37,6 +37,7 @@ use crate::io::persist::{
 use crate::util::config::{load_config, ChainSource};
 use crate::util::logger::ServerLogger;
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
+use crate::util::tls::get_or_generate_tls_config;
 use hex::DisplayHex;
 use ldk_node::config::Config;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
@@ -165,14 +166,15 @@ fn main() {
 		},
 	};
 
-	let paginated_store: Arc<dyn PaginatedKVStore> =
-		Arc::new(match SqliteStore::new(PathBuf::from(config_file.storage_dir_path), None, None) {
+	let paginated_store: Arc<dyn PaginatedKVStore> = Arc::new(
+		match SqliteStore::new(PathBuf::from(&config_file.storage_dir_path), None, None) {
 			Ok(store) => store,
 			Err(e) => {
 				error!("Failed to create SqliteStore: {e:?}");
 				std::process::exit(-1);
 			},
-		});
+		},
+	);
 
 	#[cfg(not(feature = "events-rabbitmq"))]
 	let event_publisher: Arc<dyn EventPublisher> =
@@ -223,6 +225,20 @@ fn main() {
 		let rest_svc_listener = TcpListener::bind(config_file.rest_service_addr)
 			.await
 			.expect("Failed to bind listening port");
+
+		let server_config = match get_or_generate_tls_config(
+			config_file.tls_config,
+			&config_file.storage_dir_path,
+		) {
+			Ok(config) => config,
+			Err(e) => {
+				error!("Failed to set up TLS: {e}");
+				std::process::exit(-1);
+			}
+		};
+		let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+		info!("TLS enabled for REST service on {}", config_file.rest_service_addr);
+
 		loop {
 			select! {
 				event = event_node.next_event_async() => {
@@ -365,11 +381,17 @@ fn main() {
 				res = rest_svc_listener.accept() => {
 					match res {
 						Ok((stream, _)) => {
-							let io_stream = TokioIo::new(stream);
 							let node_service = NodeService::new(Arc::clone(&node), Arc::clone(&paginated_store), config_file.api_key.clone());
+							let acceptor = tls_acceptor.clone();
 							runtime.spawn(async move {
-								if let Err(err) = http1::Builder::new().serve_connection(io_stream, node_service).await {
-									error!("Failed to serve connection: {}", err);
+								match acceptor.accept(stream).await {
+									Ok(tls_stream) => {
+										let io_stream = TokioIo::new(tls_stream);
+										if let Err(err) = http1::Builder::new().serve_connection(io_stream, node_service).await {
+											error!("Failed to serve TLS connection: {err}");
+										}
+									},
+									Err(e) => error!("TLS handshake failed: {e}"),
 								}
 							});
 						},

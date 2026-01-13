@@ -49,6 +49,14 @@ struct Cli {
 	#[arg(short, long, required(true))]
 	api_key: String,
 
+	#[arg(
+		short,
+		long,
+		required(true),
+		help = "Path to the server's TLS certificate file (PEM format). Found at <server_storage_dir>/tls_cert.pem"
+	)]
+	tls_cert: String,
+
 	#[command(subcommand)]
 	command: Commands,
 }
@@ -217,7 +225,18 @@ enum Commands {
 #[tokio::main]
 async fn main() {
 	let cli = Cli::parse();
-	let client = LdkServerClient::new(cli.base_url, cli.api_key);
+
+	// Load server certificate for TLS verification
+	let server_cert_pem = std::fs::read(&cli.tls_cert).unwrap_or_else(|e| {
+		eprintln!("Failed to read server certificate file '{}': {}", cli.tls_cert, e);
+		std::process::exit(1);
+	});
+
+	let client =
+		LdkServerClient::new(cli.base_url, cli.api_key, &server_cert_pem).unwrap_or_else(|e| {
+			eprintln!("Failed to create client: {e}");
+			std::process::exit(1);
+		});
 
 	match cli.command {
 		Commands::GetNodeInfo => {
