@@ -9,6 +9,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lightning::util::native_async::FutureSpawner;
+
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::config::{
@@ -218,4 +220,20 @@ impl Runtime {
 enum RuntimeMode {
 	Owned(tokio::runtime::Runtime),
 	Handle(tokio::runtime::Handle),
+}
+
+pub(crate) struct RuntimeSpawner {
+	runtime: Arc<Runtime>,
+}
+
+impl RuntimeSpawner {
+	pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
+		Self { runtime }
+	}
+}
+
+impl FutureSpawner for RuntimeSpawner {
+	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
+		self.runtime.spawn_cancellable_background_task(future);
+	}
 }

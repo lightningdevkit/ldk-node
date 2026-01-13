@@ -35,10 +35,10 @@ use crate::chain::ChainSource;
 use crate::config::ChannelConfig;
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::gossip::RuntimeSpawner;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::PaymentDetails;
+use crate::runtime::RuntimeSpawner;
 
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
 /// same time.
