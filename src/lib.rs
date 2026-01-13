@@ -110,6 +110,8 @@ use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(cycle_tests)]
+use std::{any::Any, sync::Weak};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
@@ -173,6 +175,23 @@ use crate::scoring::setup_background_pathfinding_scores_sync;
 #[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
 
+#[cfg(cycle_tests)]
+/// A list of [`Weak`]s which can be used to check that a [`Node`]'s inner fields are being
+/// properly released after the [`Node`] is dropped.
+pub struct LeakChecker(Vec<Weak<dyn Any + Send + Sync>>);
+
+#[cfg(cycle_tests)]
+impl LeakChecker {
+	/// Asserts that all the stored [`Weak`]s point to contents which have been freed.
+	///
+	/// This will (obviously) panic if the [`Node`] has not yet been dropped.
+	pub fn assert_no_leaks(&self) {
+		for weak in self.0.iter() {
+			assert_eq!(weak.strong_count(), 0);
+		}
+	}
+}
+
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
@@ -208,6 +227,8 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
+	#[cfg(cycle_tests)]
+	_leak_checker: LeakChecker,
 }
 
 impl Node {

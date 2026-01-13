@@ -1481,8 +1481,12 @@ fn build_with_store_internal(
 
 	let gossip_source = match gossip_source_config {
 		GossipSourceConfig::P2PNetwork => {
-			let p2p_source =
-				Arc::new(GossipSource::new_p2p(Arc::clone(&network_graph), Arc::clone(&logger)));
+			let p2p_source = Arc::new(GossipSource::new_p2p(
+				Arc::clone(&network_graph),
+				Arc::clone(&chain_source),
+				Arc::clone(&runtime),
+				Arc::clone(&logger),
+			));
 
 			// Reset the RGS sync timestamp in case we somehow switch gossip sources
 			{
@@ -1597,19 +1601,14 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
-	let peer_manager_clone = Arc::clone(&peer_manager);
-
+	let peer_manager_clone = Arc::downgrade(&peer_manager);
 	hrn_resolver.register_post_queue_action(Box::new(move || {
-		peer_manager_clone.process_events();
+		if let Some(upgraded_pointer) = peer_manager_clone.upgrade() {
+			upgraded_pointer.process_events();
+		}
 	}));
 
-	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::clone(&peer_manager)));
-
-	gossip_source.set_gossip_verifier(
-		Arc::clone(&chain_source),
-		Arc::clone(&peer_manager),
-		Arc::clone(&runtime),
-	);
+	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
 
 	let connection_manager =
 		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
@@ -1685,6 +1684,18 @@ fn build_with_store_internal(
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
 
+	#[cfg(cycle_tests)]
+	let mut _leak_checker = crate::LeakChecker(Vec::new());
+	#[cfg(cycle_tests)]
+	{
+		use std::any::Any;
+		use std::sync::Weak;
+
+		_leak_checker.0.push(Arc::downgrade(&channel_manager) as Weak<dyn Any + Send + Sync>);
+		_leak_checker.0.push(Arc::downgrade(&network_graph) as Weak<dyn Any + Send + Sync>);
+		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
+	}
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1717,6 +1728,8 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver,
+		#[cfg(cycle_tests)]
+		_leak_checker,
 	})
 }
 
