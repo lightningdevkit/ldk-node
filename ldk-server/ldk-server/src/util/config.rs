@@ -26,10 +26,9 @@ pub struct Config {
 	pub announcement_addrs: Option<Vec<SocketAddress>>,
 	pub alias: Option<NodeAlias>,
 	pub network: Network,
-	pub api_key: String,
 	pub tls_config: Option<TlsConfig>,
 	pub rest_service_addr: SocketAddr,
-	pub storage_dir_path: String,
+	pub storage_dir_path: Option<String>,
 	pub chain_source: ChainSource,
 	pub rabbitmq_connection_string: String,
 	pub rabbitmq_exchange_name: String,
@@ -194,8 +193,7 @@ impl TryFrom<TomlConfig> for Config {
 			network: toml_config.node.network,
 			alias,
 			rest_service_addr,
-			api_key: toml_config.node.api_key,
-			storage_dir_path: toml_config.storage.disk.dir_path,
+			storage_dir_path: toml_config.storage.and_then(|s| s.disk.and_then(|d| d.dir_path)),
 			chain_source,
 			rabbitmq_connection_string,
 			rabbitmq_exchange_name,
@@ -211,7 +209,7 @@ impl TryFrom<TomlConfig> for Config {
 #[derive(Deserialize, Serialize)]
 pub struct TomlConfig {
 	node: NodeConfig,
-	storage: StorageConfig,
+	storage: Option<StorageConfig>,
 	bitcoind: Option<BitcoindConfig>,
 	electrum: Option<ElectrumConfig>,
 	esplora: Option<EsploraConfig>,
@@ -228,17 +226,16 @@ struct NodeConfig {
 	announcement_addresses: Option<Vec<String>>,
 	rest_service_address: String,
 	alias: Option<String>,
-	api_key: String,
 }
 
 #[derive(Deserialize, Serialize)]
 struct StorageConfig {
-	disk: DiskConfig,
+	disk: Option<DiskConfig>,
 }
 
 #[derive(Deserialize, Serialize)]
 struct DiskConfig {
-	dir_path: String,
+	dir_path: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -365,7 +362,6 @@ mod tests {
 			announcement_addresses = ["54.3.7.81:3001"]
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			api_key = "test_api_key"
 
 			[tls]
 			cert_path = "/path/to/tls.crt"
@@ -411,8 +407,7 @@ mod tests {
 			alias: Some(NodeAlias(bytes)),
 			network: Network::Regtest,
 			rest_service_addr: SocketAddr::from_str("127.0.0.1:3002").unwrap(),
-			api_key: "test_api_key".to_string(),
-			storage_dir_path: "/tmp".to_string(),
+			storage_dir_path: Some("/tmp".to_string()),
 			tls_config: Some(TlsConfig {
 				cert_path: Some("/path/to/tls.crt".to_string()),
 				key_path: Some("/path/to/tls.key".to_string()),
@@ -444,7 +439,6 @@ mod tests {
 		assert_eq!(config.alias, expected.alias);
 		assert_eq!(config.network, expected.network);
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
-		assert_eq!(config.api_key, expected.api_key);
 		assert_eq!(config.storage_dir_path, expected.storage_dir_path);
 		assert_eq!(config.tls_config, expected.tls_config);
 		let ChainSource::Esplora { server_url } = config.chain_source else {
@@ -468,7 +462,6 @@ mod tests {
 			network = "regtest"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			api_key = "test_api_key"
 
 			[storage.disk]
 			dir_path = "/tmp"
@@ -512,7 +505,6 @@ mod tests {
 			network = "regtest"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			api_key = "test_api_key"
 
 			[storage.disk]
 			dir_path = "/tmp"
@@ -560,7 +552,6 @@ mod tests {
 			network = "regtest"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
-			api_key = "test_api_key"
 
 			[storage.disk]
 			dir_path = "/tmp"

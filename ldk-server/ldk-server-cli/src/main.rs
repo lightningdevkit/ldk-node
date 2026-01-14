@@ -8,6 +8,10 @@
 // licenses.
 
 use clap::{Parser, Subcommand};
+use config::{
+	get_default_api_key_path, get_default_cert_path, get_default_config_path, load_config,
+};
+use hex_conservative::DisplayHex;
 use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::error::LdkServerError;
 use ldk_server_client::error::LdkServerErrorCode::{
@@ -28,8 +32,10 @@ use ldk_server_client::ldk_server_protos::types::{
 	RouteParametersConfig,
 };
 use serde::Serialize;
+use std::path::PathBuf;
 use types::CliListPaymentsResponse;
 
+mod config;
 mod types;
 
 // Having these default values as constants in the Proto file and
@@ -43,19 +49,25 @@ const DEFAULT_EXPIRY_SECS: u32 = 86_400;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
-	#[arg(short, long, default_value = "localhost:3000")]
-	base_url: String,
-
-	#[arg(short, long, required(true))]
-	api_key: String,
+	#[arg(short, long, help = "Base URL of the server. If not provided, reads from config file")]
+	base_url: Option<String>,
 
 	#[arg(
 		short,
 		long,
-		required(true),
-		help = "Path to the server's TLS certificate file (PEM format). Found at <server_storage_dir>/tls.crt"
+		help = "API key for authentication. Defaults by reading ~/.ldk-server/[network]/api_key"
 	)]
-	tls_cert: String,
+	api_key: Option<String>,
+
+	#[arg(
+		short,
+		long,
+		help = "Path to the server's TLS certificate file (PEM format). Defaults to ~/.ldk-server/tls.crt"
+	)]
+	tls_cert: Option<String>,
+
+	#[arg(short, long, help = "Path to config file. Defaults to ~/.ldk-server/config.toml")]
+	config: Option<String>,
 
 	#[command(subcommand)]
 	command: Commands,
@@ -226,17 +238,53 @@ enum Commands {
 async fn main() {
 	let cli = Cli::parse();
 
-	// Load server certificate for TLS verification
-	let server_cert_pem = std::fs::read(&cli.tls_cert).unwrap_or_else(|e| {
-		eprintln!("Failed to read server certificate file '{}': {}", cli.tls_cert, e);
+	let config_path = cli.config.map(PathBuf::from).or_else(get_default_config_path);
+	let config = config_path.as_ref().and_then(|p| load_config(p).ok());
+
+	// Get API key from argument, then from api_key file
+	let api_key = cli
+		.api_key
+		.or_else(|| {
+			// Try to read from api_key file based on network (file contains raw bytes)
+			let network = config.as_ref().and_then(|c| c.network().ok()).unwrap_or("bitcoin".to_string());
+			get_default_api_key_path(&network)
+				.and_then(|path| std::fs::read(&path).ok())
+				.map(|bytes| bytes.to_lower_hex_string())
+		})
+		.unwrap_or_else(|| {
+			eprintln!("API key not provided. Use --api-key or ensure the api_key file exists at ~/.ldk-server/[network]/api_key");
+			std::process::exit(1);
+		});
+
+	// Get base URL from argument then from config file
+	let base_url =
+		cli.base_url.or_else(|| config.as_ref().map(|c| c.node.rest_service_address.clone()))
+			.unwrap_or_else(|| {
+				eprintln!("Base URL not provided. Use --base-url or ensure config file exists at ~/.ldk-server/config.toml");
+				std::process::exit(1);
+			});
+
+	// Get TLS cert path from argument, then from config file, then try default location
+	let tls_cert_path = cli.tls_cert.map(PathBuf::from).or_else(|| {
+		config
+			.as_ref()
+			.and_then(|c| c.tls.as_ref().and_then(|t| t.cert_path.as_ref().map(PathBuf::from)))
+			.or_else(get_default_cert_path)
+	})
+		.unwrap_or_else(|| {
+			eprintln!("TLS cert path not provided. Use --tls-cert or ensure config file exists at ~/.ldk-server/config.toml");
+			std::process::exit(1);
+		});
+
+	let server_cert_pem = std::fs::read(&tls_cert_path).unwrap_or_else(|e| {
+		eprintln!("Failed to read server certificate file '{}': {}", tls_cert_path.display(), e);
 		std::process::exit(1);
 	});
 
-	let client =
-		LdkServerClient::new(cli.base_url, cli.api_key, &server_cert_pem).unwrap_or_else(|e| {
-			eprintln!("Failed to create client: {e}");
-			std::process::exit(1);
-		});
+	let client = LdkServerClient::new(base_url, api_key, &server_cert_pem).unwrap_or_else(|e| {
+		eprintln!("Failed to create client: {e}");
+		std::process::exit(1);
+	});
 
 	match cli.command {
 		Commands::GetNodeInfo => {

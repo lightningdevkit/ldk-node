@@ -1760,10 +1760,12 @@ name = "ldk-server-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "hex-conservative 0.2.1",
  "ldk-server-client",
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
