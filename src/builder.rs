@@ -47,7 +47,8 @@ use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
+	RuntimeSyncIntervals, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	WALLET_KEYS_SEED_LEN,
 };
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -1912,6 +1913,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		runtime_sync_intervals: Arc::new(RwLock::new(RuntimeSyncIntervals::default())),
 	})
 }
 

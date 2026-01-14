@@ -387,6 +387,86 @@ impl Default for BackgroundSyncConfig {
 	}
 }
 
+/// Runtime-adjustable sync intervals for background wallet syncing.
+///
+/// This struct allows updating sync intervals after `node.start()` has been called,
+/// which is useful for mobile apps that want to reduce battery usage when in the background.
+///
+/// ### Defaults
+///
+/// | Parameter                              | Value (secs) |
+/// |----------------------------------------|--------------|
+/// | `onchain_wallet_sync_interval_secs`    | 80           |
+/// | `lightning_wallet_sync_interval_secs`  | 30           |
+/// | `fee_rate_cache_update_interval_secs`  | 600          |
+///
+/// [`Node::update_sync_intervals`]: crate::Node::update_sync_intervals
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSyncIntervals {
+	/// Interval for on-chain wallet sync, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is enforced.
+	pub onchain_wallet_sync_interval_secs: u64,
+
+	/// Interval for Lightning wallet sync, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is enforced.
+	pub lightning_wallet_sync_interval_secs: u64,
+
+	/// Interval for fee rate cache updates, in seconds.
+	///
+	/// **Note:** A minimum of 10 seconds is enforced.
+	pub fee_rate_cache_update_interval_secs: u64,
+}
+
+impl Default for RuntimeSyncIntervals {
+	fn default() -> Self {
+		Self {
+			onchain_wallet_sync_interval_secs: DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS,
+			lightning_wallet_sync_interval_secs: DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS,
+			fee_rate_cache_update_interval_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
+		}
+	}
+}
+
+impl RuntimeSyncIntervals {
+	/// Returns intervals optimized for battery saving in background operation.
+	///
+	/// This preset uses longer intervals to reduce CPU and network usage:
+	/// - On-chain wallet sync: 5 minutes (was 80 seconds)
+	/// - Lightning wallet sync: 2 minutes (was 30 seconds)
+	/// - Fee rate cache: 30 minutes (was 10 minutes)
+	///
+	/// Ideal for Android foreground services when the app goes to background.
+	pub fn battery_saving() -> Self {
+		Self {
+			onchain_wallet_sync_interval_secs: 300,       // 5 minutes
+			lightning_wallet_sync_interval_secs: 120,     // 2 minutes
+			fee_rate_cache_update_interval_secs: 1800,    // 30 minutes
+		}
+	}
+}
+
+impl From<RuntimeSyncIntervals> for BackgroundSyncConfig {
+	fn from(intervals: RuntimeSyncIntervals) -> Self {
+		Self {
+			onchain_wallet_sync_interval_secs: intervals.onchain_wallet_sync_interval_secs,
+			lightning_wallet_sync_interval_secs: intervals.lightning_wallet_sync_interval_secs,
+			fee_rate_cache_update_interval_secs: intervals.fee_rate_cache_update_interval_secs,
+		}
+	}
+}
+
+/// Returns a [`RuntimeSyncIntervals`] object with battery-saving presets.
+///
+/// See the documentation of [`RuntimeSyncIntervals::battery_saving`] for more information.
+///
+/// This is mostly meant for use in bindings, in Rust this is synonymous with
+/// [`RuntimeSyncIntervals::battery_saving()`].
+pub fn battery_saving_sync_intervals() -> RuntimeSyncIntervals {
+	RuntimeSyncIntervals::battery_saving()
+}
+
 /// Configuration for syncing with an Esplora backend.
 ///
 /// Background syncing is enabled by default, using the default values specified in

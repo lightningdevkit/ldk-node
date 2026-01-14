@@ -1,6 +1,7 @@
 namespace ldk_node {
 	Mnemonic generate_entropy_mnemonic(WordCount? word_count);
 	Config default_config();
+	RuntimeSyncIntervals battery_saving_sync_intervals();
 	[Throws=NodeError]
 	sequence<u8> derive_node_secret_from_mnemonic(string mnemonic, string? passphrase);
 };
@@ -24,6 +25,12 @@ dictionary AnchorChannelsConfig {
 };
 
 dictionary BackgroundSyncConfig {
+	u64 onchain_wallet_sync_interval_secs;
+	u64 lightning_wallet_sync_interval_secs;
+	u64 fee_rate_cache_update_interval_secs;
+};
+
+dictionary RuntimeSyncIntervals {
 	u64 onchain_wallet_sync_interval_secs;
 	u64 lightning_wallet_sync_interval_secs;
 	u64 fee_rate_cache_update_interval_secs;
@@ -185,6 +192,9 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
 	bytes export_pathfinding_scores();
+	[Throws=NodeError]
+	void update_sync_intervals(RuntimeSyncIntervals intervals);
+	RuntimeSyncIntervals current_sync_intervals();
 };
 
 [Enum]
@@ -383,6 +393,7 @@ enum NodeError {
     "NoSpendableOutputs",
     "CoinSelectionFailed",
 	"InvalidMnemonic",
+	"BackgroundSyncNotEnabled",
 };
 
 dictionary NodeStatus {

@@ -141,6 +141,11 @@ pub enum Error {
 	CoinSelectionFailed,
 	/// The given mnemonic is invalid.
 	InvalidMnemonic,
+	/// Background syncing is not enabled.
+	///
+	/// This error is returned when attempting to update sync intervals but background
+	/// syncing was disabled at build time by setting `background_sync_config` to `None`.
+	BackgroundSyncNotEnabled,
 }
 
 impl fmt::Display for Error {
@@ -230,6 +235,7 @@ impl fmt::Display for Error {
 			Self::NoSpendableOutputs => write!(f, "The transaction has no spendable outputs."),
 			Self::CoinSelectionFailed => write!(f, "Coin selection failed to find suitable UTXOs."),
 			Self::InvalidMnemonic => write!(f, "The given mnemonic is invalid."),
+			Self::BackgroundSyncNotEnabled => write!(f, "Background syncing is not enabled."),
 		}
 	}
 }

@@ -93,6 +93,7 @@ pub(crate) struct ChainSource {
 	logger: Arc<Logger>,
 	onchain_wallet: Arc<Mutex<Option<Arc<Wallet>>>>,
 	event_queue: Arc<Mutex<Option<Arc<EventQueue<Arc<Logger>>>>>>,
+	sync_config_sender: Option<tokio::sync::watch::Sender<BackgroundSyncConfig>>,
 }
 
 enum ChainSourceKind {
@@ -285,6 +286,12 @@ impl ChainSource {
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> (Self, Option<BestBlock>) {
+		// Create watch channel for runtime sync config updates if background sync is enabled
+		let sync_config_sender = sync_config.background_sync_config.as_ref().map(|cfg| {
+			let (tx, _) = tokio::sync::watch::channel(cfg.clone());
+			tx
+		});
+
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
@@ -303,6 +310,7 @@ impl ChainSource {
 				logger,
 				onchain_wallet: Arc::new(Mutex::new(None)),
 				event_queue: Arc::new(Mutex::new(None)),
+				sync_config_sender,
 			},
 			None,
 		)
@@ -314,6 +322,12 @@ impl ChainSource {
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> (Self, Option<BestBlock>) {
+		// Create watch channel for runtime sync config updates if background sync is enabled
+		let sync_config_sender = sync_config.background_sync_config.as_ref().map(|cfg| {
+			let (tx, _) = tokio::sync::watch::channel(cfg.clone());
+			tx
+		});
+
 		let electrum_chain_source = ElectrumChainSource::new(
 			server_url,
 			sync_config,
@@ -331,6 +345,7 @@ impl ChainSource {
 				logger,
 				onchain_wallet: Arc::new(Mutex::new(None)),
 				event_queue: Arc::new(Mutex::new(None)),
+				sync_config_sender,
 			},
 			None,
 		)
@@ -362,6 +377,7 @@ impl ChainSource {
 				logger,
 				onchain_wallet: Arc::new(Mutex::new(None)),
 				event_queue: Arc::new(Mutex::new(None)),
+				sync_config_sender: None,
 			},
 			best_block,
 		)
@@ -394,6 +410,7 @@ impl ChainSource {
 				logger,
 				onchain_wallet: Arc::new(Mutex::new(None)),
 				event_queue: Arc::new(Mutex::new(None)),
+				sync_config_sender: None,
 			},
 			best_block,
 		)
@@ -449,8 +466,16 @@ impl ChainSource {
 				if let Some(background_sync_config) =
 					esplora_chain_source.sync_config.background_sync_config.as_ref()
 				{
+					// Get config receiver for runtime updates
+					let config_receiver = self
+						.sync_config_sender
+						.as_ref()
+						.expect("sync_config_sender should be set when background_sync_config is Some")
+						.subscribe();
+
 					self.start_tx_based_sync_loop(
 						stop_sync_receiver,
+						config_receiver,
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
@@ -471,8 +496,16 @@ impl ChainSource {
 				if let Some(background_sync_config) =
 					electrum_chain_source.sync_config.background_sync_config.as_ref()
 				{
+					// Get config receiver for runtime updates
+					let config_receiver = self
+						.sync_config_sender
+						.as_ref()
+						.expect("sync_config_sender should be set when background_sync_config is Some")
+						.subscribe();
+
 					self.start_tx_based_sync_loop(
 						stop_sync_receiver,
+						config_receiver,
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
@@ -548,6 +581,7 @@ impl ChainSource {
 
 	async fn start_tx_based_sync_loop(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
+		mut config_receiver: tokio::sync::watch::Receiver<BackgroundSyncConfig>,
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>, background_sync_config: &BackgroundSyncConfig,
 		logger: Arc<Logger>,
@@ -588,6 +622,41 @@ impl ChainSource {
 						);
 					return;
 				}
+				Ok(()) = config_receiver.changed() => {
+					let new_config = config_receiver.borrow().clone();
+					log_info!(
+						logger,
+						"Background sync intervals updated: onchain={}s, lightning={}s, fee_rate={}s",
+						new_config.onchain_wallet_sync_interval_secs,
+						new_config.lightning_wallet_sync_interval_secs,
+						new_config.fee_rate_cache_update_interval_secs,
+					);
+
+					// Reset intervals with new durations (enforce minimum)
+					let new_onchain_secs = new_config
+						.onchain_wallet_sync_interval_secs
+						.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+					onchain_wallet_sync_interval =
+						tokio::time::interval(Duration::from_secs(new_onchain_secs));
+					onchain_wallet_sync_interval
+						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+					let new_fee_rate_secs = new_config
+						.fee_rate_cache_update_interval_secs
+						.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+					fee_rate_update_interval =
+						tokio::time::interval(Duration::from_secs(new_fee_rate_secs));
+					fee_rate_update_interval
+						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+					let new_lightning_secs = new_config
+						.lightning_wallet_sync_interval_secs
+						.max(WALLET_SYNC_INTERVAL_MINIMUM_SECS);
+					lightning_wallet_sync_interval =
+						tokio::time::interval(Duration::from_secs(new_lightning_secs));
+					lightning_wallet_sync_interval
+						.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				}
 				_ = onchain_wallet_sync_interval.tick() => {
 					// Access event_queue from struct for event emission
 					let event_queue = self.event_queue.lock().unwrap().clone();
@@ -618,6 +687,23 @@ impl ChainSource {
 
 	pub(crate) fn set_event_queue(&self, event_queue: Arc<EventQueue<Arc<Logger>>>) {
 		*self.event_queue.lock().unwrap() = Some(event_queue);
+	}
+
+	/// Update the background sync configuration at runtime.
+	///
+	/// This allows changing sync intervals while the node is running.
+	/// Returns an error if background syncing was disabled at build time.
+	pub(crate) fn set_background_sync_config(
+		&self, config: BackgroundSyncConfig,
+	) -> Result<(), Error> {
+		if let Some(ref sender) = self.sync_config_sender {
+			// Send will only fail if there are no receivers, which shouldn't happen
+			// while the sync loop is running
+			let _ = sender.send(config);
+			Ok(())
+		} else {
+			Err(Error::BackgroundSyncNotEnabled)
+		}
 	}
 
 	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum,
