@@ -117,10 +117,10 @@ pub use builder::{BuildError, ChannelDataMigration};
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
+pub use config::{battery_saving_sync_intervals, RuntimeSyncIntervals};
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, BackgroundSyncConfig,
-	ChannelConfig, Config, RuntimeSyncIntervals, NODE_ANN_BCAST_INTERVAL,
-	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 pub use error::Error as NodeError;

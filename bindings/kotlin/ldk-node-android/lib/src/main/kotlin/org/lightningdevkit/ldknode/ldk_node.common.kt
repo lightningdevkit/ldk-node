@@ -424,6 +424,8 @@ interface NodeInterface {
     @Throws(NodeException::class)
     fun `connect`(`nodeId`: PublicKey, `address`: SocketAddress, `persist`: kotlin.Boolean)
     
+    fun `currentSyncIntervals`(): RuntimeSyncIntervals
+    
     @Throws(NodeException::class)
     fun `disconnect`(`nodeId`: PublicKey)
     
@@ -501,6 +503,9 @@ interface NodeInterface {
     
     @Throws(NodeException::class)
     fun `updateChannelConfig`(`userChannelId`: UserChannelId, `counterpartyNodeId`: PublicKey, `channelConfig`: ChannelConfig)
+    
+    @Throws(NodeException::class)
+    fun `updateSyncIntervals`(`intervals`: RuntimeSyncIntervals)
     
     fun `verifySignature`(`msg`: List<kotlin.UByte>, `sig`: kotlin.String, `pkey`: PublicKey): kotlin.Boolean
     
@@ -1093,6 +1098,17 @@ data class RouteParametersConfig (
 data class RoutingFees (
     val `baseMsat`: kotlin.UInt, 
     val `proportionalMillionths`: kotlin.UInt
+) {
+    companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+data class RuntimeSyncIntervals (
+    val `onchainWalletSyncIntervalSecs`: kotlin.ULong, 
+    val `lightningWalletSyncIntervalSecs`: kotlin.ULong, 
+    val `feeRateCacheUpdateIntervalSecs`: kotlin.ULong
 ) {
     companion object
 }
@@ -1782,6 +1798,8 @@ sealed class NodeException(message: String): kotlin.Exception(message) {
     class CoinSelectionFailed(message: String) : NodeException(message)
     
     class InvalidMnemonic(message: String) : NodeException(message)
+    
+    class BackgroundSyncNotEnabled(message: String) : NodeException(message)
     
 }
 
