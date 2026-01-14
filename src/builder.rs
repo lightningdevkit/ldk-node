@@ -1352,11 +1352,11 @@ fn build_with_store_internal(
 	let mut user_config = default_user_config(&config);
 
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
-		// If we act as an LSPS2 service, we need to to be able to intercept HTLCs and forward the
+		// If we act as an LSPS2 service, we need to be able to intercept HTLCs and forward the
 		// information to the service handler.
 		user_config.accept_intercept_htlcs = true;
 
-		// If we act as an LSPS2 service, we allow forwarding to unnannounced channels.
+		// If we act as an LSPS2 service, we allow forwarding to unannounced channels.
 		user_config.accept_forwards_to_priv_channels = true;
 
 		// If we act as an LSPS2 service, set the HTLC-value-in-flight to 100% of the channel value
