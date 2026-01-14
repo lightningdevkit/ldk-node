@@ -124,7 +124,7 @@ mod tests {
 
 			connection.execute(&sql, []).unwrap();
 
-			// We write some data to to the table
+			// We write some data to the table
 			let sql = format!(
 				"INSERT OR REPLACE INTO {} (namespace, key, value) VALUES (:namespace, :key, :value);",
 				kv_table_name

@@ -165,7 +165,7 @@ pub enum Event {
 	///
 	/// This needs to be manually claimed by supplying the correct preimage to [`claim_for_hash`].
 	///
-	/// If the the provided parameters don't match the expectations or the preimage can't be
+	/// If the provided parameters don't match the expectations or the preimage can't be
 	/// retrieved in time, should be failed-back via [`fail_for_hash`].
 	///
 	/// Note claiming will necessarily fail after the `claim_deadline` has been reached.

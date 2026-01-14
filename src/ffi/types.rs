@@ -1167,9 +1167,9 @@ pub struct LSPS1OnchainPaymentInfo {
 	pub expires_at: LSPSDateTime,
 	/// The total fee the LSP will charge to open this channel in satoshi.
 	pub fee_total_sat: u64,
-	/// The amount the client needs to pay to have the requested channel openend.
+	/// The amount the client needs to pay to have the requested channel opened.
 	pub order_total_sat: u64,
-	/// An on-chain address the client can send [`Self::order_total_sat`] to to have the channel
+	/// An on-chain address the client can send [`Self::order_total_sat`] to have the channel
 	/// opened.
 	pub address: bitcoin::Address,
 	/// The minimum number of block confirmations that are required for the on-chain payment to be
