@@ -168,3 +168,6 @@ harness = false
 
 #vss-client-ng = { path = "../vss-client" }
 #vss-client-ng = { git = "https://github.com/lightningdevkit/vss-client", branch = "main" }
+
+[patch.crates-io]
+esplora-client = { git = 'https://github.com/acidbunny21/rust-esplora-client.git', branch = 'submit-tx-pkg-clients' }
