@@ -25,12 +25,7 @@ async fn channel_full_cycle_with_vss_store() {
 	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 	let node_a = builder_a
-		.build_with_vss_store(
-			config_a.node_entropy,
-			vss_base_url.clone(),
-			"".to_owned(),
-			HashMap::new(),
-		)
+		.build_with_vss_store(config_a.node_entropy, vss_base_url.clone(), HashMap::new())
 		.unwrap();
 	node_a.start().unwrap();
 
@@ -39,12 +34,7 @@ async fn channel_full_cycle_with_vss_store() {
 	let mut builder_b = Builder::from_config(config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b
-		.build_with_vss_store(
-			config_b.node_entropy,
-			vss_base_url,
-			"".to_owned(),
-			HashMap::new(),
-		)
+		.build_with_vss_store(config_b.node_entropy, vss_base_url, HashMap::new())
 		.unwrap();
 	node_b.start().unwrap();
 
@@ -79,11 +69,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 		builder_old.set_entropy_seed_bytes(seed_bytes);
 		builder_old.set_chain_source_esplora(esplora_url.clone(), None);
 		let node_old = builder_old
-			.build_with_vss_store(
-				vss_base_url.clone(),
-				"".to_owned(),
-				HashMap::new(),
-			)
+			.build_with_vss_store(node_entropy, vss_base_url.clone(), HashMap::new())
 			.unwrap();
 
 		node_old.start().unwrap();
@@ -120,8 +106,6 @@ async fn vss_v0_schema_backwards_compatibility() {
 		.build_with_vss_store(
 			node_entropy,
 			vss_base_url,
-			"".to_owned(),
-			HashMap::new(),
 		)
 		.unwrap();
 
@@ -155,12 +139,7 @@ async fn vss_node_restart() {
 		builder.set_storage_dir_path(storage_path.clone());
 		builder.set_chain_source_esplora(esplora_url.clone(), None);
 		let node = builder
-			.build_with_vss_store(
-				node_entropy,
-				vss_base_url.clone(),
-				"".to_owned(),
-				HashMap::new(),
-			)
+			.build_with_vss_store(node_entropy, vss_base_url.clone(), HashMap::new())
 			.unwrap();
 
 		node.start().unwrap();
@@ -188,14 +167,7 @@ async fn vss_node_restart() {
 	builder.set_storage_dir_path(storage_path);
 	builder.set_chain_source_esplora(esplora_url, None);
 
-	let node = builder
-		.build_with_vss_store(
-			node_entropy,
-			vss_base_url,
-			"".to_owned(),
-			HashMap::new(),
-		)
-		.unwrap();
+	let node = builder.build_with_vss_store(node_entropy, vss_base_url, HashMap::new()).unwrap();
 
 	node.start().unwrap();
 	node.sync_wallets().unwrap();

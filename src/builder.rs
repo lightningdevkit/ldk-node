@@ -571,7 +571,8 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
 	/// previously configured.
 	///
-	/// Uses a simple authentication scheme proving knowledge of a secret key.
+	/// Uses a simple authentication scheme proving knowledge of a secret key and a `store_id` of
+	/// "ldk-node".
 	///
 	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
 	///
@@ -581,10 +582,10 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_vss_store(
-		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
-		fixed_headers: HashMap<String, String>,
+		&self, node_entropy: NodeEntropy, vss_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let store_id = "ldk-node".to_owned();
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store = builder.build_with_sigs_auth(fixed_headers).map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
