@@ -117,7 +117,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 	builder_new.set_chain_source_esplora(esplora_url, None);
 
 	let node_new = builder_new
-		.build_with_vss_store_and_fixed_headers(
+		.build_with_vss_store(
 			node_entropy,
 			vss_base_url,
 			"".to_owned(),
@@ -155,7 +155,7 @@ async fn vss_node_restart() {
 		builder.set_storage_dir_path(storage_path.clone());
 		builder.set_chain_source_esplora(esplora_url.clone(), None);
 		let node = builder
-			.build_with_vss_store_and_fixed_headers(
+			.build_with_vss_store(
 				node_entropy,
 				vss_base_url.clone(),
 				"".to_owned(),
@@ -189,7 +189,7 @@ async fn vss_node_restart() {
 	builder.set_chain_source_esplora(esplora_url, None);
 
 	let node = builder
-		.build_with_vss_store_and_fixed_headers(
+		.build_with_vss_store(
 			node_entropy,
 			vss_base_url,
 			"".to_owned(),
