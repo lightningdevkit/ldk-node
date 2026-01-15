@@ -589,7 +589,7 @@ impl NodeBuilder {
 	///
 	/// Uses a simple authentication scheme proving knowledge of a secret key.
 	///
-	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	/// `fixed_headers` are included as it is in all the requests made to VSS.
 	///
 	/// **Caution**: VSS support is in **alpha** and is considered experimental.
 	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are

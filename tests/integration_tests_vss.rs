@@ -25,10 +25,10 @@ async fn channel_full_cycle_with_vss_store() {
 	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 	let node_a = builder_a
-		.build_with_vss_store_and_fixed_headers(
+		.build_with_vss_store(
 			config_a.node_entropy,
 			vss_base_url.clone(),
-			"node_1_store".to_string(),
+			"".to_owned(),
 			HashMap::new(),
 		)
 		.unwrap();
@@ -39,12 +39,7 @@ async fn channel_full_cycle_with_vss_store() {
 	let mut builder_b = Builder::from_config(config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b
-		.build_with_vss_store_and_fixed_headers(
-			config_b.node_entropy,
-			vss_base_url,
-			"node_2_store".to_string(),
-			HashMap::new(),
-		)
+		.build_with_vss_store(config_b.node_entropy, vss_base_url, "".to_owned(), HashMap::new())
 		.unwrap();
 	node_b.start().unwrap();
 
@@ -66,11 +61,9 @@ async fn vss_v0_schema_backwards_compatibility() {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 
-	let rand_suffix: String =
-		(0..7).map(|_| rng().sample(rand::distr::Alphanumeric) as char).collect();
-	let store_id = format!("v0_compat_test_{}", rand_suffix);
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
-	let seed_bytes = [42u8; 64];
+	let mut seed_bytes = [42u8; 64];
+	rand::thread_rng().fill_bytes(&mut seed_bytes);
 	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup a v0.6.2 `Node` persisted with the v0 scheme.
@@ -81,11 +74,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 		builder_old.set_entropy_seed_bytes(seed_bytes);
 		builder_old.set_chain_source_esplora(esplora_url.clone(), None);
 		let node_old = builder_old
-			.build_with_vss_store_and_fixed_headers(
-				vss_base_url.clone(),
-				store_id.clone(),
-				HashMap::new(),
-			)
+			.build_with_vss_store(vss_base_url.clone(), "".to_owned(), HashMap::new())
 			.unwrap();
 
 		node_old.start().unwrap();
@@ -119,12 +108,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 	builder_new.set_chain_source_esplora(esplora_url, None);
 
 	let node_new = builder_new
-		.build_with_vss_store_and_fixed_headers(
-			node_entropy,
-			vss_base_url,
-			store_id,
-			HashMap::new(),
-		)
+		.build_with_vss_store(node_entropy, vss_base_url, "".to_owned(), HashMap::new())
 		.unwrap();
 
 	node_new.start().unwrap();
@@ -145,11 +129,9 @@ async fn vss_node_restart() {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 
-	let rand_suffix: String =
-		(0..7).map(|_| rng().sample(rand::distr::Alphanumeric) as char).collect();
-	let store_id = format!("restart_test_{}", rand_suffix);
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
-	let seed_bytes = [42u8; 64];
+	let mut seed_bytes = [42u8; 64];
+	rand::thread_rng().fill_bytes(&mut seed_bytes);
 	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup initial node and fund it.
@@ -159,12 +141,7 @@ async fn vss_node_restart() {
 		builder.set_storage_dir_path(storage_path.clone());
 		builder.set_chain_source_esplora(esplora_url.clone(), None);
 		let node = builder
-			.build_with_vss_store_and_fixed_headers(
-				node_entropy,
-				vss_base_url.clone(),
-				store_id.clone(),
-				HashMap::new(),
-			)
+			.build_with_vss_store(node_entropy, vss_base_url.clone(), "".to_owned(), HashMap::new())
 			.unwrap();
 
 		node.start().unwrap();
@@ -193,12 +170,7 @@ async fn vss_node_restart() {
 	builder.set_chain_source_esplora(esplora_url, None);
 
 	let node = builder
-		.build_with_vss_store_and_fixed_headers(
-			node_entropy,
-			vss_base_url,
-			store_id,
-			HashMap::new(),
-		)
+		.build_with_vss_store(node_entropy, vss_base_url, "".to_owned(), HashMap::new())
 		.unwrap();
 
 	node.start().unwrap();
