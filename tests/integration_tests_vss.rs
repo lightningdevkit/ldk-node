@@ -67,7 +67,8 @@ async fn vss_v0_schema_backwards_compatibility() {
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
-	let seed_bytes = [42u8; 64];
+	let mut seed_bytes = [42u8; 64];
+	rand::thread_rng().fill_bytes(&mut seed_bytes);
 	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup a v0.6.2 `Node` persisted with the v0 scheme.
@@ -143,7 +144,8 @@ async fn vss_node_restart() {
 	let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
-	let seed_bytes = [42u8; 64];
+	let mut seed_bytes = [42u8; 64];
+	rand::thread_rng().fill_bytes(&mut seed_bytes);
 	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup initial node and fund it.
