@@ -135,7 +135,9 @@ interface Builder {
 	[Throws=BuildError]
 	Node build_with_fs_store(NodeEntropy node_entropy);
 	[Throws=BuildError]
-	Node build_with_vss_store(NodeEntropy node_entropy, string vss_url, string store_id, string lnurl_auth_server_url, record<string, string> fixed_headers);
+	Node build_with_vss_store(NodeEntropy node_entropy, string vss_url, string store_id, record<string, string> fixed_headers);
+	[Throws=BuildError]
+	Node build_with_vss_store_and_lnurl_auth(NodeEntropy node_entropy, string vss_url, string store_id, string lnurl_auth_server_url, record<string, string> fixed_headers);
 	[Throws=BuildError]
 	Node build_with_vss_store_and_fixed_headers(NodeEntropy node_entropy, string vss_url, string store_id, record<string, string> fixed_headers);
 	[Throws=BuildError]
