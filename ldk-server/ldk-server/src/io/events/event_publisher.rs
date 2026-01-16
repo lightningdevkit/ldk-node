@@ -7,9 +7,10 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use crate::api::error::LdkServerError;
 use async_trait::async_trait;
 use ldk_server_protos::events::EventEnvelope;
+
+use crate::api::error::LdkServerError;
 
 /// A trait for publishing events or notifications from the LDK Server.
 ///

@@ -7,12 +7,8 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use prost::Message;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::error::LdkServerError;
-use crate::error::LdkServerErrorCode::{
-	AuthError, InternalError, InternalServerError, InvalidRequestError, LightningError,
-};
 use bitcoin_hashes::hmac::{Hmac, HmacEngine};
 use bitcoin_hashes::{sha256, Hash, HashEngine};
 use ldk_server_protos::api::{
@@ -32,9 +28,14 @@ use ldk_server_protos::endpoints::{
 	OPEN_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH, UPDATE_CHANNEL_CONFIG_PATH,
 };
 use ldk_server_protos::error::{ErrorCode, ErrorResponse};
+use prost::Message;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Certificate, Client};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::error::LdkServerError;
+use crate::error::LdkServerErrorCode::{
+	AuthError, InternalError, InternalServerError, InvalidRequestError, LightningError,
+};
 
 const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 

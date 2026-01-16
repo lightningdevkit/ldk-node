@@ -7,9 +7,8 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use crate::api::error::LdkServerError;
-use crate::api::error::LdkServerErrorCode::InternalServerError;
-use crate::io::events::event_publisher::EventPublisher;
+use std::sync::Arc;
+
 use ::prost::Message;
 use async_trait::async_trait;
 use lapin::options::{BasicPublishOptions, ConfirmSelectOptions, ExchangeDeclareOptions};
@@ -18,8 +17,11 @@ use lapin::{
 	BasicProperties, Channel, Connection, ConnectionProperties, ConnectionState, ExchangeKind,
 };
 use ldk_server_protos::events::EventEnvelope;
-use std::sync::Arc;
 use tokio::sync::Mutex;
+
+use crate::api::error::LdkServerError;
+use crate::api::error::LdkServerErrorCode::InternalServerError;
+use crate::io::events::event_publisher::EventPublisher;
 
 /// A RabbitMQ-based implementation of the EventPublisher trait.
 pub struct RabbitMqEventPublisher {
@@ -155,19 +157,20 @@ impl EventPublisher for RabbitMqEventPublisher {
 #[cfg(test)]
 #[cfg(feature = "integration-tests-events-rabbitmq")]
 mod integration_tests_events_rabbitmq {
-	use super::*;
-	use lapin::{
-		options::{BasicAckOptions, BasicConsumeOptions, QueueBindOptions, QueueDeclareOptions},
-		types::FieldTable,
-		Channel, Connection,
-	};
-	use ldk_server_protos::events::event_envelope::Event;
-	use ldk_server_protos::events::PaymentForwarded;
 	use std::io;
 	use std::time::Duration;
-	use tokio;
 
 	use futures_util::stream::StreamExt;
+	use lapin::options::{
+		BasicAckOptions, BasicConsumeOptions, QueueBindOptions, QueueDeclareOptions,
+	};
+	use lapin::types::FieldTable;
+	use lapin::{Channel, Connection};
+	use ldk_server_protos::events::event_envelope::Event;
+	use ldk_server_protos::events::PaymentForwarded;
+	use tokio;
+
+	use super::*;
 	#[tokio::test]
 	async fn test_publish_and_consume_event() {
 		let config = RabbitMqConfig {

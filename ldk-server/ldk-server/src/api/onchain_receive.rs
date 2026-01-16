@@ -7,9 +7,10 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use ldk_server_protos::api::{OnchainReceiveRequest, OnchainReceiveResponse};
+
 use crate::api::error::LdkServerError;
 use crate::service::Context;
-use ldk_server_protos::api::{OnchainReceiveRequest, OnchainReceiveResponse};
 
 pub(crate) fn handle_onchain_receive_request(
 	context: Context, _request: OnchainReceiveRequest,

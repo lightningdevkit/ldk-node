@@ -7,12 +7,14 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use crate::util::config::TlsConfig;
+use std::fs;
+
 use base64::Engine;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
-use std::fs;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
+
+use crate::util::config::TlsConfig;
 
 // PEM markers
 const PEM_CERT_BEGIN: &str = "-----BEGIN CERTIFICATE-----";

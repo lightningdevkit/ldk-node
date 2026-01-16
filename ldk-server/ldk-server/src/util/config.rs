@@ -7,16 +7,17 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use std::net::SocketAddr;
+use std::path::Path;
+use std::str::FromStr;
+use std::{fs, io};
+
 use ldk_node::bitcoin::Network;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::routing::gossip::NodeAlias;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
-use std::path::Path;
-use std::str::FromStr;
-use std::{fs, io};
 
 /// Configuration for LDK Server.
 #[derive(Debug)]
@@ -315,9 +316,12 @@ pub fn load_config<P: AsRef<Path>>(config_path: P) -> io::Result<Config> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use ldk_node::{bitcoin::Network, lightning::ln::msgs::SocketAddress};
 	use std::str::FromStr;
+
+	use ldk_node::bitcoin::Network;
+	use ldk_node::lightning::ln::msgs::SocketAddress;
+
+	use super::*;
 
 	#[test]
 	fn test_read_toml_config_from_file() {

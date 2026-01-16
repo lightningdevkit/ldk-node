@@ -7,10 +7,11 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use ldk_server_protos::api::{ListChannelsRequest, ListChannelsResponse};
+
 use crate::api::error::LdkServerError;
 use crate::service::Context;
 use crate::util::proto_adapter::channel_to_proto;
-use ldk_server_protos::api::{ListChannelsRequest, ListChannelsResponse};
 
 pub(crate) fn handle_list_channels_request(
 	context: Context, _request: ListChannelsRequest,

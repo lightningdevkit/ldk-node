@@ -7,13 +7,15 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use crate::io::persist::paginated_kv_store::{ListResponse, PaginatedKVStore};
-use crate::io::utils::check_namespace_key_validity;
-use ldk_node::lightning::types::string::PrintableString;
-use rusqlite::{named_params, Connection};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
+
+use ldk_node::lightning::types::string::PrintableString;
+use rusqlite::{named_params, Connection};
+
+use crate::io::persist::paginated_kv_store::{ListResponse, PaginatedKVStore};
+use crate::io::utils::check_namespace_key_validity;
 
 /// The default database file name.
 pub const DEFAULT_SQLITE_DB_FILE_NAME: &str = "ldk_server_data.sqlite";
@@ -287,11 +289,13 @@ impl PaginatedKVStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+	use std::panic::RefUnwindSafe;
+
 	use ldk_node::lightning::util::persist::KVSTORE_NAMESPACE_KEY_MAX_LEN;
 	use rand::distributions::Alphanumeric;
 	use rand::{thread_rng, Rng};
-	use std::panic::RefUnwindSafe;
+
+	use super::*;
 
 	#[test]
 	fn read_write_remove_list_persist() {

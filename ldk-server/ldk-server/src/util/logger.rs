@@ -7,11 +7,12 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use log::{Level, LevelFilter, Log, Metadata, Record};
 
 /// A logger implementation that writes logs to both stderr and a file.
 ///

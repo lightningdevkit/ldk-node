@@ -7,10 +7,11 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use ldk_server_protos::api::{Bolt11ReceiveRequest, Bolt11ReceiveResponse};
+
 use crate::api::error::LdkServerError;
 use crate::service::Context;
 use crate::util::proto_adapter::proto_to_bolt11_description;
-use ldk_server_protos::api::{Bolt11ReceiveRequest, Bolt11ReceiveResponse};
 
 pub(crate) fn handle_bolt11_receive_request(
 	context: Context, request: Bolt11ReceiveRequest,
