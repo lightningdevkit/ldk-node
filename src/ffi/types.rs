@@ -22,20 +22,17 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
-use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::msgs::DecodeError;
 pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
 use lightning::offers::refund::Refund as LdkRefund;
-use lightning::offers::static_invoice::StaticInvoice as LdkStaticInvoice;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
-use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
 pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
@@ -686,172 +683,6 @@ impl Deref for Bolt12Invoice {
 impl AsRef<LdkBolt12Invoice> for Bolt12Invoice {
 	fn as_ref(&self) -> &LdkBolt12Invoice {
 		self.deref()
-	}
-}
-
-/// A `StaticInvoice` is used for async payments where the recipient may be offline.
-///
-/// Unlike [`Bolt12Invoice`], a `StaticInvoice` does not support proof of payment
-/// because the payment hash is not derived from a preimage known only to the recipient.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaticInvoice {
-	pub(crate) inner: LdkStaticInvoice,
-}
-
-impl StaticInvoice {
-	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
-		invoice_str.parse()
-	}
-
-	/// Returns the [`OfferId`] of the underlying [`Offer`] this invoice corresponds to.
-	///
-	/// [`Offer`]: lightning::offers::offer::Offer
-	pub fn offer_id(&self) -> OfferId {
-		OfferId(self.inner.offer_id().0)
-	}
-
-	/// Whether the offer this invoice corresponds to has expired.
-	pub fn is_offer_expired(&self) -> bool {
-		self.inner.is_offer_expired()
-	}
-
-	/// A typically transient public key corresponding to the key used to sign the invoice.
-	pub fn signing_pubkey(&self) -> PublicKey {
-		self.inner.signing_pubkey()
-	}
-
-	/// The public key used by the recipient to sign invoices.
-	pub fn issuer_signing_pubkey(&self) -> Option<PublicKey> {
-		self.inner.issuer_signing_pubkey()
-	}
-
-	/// A complete description of the purpose of the originating offer.
-	pub fn invoice_description(&self) -> Option<String> {
-		self.inner.description().map(|printable| printable.to_string())
-	}
-
-	/// The issuer of the offer.
-	pub fn issuer(&self) -> Option<String> {
-		self.inner.issuer().map(|printable| printable.to_string())
-	}
-
-	/// The minimum amount required for a successful payment of a single item.
-	pub fn amount(&self) -> Option<OfferAmount> {
-		self.inner.amount().map(|amount| amount.into())
-	}
-
-	/// The chain that must be used when paying the invoice.
-	pub fn chain(&self) -> Vec<u8> {
-		self.inner.chain().to_bytes().to_vec()
-	}
-
-	/// Opaque bytes set by the originating [`Offer`].
-	///
-	/// [`Offer`]: lightning::offers::offer::Offer
-	pub fn metadata(&self) -> Option<Vec<u8>> {
-		self.inner.metadata().cloned()
-	}
-
-	/// Seconds since the Unix epoch when an invoice should no longer be requested.
-	///
-	/// If `None`, the offer does not expire.
-	pub fn absolute_expiry_seconds(&self) -> Option<u64> {
-		self.inner.absolute_expiry().map(|duration| duration.as_secs())
-	}
-
-	/// Writes `self` out to a `Vec<u8>`.
-	pub fn encode(&self) -> Vec<u8> {
-		self.inner.encode()
-	}
-}
-
-impl std::str::FromStr for StaticInvoice {
-	type Err = Error;
-
-	fn from_str(invoice_str: &str) -> Result<Self, Self::Err> {
-		if let Some(bytes_vec) = hex_utils::to_vec(invoice_str) {
-			if let Ok(invoice) = LdkStaticInvoice::try_from(bytes_vec) {
-				return Ok(StaticInvoice { inner: invoice });
-			}
-		}
-		Err(Error::InvalidInvoice)
-	}
-}
-
-impl From<LdkStaticInvoice> for StaticInvoice {
-	fn from(invoice: LdkStaticInvoice) -> Self {
-		StaticInvoice { inner: invoice }
-	}
-}
-
-impl Deref for StaticInvoice {
-	type Target = LdkStaticInvoice;
-	fn deref(&self) -> &Self::Target {
-		&self.inner
-	}
-}
-
-impl AsRef<LdkStaticInvoice> for StaticInvoice {
-	fn as_ref(&self) -> &LdkStaticInvoice {
-		self.deref()
-	}
-}
-
-/// Represents a BOLT12 invoice that was paid.
-///
-/// This is used in [`Event::PaymentSuccessful`] to provide proof of payment for BOLT12 payments.
-///
-/// Note: Due to UniFFI limitations with Object types in enum variants, this is exposed as a
-/// struct with optional fields. Check which field is `Some` to determine the invoice type:
-/// - `bolt12_invoice`: A standard BOLT12 invoice (supports proof of payment)
-/// - `static_invoice`: A static invoice for async payments (does NOT support proof of payment)
-///
-/// [`Event::PaymentSuccessful`]: crate::Event::PaymentSuccessful
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaidBolt12Invoice {
-	/// The paid BOLT12 invoice, if this is a regular BOLT12 invoice.
-	pub bolt12_invoice: Option<Arc<Bolt12Invoice>>,
-	/// The paid static invoice, if this is a static invoice (async payment).
-	pub static_invoice: Option<Arc<StaticInvoice>>,
-}
-
-impl From<LdkPaidBolt12Invoice> for PaidBolt12Invoice {
-	fn from(ldk_invoice: LdkPaidBolt12Invoice) -> Self {
-		match ldk_invoice {
-			LdkPaidBolt12Invoice::Bolt12Invoice(invoice) => PaidBolt12Invoice {
-				bolt12_invoice: Some(super::maybe_wrap(invoice)),
-				static_invoice: None,
-			},
-			LdkPaidBolt12Invoice::StaticInvoice(invoice) => PaidBolt12Invoice {
-				bolt12_invoice: None,
-				static_invoice: Some(super::maybe_wrap(invoice)),
-			},
-		}
-	}
-}
-
-impl Writeable for PaidBolt12Invoice {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		// Convert our struct back to LDK's enum and delegate serialization
-		let ldk_invoice: LdkPaidBolt12Invoice = match (&self.bolt12_invoice, &self.static_invoice) {
-			(Some(inv), None) => LdkPaidBolt12Invoice::Bolt12Invoice(inv.inner.clone()),
-			(None, Some(inv)) => LdkPaidBolt12Invoice::StaticInvoice(inv.inner.clone()),
-			_ => {
-				return Err(lightning::io::Error::new(
-					lightning::io::ErrorKind::InvalidData,
-					"PaidBolt12Invoice must have exactly one variant set",
-				));
-			},
-		};
-		ldk_invoice.write(writer)
-	}
-}
-
-impl Readable for PaidBolt12Invoice {
-	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-		// Read using LDK's deserialization, then convert to our type
-		let ldk_invoice: LdkPaidBolt12Invoice = Readable::read(reader)?;
-		Ok(PaidBolt12Invoice::from(ldk_invoice))
 	}
 }
 

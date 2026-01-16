@@ -403,7 +403,8 @@ enum VssHeaderProviderError {
 
 [Enum]
 interface Event {
-	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat, PaidBolt12Invoice? bolt12_invoice);
+	// TODO: Add bolt12_invoice field once we upgrade to UniFFI 0.29+. See #757.
+	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat);
 	PaymentFailed(PaymentId? payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
 	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat, sequence<CustomTlvRecord> custom_records);
 	PaymentClaimable(PaymentId payment_id, PaymentHash payment_hash, u64 claimable_amount_msat, u32? claim_deadline, sequence<CustomTlvRecord> custom_records);
@@ -860,29 +861,7 @@ interface Bolt12Invoice {
 	sequence<u8> encode();
 };
 
-interface StaticInvoice {
-	[Throws=NodeError, Name=from_str]
-	constructor([ByRef] string invoice_str);
-	OfferId offer_id();
-	boolean is_offer_expired();
-	PublicKey signing_pubkey();
-	PublicKey? issuer_signing_pubkey();
-	string? invoice_description();
-	string? issuer();
-	OfferAmount? amount();
-	sequence<u8> chain();
-	sequence<u8>? metadata();
-	u64? absolute_expiry_seconds();
-	sequence<u8> encode();
-};
-
-// Note: UniFFI doesn't support Object types in enum variant data, so we use
-// a dictionary with optional fields. Check which field is Some to determine
-// the invoice type.
-dictionary PaidBolt12Invoice {
-	Bolt12Invoice? bolt12_invoice;
-	StaticInvoice? static_invoice;
-};
+// TODO: Add StaticInvoice and PaidBolt12Invoice once we upgrade to UniFFI 0.29+. See #757.
 
 [Custom]
 typedef string Txid;

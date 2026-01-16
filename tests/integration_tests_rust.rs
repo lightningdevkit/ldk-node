@@ -29,9 +29,11 @@ use common::{
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
+#[cfg(not(feature = "uniffi"))]
+use ldk_node::payment::PaidBolt12Invoice;
 use ldk_node::payment::{
-	ConfirmationStatus, PaidBolt12Invoice, PaymentDetails, PaymentDirection, PaymentKind,
-	PaymentStatus, UnifiedPaymentResult,
+	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
+	UnifiedPaymentResult,
 };
 use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
@@ -1349,6 +1351,7 @@ async fn bolt12_proof_of_payment() {
 		node_a.bolt12_payment().send(&offer, Some(1), Some("Test".to_string()), None).unwrap();
 
 	// Wait for payment and verify proof of payment
+	#[cfg(not(feature = "uniffi"))]
 	match node_a.next_event_async().await {
 		Event::PaymentSuccessful {
 			payment_id: event_payment_id,
@@ -1367,25 +1370,40 @@ async fn bolt12_proof_of_payment() {
 			// Verify the BOLT12 invoice is present and contains the correct payment hash
 			let paid_invoice =
 				bolt12_invoice.expect("bolt12_invoice should be present for BOLT12 payments");
-			#[cfg(not(feature = "uniffi"))]
-			{
-				match paid_invoice {
-					PaidBolt12Invoice::Bolt12Invoice(invoice) => {
-						assert_eq!(invoice.payment_hash(), payment_hash);
-						assert_eq!(invoice.amount_msats(), expected_amount_msat);
-					},
-					PaidBolt12Invoice::StaticInvoice(_) => {
-						panic!("Expected Bolt12Invoice, got StaticInvoice");
-					},
-				}
+			match paid_invoice {
+				PaidBolt12Invoice::Bolt12Invoice(invoice) => {
+					assert_eq!(invoice.payment_hash(), payment_hash);
+					assert_eq!(invoice.amount_msats(), expected_amount_msat);
+				},
+				PaidBolt12Invoice::StaticInvoice(_) => {
+					panic!("Expected Bolt12Invoice, got StaticInvoice");
+				},
 			}
-			#[cfg(feature = "uniffi")]
-			{
-				let invoice =
-					paid_invoice.bolt12_invoice.expect("bolt12_invoice should be present");
-				assert_eq!(invoice.payment_hash(), payment_hash);
-				assert_eq!(invoice.amount_msats(), expected_amount_msat);
-			}
+
+			node_a.event_handled().unwrap();
+		},
+		ref e => {
+			panic!("Unexpected event: {:?}", e);
+		},
+	}
+
+	// For UniFFI builds, bolt12_invoice is not available until UniFFI 0.29+
+	#[cfg(feature = "uniffi")]
+	match node_a.next_event_async().await {
+		Event::PaymentSuccessful {
+			payment_id: event_payment_id,
+			payment_hash,
+			payment_preimage,
+			fee_paid_msat: _,
+		} => {
+			assert_eq!(event_payment_id, Some(payment_id));
+
+			// Verify proof of payment: sha256(preimage) == payment_hash
+			let preimage = payment_preimage.expect("preimage should be present");
+			let computed_hash = Sha256Hash::hash(&preimage.0);
+			assert_eq!(PaymentHash(computed_hash.to_byte_array()), payment_hash);
+
+			// Note: bolt12_invoice verification skipped in UniFFI builds until UniFFI 0.29+
 
 			node_a.event_handled().unwrap();
 		},

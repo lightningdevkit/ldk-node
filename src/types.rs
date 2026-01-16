@@ -622,11 +622,8 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 	}
 }
 
-// Re-export the invoice types. When UniFFI is enabled, we use the types from ffi::types
-// which have additional UniFFI-specific implementations. Otherwise, we re-export LDK's
-// types directly to avoid unnecessary wrappers and serialization reimplementation.
+// PaidBolt12Invoice is only exposed for non-UniFFI builds because UniFFI v0.28
+// doesn't support Object types in enum variants. We re-export LDK's type directly.
+// TODO: Expose in bindings once we upgrade to UniFFI 0.29+. See #757.
 #[cfg(not(feature = "uniffi"))]
 pub use lightning::events::PaidBolt12Invoice;
-
-#[cfg(feature = "uniffi")]
-pub use crate::ffi::{Bolt12Invoice, PaidBolt12Invoice, StaticInvoice};
