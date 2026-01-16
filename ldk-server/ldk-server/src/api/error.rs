@@ -7,8 +7,9 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use ldk_node::NodeError;
 use std::fmt;
+
+use ldk_node::NodeError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LdkServerError {

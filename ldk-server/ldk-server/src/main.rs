@@ -12,16 +12,27 @@ mod io;
 mod service;
 mod util;
 
-use crate::service::NodeService;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use ldk_node::entropy::NodeEntropy;
-use ldk_node::{Builder, Event, Node};
-
-use tokio::net::TcpListener;
-use tokio::signal::unix::SignalKind;
-
+use hex::DisplayHex;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
+use ldk_node::config::Config;
+use ldk_node::entropy::NodeEntropy;
+use ldk_node::lightning::ln::channelmanager::PaymentId;
+use ldk_node::{Builder, Event, Node};
+use ldk_server_protos::events;
+use ldk_server_protos::events::{event_envelope, EventEnvelope};
+use ldk_server_protos::types::Payment;
+use log::{error, info};
+use prost::Message;
+use rand::Rng;
+use tokio::net::TcpListener;
+use tokio::select;
+use tokio::signal::unix::SignalKind;
 
 use crate::io::events::event_publisher::EventPublisher;
 use crate::io::events::get_event_name;
@@ -34,24 +45,11 @@ use crate::io::persist::{
 	FORWARDED_PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE, PAYMENTS_PERSISTENCE_PRIMARY_NAMESPACE,
 	PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 };
+use crate::service::NodeService;
 use crate::util::config::{load_config, ChainSource};
 use crate::util::logger::ServerLogger;
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use crate::util::tls::get_or_generate_tls_config;
-use hex::DisplayHex;
-use ldk_node::config::Config;
-use ldk_node::lightning::ln::channelmanager::PaymentId;
-use ldk_server_protos::events;
-use ldk_server_protos::events::{event_envelope, EventEnvelope};
-use ldk_server_protos::types::Payment;
-use log::{error, info};
-use prost::Message;
-use rand::Rng;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::select;
 
 const USAGE_GUIDE: &str = "Usage: ldk-server <config_path>";
 

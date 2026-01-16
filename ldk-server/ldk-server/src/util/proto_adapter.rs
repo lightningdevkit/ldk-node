@@ -7,10 +7,6 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use crate::api::error::LdkServerError;
-use crate::api::error::LdkServerErrorCode::{
-	AuthError, InternalServerError, InvalidRequestError, LightningError,
-};
 use bytes::Bytes;
 use hex::prelude::*;
 use hyper::StatusCode;
@@ -37,6 +33,11 @@ use ldk_server_protos::types::pending_sweep_balance::BalanceType::{
 };
 use ldk_server_protos::types::{
 	bolt11_invoice_description, Channel, ForwardedPayment, LspFeeLimits, OutPoint, Payment,
+};
+
+use crate::api::error::LdkServerError;
+use crate::api::error::LdkServerErrorCode::{
+	AuthError, InternalServerError, InvalidRequestError, LightningError,
 };
 
 pub(crate) fn channel_to_proto(channel: ChannelDetails) -> Channel {

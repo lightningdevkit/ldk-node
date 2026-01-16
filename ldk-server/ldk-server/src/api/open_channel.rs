@@ -7,14 +7,16 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use crate::api::build_channel_config_from_proto;
-use crate::api::error::LdkServerError;
-use crate::service::Context;
+use std::str::FromStr;
+
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::ChannelConfig;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_server_protos::api::{OpenChannelRequest, OpenChannelResponse};
-use std::str::FromStr;
+
+use crate::api::build_channel_config_from_proto;
+use crate::api::error::LdkServerError;
+use crate::service::Context;
 
 pub(crate) fn handle_open_channel(
 	context: Context, request: OpenChannelRequest,

@@ -7,10 +7,11 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use crate::api::error::LdkServerError;
-use crate::service::Context;
 use ldk_server_protos::api::{GetNodeInfoRequest, GetNodeInfoResponse};
 use ldk_server_protos::types::BestBlock;
+
+use crate::api::error::LdkServerError;
+use crate::service::Context;
 
 pub(crate) fn handle_get_node_info_request(
 	context: Context, _request: GetNodeInfoRequest,

@@ -7,14 +7,16 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use std::str::FromStr;
+
+use ldk_node::bitcoin::secp256k1::PublicKey;
+use ldk_node::UserChannelId;
+use ldk_server_protos::api::{UpdateChannelConfigRequest, UpdateChannelConfigResponse};
+
 use crate::api::build_channel_config_from_proto;
 use crate::api::error::LdkServerError;
 use crate::api::error::LdkServerErrorCode::{InvalidRequestError, LightningError};
 use crate::service::Context;
-use ldk_node::bitcoin::secp256k1::PublicKey;
-use ldk_node::UserChannelId;
-use ldk_server_protos::api::{UpdateChannelConfigRequest, UpdateChannelConfigResponse};
-use std::str::FromStr;
 
 pub(crate) fn handle_update_channel_config_request(
 	context: Context, request: UpdateChannelConfigRequest,
@@ -24,7 +26,7 @@ pub(crate) fn handle_update_channel_config_request(
 		.parse::<u128>()
 		.map_err(|_| LdkServerError::new(InvalidRequestError, "Invalid UserChannelId."))?;
 
-	//FIXME: Use ldk/ldk-node's partial config update api.
+	// FIXME: Use ldk/ldk-node's partial config update api.
 	let current_config = context
 		.node
 		.list_channels()
