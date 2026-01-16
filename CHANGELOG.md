@@ -6,10 +6,6 @@
   from the channel monitor's `ClaimableOnChannelClose` balance. Returns `None` if no monitor
   exists yet (pre-funding). This replaces the workaround of approximating the claimable amount
   using `outbound_capacity_msat + counterparty_reserve`.
-
-# 0.7.0-rc.6 (Synonym Fork)
-
-## Synonym Fork Additions
 - Added reactive event system for wallet monitoring without polling:
   - **Onchain Transaction Events** (fully implemented):
     - `OnchainTransactionReceived`: Emitted when a new unconfirmed transaction is
