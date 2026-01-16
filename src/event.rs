@@ -48,6 +48,8 @@ use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::runtime::Runtime;
+#[cfg(not(feature = "uniffi"))]
+use crate::types::PaidBolt12Invoice;
 use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -75,6 +77,22 @@ pub enum Event {
 		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
+		/// The BOLT12 invoice that was paid.
+		///
+		/// This is useful for proof of payment. A third party can verify that the payment was made
+		/// by checking that the `payment_hash` in the invoice matches `sha256(payment_preimage)`.
+		///
+		/// Will be `None` for non-BOLT12 payments.
+		///
+		/// Note that static invoices (indicated by [`PaidBolt12Invoice::StaticInvoice`], used for
+		/// async payments) do not support proof of payment as the payment hash is not derived
+		/// from a preimage known only to the recipient.
+		///
+		/// This field is only available in non-UniFFI builds. See the module documentation for
+		/// more information.
+		// TODO: Expose in bindings once we upgrade to UniFFI 0.29+. See #757.
+		#[cfg(not(feature = "uniffi"))]
+		bolt12_invoice: Option<PaidBolt12Invoice>,
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
@@ -258,6 +276,90 @@ pub enum Event {
 	},
 }
 
+// TODO: These two macros are duplicated because the `Event::PaymentSuccessful` variant has a
+// different set of fields depending on the `uniffi` feature flag. The `bolt12_invoice` field
+// only exists in non-UniFFI builds, and the macro generates code that references struct fields
+// by name, so we can't use a single macro for both. The duplication can be removed once we
+// upgrade to UniFFI 0.29+, which supports Object types in enum variants.
+// See https://github.com/lightningdevkit/ldk-node/issues/757
+//
+// Note: The serialization formats are compatible - TLV tag 7 (bolt12_invoice) written by
+// non-UniFFI builds is silently skipped by UniFFI builds (unknown optional TLV), and UniFFI
+// builds write without tag 7, which non-UniFFI builds read as `bolt12_invoice: None`.
+#[cfg(not(feature = "uniffi"))]
+impl_writeable_tlv_based_enum!(Event,
+	(0, PaymentSuccessful) => {
+		(0, payment_hash, required),
+		(1, fee_paid_msat, option),
+		(3, payment_id, option),
+		(5, payment_preimage, option),
+		(7, bolt12_invoice, option),
+	},
+	(1, PaymentFailed) => {
+		(0, payment_hash, option),
+		(1, reason, upgradable_option),
+		(3, payment_id, option),
+	},
+	(2, PaymentReceived) => {
+		(0, payment_hash, required),
+		(1, payment_id, option),
+		(2, amount_msat, required),
+		(3, custom_records, optional_vec),
+	},
+	(3, ChannelReady) => {
+		(0, channel_id, required),
+		(1, counterparty_node_id, option),
+		(2, user_channel_id, required),
+		(3, funding_txo, option),
+	},
+	(4, ChannelPending) => {
+		(0, channel_id, required),
+		(2, user_channel_id, required),
+		(4, former_temporary_channel_id, required),
+		(6, counterparty_node_id, required),
+		(8, funding_txo, required),
+	},
+	(5, ChannelClosed) => {
+		(0, channel_id, required),
+		(1, counterparty_node_id, option),
+		(2, user_channel_id, required),
+		(3, reason, upgradable_option),
+	},
+	(6, PaymentClaimable) => {
+		(0, payment_hash, required),
+		(2, payment_id, required),
+		(4, claimable_amount_msat, required),
+		(6, claim_deadline, option),
+		(7, custom_records, optional_vec),
+	},
+	(7, PaymentForwarded) => {
+		(0, prev_channel_id, required),
+		(1, prev_node_id, option),
+		(2, next_channel_id, required),
+		(3, next_node_id, option),
+		(4, prev_user_channel_id, option),
+		(6, next_user_channel_id, option),
+		(8, total_fee_earned_msat, option),
+		(10, skimmed_fee_msat, option),
+		(12, claim_from_onchain_tx, required),
+		(14, outbound_amount_forwarded_msat, option),
+	},
+	(8, SplicePending) => {
+		(1, channel_id, required),
+		(3, counterparty_node_id, required),
+		(5, user_channel_id, required),
+		(7, new_funding_txo, required),
+	},
+	(9, SpliceFailed) => {
+		(1, channel_id, required),
+		(3, counterparty_node_id, required),
+		(5, user_channel_id, required),
+		(7, abandoned_funding_txo, option),
+	},
+);
+
+// UniFFI version of the macro - see the comment above for why this duplication exists.
+#[cfg(feature = "uniffi")]
 impl_writeable_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
@@ -1022,6 +1124,7 @@ where
 				payment_preimage,
 				payment_hash,
 				fee_paid_msat,
+				bolt12_invoice,
 				..
 			} => {
 				let payment_id = if let Some(id) = payment_id {
@@ -1062,11 +1165,26 @@ where
 						hex_utils::to_string(&payment_preimage.0)
 					);
 				});
+
+				#[cfg(not(feature = "uniffi"))]
 				let event = Event::PaymentSuccessful {
 					payment_id: Some(payment_id),
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
+					bolt12_invoice,
+				};
+
+				#[cfg(feature = "uniffi")]
+				let event = {
+					// bolt12_invoice not exposed in uniffi builds until UniFFI 0.29+
+					let _ = bolt12_invoice;
+					Event::PaymentSuccessful {
+						payment_id: Some(payment_id),
+						payment_hash,
+						payment_preimage: Some(payment_preimage),
+						fee_paid_msat,
+					}
 				};
 
 				match self.event_queue.add_event(event).await {

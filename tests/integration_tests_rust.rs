@@ -29,6 +29,8 @@ use common::{
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
+#[cfg(not(feature = "uniffi"))]
+use ldk_node::payment::PaidBolt12Invoice;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
@@ -1303,6 +1305,114 @@ async fn simple_bolt12_send_receive() {
 		},
 	}
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(overpaid_amount));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn bolt12_proof_of_payment() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Sleep until we broadcasted a node announcement.
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+
+	// Sleep one more sec to make sure the node announcement propagates.
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+	let expected_amount_msat = 100_000_000;
+	let offer = node_b
+		.bolt12_payment()
+		.receive(expected_amount_msat, "proof of payment test", None, Some(1))
+		.unwrap();
+	let payment_id =
+		node_a.bolt12_payment().send(&offer, Some(1), Some("Test".to_string()), None).unwrap();
+
+	// Wait for payment and verify proof of payment
+	#[cfg(not(feature = "uniffi"))]
+	match node_a.next_event_async().await {
+		Event::PaymentSuccessful {
+			payment_id: event_payment_id,
+			payment_hash,
+			payment_preimage,
+			fee_paid_msat: _,
+			bolt12_invoice,
+		} => {
+			assert_eq!(event_payment_id, Some(payment_id));
+
+			// Verify proof of payment: sha256(preimage) == payment_hash
+			let preimage = payment_preimage.expect("preimage should be present");
+			let computed_hash = Sha256Hash::hash(&preimage.0);
+			assert_eq!(PaymentHash(computed_hash.to_byte_array()), payment_hash);
+
+			// Verify the BOLT12 invoice is present and contains the correct payment hash
+			let paid_invoice =
+				bolt12_invoice.expect("bolt12_invoice should be present for BOLT12 payments");
+			match paid_invoice {
+				PaidBolt12Invoice::Bolt12Invoice(invoice) => {
+					assert_eq!(invoice.payment_hash(), payment_hash);
+					assert_eq!(invoice.amount_msats(), expected_amount_msat);
+				},
+				PaidBolt12Invoice::StaticInvoice(_) => {
+					panic!("Expected Bolt12Invoice, got StaticInvoice");
+				},
+			}
+
+			node_a.event_handled().unwrap();
+		},
+		ref e => {
+			panic!("Unexpected event: {:?}", e);
+		},
+	}
+
+	// For UniFFI builds, bolt12_invoice is not available until UniFFI 0.29+
+	#[cfg(feature = "uniffi")]
+	match node_a.next_event_async().await {
+		Event::PaymentSuccessful {
+			payment_id: event_payment_id,
+			payment_hash,
+			payment_preimage,
+			fee_paid_msat: _,
+		} => {
+			assert_eq!(event_payment_id, Some(payment_id));
+
+			// Verify proof of payment: sha256(preimage) == payment_hash
+			let preimage = payment_preimage.expect("preimage should be present");
+			let computed_hash = Sha256Hash::hash(&preimage.0);
+			assert_eq!(PaymentHash(computed_hash.to_byte_array()), payment_hash);
+
+			// Note: bolt12_invoice verification skipped in UniFFI builds until UniFFI 0.29+
+
+			node_a.event_handled().unwrap();
+		},
+		ref e => {
+			panic!("Unexpected event: {:?}", e);
+		},
+	}
+
+	expect_payment_received_event!(node_b, expected_amount_msat);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

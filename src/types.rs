@@ -621,3 +621,9 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 		CustomTlvRecord { type_num: tlv.0, value: tlv.1.clone() }
 	}
 }
+
+// PaidBolt12Invoice is only exposed for non-UniFFI builds because UniFFI v0.28
+// doesn't support Object types in enum variants. We re-export LDK's type directly.
+// TODO: Expose in bindings once we upgrade to UniFFI 0.29+. See #757.
+#[cfg(not(feature = "uniffi"))]
+pub use lightning::events::PaidBolt12Invoice;
