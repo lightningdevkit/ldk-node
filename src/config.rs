@@ -87,11 +87,19 @@ pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort a transaction broadcast operation.
 pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
 
+// The maximum encoded size of an RGS snapshot we'll accept.
+// In practice the maximum we see is around 4MiB.
+pub(crate) const RGS_SNAPSHOT_MAX_SIZE: usize = 15 * 1024 * 1024;
+
 // The timeout after which we abort a RGS sync operation.
 pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
 
 /// The length in bytes of our wallets' keys seed.
 pub const WALLET_KEYS_SEED_LEN: usize = 64;
+
+// The maximum encoded size of external scores we'll accept.
+// In practice we see scores files in the 5MiB range.
+pub(crate) const EXTERNAL_PATHFINDING_SCORES_MAX_SIZE: usize = 20 * 1024 * 1024;
 
 // The timeout after which we abort a external scores sync operation.
 pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;

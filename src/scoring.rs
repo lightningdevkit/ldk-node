@@ -1,12 +1,13 @@
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use lightning::routing::scoring::ChannelLiquidities;
 use lightning::util::ser::Readable;
 use lightning::{log_error, log_info, log_trace};
 
 use crate::config::{
-	EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL, EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS,
+	EXTERNAL_PATHFINDING_SCORES_MAX_SIZE, EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL,
+	EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS,
 };
 use crate::io::utils::write_external_pathfinding_scores_to_cache;
 use crate::logger::LdkLogger;
@@ -53,34 +54,27 @@ async fn sync_external_scores(
 	logger: &Logger, scorer: &Mutex<Scorer>, node_metrics: &RwLock<NodeMetrics>,
 	kv_store: Arc<DynStore>, url: &String,
 ) -> () {
-	let response = tokio::time::timeout(
-		Duration::from_secs(EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS),
-		reqwest::get(url),
-	)
-	.await;
+	let request = bitreq::get(url)
+		.with_timeout(EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS)
+		.with_max_body_size(Some(EXTERNAL_PATHFINDING_SCORES_MAX_SIZE));
 
-	let response = match response {
-		Ok(resp) => resp,
-		Err(e) => {
-			log_error!(logger, "Retrieving external scores timed out: {}", e);
-			return;
-		},
-	};
-	let response = match response {
+	let response = match request.send_async().await {
 		Ok(resp) => resp,
 		Err(e) => {
 			log_error!(logger, "Failed to retrieve external scores update: {}", e);
 			return;
 		},
 	};
-	let reader = match response.bytes().await {
-		Ok(bytes) => bytes,
-		Err(e) => {
-			log_error!(logger, "Failed to read external scores update: {}", e);
-			return;
-		},
-	};
-	match ChannelLiquidities::read(&mut &*reader) {
+	if response.status_code != 200 {
+		log_error!(
+			logger,
+			"Failed to retrieve external scores update: HTTP {}",
+			response.status_code
+		);
+		return;
+	}
+	let mut reader = response.as_bytes();
+	match ChannelLiquidities::read(&mut reader) {
 		Ok(liquidities) => {
 			if let Err(e) =
 				write_external_pathfinding_scores_to_cache(&*kv_store, &liquidities, logger).await
