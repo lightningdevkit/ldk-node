@@ -102,6 +102,7 @@ mod tx_broadcaster;
 mod types;
 mod wallet;
 
+use std::collections::HashMap;
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::ops::Deref;
@@ -133,6 +134,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
 pub use io::utils::{derive_node_secret_from_mnemonic, generate_entropy_mnemonic};
+use lightning::chain::channelmonitor::Balance as LdkBalance;
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
@@ -141,6 +143,7 @@ use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelS
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
@@ -1047,11 +1050,8 @@ impl Node {
 
 	/// Retrieve a list of known channels.
 	pub fn list_channels(&self) -> Vec<ChannelDetails> {
-		use lightning::chain::channelmonitor::Balance as LdkBalance;
-
 		// Build channel_id -> claimable_on_close_sats map from monitors
-		let mut claimable_map: std::collections::HashMap<lightning::ln::types::ChannelId, u64> =
-			std::collections::HashMap::new();
+		let mut claimable_map: HashMap<ChannelId, u64> = HashMap::new();
 
 		for channel_id in self.chain_monitor.list_monitors() {
 			if let Ok(monitor) = self.chain_monitor.get_monitor(channel_id) {
@@ -1062,11 +1062,12 @@ impl Node {
 						..
 					} = &balance
 					{
-						// unwrap safety: confirmed_balance_candidate_index is guaranteed to
-						// index into balance_candidates
-						let confirmed =
-							balance_candidates.get(*confirmed_balance_candidate_index).unwrap();
-						*claimable_map.entry(channel_id).or_insert(0) += confirmed.amount_satoshis;
+						if let Some(confirmed) =
+							balance_candidates.get(*confirmed_balance_candidate_index)
+						{
+							*claimable_map.entry(channel_id).or_insert(0) +=
+								confirmed.amount_satoshis;
+						}
 					}
 				}
 			}

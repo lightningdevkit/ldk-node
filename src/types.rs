@@ -398,7 +398,7 @@ pub struct ChannelDetails {
 	pub inbound_htlc_maximum_msat: Option<u64>,
 	/// Set of configurable parameters that affect channel operation.
 	pub config: ChannelConfig,
-	/// The amount, in satoshis, claimable if the channel is force-closed now.
+	/// The amount, in satoshis, claimable if the channel is closed now.
 	///
 	/// This is computed from the channel monitor and represents the confirmed balance
 	/// excluding pending HTLCs. Returns `None` if no monitor exists yet (pre-funding).
@@ -466,58 +466,9 @@ impl ChannelDetails {
 	pub(crate) fn from_ldk_with_balance(
 		value: LdkChannelDetails, claimable_on_close_sats: Option<u64>,
 	) -> Self {
-		ChannelDetails {
-			channel_id: value.channel_id,
-			counterparty_node_id: value.counterparty.node_id,
-			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
-			short_channel_id: value.short_channel_id,
-			outbound_scid_alias: value.outbound_scid_alias,
-			inbound_scid_alias: value.inbound_scid_alias,
-			channel_value_sats: value.channel_value_satoshis,
-			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
-			user_channel_id: UserChannelId(value.user_channel_id),
-			// unwrap safety: This value will be `None` for objects serialized with LDK versions
-			// prior to 0.0.115.
-			feerate_sat_per_1000_weight: value.feerate_sat_per_1000_weight.unwrap(),
-			outbound_capacity_msat: value.outbound_capacity_msat,
-			inbound_capacity_msat: value.inbound_capacity_msat,
-			confirmations_required: value.confirmations_required,
-			confirmations: value.confirmations,
-			is_outbound: value.is_outbound,
-			is_channel_ready: value.is_channel_ready,
-			is_usable: value.is_usable,
-			is_announced: value.is_announced,
-			cltv_expiry_delta: value.config.map(|c| c.cltv_expiry_delta),
-			counterparty_unspendable_punishment_reserve: value
-				.counterparty
-				.unspendable_punishment_reserve,
-			counterparty_outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat,
-			counterparty_outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
-			counterparty_forwarding_info_fee_base_msat: value
-				.counterparty
-				.forwarding_info
-				.as_ref()
-				.map(|f| f.fee_base_msat),
-			counterparty_forwarding_info_fee_proportional_millionths: value
-				.counterparty
-				.forwarding_info
-				.as_ref()
-				.map(|f| f.fee_proportional_millionths),
-			counterparty_forwarding_info_cltv_expiry_delta: value
-				.counterparty
-				.forwarding_info
-				.as_ref()
-				.map(|f| f.cltv_expiry_delta),
-			next_outbound_htlc_limit_msat: value.next_outbound_htlc_limit_msat,
-			next_outbound_htlc_minimum_msat: value.next_outbound_htlc_minimum_msat,
-			force_close_spend_delay: value.force_close_spend_delay,
-			// unwrap safety: This field is only `None` for objects serialized prior to LDK 0.0.107
-			inbound_htlc_minimum_msat: value.inbound_htlc_minimum_msat.unwrap_or(0),
-			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
-			// unwrap safety: `config` is only `None` for LDK objects serialized prior to 0.0.109.
-			config: value.config.map(|c| c.into()).unwrap(),
-			claimable_on_close_sats,
-		}
+		let mut details: ChannelDetails = value.into();
+		details.claimable_on_close_sats = claimable_on_close_sats;
+		details
 	}
 }
 
