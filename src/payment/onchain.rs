@@ -13,8 +13,8 @@ use bitcoin::{Address, Txid};
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::logger::{log_info, LdkLogger, Logger};
 use crate::fee_estimator::ConfirmationTarget;
+use crate::logger::{log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, SpendableUtxo, Wallet};
 use crate::wallet::{CoinSelectionAlgorithm, OnchainSendAmount};
 

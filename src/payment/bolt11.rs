@@ -16,7 +16,9 @@ use bitcoin::hashes::Hash;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
 };
-use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig, Router as LdkRouter};
+use lightning::routing::router::{
+	PaymentParameters, RouteParameters, RouteParametersConfig, Router as LdkRouter,
+};
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
 };
@@ -957,20 +959,23 @@ impl Bolt11Payment {
 			Error::InvalidInvoice
 		})?;
 
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+		let route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
 
 		let first_hops = self.channel_manager.list_usable_channels();
 		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
 
-		let route = (&*self.router).find_route(
-			&self.channel_manager.get_our_node_id(),
-			&route_params,
-			Some(&first_hops.iter().collect::<Vec<_>>()),
-			inflight_htlcs,
-		).map_err(|e| {
-			log_error!(self.logger, "Failed to find route for fee estimation: {:?}", e);
-			Error::RouteNotFound
-		})?;
+		let route = (&*self.router)
+			.find_route(
+				&self.channel_manager.get_our_node_id(),
+				&route_params,
+				Some(&first_hops.iter().collect::<Vec<_>>()),
+				inflight_htlcs,
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to find route for fee estimation: {:?}", e);
+				Error::RouteNotFound
+			})?;
 
 		let total_fees = route.paths.iter().map(|path| path.fee_msat()).sum::<u64>();
 
@@ -1002,20 +1007,23 @@ impl Bolt11Payment {
 			}
 		}
 
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+		let route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
 
 		let first_hops = self.channel_manager.list_usable_channels();
 		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
 
-		let route = (&*self.router).find_route(
-			&self.channel_manager.get_our_node_id(),
-			&route_params,
-			Some(&first_hops.iter().collect::<Vec<_>>()),
-			inflight_htlcs,
-		).map_err(|e| {
-			log_error!(self.logger, "Failed to find route for fee estimation: {:?}", e);
-			Error::RouteNotFound
-		})?;
+		let route = (&*self.router)
+			.find_route(
+				&self.channel_manager.get_our_node_id(),
+				&route_params,
+				Some(&first_hops.iter().collect::<Vec<_>>()),
+				inflight_htlcs,
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to find route for fee estimation: {:?}", e);
+				Error::RouteNotFound
+			})?;
 
 		let total_fees = route.paths.iter().map(|path| path.fee_msat()).sum::<u64>();
 

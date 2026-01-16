@@ -92,8 +92,8 @@ pub fn derive_node_secret_from_mnemonic(
 
 	let ldk_seed_bytes: [u8; 32] = master_xpriv.private_key.secret_bytes();
 
-	let keys_manager_master = Xpriv::new_master(Network::Bitcoin, &ldk_seed_bytes)
-		.map_err(|_| Error::InvalidMnemonic)?;
+	let keys_manager_master =
+		Xpriv::new_master(Network::Bitcoin, &ldk_seed_bytes).map_err(|_| Error::InvalidMnemonic)?;
 
 	let node_secret_xpriv = keys_manager_master
 		.derive_priv(&Secp256k1::new(), &[ChildNumber::from_hardened_idx(0).unwrap()])
@@ -701,8 +701,7 @@ mod tests {
 			"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 		// Derive using our function
-		let derived_secret =
-			derive_node_secret_from_mnemonic(mnemonic.to_string(), None).unwrap();
+		let derived_secret = derive_node_secret_from_mnemonic(mnemonic.to_string(), None).unwrap();
 
 		// Derive using LDK's KeysManager (same flow as Builder)
 		let parsed = Mnemonic::parse(mnemonic).unwrap();

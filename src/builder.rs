@@ -25,7 +25,6 @@ use lightning::io::Cursor;
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
-use lightning::{log_info, log_trace};
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
@@ -34,12 +33,13 @@ use lightning::routing::scoring::{
 };
 use lightning::sign::{EntropySource, InMemorySigner, NodeSigner};
 use lightning::util::persist::{
-	KVStore, KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStore, KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
+use lightning::{log_info, log_trace};
 use lightning_persister::fs_store::FilesystemStore;
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 
@@ -1425,20 +1425,21 @@ fn build_with_store_internal(
 
 	if let Some(migration) = channel_data_migration {
 		if let Some(manager_bytes) = &migration.channel_manager {
-			runtime.block_on(async {
-				KVStore::write(
-					&*kv_store,
-					CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-					CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-					CHANNEL_MANAGER_PERSISTENCE_KEY,
-					manager_bytes.clone(),
-				)
-				.await
-			})
-			.map_err(|e| {
-				log_error!(logger, "Failed to write migrated channel_manager: {}", e);
-				BuildError::WriteFailed
-			})?;
+			runtime
+				.block_on(async {
+					KVStore::write(
+						&*kv_store,
+						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_KEY,
+						manager_bytes.clone(),
+					)
+					.await
+				})
+				.map_err(|e| {
+					log_error!(logger, "Failed to write migrated channel_manager: {}", e);
+					BuildError::WriteFailed
+				})?;
 		}
 
 		for monitor_data in &migration.channel_monitors {
@@ -1458,23 +1459,28 @@ fn build_with_store_internal(
 			let monitor_key = format!("{}_{}", funding_txo.txid, funding_txo.index);
 			log_info!(logger, "Migrating channel monitor: {}", monitor_key);
 
-			runtime.block_on(async {
-				KVStore::write(
-					&*kv_store,
-					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-					&monitor_key,
-					monitor_data.clone(),
-				)
-				.await
-			})
-			.map_err(|e| {
-				log_error!(logger, "Failed to write channel_monitor {}: {}", monitor_key, e);
-				BuildError::WriteFailed
-			})?;
+			runtime
+				.block_on(async {
+					KVStore::write(
+						&*kv_store,
+						CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+						CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+						&monitor_key,
+						monitor_data.clone(),
+					)
+					.await
+				})
+				.map_err(|e| {
+					log_error!(logger, "Failed to write channel_monitor {}: {}", monitor_key, e);
+					BuildError::WriteFailed
+				})?;
 		}
 
-		log_info!(logger, "Applied channel migration: {} monitors", migration.channel_monitors.len());
+		log_info!(
+			logger,
+			"Applied channel migration: {} monitors",
+			migration.channel_monitors.len()
+		);
 	}
 
 	// Read ChannelMonitor state from store

@@ -1,3 +1,12 @@
+# 0.7.0-rc.7 (Synonym Fork)
+
+## Synonym Fork Additions
+- Added `claimable_on_close_sats` field to `ChannelDetails` struct. This field contains the
+  amount (in satoshis) that would be claimable if the channel were force-closed now, computed
+  from the channel monitor's `ClaimableOnChannelClose` balance. Returns `None` if no monitor
+  exists yet (pre-funding). This replaces the workaround of approximating the claimable amount
+  using `outbound_capacity_msat + counterparty_reserve`.
+
 # 0.7.0-rc.6 (Synonym Fork)
 
 ## Synonym Fork Additions

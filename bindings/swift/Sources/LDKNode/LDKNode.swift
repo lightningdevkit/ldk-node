@@ -4417,10 +4417,11 @@ public struct ChannelDetails {
     public var inboundHtlcMinimumMsat: UInt64
     public var inboundHtlcMaximumMsat: UInt64?
     public var config: ChannelConfig
+    public var claimableOnCloseSats: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(channelId: ChannelId, counterpartyNodeId: PublicKey, fundingTxo: OutPoint?, shortChannelId: UInt64?, outboundScidAlias: UInt64?, inboundScidAlias: UInt64?, channelValueSats: UInt64, unspendablePunishmentReserve: UInt64?, userChannelId: UserChannelId, feerateSatPer1000Weight: UInt32, outboundCapacityMsat: UInt64, inboundCapacityMsat: UInt64, confirmationsRequired: UInt32?, confirmations: UInt32?, isOutbound: Bool, isChannelReady: Bool, isUsable: Bool, isAnnounced: Bool, cltvExpiryDelta: UInt16?, counterpartyUnspendablePunishmentReserve: UInt64, counterpartyOutboundHtlcMinimumMsat: UInt64?, counterpartyOutboundHtlcMaximumMsat: UInt64?, counterpartyForwardingInfoFeeBaseMsat: UInt32?, counterpartyForwardingInfoFeeProportionalMillionths: UInt32?, counterpartyForwardingInfoCltvExpiryDelta: UInt16?, nextOutboundHtlcLimitMsat: UInt64, nextOutboundHtlcMinimumMsat: UInt64, forceCloseSpendDelay: UInt16?, inboundHtlcMinimumMsat: UInt64, inboundHtlcMaximumMsat: UInt64?, config: ChannelConfig) {
+    public init(channelId: ChannelId, counterpartyNodeId: PublicKey, fundingTxo: OutPoint?, shortChannelId: UInt64?, outboundScidAlias: UInt64?, inboundScidAlias: UInt64?, channelValueSats: UInt64, unspendablePunishmentReserve: UInt64?, userChannelId: UserChannelId, feerateSatPer1000Weight: UInt32, outboundCapacityMsat: UInt64, inboundCapacityMsat: UInt64, confirmationsRequired: UInt32?, confirmations: UInt32?, isOutbound: Bool, isChannelReady: Bool, isUsable: Bool, isAnnounced: Bool, cltvExpiryDelta: UInt16?, counterpartyUnspendablePunishmentReserve: UInt64, counterpartyOutboundHtlcMinimumMsat: UInt64?, counterpartyOutboundHtlcMaximumMsat: UInt64?, counterpartyForwardingInfoFeeBaseMsat: UInt32?, counterpartyForwardingInfoFeeProportionalMillionths: UInt32?, counterpartyForwardingInfoCltvExpiryDelta: UInt16?, nextOutboundHtlcLimitMsat: UInt64, nextOutboundHtlcMinimumMsat: UInt64, forceCloseSpendDelay: UInt16?, inboundHtlcMinimumMsat: UInt64, inboundHtlcMaximumMsat: UInt64?, config: ChannelConfig, claimableOnCloseSats: UInt64?) {
         self.channelId = channelId
         self.counterpartyNodeId = counterpartyNodeId
         self.fundingTxo = fundingTxo
@@ -4452,6 +4453,7 @@ public struct ChannelDetails {
         self.inboundHtlcMinimumMsat = inboundHtlcMinimumMsat
         self.inboundHtlcMaximumMsat = inboundHtlcMaximumMsat
         self.config = config
+        self.claimableOnCloseSats = claimableOnCloseSats
     }
 }
 
@@ -4550,6 +4552,9 @@ extension ChannelDetails: Equatable, Hashable {
         if lhs.config != rhs.config {
             return false
         }
+        if lhs.claimableOnCloseSats != rhs.claimableOnCloseSats {
+            return false
+        }
         return true
     }
 
@@ -4585,6 +4590,7 @@ extension ChannelDetails: Equatable, Hashable {
         hasher.combine(inboundHtlcMinimumMsat)
         hasher.combine(inboundHtlcMaximumMsat)
         hasher.combine(config)
+        hasher.combine(claimableOnCloseSats)
     }
 }
 
@@ -4625,7 +4631,8 @@ public struct FfiConverterTypeChannelDetails: FfiConverterRustBuffer {
                 forceCloseSpendDelay: FfiConverterOptionUInt16.read(from: &buf),
                 inboundHtlcMinimumMsat: FfiConverterUInt64.read(from: &buf),
                 inboundHtlcMaximumMsat: FfiConverterOptionUInt64.read(from: &buf),
-                config: FfiConverterTypeChannelConfig.read(from: &buf)
+                config: FfiConverterTypeChannelConfig.read(from: &buf),
+                claimableOnCloseSats: FfiConverterOptionUInt64.read(from: &buf)
             )
     }
 
@@ -4661,6 +4668,7 @@ public struct FfiConverterTypeChannelDetails: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.inboundHtlcMinimumMsat, into: &buf)
         FfiConverterOptionUInt64.write(value.inboundHtlcMaximumMsat, into: &buf)
         FfiConverterTypeChannelConfig.write(value.config, into: &buf)
+        FfiConverterOptionUInt64.write(value.claimableOnCloseSats, into: &buf)
     }
 }
 
