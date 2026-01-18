@@ -304,8 +304,9 @@ impl LdkLogger for Logger {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use std::sync::Mutex;
+
+	use super::*;
 
 	/// A minimal log facade logger that captures log output for testing.
 	struct TestLogger {
