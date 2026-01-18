@@ -354,7 +354,7 @@ mod tests {
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
 			exchange_name = "rabbitmq_exchange_name"
-			
+
 			[liquidity.lsps2_service]
 			advertise_service = false
 			channel_opening_fee_ppm = 1000            # 0.1% fee
@@ -495,7 +495,7 @@ mod tests {
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
 			exchange_name = "rabbitmq_exchange_name"
-			
+
 			[liquidity.lsps2_service]
 			advertise_service = false
 			channel_opening_fee_ppm = 1000            # 0.1% fee
@@ -547,7 +547,7 @@ mod tests {
 			[rabbitmq]
 			connection_string = "rabbitmq_connection_string"
 			exchange_name = "rabbitmq_exchange_name"
-			
+
 			[liquidity.lsps2_service]
 			advertise_service = false
 			channel_opening_fee_ppm = 1000            # 0.1% fee
