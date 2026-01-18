@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for LDK Server.
 #[derive(Debug)]
 pub struct Config {
-	pub listening_addr: SocketAddress,
+	pub listening_addrs: Option<Vec<SocketAddress>>,
 	pub announcement_addrs: Option<Vec<SocketAddress>>,
 	pub alias: Option<NodeAlias>,
 	pub network: Network,
@@ -56,13 +56,23 @@ impl TryFrom<TomlConfig> for Config {
 	type Error = io::Error;
 
 	fn try_from(toml_config: TomlConfig) -> io::Result<Self> {
-		let listening_addr =
-			SocketAddress::from_str(&toml_config.node.listening_address).map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::InvalidInput,
-					format!("Invalid listening address configured: {}", e),
-				)
-			})?;
+		let listening_addrs = toml_config
+			.node
+			.listening_addresses
+			.map(|addresses| {
+				addresses
+					.into_iter()
+					.map(|addr| {
+						SocketAddress::from_str(&addr).map_err(|e| {
+							io::Error::new(
+								io::ErrorKind::InvalidInput,
+								format!("Invalid listening address configured: {}", e),
+							)
+						})
+					})
+					.collect()
+			})
+			.transpose()?;
 		let announcement_addrs = toml_config
 			.node
 			.announcement_addresses
@@ -179,7 +189,7 @@ impl TryFrom<TomlConfig> for Config {
 		});
 
 		Ok(Config {
-			listening_addr,
+			listening_addrs,
 			announcement_addrs,
 			network: toml_config.node.network,
 			alias,
@@ -214,7 +224,7 @@ pub struct TomlConfig {
 #[derive(Deserialize, Serialize)]
 struct NodeConfig {
 	network: Network,
-	listening_address: String,
+	listening_addresses: Option<Vec<String>>,
 	announcement_addresses: Option<Vec<String>>,
 	rest_service_address: String,
 	alias: Option<String>,
@@ -351,7 +361,7 @@ mod tests {
 		let toml_config = r#"
 			[node]
 			network = "regtest"
-			listening_address = "localhost:3001"
+			listening_addresses = ["localhost:3001"]
 			announcement_addresses = ["54.3.7.81:3001"]
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
@@ -396,7 +406,7 @@ mod tests {
 
 		let config = load_config(storage_path.join(config_file_name)).unwrap();
 		let expected = Config {
-			listening_addr: SocketAddress::from_str("localhost:3001").unwrap(),
+			listening_addrs: Some(vec![SocketAddress::from_str("localhost:3001").unwrap()]),
 			announcement_addrs: Some(vec![SocketAddress::from_str("54.3.7.81:3001").unwrap()]),
 			alias: Some(NodeAlias(bytes)),
 			network: Network::Regtest,
@@ -429,7 +439,7 @@ mod tests {
 			log_file_path: Some("/var/log/ldk-server.log".to_string()),
 		};
 
-		assert_eq!(config.listening_addr, expected.listening_addr);
+		assert_eq!(config.listening_addrs, expected.listening_addrs);
 		assert_eq!(config.announcement_addrs, expected.announcement_addrs);
 		assert_eq!(config.network, expected.network);
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
@@ -453,7 +463,6 @@ mod tests {
 		let toml_config = r#"
 			[node]
 			network = "regtest"
-			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
 			api_key = "test_api_key"
@@ -498,7 +507,6 @@ mod tests {
 		let toml_config = r#"
 			[node]
 			network = "regtest"
-			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
 			api_key = "test_api_key"
@@ -547,7 +555,6 @@ mod tests {
 		let toml_config = r#"
 			[node]
 			network = "regtest"
-			listening_address = "localhost:3001"
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
 			api_key = "test_api_key"

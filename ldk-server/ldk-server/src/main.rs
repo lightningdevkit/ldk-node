@@ -101,7 +101,7 @@ fn main() {
 	};
 
 	ldk_node_config.storage_dir_path = config_file.storage_dir_path.clone();
-	ldk_node_config.listening_addresses = Some(vec![config_file.listening_addr]);
+	ldk_node_config.listening_addresses = config_file.listening_addrs;
 	ldk_node_config.announcement_addresses = config_file.announcement_addrs;
 	ldk_node_config.network = config_file.network;
 
