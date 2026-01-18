@@ -1,7 +1,8 @@
 # Lightning node settings
 [node]
 network = "regtest"                           # Bitcoin network to use
-listening_address = "localhost:3001"          # Lightning node listening address
+listening_addresses = ["localhost:3001"]      # Lightning node listening addresses
+announcement_addresses = ["54.3.7.81:3001"]   # Lightning node announcement addresses
 rest_service_address = "127.0.0.1:3002"       # LDK Server REST address
 api_key = "your-secret-api-key"               # API key for authenticating REST requests
 
@@ -18,7 +19,7 @@ file_path = "/tmp/ldk-server/ldk-server.log"  # Log file path
 #key_path = "/path/to/tls.key"                # Path to TLS private key, by default uses dir_path/tls.key
 hosts = ["example.com"]                       # Allowed hosts for TLS, will always include "localhost" and "127.0.0.1"
 
-# Must set either bitcoind or esplora settings, but not both
+# Must set one of bitcoind, electrum, or esplora
 
 # Bitcoin Core settings
 [bitcoind]
