@@ -19,7 +19,7 @@ file_path = "/tmp/ldk-server/ldk-server.log"  # Log file path
 #key_path = "/path/to/tls.key"                # Path to TLS private key, by default uses dir_path/tls.key
 hosts = ["example.com"]                       # Allowed hosts for TLS, will always include "localhost" and "127.0.0.1"
 
-# Must set either bitcoind or esplora settings, but not both
+# Must set one of bitcoind, electrum, or esplora
 
 # Bitcoin Core settings
 [bitcoind]
