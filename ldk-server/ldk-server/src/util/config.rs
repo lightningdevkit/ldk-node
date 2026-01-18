@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug)]
 pub struct Config {
 	pub listening_addr: SocketAddress,
+	pub announcement_addrs: Option<Vec<SocketAddress>>,
 	pub alias: Option<NodeAlias>,
 	pub network: Network,
 	pub api_key: String,
@@ -62,6 +63,23 @@ impl TryFrom<TomlConfig> for Config {
 					format!("Invalid listening address configured: {}", e),
 				)
 			})?;
+		let announcement_addrs = toml_config
+			.node
+			.announcement_addresses
+			.map(|addresses| {
+				addresses
+					.into_iter()
+					.map(|addr| {
+						SocketAddress::from_str(&addr).map_err(|e| {
+							io::Error::new(
+								io::ErrorKind::InvalidInput,
+								format!("Invalid announcement address configured: {}", e),
+							)
+						})
+					})
+					.collect()
+			})
+			.transpose()?;
 		let rest_service_addr = SocketAddr::from_str(&toml_config.node.rest_service_address)
 			.map_err(|e| {
 				io::Error::new(
@@ -162,6 +180,7 @@ impl TryFrom<TomlConfig> for Config {
 
 		Ok(Config {
 			listening_addr,
+			announcement_addrs,
 			network: toml_config.node.network,
 			alias,
 			rest_service_addr,
@@ -196,6 +215,7 @@ pub struct TomlConfig {
 struct NodeConfig {
 	network: Network,
 	listening_address: String,
+	announcement_addresses: Option<Vec<String>>,
 	rest_service_address: String,
 	alias: Option<String>,
 	api_key: String,
@@ -332,6 +352,7 @@ mod tests {
 			[node]
 			network = "regtest"
 			listening_address = "localhost:3001"
+			announcement_addresses = ["54.3.7.81:3001"]
 			rest_service_address = "127.0.0.1:3002"
 			alias = "LDK Server"
 			api_key = "test_api_key"
@@ -376,6 +397,7 @@ mod tests {
 		let config = load_config(storage_path.join(config_file_name)).unwrap();
 		let expected = Config {
 			listening_addr: SocketAddress::from_str("localhost:3001").unwrap(),
+			announcement_addrs: Some(vec![SocketAddress::from_str("54.3.7.81:3001").unwrap()]),
 			alias: Some(NodeAlias(bytes)),
 			network: Network::Regtest,
 			rest_service_addr: SocketAddr::from_str("127.0.0.1:3002").unwrap(),
@@ -408,6 +430,7 @@ mod tests {
 		};
 
 		assert_eq!(config.listening_addr, expected.listening_addr);
+		assert_eq!(config.announcement_addrs, expected.announcement_addrs);
 		assert_eq!(config.network, expected.network);
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
 		assert_eq!(config.api_key, expected.api_key);
