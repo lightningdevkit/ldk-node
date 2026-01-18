@@ -441,6 +441,7 @@ mod tests {
 
 		assert_eq!(config.listening_addrs, expected.listening_addrs);
 		assert_eq!(config.announcement_addrs, expected.announcement_addrs);
+		assert_eq!(config.alias, expected.alias);
 		assert_eq!(config.network, expected.network);
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
 		assert_eq!(config.api_key, expected.api_key);
@@ -457,6 +458,8 @@ mod tests {
 		assert_eq!(config.rabbitmq_exchange_name, expected.rabbitmq_exchange_name);
 		#[cfg(feature = "experimental-lsps2-support")]
 		assert_eq!(config.lsps2_service_config.is_some(), expected.lsps2_service_config.is_some());
+		assert_eq!(config.log_level, expected.log_level);
+		assert_eq!(config.log_file_path, expected.log_file_path);
 
 		// Test case where only electrum is set
 
