@@ -34,7 +34,7 @@ use crate::fee_estimator::{
 	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::write_node_metrics;
-use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
@@ -100,7 +100,7 @@ impl ElectrumChainSource {
 			status_lock.register_or_subscribe_pending_sync()
 		};
 		if let Some(mut sync_receiver) = receiver_res {
-			log_info!(self.logger, "Sync in progress, skipping.");
+			log_debug!(self.logger, "Sync in progress, skipping.");
 			return sync_receiver.recv().await.map_err(|e| {
 				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
 				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
@@ -135,7 +135,7 @@ impl ElectrumChainSource {
 			|update_res: Result<BdkUpdate, Error>, now: Instant| match update_res {
 				Ok(update) => match onchain_wallet.apply_update(update) {
 					Ok(()) => {
-						log_info!(
+						log_debug!(
 							self.logger,
 							"{} of on-chain wallet finished in {}ms.",
 							if incremental_sync { "Incremental sync" } else { "Sync" },
@@ -191,7 +191,7 @@ impl ElectrumChainSource {
 			status_lock.register_or_subscribe_pending_sync()
 		};
 		if let Some(mut sync_receiver) = receiver_res {
-			log_info!(self.logger, "Sync in progress, skipping.");
+			log_debug!(self.logger, "Sync in progress, skipping.");
 			return sync_receiver.recv().await.map_err(|e| {
 				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
 				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
@@ -261,7 +261,7 @@ impl ElectrumChainSource {
 		let new_fee_rate_cache = electrum_client.get_fee_rate_cache_update().await?;
 		self.fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
 
-		log_info!(
+		log_debug!(
 			self.logger,
 			"Fee rate cache update finished in {}ms.",
 			now.elapsed().as_millis()
@@ -437,7 +437,7 @@ impl ElectrumRuntimeClient {
 				Error::TxSyncFailed
 			})?;
 
-		log_info!(
+		log_debug!(
 			self.logger,
 			"Sync of Lightning wallet finished in {}ms.",
 			now.elapsed().as_millis()
