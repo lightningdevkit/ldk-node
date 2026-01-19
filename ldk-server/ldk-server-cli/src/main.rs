@@ -53,7 +53,7 @@ struct Cli {
 		short,
 		long,
 		required(true),
-		help = "Path to the server's TLS certificate file (PEM format). Found at <server_storage_dir>/tls_cert.pem"
+		help = "Path to the server's TLS certificate file (PEM format). Found at <server_storage_dir>/tls.crt"
 	)]
 	tls_cert: String,
 

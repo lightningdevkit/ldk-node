@@ -42,7 +42,7 @@ const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 /// Client to access a hosted instance of LDK Server.
 ///
 /// The client requires the server's TLS certificate to be provided for verification.
-/// This certificate can be found at `<server_storage_dir>/tls_cert.pem` after the
+/// This certificate can be found at `<server_storage_dir>/tls.crt` after the
 /// server generates it on first startup.
 #[derive(Clone)]
 pub struct LdkServerClient {
@@ -57,7 +57,7 @@ impl LdkServerClient {
 	/// `base_url` should not include the scheme, e.g., `localhost:3000`.
 	/// `api_key` is used for HMAC-based authentication.
 	/// `server_cert_pem` is the server's TLS certificate in PEM format. This can be
-	/// found at `<server_storage_dir>/tls_cert.pem` after the server starts.
+	/// found at `<server_storage_dir>/tls.crt` after the server starts.
 	pub fn new(base_url: String, api_key: String, server_cert_pem: &[u8]) -> Result<Self, String> {
 		let cert = Certificate::from_pem(server_cert_pem)
 			.map_err(|e| format!("Failed to parse server certificate: {e}"))?;
