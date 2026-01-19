@@ -9,7 +9,7 @@ else
 fi
 
 cargo build --profile release-smaller --features uniffi || exit 1
-$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language python -o "$BINDINGS_DIR" || exit 1
+$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --lib-file "$DYNAMIC_LIB_PATH" --language python -o "$BINDINGS_DIR" || exit 1
 
 mkdir -p $BINDINGS_DIR
 cp "$DYNAMIC_LIB_PATH" "$BINDINGS_DIR" || exit 1

@@ -4,9 +4,6 @@ set -eox pipefail
 BINDINGS_DIR="./bindings/swift"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
 
-cargo build --release || exit 1
-$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language swift -o "$BINDINGS_DIR" || exit 1
-
 mkdir -p $BINDINGS_DIR
 
 # Install rust target toolchains
@@ -30,7 +27,7 @@ lipo target/aarch64-apple-ios-sim/release/libldk_node.a target/x86_64-apple-ios/
 mkdir -p target/lipo-macos/release-smaller || exit 1
 lipo target/aarch64-apple-darwin/release-smaller/libldk_node.a target/x86_64-apple-darwin/release-smaller/libldk_node.a -create -output target/lipo-macos/release-smaller/libldk_node.a || exit 1
 
-$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language swift -o "$BINDINGS_DIR" || exit 1
+$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --lib-file target/release-smaller/libldk_node.a --language swift -o "$BINDINGS_DIR" || exit 1
 
 swiftc -module-name LDKNode -emit-library -o "$BINDINGS_DIR"/libldk_node.dylib -emit-module -emit-module-path "$BINDINGS_DIR" -parse-as-library -L ./target/release-smaller -lldk_node -Xcc -fmodule-map-file="$BINDINGS_DIR"/LDKNodeFFI.modulemap "$BINDINGS_DIR"/LDKNode.swift -v || exit 1
 

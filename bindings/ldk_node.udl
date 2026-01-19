@@ -79,6 +79,7 @@ enum WordCount {
 	"Words24",
 };
 
+[Remote]
 enum LogLevel {
 	"Gossip",
 	"Trace",
@@ -281,6 +282,7 @@ interface OnchainPayment {
 	Txid bump_fee_rbf(PaymentId payment_id, FeeRate? fee_rate);
 };
 
+[Remote]
 interface FeeRate {
 	[Name=from_sat_per_kwu]
 	constructor(u64 sat_kwu);
@@ -377,6 +379,7 @@ dictionary NodeStatus {
 	u64? latest_node_announcement_broadcast_timestamp;
 };
 
+[Remote]
 dictionary BestBlock {
 	BlockHash block_hash;
 	u32 height;
@@ -400,35 +403,21 @@ enum BuildError {
 	"AsyncPaymentsConfigMismatch",
 };
 
-[Trait]
+[Trait, WithForeign]
 interface VssHeaderProvider {
 	[Async, Throws=VssHeaderProviderError]
-	record<string, string> get_headers([ByRef]sequence<u8> request);
+	record<string, string> get_headers(sequence<u8> request);
 };
 
 [Error]
-enum VssHeaderProviderError {
-	"InvalidData",
-	"RequestError",
-	"AuthorizationError",
-	"InternalError",
+interface VssHeaderProviderError {
+	InvalidData(string error);
+	RequestError(string error);
+	AuthorizationError(string error);
+	InternalError(string error);
 };
 
-[Enum]
-interface Event {
-	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat);
-	PaymentFailed(PaymentId? payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
-	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat, sequence<CustomTlvRecord> custom_records);
-	PaymentClaimable(PaymentId payment_id, PaymentHash payment_hash, u64 claimable_amount_msat, u32? claim_deadline, sequence<CustomTlvRecord> custom_records);
-	PaymentForwarded(ChannelId prev_channel_id, ChannelId next_channel_id, UserChannelId?
-	prev_user_channel_id, UserChannelId? next_user_channel_id, PublicKey? prev_node_id, PublicKey? next_node_id, u64? total_fee_earned_msat, u64? skimmed_fee_msat, boolean claim_from_onchain_tx, u64? outbound_amount_forwarded_msat);
-	ChannelPending(ChannelId channel_id, UserChannelId user_channel_id, ChannelId former_temporary_channel_id, PublicKey counterparty_node_id, OutPoint funding_txo);
-	ChannelReady(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, OutPoint? funding_txo);
-	ChannelClosed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey? counterparty_node_id, ClosureReason? reason);
-	SplicePending(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint new_funding_txo);
-	SpliceFailed(ChannelId channel_id, UserChannelId user_channel_id, PublicKey counterparty_node_id, OutPoint? abandoned_funding_txo);
-};
-
+[Remote]
 enum PaymentFailureReason {
 	"RecipientRejected",
 	"UserAbandoned",
@@ -440,25 +429,6 @@ enum PaymentFailureReason {
 	"InvoiceRequestExpired",
 	"InvoiceRequestRejected",
 	"BlindedPathCreationFailed",
-};
-
-[Enum]
-interface ClosureReason {
-	CounterpartyForceClosed(UntrustedString peer_msg);
-	HolderForceClosed(boolean? broadcasted_latest_txn, string message);
-	LegacyCooperativeClosure();
-	CounterpartyInitiatedCooperativeClosure();
-	LocallyInitiatedCooperativeClosure();
-	CommitmentTxConfirmed();
-	FundingTimedOut();
-	ProcessingError(string err);
-	DisconnectedPeer();
-	OutdatedChannelManager();
-	CounterpartyCoopClosedUnfundedChannel();
-	LocallyCoopClosedUnfundedChannel();
-	FundingBatchClosure();
-	HTLCsTimedOut( PaymentHash? payment_hash );
-	PeerFeerateTooLow(u32 peer_feerate_sat_per_kw, u32 required_feerate_sat_per_kw);
 };
 
 [Enum]
@@ -510,6 +480,7 @@ dictionary PaymentDetails {
 	u64 latest_update_timestamp;
 };
 
+[Remote]
 dictionary RouteParametersConfig {
 	u64? max_total_routing_fee_msat;
 	u32 max_total_cltv_expiry_delta;
@@ -522,6 +493,7 @@ dictionary CustomTlvRecord {
 	sequence<u8> value;
 };
 
+[Remote]
 dictionary LSPS1OrderStatus {
 	LSPS1OrderId order_id;
 	LSPS1OrderParams order_params;
@@ -529,6 +501,7 @@ dictionary LSPS1OrderStatus {
 	LSPS1ChannelInfo? channel_state;
 };
 
+[Remote]
 dictionary LSPS1OrderParams {
 	u64 lsp_balance_sat;
 	u64 client_balance_sat;
@@ -563,19 +536,21 @@ dictionary LSPS1OnchainPaymentInfo {
 	Address? refund_onchain_address;
 };
 
+[Remote]
 dictionary LSPS1ChannelInfo {
 	LSPSDateTime funded_at;
 	OutPoint funding_outpoint;
 	LSPSDateTime expires_at;
 };
 
+[Remote]
 enum LSPS1PaymentState {
 	"ExpectPayment",
 	"Paid",
 	"Refunded",
 };
 
-[NonExhaustive]
+[Remote, NonExhaustive]
 enum Network {
 	"Bitcoin",
 	"Testnet",
@@ -583,6 +558,7 @@ enum Network {
 	"Regtest",
 };
 
+[Remote]
 dictionary OutPoint {
 	Txid txid;
 	u32 vout;
@@ -679,6 +655,7 @@ interface LightningBalance {
 	);
 };
 
+[Remote]
 enum BalanceSource {
 	"HolderForceClosed",
 	"CounterpartyForceClosed",
@@ -741,6 +718,7 @@ dictionary ChannelUpdateInfo {
 	RoutingFees fees;
 };
 
+[Remote]
 dictionary RoutingFees {
 	u32 base_msat;
 	u32 proportional_millionths;
@@ -757,6 +735,7 @@ dictionary NodeAnnouncementInfo {
 	sequence<SocketAddress> addresses;
 };
 
+[Remote]
 enum Currency {
 	"Bitcoin",
 	"BitcoinTestnet",
@@ -929,3 +908,6 @@ typedef string LSPSDateTime;
 
 [Custom]
 typedef string ScriptBuf;
+
+typedef enum ClosureReason;
+typedef enum Event;

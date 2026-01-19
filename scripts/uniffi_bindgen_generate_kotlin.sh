@@ -29,6 +29,6 @@ else
 fi
 
 mkdir -p "$BINDINGS_DIR"/"$PROJECT_DIR"/lib/src/main/kotlin/"$PACKAGE_DIR" || exit 1
-$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language kotlin -o "$TARGET_DIR" || exit 1
+$UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --lib-file "$DYNAMIC_LIB_PATH" --language kotlin -o "$TARGET_DIR" || exit 1
 
 cp "$TARGET_DIR"/"$PACKAGE_DIR"/ldk_node.kt "$BINDINGS_DIR"/"$PROJECT_DIR"/lib/src/main/kotlin/"$PACKAGE_DIR"/ || exit 1
