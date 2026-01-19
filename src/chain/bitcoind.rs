@@ -38,7 +38,7 @@ use crate::fee_estimator::{
 	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::write_node_metrics;
-use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
 
@@ -364,7 +364,7 @@ impl BitcoindChainSource {
 		};
 
 		if let Some(mut sync_receiver) = receiver_res {
-			log_info!(self.logger, "Sync in progress, skipping.");
+			log_debug!(self.logger, "Sync in progress, skipping.");
 			return sync_receiver.recv().await.map_err(|e| {
 				debug_assert!(false, "Failed to receive wallet polling result: {:?}", e);
 				log_error!(self.logger, "Failed to receive wallet polling result: {:?}", e);
@@ -558,7 +558,7 @@ impl BitcoindChainSource {
 
 		if self.fee_estimator.set_fee_rate_cache(new_fee_rate_cache) {
 			// We only log if the values changed, as it might be very spammy otherwise.
-			log_info!(
+			log_debug!(
 				self.logger,
 				"Fee rate cache update finished in {}ms.",
 				now.elapsed().as_millis()
