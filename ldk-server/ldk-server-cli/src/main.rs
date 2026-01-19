@@ -48,7 +48,12 @@ const DEFAULT_MAX_CHANNEL_SATURATION_POWER_OF_HALF: u32 = 2;
 const DEFAULT_EXPIRY_SECS: u32 = 86_400;
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(
+	name = "ldk-server-cli",
+	version,
+	about = "CLI for interacting with an LDK Server node",
+	override_usage = "ldk-server-cli [OPTIONS] <COMMAND>"
+)]
 struct Cli {
 	#[arg(short, long, help = "Base URL of the server. If not provided, reads from config file")]
 	base_url: Option<String>,
@@ -76,95 +81,161 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+	#[command(about = "Retrieve the latest node info like node_id, current_best_block, etc")]
 	GetNodeInfo,
+	#[command(about = "Retrieve an overview of all known balances")]
 	GetBalances,
+	#[command(about = "Retrieve a new on-chain funding address")]
 	OnchainReceive,
+	#[command(about = "Send an on-chain payment to the given address")]
 	OnchainSend {
-		#[arg(short, long)]
+		#[arg(short, long, help = "The address to send coins to")]
 		address: String,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "The amount in satoshis to send. Will respect any on-chain reserve needed for anchor channels"
+		)]
 		amount_sats: Option<u64>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Send full balance to the address. Warning: will not retain on-chain reserves for anchor channels"
+		)]
 		send_all: Option<bool>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Fee rate in satoshis per virtual byte. If not set, a reasonable estimate will be used"
+		)]
 		fee_rate_sat_per_vb: Option<u64>,
 	},
+	#[command(about = "Create a BOLT11 invoice to receive a payment")]
 	Bolt11Receive {
-		#[arg(short, long)]
+		#[arg(short, long, help = "Description to attach along with the invoice")]
 		description: Option<String>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "SHA-256 hash of the description (hex). Use instead of description for longer text"
+		)]
 		description_hash: Option<String>,
-		#[arg(short, long)]
+		#[arg(short, long, help = "Invoice expiry time in seconds (default: 86400)")]
 		expiry_secs: Option<u32>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Amount in millisatoshis to request. If unset, a variable-amount invoice is returned"
+		)]
 		amount_msat: Option<u64>,
 	},
+	#[command(about = "Pay a BOLT11 invoice")]
 	Bolt11Send {
-		#[arg(short, long)]
+		#[arg(short, long, help = "A BOLT11 invoice for a payment within the Lightning Network")]
 		invoice: String,
-		#[arg(long)]
+		#[arg(long, help = "Amount in millisatoshis. Required when paying a zero-amount invoice")]
 		amount_msat: Option<u64>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Maximum total fees in millisatoshis that may accrue during route finding. Defaults to 1% of payment + 50 sats"
+		)]
 		max_total_routing_fee_msat: Option<u64>,
-		#[arg(long)]
+		#[arg(long, help = "Maximum total CLTV delta we accept for the route (default: 1008)")]
 		max_total_cltv_expiry_delta: Option<u32>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Maximum number of paths that may be used by MPP payments (default: 10)"
+		)]
 		max_path_count: Option<u32>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Maximum share of a channel's total capacity to send over a channel, as a power of 1/2 (default: 2)"
+		)]
 		max_channel_saturation_power_of_half: Option<u32>,
 	},
+	#[command(about = "Return a BOLT12 offer for receiving payments")]
 	Bolt12Receive {
-		#[arg(short, long)]
+		#[arg(short, long, help = "Description to attach along with the offer")]
 		description: String,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Amount in millisatoshis to request. If unset, a variable-amount offer is returned"
+		)]
 		amount_msat: Option<u64>,
-		#[arg(long)]
+		#[arg(long, help = "Offer expiry time in seconds")]
 		expiry_secs: Option<u32>,
-		#[arg(long)]
+		#[arg(long, help = "Number of items requested. Can only be set for fixed-amount offers")]
 		quantity: Option<u64>,
 	},
+	#[command(about = "Send a payment for a BOLT12 offer")]
 	Bolt12Send {
-		#[arg(short, long)]
+		#[arg(short, long, help = "A BOLT12 offer for a payment within the Lightning Network")]
 		offer: String,
-		#[arg(long)]
+		#[arg(long, help = "Amount in millisatoshis. Required when paying a zero-amount offer")]
 		amount_msat: Option<u64>,
-		#[arg(short, long)]
+		#[arg(short, long, help = "Number of items requested")]
 		quantity: Option<u64>,
-		#[arg(short, long)]
+		#[arg(
+			short,
+			long,
+			help = "Note to include for the payee. Will be seen by recipient and reflected back in the invoice"
+		)]
 		payer_note: Option<String>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Maximum total fees, in millisatoshi, that may accrue during route finding, Defaults to 1% of the payment amount + 50 sats"
+		)]
 		max_total_routing_fee_msat: Option<u64>,
-		#[arg(long)]
+		#[arg(long, help = "Maximum total CLTV delta we accept for the route (default: 1008)")]
 		max_total_cltv_expiry_delta: Option<u32>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Maximum number of paths that may be used by MPP payments (default: 10)"
+		)]
 		max_path_count: Option<u32>,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Maximum share of a channel's total capacity to send over a channel, as a power of 1/2 (default: 2)"
+		)]
 		max_channel_saturation_power_of_half: Option<u32>,
 	},
+	#[command(about = "Cooperatively close the channel specified by the given channel ID")]
 	CloseChannel {
-		#[arg(short, long)]
+		#[arg(short, long, help = "The local user_channel_id of this channel")]
 		user_channel_id: String,
-		#[arg(short, long)]
+		#[arg(
+			short,
+			long,
+			help = "The hex-encoded public key of the node to close a channel with"
+		)]
 		counterparty_node_id: String,
 	},
+	#[command(about = "Force close the channel specified by the given channel ID")]
 	ForceCloseChannel {
-		#[arg(short, long)]
+		#[arg(short, long, help = "The local user_channel_id of this channel")]
 		user_channel_id: String,
-		#[arg(short, long)]
+		#[arg(
+			short,
+			long,
+			help = "The hex-encoded public key of the node to close a channel with"
+		)]
 		counterparty_node_id: String,
-		#[arg(long)]
+		#[arg(long, help = "The reason for force-closing, defaults to \"\"")]
 		force_close_reason: Option<String>,
 	},
+	#[command(about = "Create a new outbound channel to the given remote node")]
 	OpenChannel {
-		#[arg(short, long)]
+		#[arg(short, long, help = "The hex-encoded public key of the node to open a channel with")]
 		node_pubkey: String,
-		#[arg(short, long)]
+		#[arg(
+			short,
+			long,
+			help = "Address to connect to remote peer (IPv4:port, IPv6:port, OnionV3:port, or hostname:port)"
+		)]
 		address: String,
-		#[arg(long)]
+		#[arg(long, help = "The amount of satoshis to commit to the channel")]
 		channel_amount_sats: u64,
-		#[arg(long)]
+		#[arg(
+			long,
+			help = "Amount of satoshis to push to the remote side as part of the initial commitment state"
+		)]
 		push_to_counterparty_msat: Option<u64>,
-		#[arg(long)]
+		#[arg(long, help = "Whether the channel should be public")]
 		announce_channel: bool,
 		// Channel config options
 		#[arg(
@@ -183,25 +254,35 @@ enum Commands {
 		)]
 		cltv_expiry_delta: Option<u32>,
 	},
+	#[command(
+		about = "Increase the channel balance by the given amount, funds will come from the node's on-chain wallet"
+	)]
 	SpliceIn {
-		#[arg(short, long)]
+		#[arg(short, long, help = "The local user_channel_id of the channel")]
 		user_channel_id: String,
-		#[arg(short, long)]
+		#[arg(short, long, help = "The hex-encoded public key of the channel's counterparty node")]
 		counterparty_node_id: String,
-		#[arg(long)]
+		#[arg(long, help = "The amount of sats to splice into the channel")]
 		splice_amount_sats: u64,
 	},
+	#[command(about = "Decrease the channel balance by the given amount")]
 	SpliceOut {
-		#[arg(short, long)]
+		#[arg(short, long, help = "The local user_channel_id of this channel")]
 		user_channel_id: String,
-		#[arg(short, long)]
+		#[arg(short, long, help = "The hex-encoded public key of the channel's counterparty node")]
 		counterparty_node_id: String,
-		#[arg(short, long)]
-		address: Option<String>,
-		#[arg(long)]
+		#[arg(long, help = "The amount of sats to splice out of the channel")]
 		splice_amount_sats: u64,
+		#[arg(
+			short,
+			long,
+			help = "Bitcoin address to send the spliced-out funds. If not set, uses the node's on-chain wallet"
+		)]
+		address: Option<String>,
 	},
+	#[command(about = "Return a list of known channels")]
 	ListChannels,
+	#[command(about = "Retrieve list of all payments")]
 	ListPayments {
 		#[arg(short, long)]
 		#[arg(
@@ -212,10 +293,15 @@ enum Commands {
 		#[arg(help = "Page token to continue from a previous page (format: token:index)")]
 		page_token: Option<String>,
 	},
+	#[command(about = "Update the config for a previously opened channel")]
 	UpdateChannelConfig {
-		#[arg(short, long)]
+		#[arg(short, long, help = "The local user_channel_id of this channel")]
 		user_channel_id: String,
-		#[arg(short, long)]
+		#[arg(
+			short,
+			long,
+			help = "The hex-encoded public key of the counterparty node to update channel config with"
+		)]
 		counterparty_node_id: String,
 		#[arg(
 			long,
