@@ -12,7 +12,7 @@ dir_path = "/tmp/ldk-server/"                 # Path for LDK and BDK data persis
 
 [log]
 level = "Debug"                               # Log level (Error, Warn, Info, Debug, Trace)
-file_path = "/tmp/ldk-server/ldk-server.log"  # Log file path
+file = "/tmp/ldk-server/ldk-server.log"       # Log file path
 
 [tls]
 #cert_path = "/path/to/tls.crt"               # Path to TLS certificate, by default uses dir_path/tls.crt
