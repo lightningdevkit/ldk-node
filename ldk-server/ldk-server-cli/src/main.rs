@@ -9,7 +9,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use config::{
 	get_default_api_key_path, get_default_cert_path, get_default_config_path, load_config,
 };
@@ -319,11 +320,25 @@ enum Commands {
 		)]
 		cltv_expiry_delta: Option<u32>,
 	},
+	#[command(about = "Generate shell completions for the CLI")]
+	Completions {
+		#[arg(
+			value_enum,
+			help = "The shell to generate completions for (bash, zsh, fish, powershell, elvish)"
+		)]
+		shell: Shell,
+	},
 }
 
 #[tokio::main]
 async fn main() {
 	let cli = Cli::parse();
+
+	// short-circuit if generating completions
+	if let Commands::Completions { shell } = cli.command {
+		generate(shell, &mut Cli::command(), "ldk-server-cli", &mut std::io::stdout());
+		return;
+	}
 
 	let config_path = cli.config.map(PathBuf::from).or_else(get_default_config_path);
 	let config = config_path.as_ref().and_then(|p| load_config(p).ok());
@@ -613,6 +628,7 @@ async fn main() {
 					.await,
 			);
 		},
+		Commands::Completions { .. } => unreachable!("Handled above"),
 	}
 }
 
