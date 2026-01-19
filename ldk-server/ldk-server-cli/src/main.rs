@@ -7,6 +7,8 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use config::{
 	get_default_api_key_path, get_default_cert_path, get_default_config_path, load_config,
@@ -32,7 +34,6 @@ use ldk_server_client::ldk_server_protos::types::{
 	RouteParametersConfig,
 };
 use serde::Serialize;
-use std::path::PathBuf;
 use types::CliListPaymentsResponse;
 
 mod config;
