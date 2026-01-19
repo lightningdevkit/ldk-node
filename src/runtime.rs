@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lightning::util::native_async::FutureSpawner;
-
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::config::{
