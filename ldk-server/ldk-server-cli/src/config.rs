@@ -7,8 +7,9 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG_FILE: &str = "config.toml";
 const DEFAULT_CERT_FILE: &str = "tls.crt";
