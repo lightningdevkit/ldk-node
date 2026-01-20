@@ -1,6 +1,12 @@
-# 0.7.0-rc.7 (Synonym Fork)
+# 0.7.0-rc.8 (Synonym Fork)
 
 ## Synonym Fork Additions
+- Optimized startup performance by parallelizing VSS reads and caching network graph locally:
+  - Parallelized early reads (node_metrics, payments, wallet)
+  - Parallelized channel monitors and scorer reads
+  - Parallelized tail reads (output_sweeper, event_queue, peer_store)
+  - Added `LocalGraphStore` to redirect network graph persistence to local storage instead of VSS
+  - Network graph is regenerable via RGS, so local-only storage avoids slow remote reads
 - Added `claimable_on_close_sats` field to `ChannelDetails` struct. This field contains the
   amount (in satoshis) that would be claimable if the channel were force-closed now, computed
   from the channel monitor's `ClaimableOnChannelClose` balance. Returns `None` if no monitor
