@@ -13,28 +13,28 @@
 //! of API responses for CLI output. These wrappers ensure that the CLI's output
 //! format matches what users expect and what the CLI can parse back as input.
 
-use ldk_server_client::ldk_server_protos::api::ListPaymentsResponse;
-use ldk_server_client::ldk_server_protos::types::{PageToken, Payment};
+use ldk_server_client::ldk_server_protos::types::{ForwardedPayment, PageToken, Payment};
 use serde::Serialize;
 
-/// CLI-specific wrapper for ListPaymentsResponse that formats the page token
+/// CLI-specific wrapper for paginated responses that formats the page token
 /// as "token:idx" instead of a JSON object.
 #[derive(Debug, Clone, Serialize)]
-pub struct CliListPaymentsResponse {
-	/// List of payments.
-	pub payments: Vec<Payment>,
+pub struct CliPaginatedResponse<T> {
+	/// List of items.
+	pub list: Vec<T>,
 	/// Next page token formatted as "token:idx", or None if no more pages.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub next_page_token: Option<String>,
 }
 
-impl From<ListPaymentsResponse> for CliListPaymentsResponse {
-	fn from(response: ListPaymentsResponse) -> Self {
-		let next_page_token = response.next_page_token.map(format_page_token);
-
-		CliListPaymentsResponse { payments: response.payments, next_page_token }
+impl<T> CliPaginatedResponse<T> {
+	pub fn new(list: Vec<T>, next_page_token: Option<PageToken>) -> Self {
+		Self { list, next_page_token: next_page_token.map(format_page_token) }
 	}
 }
+
+pub type CliListPaymentsResponse = CliPaginatedResponse<Payment>;
+pub type CliListForwardedPaymentsResponse = CliPaginatedResponse<ForwardedPayment>;
 
 fn format_page_token(token: PageToken) -> String {
 	format!("{}:{}", token.token, token.index)
