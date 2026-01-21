@@ -756,7 +756,8 @@ data class ChannelDetails (
     val `forceCloseSpendDelay`: kotlin.UShort?, 
     val `inboundHtlcMinimumMsat`: kotlin.ULong, 
     val `inboundHtlcMaximumMsat`: kotlin.ULong?, 
-    val `config`: ChannelConfig
+    val `config`: ChannelConfig, 
+    val `claimableOnCloseSats`: kotlin.ULong?
 ) {
     companion object
 }

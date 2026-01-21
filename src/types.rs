@@ -398,6 +398,11 @@ pub struct ChannelDetails {
 	pub inbound_htlc_maximum_msat: Option<u64>,
 	/// Set of configurable parameters that affect channel operation.
 	pub config: ChannelConfig,
+	/// The amount, in satoshis, claimable if the channel is closed now.
+	///
+	/// This is computed from the channel monitor and represents the confirmed balance
+	/// excluding pending HTLCs. Returns `None` if no monitor exists yet (pre-funding).
+	pub claimable_on_close_sats: Option<u64>,
 }
 
 impl From<LdkChannelDetails> for ChannelDetails {
@@ -452,7 +457,18 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
 			// unwrap safety: `config` is only `None` for LDK objects serialized prior to 0.0.109.
 			config: value.config.map(|c| c.into()).unwrap(),
+			claimable_on_close_sats: None,
 		}
+	}
+}
+
+impl ChannelDetails {
+	pub(crate) fn from_ldk_with_balance(
+		value: LdkChannelDetails, claimable_on_close_sats: Option<u64>,
+	) -> Self {
+		let mut details: ChannelDetails = value.into();
+		details.claimable_on_close_sats = claimable_on_close_sats;
+		details
 	}
 }
 

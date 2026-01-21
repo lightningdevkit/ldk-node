@@ -678,6 +678,7 @@ dictionary ChannelDetails {
 	u64 inbound_htlc_minimum_msat;
 	u64? inbound_htlc_maximum_msat;
 	ChannelConfig config;
+	u64? claimable_on_close_sats;
 };
 
 dictionary PeerDetails {
