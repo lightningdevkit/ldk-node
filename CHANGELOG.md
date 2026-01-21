@@ -1,4 +1,4 @@
-# 0.7.0-rc.8 (Synonym Fork)
+# 0.7.0-rc.9 (Synonym Fork)
 
 ## Synonym Fork Additions
 - Optimized startup performance by parallelizing VSS reads and caching network graph locally:
