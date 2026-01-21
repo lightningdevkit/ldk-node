@@ -8930,6 +8930,7 @@ object FfiConverterTypeChannelDetails: FfiConverterRustBuffer<ChannelDetails> {
             FfiConverterULong.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterTypeChannelConfig.read(buf),
+            FfiConverterOptionalULong.read(buf),
         )
     }
 
@@ -8964,7 +8965,8 @@ object FfiConverterTypeChannelDetails: FfiConverterRustBuffer<ChannelDetails> {
             FfiConverterOptionalUShort.allocationSize(value.`forceCloseSpendDelay`) +
             FfiConverterULong.allocationSize(value.`inboundHtlcMinimumMsat`) +
             FfiConverterOptionalULong.allocationSize(value.`inboundHtlcMaximumMsat`) +
-            FfiConverterTypeChannelConfig.allocationSize(value.`config`)
+            FfiConverterTypeChannelConfig.allocationSize(value.`config`) +
+            FfiConverterOptionalULong.allocationSize(value.`claimableOnCloseSats`)
     )
 
     override fun write(value: ChannelDetails, buf: ByteBuffer) {
@@ -8999,6 +9001,7 @@ object FfiConverterTypeChannelDetails: FfiConverterRustBuffer<ChannelDetails> {
         FfiConverterULong.write(value.`inboundHtlcMinimumMsat`, buf)
         FfiConverterOptionalULong.write(value.`inboundHtlcMaximumMsat`, buf)
         FfiConverterTypeChannelConfig.write(value.`config`, buf)
+        FfiConverterOptionalULong.write(value.`claimableOnCloseSats`, buf)
     }
 }
 

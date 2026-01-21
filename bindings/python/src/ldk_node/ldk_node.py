@@ -7395,7 +7395,8 @@ class ChannelDetails:
     inbound_htlc_minimum_msat: "int"
     inbound_htlc_maximum_msat: "typing.Optional[int]"
     config: "ChannelConfig"
-    def __init__(self, *, channel_id: "ChannelId", counterparty_node_id: "PublicKey", funding_txo: "typing.Optional[OutPoint]", short_channel_id: "typing.Optional[int]", outbound_scid_alias: "typing.Optional[int]", inbound_scid_alias: "typing.Optional[int]", channel_value_sats: "int", unspendable_punishment_reserve: "typing.Optional[int]", user_channel_id: "UserChannelId", feerate_sat_per_1000_weight: "int", outbound_capacity_msat: "int", inbound_capacity_msat: "int", confirmations_required: "typing.Optional[int]", confirmations: "typing.Optional[int]", is_outbound: "bool", is_channel_ready: "bool", is_usable: "bool", is_announced: "bool", cltv_expiry_delta: "typing.Optional[int]", counterparty_unspendable_punishment_reserve: "int", counterparty_outbound_htlc_minimum_msat: "typing.Optional[int]", counterparty_outbound_htlc_maximum_msat: "typing.Optional[int]", counterparty_forwarding_info_fee_base_msat: "typing.Optional[int]", counterparty_forwarding_info_fee_proportional_millionths: "typing.Optional[int]", counterparty_forwarding_info_cltv_expiry_delta: "typing.Optional[int]", next_outbound_htlc_limit_msat: "int", next_outbound_htlc_minimum_msat: "int", force_close_spend_delay: "typing.Optional[int]", inbound_htlc_minimum_msat: "int", inbound_htlc_maximum_msat: "typing.Optional[int]", config: "ChannelConfig"):
+    claimable_on_close_sats: "typing.Optional[int]"
+    def __init__(self, *, channel_id: "ChannelId", counterparty_node_id: "PublicKey", funding_txo: "typing.Optional[OutPoint]", short_channel_id: "typing.Optional[int]", outbound_scid_alias: "typing.Optional[int]", inbound_scid_alias: "typing.Optional[int]", channel_value_sats: "int", unspendable_punishment_reserve: "typing.Optional[int]", user_channel_id: "UserChannelId", feerate_sat_per_1000_weight: "int", outbound_capacity_msat: "int", inbound_capacity_msat: "int", confirmations_required: "typing.Optional[int]", confirmations: "typing.Optional[int]", is_outbound: "bool", is_channel_ready: "bool", is_usable: "bool", is_announced: "bool", cltv_expiry_delta: "typing.Optional[int]", counterparty_unspendable_punishment_reserve: "int", counterparty_outbound_htlc_minimum_msat: "typing.Optional[int]", counterparty_outbound_htlc_maximum_msat: "typing.Optional[int]", counterparty_forwarding_info_fee_base_msat: "typing.Optional[int]", counterparty_forwarding_info_fee_proportional_millionths: "typing.Optional[int]", counterparty_forwarding_info_cltv_expiry_delta: "typing.Optional[int]", next_outbound_htlc_limit_msat: "int", next_outbound_htlc_minimum_msat: "int", force_close_spend_delay: "typing.Optional[int]", inbound_htlc_minimum_msat: "int", inbound_htlc_maximum_msat: "typing.Optional[int]", config: "ChannelConfig", claimable_on_close_sats: "typing.Optional[int]"):
         self.channel_id = channel_id
         self.counterparty_node_id = counterparty_node_id
         self.funding_txo = funding_txo
@@ -7427,9 +7428,10 @@ class ChannelDetails:
         self.inbound_htlc_minimum_msat = inbound_htlc_minimum_msat
         self.inbound_htlc_maximum_msat = inbound_htlc_maximum_msat
         self.config = config
+        self.claimable_on_close_sats = claimable_on_close_sats
 
     def __str__(self):
-        return "ChannelDetails(channel_id={}, counterparty_node_id={}, funding_txo={}, short_channel_id={}, outbound_scid_alias={}, inbound_scid_alias={}, channel_value_sats={}, unspendable_punishment_reserve={}, user_channel_id={}, feerate_sat_per_1000_weight={}, outbound_capacity_msat={}, inbound_capacity_msat={}, confirmations_required={}, confirmations={}, is_outbound={}, is_channel_ready={}, is_usable={}, is_announced={}, cltv_expiry_delta={}, counterparty_unspendable_punishment_reserve={}, counterparty_outbound_htlc_minimum_msat={}, counterparty_outbound_htlc_maximum_msat={}, counterparty_forwarding_info_fee_base_msat={}, counterparty_forwarding_info_fee_proportional_millionths={}, counterparty_forwarding_info_cltv_expiry_delta={}, next_outbound_htlc_limit_msat={}, next_outbound_htlc_minimum_msat={}, force_close_spend_delay={}, inbound_htlc_minimum_msat={}, inbound_htlc_maximum_msat={}, config={})".format(self.channel_id, self.counterparty_node_id, self.funding_txo, self.short_channel_id, self.outbound_scid_alias, self.inbound_scid_alias, self.channel_value_sats, self.unspendable_punishment_reserve, self.user_channel_id, self.feerate_sat_per_1000_weight, self.outbound_capacity_msat, self.inbound_capacity_msat, self.confirmations_required, self.confirmations, self.is_outbound, self.is_channel_ready, self.is_usable, self.is_announced, self.cltv_expiry_delta, self.counterparty_unspendable_punishment_reserve, self.counterparty_outbound_htlc_minimum_msat, self.counterparty_outbound_htlc_maximum_msat, self.counterparty_forwarding_info_fee_base_msat, self.counterparty_forwarding_info_fee_proportional_millionths, self.counterparty_forwarding_info_cltv_expiry_delta, self.next_outbound_htlc_limit_msat, self.next_outbound_htlc_minimum_msat, self.force_close_spend_delay, self.inbound_htlc_minimum_msat, self.inbound_htlc_maximum_msat, self.config)
+        return "ChannelDetails(channel_id={}, counterparty_node_id={}, funding_txo={}, short_channel_id={}, outbound_scid_alias={}, inbound_scid_alias={}, channel_value_sats={}, unspendable_punishment_reserve={}, user_channel_id={}, feerate_sat_per_1000_weight={}, outbound_capacity_msat={}, inbound_capacity_msat={}, confirmations_required={}, confirmations={}, is_outbound={}, is_channel_ready={}, is_usable={}, is_announced={}, cltv_expiry_delta={}, counterparty_unspendable_punishment_reserve={}, counterparty_outbound_htlc_minimum_msat={}, counterparty_outbound_htlc_maximum_msat={}, counterparty_forwarding_info_fee_base_msat={}, counterparty_forwarding_info_fee_proportional_millionths={}, counterparty_forwarding_info_cltv_expiry_delta={}, next_outbound_htlc_limit_msat={}, next_outbound_htlc_minimum_msat={}, force_close_spend_delay={}, inbound_htlc_minimum_msat={}, inbound_htlc_maximum_msat={}, config={}, claimable_on_close_sats={})".format(self.channel_id, self.counterparty_node_id, self.funding_txo, self.short_channel_id, self.outbound_scid_alias, self.inbound_scid_alias, self.channel_value_sats, self.unspendable_punishment_reserve, self.user_channel_id, self.feerate_sat_per_1000_weight, self.outbound_capacity_msat, self.inbound_capacity_msat, self.confirmations_required, self.confirmations, self.is_outbound, self.is_channel_ready, self.is_usable, self.is_announced, self.cltv_expiry_delta, self.counterparty_unspendable_punishment_reserve, self.counterparty_outbound_htlc_minimum_msat, self.counterparty_outbound_htlc_maximum_msat, self.counterparty_forwarding_info_fee_base_msat, self.counterparty_forwarding_info_fee_proportional_millionths, self.counterparty_forwarding_info_cltv_expiry_delta, self.next_outbound_htlc_limit_msat, self.next_outbound_htlc_minimum_msat, self.force_close_spend_delay, self.inbound_htlc_minimum_msat, self.inbound_htlc_maximum_msat, self.config, self.claimable_on_close_sats)
 
     def __eq__(self, other):
         if self.channel_id != other.channel_id:
@@ -7494,6 +7496,8 @@ class ChannelDetails:
             return False
         if self.config != other.config:
             return False
+        if self.claimable_on_close_sats != other.claimable_on_close_sats:
+            return False
         return True
 
 class _UniffiConverterTypeChannelDetails(_UniffiConverterRustBuffer):
@@ -7531,6 +7535,7 @@ class _UniffiConverterTypeChannelDetails(_UniffiConverterRustBuffer):
             inbound_htlc_minimum_msat=_UniffiConverterUInt64.read(buf),
             inbound_htlc_maximum_msat=_UniffiConverterOptionalUInt64.read(buf),
             config=_UniffiConverterTypeChannelConfig.read(buf),
+            claimable_on_close_sats=_UniffiConverterOptionalUInt64.read(buf),
         )
 
     @staticmethod
@@ -7566,6 +7571,7 @@ class _UniffiConverterTypeChannelDetails(_UniffiConverterRustBuffer):
         _UniffiConverterUInt64.check_lower(value.inbound_htlc_minimum_msat)
         _UniffiConverterOptionalUInt64.check_lower(value.inbound_htlc_maximum_msat)
         _UniffiConverterTypeChannelConfig.check_lower(value.config)
+        _UniffiConverterOptionalUInt64.check_lower(value.claimable_on_close_sats)
 
     @staticmethod
     def write(value, buf):
@@ -7600,6 +7606,7 @@ class _UniffiConverterTypeChannelDetails(_UniffiConverterRustBuffer):
         _UniffiConverterUInt64.write(value.inbound_htlc_minimum_msat, buf)
         _UniffiConverterOptionalUInt64.write(value.inbound_htlc_maximum_msat, buf)
         _UniffiConverterTypeChannelConfig.write(value.config, buf)
+        _UniffiConverterOptionalUInt64.write(value.claimable_on_close_sats, buf)
 
 
 class ChannelInfo:
