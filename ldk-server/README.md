@@ -51,6 +51,22 @@ cargo run --bin ldk-server ./ldk-server/ldk-server-config.toml
 
 Interact with the node using CLI:
 ```
-./target/debug/ldk-server-cli -b localhost:3002 --api-key your-secret-api-key onchain-receive # To generate onchain-receive address.
-./target/debug/ldk-server-cli -b localhost:3002 --api-key your-secret-api-key help # To print help/available commands.
+ldk-server-cli -b localhost:3002 --api-key your-secret-api-key --tls-cert /path/to/tls_cert.pem onchain-receive # To generate onchain-receive address.
+ldk-server-cli -b localhost:3002 --api-key your-secret-api-key --tls-cert /path/to/tls_cert.pem help # To print help/available commands.
+```
+
+### Shell Completions
+
+The CLI supports generating shell completions for Bash, Zsh, Fish, Elvish, and PowerShell.
+
+Add completions to your shell config:
+```bash
+# Bash (add to ~/.bashrc)
+eval "$(ldk-server-cli completions bash)"
+
+# Zsh (add to ~/.zshrc)
+eval "$(ldk-server-cli completions zsh)"
+
+# Fish (add to ~/.config/fish/config.fish)
+ldk-server-cli completions fish | source
 ```
