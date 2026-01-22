@@ -18,8 +18,6 @@ use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{
 	ClosureReason, Event as LdkEvent, PaymentFailureReason, PaymentPurpose, ReplayEvent,
 };
-use lightning::impl_writeable_tlv_based;
-use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
@@ -29,6 +27,7 @@ use lightning::util::config::{
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use rand::{rng, Rng};
@@ -218,8 +217,8 @@ impl_writeable_tlv_based_enum!(SyncType,
 /// ## Example: Monitoring Onchain Transactions (Reactive - No Polling!)
 ///
 /// ```no_run
-/// use ldk_node::{Builder, Event};
 /// use ldk_node::bitcoin::Network;
+/// use ldk_node::{Builder, Event};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Build and start the node with background sync enabled (default)
@@ -227,7 +226,7 @@ impl_writeable_tlv_based_enum!(SyncType,
 /// builder.set_network(Network::Testnet);
 /// builder.set_esplora_server("https://blockstream.info/testnet/api".to_string());
 /// let node = builder.build()?;
-/// node.start()?;  // Background sync starts automatically!
+/// node.start()?; // Background sync starts automatically!
 ///
 /// // Event handling loop (NOT a polling loop!)
 /// // The loop is needed to process multiple events over time, but wait_next_event()
@@ -241,39 +240,43 @@ impl_writeable_tlv_based_enum!(SyncType,
 /// //   loop { event = wait_for_event(); handle(event); }
 /// //
 /// loop {
-///     // This blocks until an event is available (pushed by background sync)
-///     match node.wait_next_event() {
-///         Event::OnchainTransactionConfirmed { txid, block_height, details, .. } => {
-///             println!("Transaction {} confirmed at height {}", txid, block_height);
-///             println!("Amount: {} sats", details.amount_sats);
-///             // Update UI, send push notification, etc. - truly reactive!
-///             node.event_handled()?;
-///         },
-///         Event::OnchainTransactionReceived { txid, details } => {
-///             println!("New transaction {} received", txid);
-///             println!("Amount: {} sats", details.amount_sats);
-///             node.event_handled()?;
-///         },
-///         Event::OnchainTransactionReplaced { txid, conflicts } => {
-///             println!("Transaction {} was replaced (RBF) by {} transaction(s)", txid, conflicts.len());
-///             node.event_handled()?;
-///         },
-///         Event::OnchainTransactionReorged { txid } => {
-///             println!("Transaction {} became unconfirmed due to a reorg", txid);
-///             node.event_handled()?;
-///         },
-///         Event::OnchainTransactionEvicted { txid } => {
-///             println!("Transaction {} was evicted from the mempool", txid);
-///             node.event_handled()?;
-///         },
-///         Event::PaymentReceived { .. } => {
-///             println!("Payment received!");
-///             node.event_handled()?;
-///         },
-///         _ => {
-///             node.event_handled()?;
-///         }
-///     }
+/// 	// This blocks until an event is available (pushed by background sync)
+/// 	match node.wait_next_event() {
+/// 		Event::OnchainTransactionConfirmed { txid, block_height, details, .. } => {
+/// 			println!("Transaction {} confirmed at height {}", txid, block_height);
+/// 			println!("Amount: {} sats", details.amount_sats);
+/// 			// Update UI, send push notification, etc. - truly reactive!
+/// 			node.event_handled()?;
+/// 		},
+/// 		Event::OnchainTransactionReceived { txid, details } => {
+/// 			println!("New transaction {} received", txid);
+/// 			println!("Amount: {} sats", details.amount_sats);
+/// 			node.event_handled()?;
+/// 		},
+/// 		Event::OnchainTransactionReplaced { txid, conflicts } => {
+/// 			println!(
+/// 				"Transaction {} was replaced (RBF) by {} transaction(s)",
+/// 				txid,
+/// 				conflicts.len()
+/// 			);
+/// 			node.event_handled()?;
+/// 		},
+/// 		Event::OnchainTransactionReorged { txid } => {
+/// 			println!("Transaction {} became unconfirmed due to a reorg", txid);
+/// 			node.event_handled()?;
+/// 		},
+/// 		Event::OnchainTransactionEvicted { txid } => {
+/// 			println!("Transaction {} was evicted from the mempool", txid);
+/// 			node.event_handled()?;
+/// 		},
+/// 		Event::PaymentReceived { .. } => {
+/// 			println!("Payment received!");
+/// 			node.event_handled()?;
+/// 		},
+/// 		_ => {
+/// 			node.event_handled()?;
+/// 		},
+/// 	}
 /// }
 /// # }
 /// ```
@@ -510,10 +513,12 @@ pub enum Event {
 	/// node.sync_wallets().unwrap();
 	///
 	/// // Check for onchain transaction events
-	/// if let Some(Event::OnchainTransactionConfirmed { txid, block_height, details, .. }) = node.next_event() {
-	///     println!("Transaction {} confirmed at height {}", txid, block_height);
-	///     println!("Amount: {} sats", details.amount_sats);
-	///     node.event_handled().unwrap();
+	/// if let Some(Event::OnchainTransactionConfirmed { txid, block_height, details, .. }) =
+	/// 	node.next_event()
+	/// {
+	/// 	println!("Transaction {} confirmed at height {}", txid, block_height);
+	/// 	println!("Amount: {} sats", details.amount_sats);
+	/// 	node.event_handled().unwrap();
 	/// }
 	/// ```
 	///
@@ -535,22 +540,24 @@ pub enum Event {
 	/// let mut channel_funding_txs = HashMap::new();
 	///
 	/// loop {
-	///     if let Some(event) = node.next_event() {
-	///         match event {
-	///             Event::ChannelPending { funding_txo, channel_id, .. } => {
-	///                 channel_funding_txs.insert(funding_txo.txid, channel_id);
-	///                 node.event_handled().unwrap();
-	///             },
-	///             Event::OnchainTransactionConfirmed { txid, .. } => {
-	///                 // This event is only emitted once when the transaction confirms
-	///                 if let Some(channel_id) = channel_funding_txs.get(&txid) {
-	///                     println!("Channel {} funding confirmed!", channel_id);
-	///                 }
-	///                 node.event_handled().unwrap();
-	///             },
-	///             _ => { node.event_handled().unwrap(); }
-	///         }
-	///     }
+	/// 	if let Some(event) = node.next_event() {
+	/// 		match event {
+	/// 			Event::ChannelPending { funding_txo, channel_id, .. } => {
+	/// 				channel_funding_txs.insert(funding_txo.txid, channel_id);
+	/// 				node.event_handled().unwrap();
+	/// 			},
+	/// 			Event::OnchainTransactionConfirmed { txid, .. } => {
+	/// 				// This event is only emitted once when the transaction confirms
+	/// 				if let Some(channel_id) = channel_funding_txs.get(&txid) {
+	/// 					println!("Channel {} funding confirmed!", channel_id);
+	/// 				}
+	/// 				node.event_handled().unwrap();
+	/// 			},
+	/// 			_ => {
+	/// 				node.event_handled().unwrap();
+	/// 			},
+	/// 		}
+	/// 	}
 	///     # break;
 	/// }
 	/// ```
@@ -587,13 +594,13 @@ pub enum Event {
 	/// # node.start().unwrap();
 	/// // When someone sends sats to your wallet...
 	/// match node.wait_next_event() {
-	///     Event::OnchainTransactionReceived { txid, details } => {
-	///         println!("Incoming payment detected! Txid: {}", txid);
-	///         println!("Amount: {} sats", details.amount_sats);
-	///         println!("Waiting for confirmations...");
-	///         node.event_handled().unwrap();
-	///     },
-	///     _ => {}
+	/// 	Event::OnchainTransactionReceived { txid, details } => {
+	/// 		println!("Incoming payment detected! Txid: {}", txid);
+	/// 		println!("Amount: {} sats", details.amount_sats);
+	/// 		println!("Waiting for confirmations...");
+	/// 		node.event_handled().unwrap();
+	/// 	},
+	/// 	_ => {},
 	/// }
 	/// ```
 	OnchainTransactionReceived {
@@ -622,14 +629,14 @@ pub enum Event {
 	/// # let node = builder.build().unwrap();
 	/// # node.start().unwrap();
 	/// match node.wait_next_event() {
-	///     Event::OnchainTransactionReplaced { txid, conflicts } => {
-	///         println!("Transaction {} was replaced by {} transaction(s)", txid, conflicts.len());
-	///         for conflict_txid in conflicts {
-	///             println!("  Replacement transaction: {}", conflict_txid);
-	///         }
-	///         node.event_handled().unwrap();
-	///     },
-	///     _ => {}
+	/// 	Event::OnchainTransactionReplaced { txid, conflicts } => {
+	/// 		println!("Transaction {} was replaced by {} transaction(s)", txid, conflicts.len());
+	/// 		for conflict_txid in conflicts {
+	/// 			println!("  Replacement transaction: {}", conflict_txid);
+	/// 		}
+	/// 		node.event_handled().unwrap();
+	/// 	},
+	/// 	_ => {},
 	/// }
 	/// ```
 	OnchainTransactionReplaced {
@@ -669,8 +676,8 @@ pub enum Event {
 	/// node.sync_wallets().unwrap();
 	///
 	/// if let Some(Event::OnchainTransactionReorged { txid }) = node.next_event() {
-	///     println!("Transaction {} became unconfirmed due to a reorg", txid);
-	///     node.event_handled().unwrap();
+	/// 	println!("Transaction {} became unconfirmed due to a reorg", txid);
+	/// 	node.event_handled().unwrap();
 	/// }
 	/// ```
 	OnchainTransactionReorged {
@@ -702,11 +709,11 @@ pub enum Event {
 	/// # let node = builder.build().unwrap();
 	/// # node.start().unwrap();
 	/// match node.wait_next_event() {
-	///     Event::OnchainTransactionEvicted { txid } => {
-	///         println!("Transaction {} was evicted from the mempool", txid);
-	///         node.event_handled().unwrap();
-	///     },
-	///     _ => {}
+	/// 	Event::OnchainTransactionEvicted { txid } => {
+	/// 		println!("Transaction {} was evicted from the mempool", txid);
+	/// 		node.event_handled().unwrap();
+	/// 	},
+	/// 	_ => {},
 	/// }
 	/// ```
 	OnchainTransactionEvicted {
@@ -730,19 +737,22 @@ pub enum Event {
 	/// # let node = builder.build().unwrap();
 	/// # node.start().unwrap();
 	/// match node.wait_next_event() {
-	///     Event::SyncProgress { sync_type, progress_percent, current_block_height, .. } => {
-	///         match sync_type {
-	///             SyncType::OnchainWallet => {
-	///                 println!("Syncing wallet: {}% (block {})", progress_percent, current_block_height);
-	///             },
-	///             SyncType::LightningWallet => {
-	///                 println!("Syncing Lightning: {}%", progress_percent);
-	///             },
-	///             _ => {}
-	///         }
-	///         node.event_handled().unwrap();
-	///     },
-	///     _ => {}
+	/// 	Event::SyncProgress { sync_type, progress_percent, current_block_height, .. } => {
+	/// 		match sync_type {
+	/// 			SyncType::OnchainWallet => {
+	/// 				println!(
+	/// 					"Syncing wallet: {}% (block {})",
+	/// 					progress_percent, current_block_height
+	/// 				);
+	/// 			},
+	/// 			SyncType::LightningWallet => {
+	/// 				println!("Syncing Lightning: {}%", progress_percent);
+	/// 			},
+	/// 			_ => {},
+	/// 		}
+	/// 		node.event_handled().unwrap();
+	/// 	},
+	/// 	_ => {},
 	/// }
 	/// ```
 	SyncProgress {
@@ -770,11 +780,11 @@ pub enum Event {
 	/// # let node = builder.build().unwrap();
 	/// # node.start().unwrap();
 	/// match node.wait_next_event() {
-	///     Event::SyncCompleted { sync_type, synced_block_height, .. } => {
-	///         println!("Sync completed! Now at block {}", synced_block_height);
-	///         node.event_handled().unwrap();
-	///     },
-	///     _ => {}
+	/// 	Event::SyncCompleted { sync_type, synced_block_height, .. } => {
+	/// 		println!("Sync completed! Now at block {}", synced_block_height);
+	/// 		node.event_handled().unwrap();
+	/// 	},
+	/// 	_ => {},
 	/// }
 	/// ```
 	SyncCompleted {
@@ -799,17 +809,17 @@ pub enum Event {
 	/// # let node = builder.build().unwrap();
 	/// # node.start().unwrap();
 	/// match node.wait_next_event() {
-	///     Event::BalanceChanged {
-	///         new_spendable_onchain_balance_sats,
-	///         new_total_lightning_balance_sats,
-	///         ..
-	///     } => {
-	///         println!("💰 Balance updated!");
-	///         println!("   Onchain: {} sats", new_spendable_onchain_balance_sats);
-	///         println!("   Lightning: {} sats", new_total_lightning_balance_sats);
-	///         node.event_handled().unwrap();
-	///     },
-	///     _ => {}
+	/// 	Event::BalanceChanged {
+	/// 		new_spendable_onchain_balance_sats,
+	/// 		new_total_lightning_balance_sats,
+	/// 		..
+	/// 	} => {
+	/// 		println!("💰 Balance updated!");
+	/// 		println!("   Onchain: {} sats", new_spendable_onchain_balance_sats);
+	/// 		println!("   Lightning: {} sats", new_total_lightning_balance_sats);
+	/// 		node.event_handled().unwrap();
+	/// 	},
+	/// 	_ => {},
 	/// }
 	/// ```
 	BalanceChanged {
@@ -1588,16 +1598,42 @@ where
 				};
 
 				match self.payment_store.update(&update) {
-					Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (
-						// No need to do anything if the idempotent update was applied, which might
-						// be the result of a replayed event.
-					),
+					Ok(DataStoreUpdateResult::Updated) => {
+						// Payment was newly updated to Succeeded - emit PaymentReceived event
+						let event = Event::PaymentReceived {
+							payment_id: Some(payment_id),
+							payment_hash,
+							amount_msat,
+							custom_records: onion_fields
+								.map(|cf| {
+									cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect()
+								})
+								.unwrap_or_default(),
+						};
+						match self.event_queue.add_event(event).await {
+							Ok(_) => return Ok(()),
+							Err(e) => {
+								log_error!(self.logger, "Failed to push to event queue: {}", e);
+								return Err(ReplayEvent());
+							},
+						};
+					},
+					Ok(DataStoreUpdateResult::Unchanged) => {
+						// Payment was already Succeeded - this is a replayed event, don't emit duplicate
+						log_debug!(
+						self.logger,
+						"Skipping duplicate PaymentReceived event for already-succeeded payment {}",
+						payment_id,
+					);
+						return Ok(());
+					},
 					Ok(DataStoreUpdateResult::NotFound) => {
 						log_error!(
 							self.logger,
 							"Claimed payment with ID {} couldn't be found in store",
 							payment_id,
 						);
+						return Ok(());
 					},
 					Err(e) => {
 						log_error!(
@@ -1609,22 +1645,6 @@ where
 						return Err(ReplayEvent());
 					},
 				}
-
-				let event = Event::PaymentReceived {
-					payment_id: Some(payment_id),
-					payment_hash,
-					amount_msat,
-					custom_records: onion_fields
-						.map(|cf| cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect())
-						.unwrap_or_default(),
-				};
-				match self.event_queue.add_event(event).await {
-					Ok(_) => return Ok(()),
-					Err(e) => {
-						log_error!(self.logger, "Failed to push to event queue: {}", e);
-						return Err(ReplayEvent());
-					},
-				};
 			},
 			LdkEvent::PaymentSent {
 				payment_id,
@@ -1649,39 +1669,57 @@ where
 				};
 
 				match self.payment_store.update(&update) {
-					Ok(_) => {},
+					Ok(DataStoreUpdateResult::Updated) => {
+						// Payment was newly updated - emit PaymentSuccessful event
+						self.payment_store.get(&payment_id).map(|payment| {
+							log_info!(
+								self.logger,
+								"Successfully sent payment of {}msat{} from \
+								payment hash {:?} with preimage {:?}",
+								payment.amount_msat.unwrap(),
+								if let Some(fee) = fee_paid_msat {
+									format!(" (fee {} msat)", fee)
+								} else {
+									"".to_string()
+								},
+								hex_utils::to_string(&payment_hash.0),
+								hex_utils::to_string(&payment_preimage.0)
+							);
+						});
+						let event = Event::PaymentSuccessful {
+							payment_id: Some(payment_id),
+							payment_hash,
+							payment_preimage: Some(payment_preimage),
+							fee_paid_msat,
+						};
+
+						match self.event_queue.add_event(event).await {
+							Ok(_) => return Ok(()),
+							Err(e) => {
+								log_error!(self.logger, "Failed to push to event queue: {}", e);
+								return Err(ReplayEvent());
+							},
+						};
+					},
+					Ok(DataStoreUpdateResult::Unchanged) => {
+						// Payment was already Succeeded - this is a replayed event
+						log_debug!(
+							self.logger,
+							"Skipping duplicate PaymentSuccessful event for already-succeeded payment {}",
+							payment_id,
+						);
+						return Ok(());
+					},
+					Ok(DataStoreUpdateResult::NotFound) => {
+						log_error!(
+							self.logger,
+							"Sent payment with ID {} couldn't be found in store",
+							payment_id,
+						);
+						return Ok(());
+					},
 					Err(e) => {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
-						return Err(ReplayEvent());
-					},
-				};
-
-				self.payment_store.get(&payment_id).map(|payment| {
-					log_info!(
-						self.logger,
-						"Successfully sent payment of {}msat{} from \
-						payment hash {:?} with preimage {:?}",
-						payment.amount_msat.unwrap(),
-						if let Some(fee) = fee_paid_msat {
-							format!(" (fee {} msat)", fee)
-						} else {
-							"".to_string()
-						},
-						hex_utils::to_string(&payment_hash.0),
-						hex_utils::to_string(&payment_preimage.0)
-					);
-				});
-				let event = Event::PaymentSuccessful {
-					payment_id: Some(payment_id),
-					payment_hash,
-					payment_preimage: Some(payment_preimage),
-					fee_paid_msat,
-				};
-
-				match self.event_queue.add_event(event).await {
-					Ok(_) => return Ok(()),
-					Err(e) => {
-						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						return Err(ReplayEvent());
 					},
 				};
@@ -1700,19 +1738,40 @@ where
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 				match self.payment_store.update(&update) {
-					Ok(_) => {},
+					Ok(DataStoreUpdateResult::Updated) => {
+						// Payment was newly updated to Failed - emit PaymentFailed event
+						let event = Event::PaymentFailed {
+							payment_id: Some(payment_id),
+							payment_hash,
+							reason,
+						};
+						match self.event_queue.add_event(event).await {
+							Ok(_) => return Ok(()),
+							Err(e) => {
+								log_error!(self.logger, "Failed to push to event queue: {}", e);
+								return Err(ReplayEvent());
+							},
+						};
+					},
+					Ok(DataStoreUpdateResult::Unchanged) => {
+						// Payment was already Failed - this is a replayed event
+						log_debug!(
+							self.logger,
+							"Skipping duplicate PaymentFailed event for already-failed payment {}",
+							payment_id,
+						);
+						return Ok(());
+					},
+					Ok(DataStoreUpdateResult::NotFound) => {
+						log_error!(
+							self.logger,
+							"Failed payment with ID {} couldn't be found in store",
+							payment_id,
+						);
+						return Ok(());
+					},
 					Err(e) => {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
-						return Err(ReplayEvent());
-					},
-				};
-
-				let event =
-					Event::PaymentFailed { payment_id: Some(payment_id), payment_hash, reason };
-				match self.event_queue.add_event(event).await {
-					Ok(_) => return Ok(()),
-					Err(e) => {
-						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						return Err(ReplayEvent());
 					},
 				};

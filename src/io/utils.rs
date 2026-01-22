@@ -596,8 +596,9 @@ pub(crate) fn read_bdk_wallet_change_set(
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use lightning::sign::KeysManager as LdkKeysManager;
+
+	use super::*;
 
 	#[test]
 	fn mnemonic_to_entropy_to_mnemonic() {
