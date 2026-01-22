@@ -545,6 +545,9 @@ fn load_or_generate_api_key(storage_dir: &Path) -> std::io::Result<String> {
 		let key_bytes = fs::read(&api_key_path)?;
 		Ok(key_bytes.to_lower_hex_string())
 	} else {
+		// Ensure the storage directory exists
+		fs::create_dir_all(storage_dir)?;
+
 		// Generate a 32-byte random API key
 		let mut rng = rand::thread_rng();
 		let mut key_bytes = [0u8; 32];
