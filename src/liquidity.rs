@@ -747,9 +747,11 @@ where
 					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 				let spendable_amount_sats =
 					self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+				let anchor_channel = init_features.requires_anchors_zero_fee_htlc_tx()
+					|| init_features.requires_anchor_zero_fee_commitments();
 				let required_funds_sats = channel_amount_sats
 					+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-						if init_features.requires_anchors_zero_fee_htlc_tx()
+						if anchor_channel
 							&& !c.trusted_peers_no_reserve.contains(&their_network_key)
 						{
 							c.per_channel_reserve_sats
