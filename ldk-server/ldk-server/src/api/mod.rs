@@ -18,6 +18,7 @@ pub(crate) mod bolt11_send;
 pub(crate) mod bolt12_receive;
 pub(crate) mod bolt12_send;
 pub(crate) mod close_channel;
+pub(crate) mod connect_peer;
 pub(crate) mod error;
 pub(crate) mod get_balances;
 pub(crate) mod get_node_info;

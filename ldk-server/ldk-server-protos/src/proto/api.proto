@@ -480,3 +480,22 @@ message GetBalancesResponse {
   // might not already be accounted for in `total_onchain_balance_sats`.
   repeated types.PendingSweepBalance pending_balances_from_channel_closures = 6;
 }
+
+// Connect to a peer on the Lightning Network.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.connect
+message ConnectPeerRequest {
+  // The hex-encoded public key of the node to connect to.
+  string node_pubkey = 1;
+
+  // An address which can be used to connect to a remote peer.
+  // It can be of type IPv4:port, IPv6:port, OnionV3:port or hostname:port
+  string address = 2;
+
+  // Whether to persist the peer connection, i.e., whether the peer will be re-connected on
+  // restart.
+  bool persist = 3;
+}
+
+// The response `content` for the `ConnectPeer` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ConnectPeerResponse {}

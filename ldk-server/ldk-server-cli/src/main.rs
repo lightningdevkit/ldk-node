@@ -23,13 +23,13 @@ use ldk_server_client::error::LdkServerErrorCode::{
 use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11SendRequest, Bolt11SendResponse,
 	Bolt12ReceiveRequest, Bolt12ReceiveResponse, Bolt12SendRequest, Bolt12SendResponse,
-	CloseChannelRequest, CloseChannelResponse, ForceCloseChannelRequest, ForceCloseChannelResponse,
-	GetBalancesRequest, GetBalancesResponse, GetNodeInfoRequest, GetNodeInfoResponse,
-	GetPaymentDetailsRequest, GetPaymentDetailsResponse, ListChannelsRequest, ListChannelsResponse,
-	ListForwardedPaymentsRequest, ListPaymentsRequest, OnchainReceiveRequest,
-	OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse, OpenChannelRequest,
-	OpenChannelResponse, SpliceInRequest, SpliceInResponse, SpliceOutRequest, SpliceOutResponse,
-	UpdateChannelConfigRequest, UpdateChannelConfigResponse,
+	CloseChannelRequest, CloseChannelResponse, ConnectPeerRequest, ConnectPeerResponse,
+	ForceCloseChannelRequest, ForceCloseChannelResponse, GetBalancesRequest, GetBalancesResponse,
+	GetNodeInfoRequest, GetNodeInfoResponse, GetPaymentDetailsRequest, GetPaymentDetailsResponse,
+	ListChannelsRequest, ListChannelsResponse, ListForwardedPaymentsRequest, ListPaymentsRequest,
+	OnchainReceiveRequest, OnchainReceiveResponse, OnchainSendRequest, OnchainSendResponse,
+	OpenChannelRequest, OpenChannelResponse, SpliceInRequest, SpliceInResponse, SpliceOutRequest,
+	SpliceOutResponse, UpdateChannelConfigRequest, UpdateChannelConfigResponse,
 };
 use ldk_server_client::ldk_server_protos::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig, PageToken,
@@ -335,6 +335,23 @@ enum Commands {
 			help = "The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over the channel."
 		)]
 		cltv_expiry_delta: Option<u32>,
+	},
+	#[command(about = "Connect to a peer on the Lightning Network without opening a channel")]
+	ConnectPeer {
+		#[arg(short, long, help = "The hex-encoded public key of the node to connect to")]
+		node_pubkey: String,
+		#[arg(
+			short,
+			long,
+			help = "Address to connect to remote peer (IPv4:port, IPv6:port, OnionV3:port, or hostname:port)"
+		)]
+		address: String,
+		#[arg(
+			long,
+			default_value_t = false,
+			help = "Whether to persist the connection for automatic reconnection on restart"
+		)]
+		persist: bool,
 	},
 	#[command(about = "Generate shell completions for the CLI")]
 	Completions {
@@ -671,6 +688,11 @@ async fn main() {
 						channel_config: Some(channel_config),
 					})
 					.await,
+			);
+		},
+		Commands::ConnectPeer { node_pubkey, address, persist } => {
+			handle_response_result::<_, ConnectPeerResponse>(
+				client.connect_peer(ConnectPeerRequest { node_pubkey, address, persist }).await,
 			);
 		},
 		Commands::Completions { .. } => unreachable!("Handled above"),
