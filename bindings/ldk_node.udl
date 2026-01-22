@@ -403,6 +403,7 @@ enum VssHeaderProviderError {
 
 [Enum]
 interface Event {
+	// TODO: Add bolt12_invoice field once we upgrade to UniFFI 0.29+. See #757.
 	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat);
 	PaymentFailed(PaymentId? payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
 	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat, sequence<CustomTlvRecord> custom_records);
@@ -859,6 +860,8 @@ interface Bolt12Invoice {
 	sequence<Address> fallback_addresses();
 	sequence<u8> encode();
 };
+
+// TODO: Add StaticInvoice and PaidBolt12Invoice once we upgrade to UniFFI 0.29+. See #757.
 
 [Custom]
 typedef string Txid;
