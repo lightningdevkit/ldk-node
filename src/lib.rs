@@ -1335,11 +1335,11 @@ impl Node {
 
 			let change_address = self.wallet.get_new_internal_address()?;
 
-			let contribution = SpliceContribution::SpliceIn {
-				value: Amount::from_sat(splice_amount_sats),
+			let contribution = SpliceContribution::splice_in(
+				Amount::from_sat(splice_amount_sats),
 				inputs,
-				change_script: Some(change_address.script_pubkey()),
-			};
+				Some(change_address.script_pubkey()),
+			);
 
 			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
 				Ok(fee_rate) => fee_rate,
@@ -1411,12 +1411,10 @@ impl Node {
 
 			self.wallet.parse_and_validate_address(address)?;
 
-			let contribution = SpliceContribution::SpliceOut {
-				outputs: vec![bitcoin::TxOut {
-					value: Amount::from_sat(splice_amount_sats),
-					script_pubkey: address.script_pubkey(),
-				}],
-			};
+			let contribution = SpliceContribution::splice_out(vec![bitcoin::TxOut {
+				value: Amount::from_sat(splice_amount_sats),
+				script_pubkey: address.script_pubkey(),
+			}]);
 
 			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
 			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
