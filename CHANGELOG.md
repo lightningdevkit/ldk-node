@@ -1,4 +1,8 @@
-# 0.7.0-rc.9 (Synonym Fork)
+# 0.7.0-rc.11 (Synonym Fork)
+
+## Bug Fixes
+- Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
+  emitted when LDK replays events after node restart.
 
 ## Synonym Fork Additions
 - Optimized startup performance by parallelizing VSS reads and caching network graph locally:
