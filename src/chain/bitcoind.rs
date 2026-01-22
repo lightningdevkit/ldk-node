@@ -626,13 +626,6 @@ pub(crate) enum UtxoSourceClient {
 	Rest(Arc<RestClient>),
 }
 
-impl std::ops::Deref for UtxoSourceClient {
-	type Target = Self;
-	fn deref(&self) -> &Self {
-		self
-	}
-}
-
 impl BlockSource for UtxoSourceClient {
 	fn get_header<'a>(
 		&'a self, header_hash: &'a BlockHash, height_hint: Option<u32>,
