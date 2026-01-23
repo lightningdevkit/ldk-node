@@ -1492,6 +1492,12 @@ internal typealias UniffiVTableCallbackInterfaceVssHeaderProviderUniffiByValue =
 
 
 
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -2195,6 +2201,10 @@ internal interface UniffiLib : Library {
         `persist`: Byte,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Unit
+    fun uniffi_ldk_node_fn_method_node_current_sync_intervals(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
     fun uniffi_ldk_node_fn_method_node_disconnect(
         `ptr`: Pointer?,
         `nodeId`: RustBufferByValue,
@@ -2349,6 +2359,11 @@ internal interface UniffiLib : Library {
         `userChannelId`: RustBufferByValue,
         `counterpartyNodeId`: RustBufferByValue,
         `channelConfig`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    fun uniffi_ldk_node_fn_method_node_update_sync_intervals(
+        `ptr`: Pointer?,
+        `intervals`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Unit
     fun uniffi_ldk_node_fn_method_node_verify_signature(
@@ -2657,6 +2672,9 @@ internal interface UniffiLib : Library {
         `ptr`: Pointer?,
         `request`: RustBufferByValue,
     ): Long
+    fun uniffi_ldk_node_fn_func_battery_saving_sync_intervals(
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
     fun uniffi_ldk_node_fn_func_default_config(
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
@@ -2881,6 +2899,8 @@ internal interface UniffiLib : Library {
         `handle`: Long,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Unit
+    fun uniffi_ldk_node_checksum_func_battery_saving_sync_intervals(
+    ): Short
     fun uniffi_ldk_node_checksum_func_default_config(
     ): Short
     fun uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic(
@@ -3095,6 +3115,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_ldk_node_checksum_method_node_connect(
     ): Short
+    fun uniffi_ldk_node_checksum_method_node_current_sync_intervals(
+    ): Short
     fun uniffi_ldk_node_checksum_method_node_disconnect(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_event_handled(
@@ -3158,6 +3180,8 @@ internal interface UniffiLib : Library {
     fun uniffi_ldk_node_checksum_method_node_unified_qr_payment(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_update_channel_config(
+    ): Short
+    fun uniffi_ldk_node_checksum_method_node_update_sync_intervals(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_verify_signature(
     ): Short
@@ -3274,6 +3298,9 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
+    if (lib.uniffi_ldk_node_checksum_func_battery_saving_sync_intervals() != 25473.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_ldk_node_checksum_func_default_config() != 55381.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3595,6 +3622,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_ldk_node_checksum_method_node_connect() != 34120.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_ldk_node_checksum_method_node_current_sync_intervals() != 51918.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_ldk_node_checksum_method_node_disconnect() != 43538.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3689,6 +3719,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_node_update_channel_config() != 37852.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_node_update_sync_intervals() != 42322.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_node_verify_signature() != 20486.toShort()) {
@@ -6844,6 +6877,17 @@ open class Node: Disposable, NodeInterface {
         }
     }
 
+    override fun `currentSyncIntervals`(): RuntimeSyncIntervals {
+        return FfiConverterTypeRuntimeSyncIntervals.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_current_sync_intervals(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
     @Throws(NodeException::class)
     override fun `disconnect`(`nodeId`: PublicKey) {
         callWithPointer {
@@ -7240,6 +7284,19 @@ open class Node: Disposable, NodeInterface {
                     FfiConverterTypeUserChannelId.lower(`userChannelId`),
                     FfiConverterTypePublicKey.lower(`counterpartyNodeId`),
                     FfiConverterTypeChannelConfig.lower(`channelConfig`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
+    @Throws(NodeException::class)
+    override fun `updateSyncIntervals`(`intervals`: RuntimeSyncIntervals) {
+        callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_update_sync_intervals(
+                    it,
+                    FfiConverterTypeRuntimeSyncIntervals.lower(`intervals`),
                     uniffiRustCallStatus,
                 )
             }
@@ -9662,6 +9719,31 @@ object FfiConverterTypeRoutingFees: FfiConverterRustBuffer<RoutingFees> {
 
 
 
+object FfiConverterTypeRuntimeSyncIntervals: FfiConverterRustBuffer<RuntimeSyncIntervals> {
+    override fun read(buf: ByteBuffer): RuntimeSyncIntervals {
+        return RuntimeSyncIntervals(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RuntimeSyncIntervals) = (
+            FfiConverterULong.allocationSize(value.`onchainWalletSyncIntervalSecs`) +
+            FfiConverterULong.allocationSize(value.`lightningWalletSyncIntervalSecs`) +
+            FfiConverterULong.allocationSize(value.`feeRateCacheUpdateIntervalSecs`)
+    )
+
+    override fun write(value: RuntimeSyncIntervals, buf: ByteBuffer) {
+        FfiConverterULong.write(value.`onchainWalletSyncIntervalSecs`, buf)
+        FfiConverterULong.write(value.`lightningWalletSyncIntervalSecs`, buf)
+        FfiConverterULong.write(value.`feeRateCacheUpdateIntervalSecs`, buf)
+    }
+}
+
+
+
+
 object FfiConverterTypeSpendableUtxo: FfiConverterRustBuffer<SpendableUtxo> {
     override fun read(buf: ByteBuffer): SpendableUtxo {
         return SpendableUtxo(
@@ -11070,6 +11152,7 @@ object FfiConverterTypeNodeError : FfiConverterRustBuffer<NodeException> {
             60 -> NodeException.NoSpendableOutputs(FfiConverterString.read(buf))
             61 -> NodeException.CoinSelectionFailed(FfiConverterString.read(buf))
             62 -> NodeException.InvalidMnemonic(FfiConverterString.read(buf))
+            63 -> NodeException.BackgroundSyncNotEnabled(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -11326,6 +11409,10 @@ object FfiConverterTypeNodeError : FfiConverterRustBuffer<NodeException> {
             }
             is NodeException.InvalidMnemonic -> {
                 buf.putInt(62)
+                Unit
+            }
+            is NodeException.BackgroundSyncNotEnabled -> {
+                buf.putInt(63)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -13783,6 +13870,14 @@ typealias FfiConverterTypeUserChannelId = FfiConverterString
 
 
 
+
+fun `batterySavingSyncIntervals`(): RuntimeSyncIntervals {
+    return FfiConverterTypeRuntimeSyncIntervals.lift(uniffiRustCall { uniffiRustCallStatus ->
+        UniffiLib.INSTANCE.uniffi_ldk_node_fn_func_battery_saving_sync_intervals(
+            uniffiRustCallStatus,
+        )
+    })
+}
 
 fun `defaultConfig`(): Config {
     return FfiConverterTypeConfig.lift(uniffiRustCall { uniffiRustCallStatus ->

@@ -49,7 +49,7 @@ use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvide
 use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, RuntimeSyncIntervals,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 use crate::connection::ConnectionManager;
@@ -2075,6 +2075,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		runtime_sync_intervals: Arc::new(RwLock::new(RuntimeSyncIntervals::default())),
 	})
 }
 

@@ -118,9 +118,10 @@ pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::NodeBuilder as Builder;
 pub use builder::{BuildError, ChannelDataMigration};
 use chain::ChainSource;
+pub use config::{battery_saving_sync_intervals, RuntimeSyncIntervals};
 use config::{
-	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	default_user_config, may_announce_channel, AsyncPaymentsRole, BackgroundSyncConfig,
+	ChannelConfig, Config, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 pub use error::Error as NodeError;
@@ -211,6 +212,7 @@ pub struct Node {
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	runtime_sync_intervals: Arc<RwLock<RuntimeSyncIntervals>>,
 }
 
 impl Node {
@@ -1641,6 +1643,46 @@ impl Node {
 		} else {
 			Err(Error::ChannelConfigUpdateFailed)
 		}
+	}
+
+	/// Updates the intervals for background wallet sync tasks at runtime.
+	///
+	/// This allows changing sync intervals while the node is running, which is useful
+	/// for mobile apps that want to reduce battery usage when in the background.
+	///
+	/// See [`RuntimeSyncIntervals`] for available interval settings and the
+	/// [`RuntimeSyncIntervals::battery_saving`] preset.
+	///
+	/// **Note:** Changes take effect on the next sync cycle. Currently running sync operations
+	/// will complete with their original interval.
+	///
+	/// **Note:** A minimum of 10 seconds is enforced for wallet sync intervals.
+	/// Values below this minimum will be silently raised to 10 seconds.
+	///
+	/// **Note:** If `background_sync_config` was set to `None` at build time (e.g., via
+	/// [`EsploraSyncConfig`] or [`ElectrumSyncConfig`]), the wallet sync intervals
+	/// cannot be updated at runtime and this method will return an error.
+	/// In that case, use [`Node::sync_wallets`] for manual syncing instead.
+	///
+	/// [`EsploraSyncConfig`]: crate::config::EsploraSyncConfig
+	/// [`ElectrumSyncConfig`]: crate::config::ElectrumSyncConfig
+	pub fn update_sync_intervals(&self, intervals: RuntimeSyncIntervals) -> Result<(), Error> {
+		// Update the shared RuntimeSyncIntervals
+		*self.runtime_sync_intervals.write().unwrap() = intervals.clone();
+
+		// Update chain source wallet sync intervals
+		let wallet_config = BackgroundSyncConfig::from(intervals);
+		self.chain_source.set_background_sync_config(wallet_config)?;
+
+		log_info!(self.logger, "Updated runtime sync intervals.");
+		Ok(())
+	}
+
+	/// Returns the current sync intervals for background wallet sync tasks.
+	///
+	/// See [`RuntimeSyncIntervals`] for the meaning of each interval.
+	pub fn current_sync_intervals(&self) -> RuntimeSyncIntervals {
+		self.runtime_sync_intervals.read().unwrap().clone()
 	}
 
 	/// Retrieve the details of a specific payment with the given id.

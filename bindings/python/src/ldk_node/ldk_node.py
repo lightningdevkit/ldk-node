@@ -461,6 +461,8 @@ def _uniffi_check_contract_api_version(lib):
         raise InternalError("UniFFI contract version mismatch: try cleaning and rebuilding your project")
 
 def _uniffi_check_api_checksums(lib):
+    if lib.uniffi_ldk_node_checksum_func_battery_saving_sync_intervals() != 25473:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_func_default_config() != 55381:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_func_derive_node_secret_from_mnemonic() != 15067:
@@ -675,6 +677,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_connect() != 34120:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_current_sync_intervals() != 51918:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_disconnect() != 43538:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_event_handled() != 38712:
@@ -738,6 +742,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_ldk_node_checksum_method_node_unified_qr_payment() != 9837:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_update_channel_config() != 37852:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_update_sync_intervals() != 42322:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_verify_signature() != 20486:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1761,6 +1767,11 @@ _UniffiLib.uniffi_ldk_node_fn_method_node_connect.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_node_connect.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_node_current_sync_intervals.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_current_sync_intervals.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_ldk_node_fn_method_node_disconnect.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
@@ -1949,6 +1960,12 @@ _UniffiLib.uniffi_ldk_node_fn_method_node_update_channel_config.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_node_update_channel_config.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_node_update_sync_intervals.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_update_sync_intervals.restype = None
 _UniffiLib.uniffi_ldk_node_fn_method_node_verify_signature.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
@@ -2318,6 +2335,10 @@ _UniffiLib.uniffi_ldk_node_fn_method_vssheaderprovider_get_headers.argtypes = (
     _UniffiRustBuffer,
 )
 _UniffiLib.uniffi_ldk_node_fn_method_vssheaderprovider_get_headers.restype = ctypes.c_uint64
+_UniffiLib.uniffi_ldk_node_fn_func_battery_saving_sync_intervals.argtypes = (
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_func_battery_saving_sync_intervals.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_ldk_node_fn_func_default_config.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
@@ -2601,6 +2622,9 @@ _UniffiLib.ffi_ldk_node_rust_future_complete_void.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.ffi_ldk_node_rust_future_complete_void.restype = None
+_UniffiLib.uniffi_ldk_node_checksum_func_battery_saving_sync_intervals.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_func_battery_saving_sync_intervals.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_func_default_config.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_func_default_config.restype = ctypes.c_uint16
@@ -2922,6 +2946,9 @@ _UniffiLib.uniffi_ldk_node_checksum_method_node_config.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_connect.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_connect.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_current_sync_intervals.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_current_sync_intervals.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_disconnect.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_disconnect.restype = ctypes.c_uint16
@@ -3018,6 +3045,9 @@ _UniffiLib.uniffi_ldk_node_checksum_method_node_unified_qr_payment.restype = cty
 _UniffiLib.uniffi_ldk_node_checksum_method_node_update_channel_config.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_update_channel_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_update_sync_intervals.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_update_sync_intervals.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_verify_signature.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_verify_signature.restype = ctypes.c_uint16
@@ -5421,6 +5451,8 @@ class NodeProtocol(typing.Protocol):
         raise NotImplementedError
     def connect(self, node_id: "PublicKey",address: "SocketAddress",persist: "bool"):
         raise NotImplementedError
+    def current_sync_intervals(self, ):
+        raise NotImplementedError
     def disconnect(self, node_id: "PublicKey"):
         raise NotImplementedError
     def event_handled(self, ):
@@ -5484,6 +5516,8 @@ class NodeProtocol(typing.Protocol):
     def unified_qr_payment(self, ):
         raise NotImplementedError
     def update_channel_config(self, user_channel_id: "UserChannelId",counterparty_node_id: "PublicKey",channel_config: "ChannelConfig"):
+        raise NotImplementedError
+    def update_sync_intervals(self, intervals: "RuntimeSyncIntervals"):
         raise NotImplementedError
     def verify_signature(self, msg: "typing.List[int]",sig: "str",pkey: "PublicKey"):
         raise NotImplementedError
@@ -5578,6 +5612,15 @@ class Node:
         _UniffiConverterTypeSocketAddress.lower(address),
         _UniffiConverterBool.lower(persist))
 
+
+
+
+
+
+    def current_sync_intervals(self, ) -> "RuntimeSyncIntervals":
+        return _UniffiConverterTypeRuntimeSyncIntervals.lift(
+            _uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_method_node_current_sync_intervals,self._uniffi_clone_pointer(),)
+        )
 
 
 
@@ -5952,6 +5995,17 @@ class Node:
         _UniffiConverterTypeUserChannelId.lower(user_channel_id),
         _UniffiConverterTypePublicKey.lower(counterparty_node_id),
         _UniffiConverterTypeChannelConfig.lower(channel_config))
+
+
+
+
+
+
+    def update_sync_intervals(self, intervals: "RuntimeSyncIntervals") -> None:
+        _UniffiConverterTypeRuntimeSyncIntervals.check_lower(intervals)
+        
+        _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_update_sync_intervals,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeRuntimeSyncIntervals.lower(intervals))
 
 
 
@@ -8844,6 +8898,49 @@ class _UniffiConverterTypeRoutingFees(_UniffiConverterRustBuffer):
     def write(value, buf):
         _UniffiConverterUInt32.write(value.base_msat, buf)
         _UniffiConverterUInt32.write(value.proportional_millionths, buf)
+
+
+class RuntimeSyncIntervals:
+    onchain_wallet_sync_interval_secs: "int"
+    lightning_wallet_sync_interval_secs: "int"
+    fee_rate_cache_update_interval_secs: "int"
+    def __init__(self, *, onchain_wallet_sync_interval_secs: "int", lightning_wallet_sync_interval_secs: "int", fee_rate_cache_update_interval_secs: "int"):
+        self.onchain_wallet_sync_interval_secs = onchain_wallet_sync_interval_secs
+        self.lightning_wallet_sync_interval_secs = lightning_wallet_sync_interval_secs
+        self.fee_rate_cache_update_interval_secs = fee_rate_cache_update_interval_secs
+
+    def __str__(self):
+        return "RuntimeSyncIntervals(onchain_wallet_sync_interval_secs={}, lightning_wallet_sync_interval_secs={}, fee_rate_cache_update_interval_secs={})".format(self.onchain_wallet_sync_interval_secs, self.lightning_wallet_sync_interval_secs, self.fee_rate_cache_update_interval_secs)
+
+    def __eq__(self, other):
+        if self.onchain_wallet_sync_interval_secs != other.onchain_wallet_sync_interval_secs:
+            return False
+        if self.lightning_wallet_sync_interval_secs != other.lightning_wallet_sync_interval_secs:
+            return False
+        if self.fee_rate_cache_update_interval_secs != other.fee_rate_cache_update_interval_secs:
+            return False
+        return True
+
+class _UniffiConverterTypeRuntimeSyncIntervals(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return RuntimeSyncIntervals(
+            onchain_wallet_sync_interval_secs=_UniffiConverterUInt64.read(buf),
+            lightning_wallet_sync_interval_secs=_UniffiConverterUInt64.read(buf),
+            fee_rate_cache_update_interval_secs=_UniffiConverterUInt64.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiConverterUInt64.check_lower(value.onchain_wallet_sync_interval_secs)
+        _UniffiConverterUInt64.check_lower(value.lightning_wallet_sync_interval_secs)
+        _UniffiConverterUInt64.check_lower(value.fee_rate_cache_update_interval_secs)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiConverterUInt64.write(value.onchain_wallet_sync_interval_secs, buf)
+        _UniffiConverterUInt64.write(value.lightning_wallet_sync_interval_secs, buf)
+        _UniffiConverterUInt64.write(value.fee_rate_cache_update_interval_secs, buf)
 
 
 class SpendableUtxo:
@@ -12019,6 +12116,11 @@ class NodeError:  # type: ignore
         def __repr__(self):
             return "NodeError.InvalidMnemonic({})".format(repr(str(self)))
     _UniffiTempNodeError.InvalidMnemonic = InvalidMnemonic # type: ignore
+    class BackgroundSyncNotEnabled(_UniffiTempNodeError):
+
+        def __repr__(self):
+            return "NodeError.BackgroundSyncNotEnabled({})".format(repr(str(self)))
+    _UniffiTempNodeError.BackgroundSyncNotEnabled = BackgroundSyncNotEnabled # type: ignore
 
 NodeError = _UniffiTempNodeError # type: ignore
 del _UniffiTempNodeError
@@ -12276,6 +12378,10 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             return NodeError.InvalidMnemonic(
                 _UniffiConverterString.read(buf),
             )
+        if variant == 63:
+            return NodeError.BackgroundSyncNotEnabled(
+                _UniffiConverterString.read(buf),
+            )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
@@ -12404,6 +12510,8 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             return
         if isinstance(value, NodeError.InvalidMnemonic):
             return
+        if isinstance(value, NodeError.BackgroundSyncNotEnabled):
+            return
 
     @staticmethod
     def write(value, buf):
@@ -12531,6 +12639,8 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             buf.write_i32(61)
         if isinstance(value, NodeError.InvalidMnemonic):
             buf.write_i32(62)
+        if isinstance(value, NodeError.BackgroundSyncNotEnabled):
+            buf.write_i32(63)
 
 
 
@@ -15896,6 +16006,10 @@ async def _uniffi_rust_call_async(rust_future, ffi_poll, ffi_complete, ffi_free,
     finally:
         ffi_free(rust_future)
 
+def battery_saving_sync_intervals() -> "RuntimeSyncIntervals":
+    return _UniffiConverterTypeRuntimeSyncIntervals.lift(_uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_func_battery_saving_sync_intervals,))
+
+
 def default_config() -> "Config":
     return _UniffiConverterTypeConfig.lift(_uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_func_default_config,))
 
@@ -15975,10 +16089,12 @@ __all__ = [
     "RouteHintHop",
     "RouteParametersConfig",
     "RoutingFees",
+    "RuntimeSyncIntervals",
     "SpendableUtxo",
     "TransactionDetails",
     "TxInput",
     "TxOutput",
+    "battery_saving_sync_intervals",
     "default_config",
     "derive_node_secret_from_mnemonic",
     "generate_entropy_mnemonic",

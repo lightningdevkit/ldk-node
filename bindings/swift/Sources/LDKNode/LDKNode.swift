@@ -2471,6 +2471,8 @@ public protocol NodeProtocol: AnyObject {
 
     func connect(nodeId: PublicKey, address: SocketAddress, persist: Bool) throws
 
+    func currentSyncIntervals() -> RuntimeSyncIntervals
+
     func disconnect(nodeId: PublicKey) throws
 
     func eventHandled() throws
@@ -2534,6 +2536,8 @@ public protocol NodeProtocol: AnyObject {
     func unifiedQrPayment() -> UnifiedQrPayment
 
     func updateChannelConfig(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, channelConfig: ChannelConfig) throws
+
+    func updateSyncIntervals(intervals: RuntimeSyncIntervals) throws
 
     func verifySignature(msg: [UInt8], sig: String, pkey: PublicKey) -> Bool
 
@@ -2626,6 +2630,12 @@ open class Node:
                                                FfiConverterTypeSocketAddress.lower(address),
                                                FfiConverterBool.lower(persist), $0)
     }
+    }
+
+    open func currentSyncIntervals() -> RuntimeSyncIntervals {
+        return try! FfiConverterTypeRuntimeSyncIntervals.lift(try! rustCall {
+            uniffi_ldk_node_fn_method_node_current_sync_intervals(self.uniffiClonePointer(), $0)
+        })
     }
 
     open func disconnect(nodeId: PublicKey) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
@@ -2846,6 +2856,12 @@ open class Node:
                                                              FfiConverterTypeUserChannelId.lower(userChannelId),
                                                              FfiConverterTypePublicKey.lower(counterpartyNodeId),
                                                              FfiConverterTypeChannelConfig.lower(channelConfig), $0)
+    }
+    }
+
+    open func updateSyncIntervals(intervals: RuntimeSyncIntervals) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
+        uniffi_ldk_node_fn_method_node_update_sync_intervals(self.uniffiClonePointer(),
+                                                             FfiConverterTypeRuntimeSyncIntervals.lower(intervals), $0)
     }
     }
 
@@ -6526,6 +6542,75 @@ public func FfiConverterTypeRoutingFees_lower(_ value: RoutingFees) -> RustBuffe
     return FfiConverterTypeRoutingFees.lower(value)
 }
 
+public struct RuntimeSyncIntervals {
+    public var onchainWalletSyncIntervalSecs: UInt64
+    public var lightningWalletSyncIntervalSecs: UInt64
+    public var feeRateCacheUpdateIntervalSecs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(onchainWalletSyncIntervalSecs: UInt64, lightningWalletSyncIntervalSecs: UInt64, feeRateCacheUpdateIntervalSecs: UInt64) {
+        self.onchainWalletSyncIntervalSecs = onchainWalletSyncIntervalSecs
+        self.lightningWalletSyncIntervalSecs = lightningWalletSyncIntervalSecs
+        self.feeRateCacheUpdateIntervalSecs = feeRateCacheUpdateIntervalSecs
+    }
+}
+
+extension RuntimeSyncIntervals: Equatable, Hashable {
+    public static func == (lhs: RuntimeSyncIntervals, rhs: RuntimeSyncIntervals) -> Bool {
+        if lhs.onchainWalletSyncIntervalSecs != rhs.onchainWalletSyncIntervalSecs {
+            return false
+        }
+        if lhs.lightningWalletSyncIntervalSecs != rhs.lightningWalletSyncIntervalSecs {
+            return false
+        }
+        if lhs.feeRateCacheUpdateIntervalSecs != rhs.feeRateCacheUpdateIntervalSecs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(onchainWalletSyncIntervalSecs)
+        hasher.combine(lightningWalletSyncIntervalSecs)
+        hasher.combine(feeRateCacheUpdateIntervalSecs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRuntimeSyncIntervals: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RuntimeSyncIntervals {
+        return
+            try RuntimeSyncIntervals(
+                onchainWalletSyncIntervalSecs: FfiConverterUInt64.read(from: &buf),
+                lightningWalletSyncIntervalSecs: FfiConverterUInt64.read(from: &buf),
+                feeRateCacheUpdateIntervalSecs: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: RuntimeSyncIntervals, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.onchainWalletSyncIntervalSecs, into: &buf)
+        FfiConverterUInt64.write(value.lightningWalletSyncIntervalSecs, into: &buf)
+        FfiConverterUInt64.write(value.feeRateCacheUpdateIntervalSecs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuntimeSyncIntervals_lift(_ buf: RustBuffer) throws -> RuntimeSyncIntervals {
+    return try FfiConverterTypeRuntimeSyncIntervals.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuntimeSyncIntervals_lower(_ value: RuntimeSyncIntervals) -> RustBuffer {
+    return FfiConverterTypeRuntimeSyncIntervals.lower(value)
+}
+
 public struct SpendableUtxo {
     public var outpoint: OutPoint
     public var valueSats: UInt64
@@ -8200,6 +8285,8 @@ public enum NodeError {
     case CoinSelectionFailed(message: String)
 
     case InvalidMnemonic(message: String)
+
+    case BackgroundSyncNotEnabled(message: String)
 }
 
 #if swift(>=5.8)
@@ -8459,6 +8546,10 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
+        case 63: return try .BackgroundSyncNotEnabled(
+                message: FfiConverterString.read(from: &buf)
+            )
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -8589,6 +8680,8 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(61))
         case .InvalidMnemonic(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(62))
+        case .BackgroundSyncNotEnabled(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(63))
         }
     }
 }
@@ -11688,6 +11781,13 @@ private func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) 
     }
 }
 
+public func batterySavingSyncIntervals() -> RuntimeSyncIntervals {
+    return try! FfiConverterTypeRuntimeSyncIntervals.lift(try! rustCall {
+        uniffi_ldk_node_fn_func_battery_saving_sync_intervals($0
+        )
+    })
+}
+
 public func defaultConfig() -> Config {
     return try! FfiConverterTypeConfig.lift(try! rustCall {
         uniffi_ldk_node_fn_func_default_config($0
@@ -11727,6 +11827,9 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_ldk_node_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if uniffi_ldk_node_checksum_func_battery_saving_sync_intervals() != 25473 {
+        return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_func_default_config() != 55381 {
         return InitializationResult.apiChecksumMismatch
@@ -12049,6 +12152,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_ldk_node_checksum_method_node_connect() != 34120 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_ldk_node_checksum_method_node_current_sync_intervals() != 51918 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_ldk_node_checksum_method_node_disconnect() != 43538 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12143,6 +12249,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_node_update_channel_config() != 37852 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_node_update_sync_intervals() != 42322 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_node_verify_signature() != 20486 {
