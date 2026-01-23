@@ -1,10 +1,18 @@
-# 0.7.0-rc.11 (Synonym Fork)
+# 0.7.0-rc.12 (Synonym Fork)
 
 ## Bug Fixes
 - Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
   emitted when LDK replays events after node restart.
 
 ## Synonym Fork Additions
+- Added runtime-adjustable wallet sync intervals for battery optimization on mobile:
+  - `RuntimeSyncIntervals` struct with configurable `onchain_wallet_sync_interval_secs`,
+    `lightning_wallet_sync_interval_secs`, and `fee_rate_cache_update_interval_secs`
+  - `Node::update_sync_intervals()` to change intervals while the node is running
+  - `Node::current_sync_intervals()` to retrieve currently active intervals
+  - `RuntimeSyncIntervals::battery_saving()` preset (5min onchain, 2min lightning, 30min fees)
+  - Minimum 10-second interval enforced for all values
+  - Returns `BackgroundSyncNotEnabled` error if manual sync mode was configured at build time
 - Optimized startup performance by parallelizing VSS reads and caching network graph locally:
   - Parallelized early reads (node_metrics, payments, wallet)
   - Parallelized channel monitors and scorer reads
