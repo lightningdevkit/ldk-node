@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::default::Default;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 use std::{fmt, fs};
@@ -56,9 +57,10 @@ use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
+use crate::io::local_graph_store::read_local_graph_cache;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
-	read_node_metrics, read_payments_async, write_node_metrics,
+	read_network_graph, read_node_metrics, read_payments_async, write_node_metrics,
 	EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
 };
 use crate::io::vss_store::VssStore;
@@ -1528,17 +1530,59 @@ fn build_with_store_internal(
 		);
 	}
 
-	// Initialize the network graph
-	let network_graph =
-		match io::utils::read_network_graph(Arc::clone(&kv_store), Arc::clone(&logger)) {
-			Ok(graph) => Arc::new(graph),
-			Err(e) => {
-				if e.kind() == std::io::ErrorKind::NotFound {
-					Arc::new(Graph::new(config.network.into(), Arc::clone(&logger)))
-				} else {
-					log_error!(logger, "Failed to read network graph from store: {}", e);
-					return Err(BuildError::ReadFailed);
+	// Initialize the network graph from local cache, with VSS fallback for migration.
+	let (network_graph, local_rgs_timestamp) =
+		match read_local_graph_cache(&config.storage_dir_path, Arc::clone(&logger)) {
+			Ok(cache_data) => {
+				log_trace!(
+					logger,
+					"Loaded network graph from local cache with RGS timestamp {}",
+					cache_data.rgs_timestamp
+				);
+				(Arc::new(cache_data.graph), Arc::new(AtomicU32::new(cache_data.rgs_timestamp)))
+			},
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+				// Local cache doesn't exist, try VSS as fallback for migration.
+				log_trace!(
+					logger,
+					"Local graph cache not found, trying VSS fallback for migration"
+				);
+				match read_network_graph(Arc::clone(&kv_store), Arc::clone(&logger)) {
+					Ok(graph) => {
+						let timestamp =
+							node_metrics.read().unwrap().latest_rgs_snapshot_timestamp.unwrap_or(0);
+						log_info!(
+							logger,
+							"Migrated network graph from VSS to local cache (RGS timestamp: {})",
+							timestamp
+						);
+						(Arc::new(graph), Arc::new(AtomicU32::new(timestamp)))
+					},
+					Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+						// New user, create empty graph. RGS will download full snapshot.
+						log_trace!(logger, "No network graph found, creating empty graph");
+						(
+							Arc::new(Graph::new(config.network.into(), Arc::clone(&logger))),
+							Arc::new(AtomicU32::new(0)),
+						)
+					},
+					Err(e) => {
+						log_error!(logger, "Failed to read network graph from VSS: {}", e);
+						return Err(BuildError::ReadFailed);
+					},
 				}
+			},
+			Err(e) => {
+				// Local cache is invalid. Start fresh to avoid graph/timestamp mismatch.
+				log_error!(
+					logger,
+					"Local graph cache invalid: {}, starting fresh with empty graph",
+					e
+				);
+				(
+					Arc::new(Graph::new(config.network.into(), Arc::clone(&logger))),
+					Arc::new(AtomicU32::new(0)),
+				)
 			},
 		};
 
@@ -1804,17 +1848,12 @@ fn build_with_store_internal(
 			}
 			p2p_source
 		},
-		GossipSourceConfig::RapidGossipSync(rgs_server) => {
-			let latest_sync_timestamp =
-				node_metrics.read().unwrap().latest_rgs_snapshot_timestamp.unwrap_or(0);
-
-			Arc::new(GossipSource::new_rgs(
-				rgs_server.clone(),
-				latest_sync_timestamp,
-				Arc::clone(&network_graph),
-				Arc::clone(&logger),
-			))
-		},
+		GossipSourceConfig::RapidGossipSync(rgs_server) => Arc::new(GossipSource::new_rgs(
+			rgs_server.clone(),
+			Arc::clone(&local_rgs_timestamp),
+			Arc::clone(&network_graph),
+			Arc::clone(&logger),
+		)),
 	};
 
 	let (liquidity_source, custom_message_handler) =
@@ -2075,6 +2114,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		runtime_sync_intervals: Arc::new(RwLock::new(RuntimeSyncIntervals::default())),
+		local_rgs_timestamp,
 	})
 }
 

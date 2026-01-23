@@ -1,4 +1,4 @@
-# 0.7.0-rc.13 (Synonym Fork)
+# 0.7.0-rc.14 (Synonym Fork)
 
 ## Bug Fixes
 - Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
@@ -13,10 +13,11 @@
   - `RuntimeSyncIntervals::battery_saving()` preset (5min onchain, 2min lightning, 30min fees)
   - Minimum 10-second interval enforced for all values
   - Returns `BackgroundSyncNotEnabled` error if manual sync mode was configured at build time
-- Optimized startup performance by parallelizing VSS reads:
+- Optimized startup performance by parallelizing VSS reads and caching network graph locally:
   - Parallelized early reads (node_metrics, payments, wallet)
   - Parallelized channel monitors and scorer reads
   - Parallelized tail reads (output_sweeper, event_queue, peer_store)
+  - Added local caching for network graph to avoid slow VSS reads on startup
 - Added `claimable_on_close_sats` field to `ChannelDetails` struct. This field contains the
   amount (in satoshis) that would be claimable if the channel were force-closed now, computed
   from the channel monitor's `ClaimableOnChannelClose` balance. Returns `None` if no monitor

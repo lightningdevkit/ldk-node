@@ -27,7 +27,7 @@ pub(crate) enum GossipSource {
 	RapidGossipSync {
 		gossip_sync: Arc<RapidGossipSync>,
 		server_url: String,
-		latest_sync_timestamp: AtomicU32,
+		latest_sync_timestamp: Arc<AtomicU32>,
 		logger: Arc<Logger>,
 	},
 }
@@ -43,11 +43,10 @@ impl GossipSource {
 	}
 
 	pub fn new_rgs(
-		server_url: String, latest_sync_timestamp: u32, network_graph: Arc<Graph>,
+		server_url: String, latest_sync_timestamp: Arc<AtomicU32>, network_graph: Arc<Graph>,
 		logger: Arc<Logger>,
 	) -> Self {
 		let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
-		let latest_sync_timestamp = AtomicU32::new(latest_sync_timestamp);
 		Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger }
 	}
 
