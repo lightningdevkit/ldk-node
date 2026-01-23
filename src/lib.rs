@@ -106,6 +106,7 @@ use std::collections::HashMap;
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::ops::Deref;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -213,6 +214,8 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_sync_intervals: Arc<RwLock<RuntimeSyncIntervals>>,
+	/// Shared RGS timestamp used by LocalGraphStore to persist the timestamp alongside the graph.
+	local_rgs_timestamp: Arc<AtomicU32>,
 }
 
 impl Node {
@@ -570,7 +573,13 @@ impl Node {
 		));
 
 		// Setup background processing
-		let background_persister = Arc::clone(&self.kv_store);
+		// Wrap the kv_store with LocalGraphStore to redirect network graph persistence to local storage
+		let background_persister: Arc<DynStore> =
+			Arc::new(io::local_graph_store::LocalGraphStore::new(
+				Arc::clone(&self.kv_store),
+				self.config.storage_dir_path.clone(),
+				Arc::clone(&self.local_rgs_timestamp),
+			));
 		let background_event_handler = Arc::clone(&event_handler);
 		let background_chain_mon = Arc::clone(&self.chain_monitor);
 		let background_chan_man = Arc::clone(&self.channel_manager);
