@@ -1,4 +1,4 @@
-# 0.7.0-rc.14 (Synonym Fork)
+# 0.7.0-rc.15 (Synonym Fork)
 
 ## Bug Fixes
 - Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
