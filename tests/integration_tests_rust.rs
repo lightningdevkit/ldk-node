@@ -626,6 +626,7 @@ async fn onchain_wallet_recovery() {
 	// Now we start from scratch, only the seed remains the same.
 	let mut recovered_config = random_config(true);
 	recovered_config.node_entropy = original_node_entropy;
+	recovered_config.recovery_mode = true;
 	let recovered_node = setup_node(&chain_source, recovered_config);
 
 	recovered_node.sync_wallets().unwrap();
