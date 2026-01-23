@@ -23,8 +23,7 @@ use common::{
 	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
 	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType,
-	TestSyncStore,
+	setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
@@ -1317,30 +1316,21 @@ async fn async_payment() {
 	config_sender.node_config.node_alias = None;
 	config_sender.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender      ".to_string())));
-	let node_sender = setup_node_for_async_payments(
-		&chain_source,
-		config_sender,
-		Some(AsyncPaymentsRole::Client),
-	);
+	config_sender.async_payments_role = Some(AsyncPaymentsRole::Client);
+	let node_sender = setup_node(&chain_source, config_sender);
 
 	let mut config_sender_lsp = random_config(true);
 	config_sender_lsp.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender_lsp  ".to_string())));
-	let node_sender_lsp = setup_node_for_async_payments(
-		&chain_source,
-		config_sender_lsp,
-		Some(AsyncPaymentsRole::Server),
-	);
+	config_sender_lsp.async_payments_role = Some(AsyncPaymentsRole::Server);
+	let node_sender_lsp = setup_node(&chain_source, config_sender_lsp);
 
 	let mut config_receiver_lsp = random_config(true);
 	config_receiver_lsp.log_writer =
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver_lsp".to_string())));
+	config_receiver_lsp.async_payments_role = Some(AsyncPaymentsRole::Server);
 
-	let node_receiver_lsp = setup_node_for_async_payments(
-		&chain_source,
-		config_receiver_lsp,
-		Some(AsyncPaymentsRole::Server),
-	);
+	let node_receiver_lsp = setup_node(&chain_source, config_receiver_lsp);
 
 	let mut config_receiver = random_config(true);
 	config_receiver.node_config.listening_addresses = None;
