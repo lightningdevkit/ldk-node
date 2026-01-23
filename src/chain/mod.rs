@@ -470,7 +470,9 @@ impl ChainSource {
 					let config_receiver = self
 						.sync_config_sender
 						.as_ref()
-						.expect("sync_config_sender should be set when background_sync_config is Some")
+						.expect(
+							"sync_config_sender should be set when background_sync_config is Some",
+						)
 						.subscribe();
 
 					self.start_tx_based_sync_loop(
@@ -500,7 +502,9 @@ impl ChainSource {
 					let config_receiver = self
 						.sync_config_sender
 						.as_ref()
-						.expect("sync_config_sender should be set when background_sync_config is Some")
+						.expect(
+							"sync_config_sender should be set when background_sync_config is Some",
+						)
 						.subscribe();
 
 					self.start_tx_based_sync_loop(

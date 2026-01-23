@@ -440,9 +440,9 @@ impl RuntimeSyncIntervals {
 	/// Ideal for Android foreground services when the app goes to background.
 	pub fn battery_saving() -> Self {
 		Self {
-			onchain_wallet_sync_interval_secs: 300,       // 5 minutes
-			lightning_wallet_sync_interval_secs: 120,     // 2 minutes
-			fee_rate_cache_update_interval_secs: 1800,    // 30 minutes
+			onchain_wallet_sync_interval_secs: 300,    // 5 minutes
+			lightning_wallet_sync_interval_secs: 120,  // 2 minutes
+			fee_rate_cache_update_interval_secs: 1800, // 30 minutes
 		}
 	}
 }

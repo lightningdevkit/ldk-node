@@ -49,9 +49,8 @@ use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvide
 use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	RuntimeSyncIntervals, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	WALLET_KEYS_SEED_LEN,
+	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, RuntimeSyncIntervals,
+	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
