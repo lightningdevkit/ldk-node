@@ -152,9 +152,40 @@ impl Wallet {
 	pub(crate) fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
+		if unconfirmed_txs.is_empty() && evicted_txids.is_empty() {
+			return Ok(());
+		}
+
 		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let chain_tip1 = locked_wallet.latest_checkpoint().block_id();
+		let wallet_txs1 = locked_wallet
+			.transactions()
+			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
+			.collect::<std::collections::BTreeMap<
+				Txid,
+				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
+			>>();
+
 		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
 		locked_wallet.apply_evicted_txs(evicted_txids);
+
+		let chain_tip2 = locked_wallet.latest_checkpoint().block_id();
+		let wallet_txs2 = locked_wallet
+			.transactions()
+			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
+			.collect::<std::collections::BTreeMap<
+				Txid,
+				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
+			>>();
+
+		let events =
+			wallet_events(&mut *locked_wallet, chain_tip1, chain_tip2, wallet_txs1, wallet_txs2);
+
+		self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
+			log_error!(self.logger, "Failed to update payment store: {}", e);
+			Error::PersistenceFailed
+		})?;
 
 		let mut locked_persister = self.persister.lock().unwrap();
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
@@ -1214,4 +1245,106 @@ impl ChangeDestinationSource for WalletKeysManager {
 				.map_err(|_| ())
 		}
 	}
+}
+
+// FIXME/TODO: This is copied-over from bdk_wallet and only used to generate `WalletEvent`s after
+// applying mempool transactions. We should drop this when BDK offers to generate events for
+// mempool transactions natively.
+pub(crate) fn wallet_events(
+	wallet: &mut bdk_wallet::Wallet, chain_tip1: bdk_chain::BlockId,
+	chain_tip2: bdk_chain::BlockId,
+	wallet_txs1: std::collections::BTreeMap<
+		Txid,
+		(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
+	>,
+	wallet_txs2: std::collections::BTreeMap<
+		Txid,
+		(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
+	>,
+) -> Vec<WalletEvent> {
+	let mut events: Vec<WalletEvent> = Vec::new();
+
+	if chain_tip1 != chain_tip2 {
+		events.push(WalletEvent::ChainTipChanged { old_tip: chain_tip1, new_tip: chain_tip2 });
+	}
+
+	wallet_txs2.iter().for_each(|(txid2, (tx2, cp2))| {
+		if let Some((tx1, cp1)) = wallet_txs1.get(txid2) {
+			assert_eq!(tx1.compute_txid(), *txid2);
+			match (cp1, cp2) {
+				(
+					bdk_chain::ChainPosition::Unconfirmed { .. },
+					bdk_chain::ChainPosition::Confirmed { anchor, .. },
+				) => {
+					events.push(WalletEvent::TxConfirmed {
+						txid: *txid2,
+						tx: tx2.clone(),
+						block_time: *anchor,
+						old_block_time: None,
+					});
+				},
+				(
+					bdk_chain::ChainPosition::Confirmed { anchor, .. },
+					bdk_chain::ChainPosition::Unconfirmed { .. },
+				) => {
+					events.push(WalletEvent::TxUnconfirmed {
+						txid: *txid2,
+						tx: tx2.clone(),
+						old_block_time: Some(*anchor),
+					});
+				},
+				(
+					bdk_chain::ChainPosition::Confirmed { anchor: anchor1, .. },
+					bdk_chain::ChainPosition::Confirmed { anchor: anchor2, .. },
+				) => {
+					if *anchor1 != *anchor2 {
+						events.push(WalletEvent::TxConfirmed {
+							txid: *txid2,
+							tx: tx2.clone(),
+							block_time: *anchor2,
+							old_block_time: Some(*anchor1),
+						});
+					}
+				},
+				(
+					bdk_chain::ChainPosition::Unconfirmed { .. },
+					bdk_chain::ChainPosition::Unconfirmed { .. },
+				) => {
+					// do nothing if still unconfirmed
+				},
+			}
+		} else {
+			match cp2 {
+				bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
+					events.push(WalletEvent::TxConfirmed {
+						txid: *txid2,
+						tx: tx2.clone(),
+						block_time: *anchor,
+						old_block_time: None,
+					});
+				},
+				bdk_chain::ChainPosition::Unconfirmed { .. } => {
+					events.push(WalletEvent::TxUnconfirmed {
+						txid: *txid2,
+						tx: tx2.clone(),
+						old_block_time: None,
+					});
+				},
+			}
+		}
+	});
+
+	// find tx that are no longer canonical
+	wallet_txs1.iter().for_each(|(txid1, (tx1, _))| {
+		if !wallet_txs2.contains_key(txid1) {
+			let conflicts = wallet.tx_graph().direct_conflicts(tx1).collect::<Vec<_>>();
+			if !conflicts.is_empty() {
+				events.push(WalletEvent::TxReplaced { txid: *txid1, tx: tx1.clone(), conflicts });
+			} else {
+				events.push(WalletEvent::TxDropped { txid: *txid1, tx: tx1.clone() });
+			}
+		}
+	});
+
+	events
 }
