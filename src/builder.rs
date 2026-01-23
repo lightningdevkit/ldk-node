@@ -1529,19 +1529,18 @@ fn build_with_store_internal(
 	}
 
 	// Initialize the network graph
-	let network_graph = match io::utils::read_network_graph_from_local_cache(
-		&config.storage_dir_path,
-		Arc::clone(&logger),
-	) {
-		Ok(graph) => Arc::new(graph),
-		Err(e) => {
-			// Local cache not found or invalid - create empty graph, RGS will populate it
-			if e.kind() != std::io::ErrorKind::NotFound {
-				log_trace!(logger, "Local network graph cache invalid: {}", e);
-			}
-			Arc::new(Graph::new(config.network.into(), Arc::clone(&logger)))
-		},
-	};
+	let network_graph =
+		match io::utils::read_network_graph(Arc::clone(&kv_store), Arc::clone(&logger)) {
+			Ok(graph) => Arc::new(graph),
+			Err(e) => {
+				if e.kind() == std::io::ErrorKind::NotFound {
+					Arc::new(Graph::new(config.network.into(), Arc::clone(&logger)))
+				} else {
+					log_error!(logger, "Failed to read network graph from store: {}", e);
+					return Err(BuildError::ReadFailed);
+				}
+			},
+		};
 
 	// Read channel monitors and scorer data in parallel
 	let (monitors_result, scorer_data_res, external_scores_data_res) = {
