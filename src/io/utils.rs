@@ -27,7 +27,9 @@ use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::scoring::ChannelLiquidities;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning_types::string::PrintableString;
@@ -46,7 +48,6 @@ use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
 use crate::{Error, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
-pub const NETWORK_GRAPH_LOCAL_CACHE_FILENAME: &str = "network_graph_cache";
 
 /// Generates a random [BIP 39] mnemonic with the specified word count.
 ///
@@ -159,39 +160,23 @@ where
 	}
 }
 
-/// Read a previously persisted [`NetworkGraph`] from a local cache file.
-pub(crate) fn read_network_graph_from_local_cache<L: Deref + Clone>(
-	storage_dir_path: &str, logger: L,
+/// Read a previously persisted [`NetworkGraph`] from the store.
+pub(crate) fn read_network_graph<L: Deref + Clone>(
+	kv_store: Arc<DynStore>, logger: L,
 ) -> Result<NetworkGraph<L>, std::io::Error>
 where
 	L::Target: LdkLogger,
 {
-	let data = read_network_graph_bytes_from_local_cache(storage_dir_path)?;
-	let mut reader = Cursor::new(data);
+	let mut reader = Cursor::new(KVStoreSync::read(
+		&*kv_store,
+		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_KEY,
+	)?);
 	NetworkGraph::read(&mut reader, logger.clone()).map_err(|e| {
-		log_error!(logger, "Failed to deserialize NetworkGraph from local cache: {}", e);
+		log_error!(logger, "Failed to deserialize NetworkGraph: {}", e);
 		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize NetworkGraph")
 	})
-}
-
-/// Read raw bytes from the local network graph cache file.
-/// Used by LocalGraphStore to intercept KVStore reads.
-pub(crate) fn read_network_graph_bytes_from_local_cache(
-	storage_dir_path: &str,
-) -> Result<Vec<u8>, std::io::Error> {
-	let cache_path = format!("{}/{}", storage_dir_path, NETWORK_GRAPH_LOCAL_CACHE_FILENAME);
-	fs::read(&cache_path)
-}
-
-/// Write raw bytes to the local network graph cache file.
-/// Used by LocalGraphStore to intercept KVStore writes.
-pub(crate) fn write_network_graph_to_local_cache_bytes(
-	storage_dir_path: &str, data: &[u8],
-) -> Result<(), std::io::Error> {
-	// Ensure the storage directory exists
-	fs::create_dir_all(storage_dir_path)?;
-	let cache_path = format!("{}/{}", storage_dir_path, NETWORK_GRAPH_LOCAL_CACHE_FILENAME);
-	fs::write(&cache_path, data)
 }
 
 /// Persist external pathfinding scores to the cache.

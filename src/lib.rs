@@ -570,12 +570,7 @@ impl Node {
 		));
 
 		// Setup background processing
-		// Wrap the kv_store with LocalGraphStore to redirect network graph persistence to local storage
-		let background_persister: Arc<DynStore> =
-			Arc::new(io::local_graph_store::LocalGraphStore::new(
-				Arc::clone(&self.kv_store),
-				self.config.storage_dir_path.clone(),
-			));
+		let background_persister = Arc::clone(&self.kv_store);
 		let background_event_handler = Arc::clone(&event_handler);
 		let background_chain_mon = Arc::clone(&self.chain_monitor);
 		let background_chan_man = Arc::clone(&self.channel_manager);
