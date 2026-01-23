@@ -206,6 +206,31 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	(bitcoind, electrsd)
 }
 
+pub(crate) fn random_chain_source<'a>(
+	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
+) -> TestChainSource<'a> {
+	let r = rand::random_range(0..3);
+	match r {
+		0 => {
+			println!("Randomly setting up Esplora chain syncing...");
+			TestChainSource::Esplora(electrsd)
+		},
+		1 => {
+			println!("Randomly setting up Electrum chain syncing...");
+			TestChainSource::Electrum(electrsd)
+		},
+		2 => {
+			println!("Randomly setting up Bitcoind RPC chain syncing...");
+			TestChainSource::BitcoindRpcSync(bitcoind)
+		},
+		3 => {
+			println!("Randomly setting up Bitcoind REST chain syncing...");
+			TestChainSource::BitcoindRestSync(bitcoind)
+		},
+		_ => unreachable!(),
+	}
+}
+
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
 	let mut rng = rng();

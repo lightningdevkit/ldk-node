@@ -21,7 +21,7 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
 	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
-	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
 	setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
 };
@@ -43,34 +43,7 @@ use log::LevelFilter;
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
-		.await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn channel_full_cycle_electrum() {
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Electrum(&electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
-		.await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn channel_full_cycle_bitcoind_rpc_sync() {
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
-		.await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn channel_full_cycle_bitcoind_rest_sync() {
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::BitcoindRestSync(&bitcoind);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
@@ -79,7 +52,7 @@ async fn channel_full_cycle_bitcoind_rest_sync() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_force_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true)
 		.await;
@@ -88,7 +61,7 @@ async fn channel_full_cycle_force_close() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_force_close_trusted_no_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true)
 		.await;
@@ -97,7 +70,7 @@ async fn channel_full_cycle_force_close_trusted_no_reserve() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true, true, false)
 		.await;
@@ -106,7 +79,7 @@ async fn channel_full_cycle_0conf() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_legacy_staticremotekey() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false)
 		.await;
@@ -115,7 +88,7 @@ async fn channel_full_cycle_legacy_staticremotekey() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -322,7 +295,7 @@ async fn start_stop_reinit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -523,7 +496,7 @@ async fn onchain_send_receive() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_send_all_retains_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	// Setup nodes
@@ -608,7 +581,7 @@ async fn onchain_send_all_retains_reserve() {
 async fn onchain_wallet_recovery() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let original_config = random_config(true);
 	let original_node_entropy = original_config.node_entropy;
@@ -823,9 +796,9 @@ async fn run_rbf_test(is_insert_block: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn sign_verify_msg() {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let node = setup_node(&chain_source, config);
 
 	// Tests arbitrary message signing and later verification
@@ -837,8 +810,8 @@ async fn sign_verify_msg() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn connection_multi_listen() {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
 
 	let node_id_b = node_b.node_id();
@@ -857,8 +830,8 @@ async fn connection_restart_behavior() {
 }
 
 async fn do_connection_restart_behavior(persist: bool) {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
 
 	let node_id_a = node_a.node_id();
@@ -904,8 +877,8 @@ async fn do_connection_restart_behavior(persist: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn concurrent_connections_succeed() {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let node_a = Arc::new(node_a);
@@ -929,13 +902,11 @@ async fn concurrent_connections_succeed() {
 	}
 }
 
-async fn run_splice_channel_test(bitcoind_chain_source: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_channel() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = if bitcoind_chain_source {
-		TestChainSource::BitcoindRpcSync(&bitcoind)
-	} else {
-		TestChainSource::Esplora(&electrsd)
-	};
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
@@ -1072,15 +1043,9 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn splice_channel() {
-	run_splice_channel_test(false).await;
-	run_splice_channel_test(true).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
@@ -1309,7 +1274,7 @@ async fn simple_bolt12_send_receive() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn async_payment() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let mut config_sender = random_config(true);
 	config_sender.node_config.listening_addresses = None;
@@ -1435,7 +1400,7 @@ async fn async_payment() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_node_announcement_propagation() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	// Node A will use both listening and announcement addresses
 	let mut config_a = random_config(true);
@@ -1527,7 +1492,7 @@ async fn test_node_announcement_propagation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn generate_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
@@ -1582,7 +1547,7 @@ async fn generate_bip21_uri() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn unified_send_receive_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
@@ -1921,8 +1886,8 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn facade_logging() {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let logger = init_log_logger(LevelFilter::Trace);
 	let mut config = random_config(false);
@@ -1940,7 +1905,7 @@ async fn facade_logging() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn spontaneous_send_with_custom_preimage() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
@@ -2006,8 +1971,8 @@ async fn spontaneous_send_with_custom_preimage() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn drop_in_async_context() {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let config = random_config(true);
 	let node = setup_node(&chain_source, config);
 	node.stop().unwrap();
@@ -2318,7 +2283,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn payment_persistence_after_restart() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	// Setup nodes manually so we can restart node_a with the same config
 	println!("== Node A ==");
