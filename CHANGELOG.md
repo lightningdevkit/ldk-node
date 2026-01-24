@@ -1,10 +1,11 @@
-# 0.7.0-rc.15 (Synonym Fork)
+# 0.7.0-rc.16 (Synonym Fork)
 
 ## Bug Fixes
 - Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
   emitted when LDK replays events after node restart.
 
 ## Synonym Fork Additions
+- Added JitPack support for `ldk-node-jvm` module to enable unit testing in consuming apps
 - Added runtime-adjustable wallet sync intervals for battery optimization on mobile:
   - `RuntimeSyncIntervals` struct with configurable `onchain_wallet_sync_interval_secs`,
     `lightning_wallet_sync_interval_secs`, and `fee_rate_cache_update_interval_secs`

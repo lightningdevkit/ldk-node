@@ -3,8 +3,8 @@
 
 import PackageDescription
 
-let tag = "v0.7.0-rc.15"
-let checksum = "34f5a8403ba9816893e416da93eefaabc6a3d9f25c7967d73a6094c9b8f45808"
+let tag = "v0.7.0-rc.16"
+let checksum = "5ca612e30639e86d4a215c7819d93e55aba3c9a9ea704a79ab18d6df78c38b32"
 let url = "https://github.com/synonymdev/ldk-node/releases/download/\(tag)/LDKNodeFFI.xcframework.zip"
 
 let package = Package(
