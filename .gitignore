@@ -38,3 +38,4 @@ swift.swiftdoc
 .cursor
 .claude
 *.local.*
+.ai
