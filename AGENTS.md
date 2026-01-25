@@ -194,10 +194,12 @@ If anything is missing or cannot be verified, you must fix it before declaring s
 - NEVER suggest manually adding @Serializable annotations to generated Kotlin bindings
 - ALWAYS run `cargo fmt` before committing to ensure consistent code formatting
 - ALWAYS move imports to the top of the file when applicable (no inline imports in functions)
-- To regenerate ALL bindings (Swift, Kotlin, Python), use this command:
-  ```bash
-  RUSTFLAGS="--cfg no_download" cargo build && ./scripts/uniffi_bindgen_generate.sh && ./scripts/swift_create_xcframework_archive.sh && sh scripts/uniffi_bindgen_generate_kotlin_android.sh
-  ```
+
+## Bindings Generation Command
+To regenerate ALL bindings (Swift, Kotlin, Python), use this command:
+```sh
+RUSTFLAGS="--cfg no_download" cargo build && ./scripts/uniffi_bindgen_generate.sh && ./scripts/swift_create_xcframework_archive.sh && sh scripts/uniffi_bindgen_generate_kotlin_android.sh
+```
 
 ## Version Bumping Checklist
 When bumping the version, ALWAYS update ALL of these files:
