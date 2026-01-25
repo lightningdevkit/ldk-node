@@ -194,6 +194,7 @@ If anything is missing or cannot be verified, you must fix it before declaring s
 - NEVER suggest manually adding @Serializable annotations to generated Kotlin bindings
 - ALWAYS run `cargo fmt` before committing to ensure consistent code formatting
 - ALWAYS move imports to the top of the file when applicable (no inline imports in functions)
+- NEVER run binding generation scripts yourself - always ask the user to run them (they are long-running and resource-intensive)
 
 ## Bindings Generation Command
 To regenerate ALL bindings (Swift, Kotlin, Python), use this command:
