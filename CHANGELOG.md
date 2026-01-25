@@ -1,6 +1,8 @@
-# 0.7.0-rc.16 (Synonym Fork)
+# 0.7.0-rc.17 (Synonym Fork)
 
 ## Bug Fixes
+- Fixed kotlinx-serialization version mismatch (1.6.0 -> 1.6.3) that caused
+  `NoSuchMethodError` when serializing `Event` objects in consuming apps.
 - Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
   emitted when LDK replays events after node restart.
 
