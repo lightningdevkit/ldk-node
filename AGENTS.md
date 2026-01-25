@@ -198,7 +198,7 @@ If anything is missing or cannot be verified, you must fix it before declaring s
 ## Bindings Generation Command
 To regenerate ALL bindings (Swift, Kotlin, Python), use this command:
 ```sh
-RUSTFLAGS="--cfg no_download" cargo build && ./scripts/uniffi_bindgen_generate.sh && ./scripts/swift_create_xcframework_archive.sh && sh scripts/uniffi_bindgen_generate_kotlin_android.sh
+RUSTFLAGS="--cfg no_download" cargo build && ./scripts/uniffi_bindgen_generate.sh && ./scripts/swift_create_xcframework_archive.sh && sh scripts/uniffi_bindgen_generate_kotlin.sh && sh scripts/uniffi_bindgen_generate_kotlin_android.sh
 ```
 
 ## Version Bumping Checklist
