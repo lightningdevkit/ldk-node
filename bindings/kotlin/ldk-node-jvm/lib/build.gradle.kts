@@ -5,9 +5,6 @@ import org.gradle.api.tasks.testing.logging.TestLogEvent.SKIPPED
 import org.gradle.api.tasks.testing.logging.TestLogEvent.STANDARD_ERROR
 import org.gradle.api.tasks.testing.logging.TestLogEvent.STANDARD_OUT
 
-// library version is defined in gradle.properties
-val libraryVersion: String by project
-
 plugins {
     // Apply the org.jetbrains.kotlin.jvm Plugin to add support for Kotlin.
     id("org.jetbrains.kotlin.jvm") version "2.2.0"
@@ -19,6 +16,12 @@ plugins {
     id("signing")
     id("org.jlleitschuh.gradle.ktlint") version "11.6.1"
 }
+
+// library version is defined in gradle.properties
+val libraryVersion: String by project
+
+group = "org.lightningdevkit"
+version = libraryVersion
 
 repositories {
     // Use Maven Central for resolving dependencies.
