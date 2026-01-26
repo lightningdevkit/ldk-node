@@ -53,11 +53,11 @@ android {
 dependencies {
     implementation("net.java.dev.jna:jna:5.12.0@aar")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("androidx.appcompat:appcompat:1.4.0")
     implementation("androidx.core:core-ktx:1.7.0")
-    implementation("org.jetbrains.kotlinx:atomicfu:0.23.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+    implementation("org.jetbrains.kotlinx:atomicfu:0.27.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     api("org.slf4j:slf4j-api:1.7.30")
 }
 

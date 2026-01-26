@@ -1,10 +1,11 @@
-# 0.7.0-rc.16 (Synonym Fork)
+# 0.7.0-rc.17 (Synonym Fork)
 
 ## Bug Fixes
 - Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
   emitted when LDK replays events after node restart.
 
 ## Synonym Fork Additions
+- Upgraded to Kotlin 2.2.0 for compatibility with consuming apps using Kotlin 2.x
 - Added JitPack support for `ldk-node-jvm` module to enable unit testing in consuming apps
 - Added runtime-adjustable wallet sync intervals for battery optimization on mobile:
   - `RuntimeSyncIntervals` struct with configurable `onchain_wallet_sync_interval_secs`,
@@ -504,4 +505,3 @@ integrated LDK and BDK-based wallets.
 
 **Note:** This release is still considered experimental, should not be run in
 production, and no compatibility guarantees are given until the release of 0.1.
-
