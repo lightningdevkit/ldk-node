@@ -118,6 +118,19 @@ check-cfg = [
 name = "payments"
 harness = false
 
+[patch.crates-io]
+lightning = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-types = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-invoice = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-net-tokio = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-persister = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-background-processor = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-rapid-gossip-sync = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-block-sync = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-transaction-sync = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-liquidity = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+lightning-macros = { git = "https://github.com/ovitrif/rust-lightning", branch = "0.2-electrum-fix" }
+
 #[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
