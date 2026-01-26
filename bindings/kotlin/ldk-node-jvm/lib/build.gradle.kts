@@ -128,10 +128,8 @@ afterEvaluate {
 }
 
 signing {
-//    val signingKeyId: String? by project
-//    val signingKey: String? by project
-//    val signingPassword: String? by project
-//    useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+    // Only sign if signing key is available (not on JitPack)
+    setRequired { gradle.taskGraph.hasTask("publish") && project.hasProperty("signingKey") }
     sign(publishing.publications)
 }
 

@@ -32,3 +32,11 @@ mkdir -p "$BINDINGS_DIR"/"$PROJECT_DIR"/lib/src/main/kotlin/"$PACKAGE_DIR" || ex
 $UNIFFI_BINDGEN_BIN generate bindings/ldk_node.udl --language kotlin -o "$TARGET_DIR" || exit 1
 
 cp "$TARGET_DIR"/"$PACKAGE_DIR"/ldk_node.kt "$BINDINGS_DIR"/"$PROJECT_DIR"/lib/src/main/kotlin/"$PACKAGE_DIR"/ || exit 1
+
+# Sync version from Cargo.toml
+echo "Syncing version from Cargo.toml..."
+CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/' | head -1)
+JVM_LIB_DIR="$BINDINGS_DIR/$PROJECT_DIR"
+sed -i.bak "s/^libraryVersion=.*/libraryVersion=$CARGO_VERSION/" "$JVM_LIB_DIR/gradle.properties"
+rm -f "$JVM_LIB_DIR/gradle.properties.bak"
+echo "JVM version synced: $CARGO_VERSION"

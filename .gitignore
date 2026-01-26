@@ -31,6 +31,8 @@ swift.swiftdoc
 # fork
 !/bindings/kotlin/ldk-node-android/lib/src/main/jniLibs
 !/bindings/kotlin/ldk-node-android/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
+!/bindings/kotlin/ldk-node-jvm/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
+!/bindings/kotlin/ldk-node-jvm/lib/src/main/resources/
 
 # IDE and local files
 .idea
@@ -38,3 +40,4 @@ swift.swiftdoc
 .cursor
 .claude
 *.local.*
+.ai
