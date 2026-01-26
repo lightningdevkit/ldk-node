@@ -39,7 +39,7 @@ use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::PaymentDetails;
+use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
@@ -621,3 +621,5 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 		CustomTlvRecord { type_num: tlv.0, value: tlv.1.clone() }
 	}
 }
+
+pub(crate) type PendingPaymentStore = DataStore<PendingPaymentDetails, Arc<Logger>>;
