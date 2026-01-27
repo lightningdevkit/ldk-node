@@ -228,8 +228,9 @@ When bumping the version, ALWAYS update ALL of these files:
   # Compare output with the checksum value in Package.swift - they MUST match
   ```
 - Create GitHub release with same name as the tag, upload `LDKNodeFFI.xcframework.zip`
-- Add release link at the end of PR description (or as a comment if not your PR):
+- **ALWAYS add release link at the end of PR description** (use `gh pr edit` to update the body):
   ```
   ### Release
-  - Release [vN.N.N](link_to_release)
+  - [vN.N.N](link_to_release)
   ```
+- Only add release as a comment if it's not your PR and you cannot edit the description

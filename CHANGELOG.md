@@ -1,6 +1,9 @@
-# 0.7.0-rc.17 (Synonym Fork)
+# 0.7.0-rc.18 (Synonym Fork)
 
 ## Bug Fixes
+- Backported upstream Electrum sync fix (PR #4341): Skip unconfirmed `get_history` entries in
+  `ElectrumSyncClient`. Previously, mempool entries (height=0 or -1) were incorrectly treated as
+  confirmed, causing `get_merkle` to fail for 0-conf channel funding transactions.
 - Fixed duplicate payment events (`PaymentReceived`, `PaymentSuccessful`, `PaymentFailed`) being
   emitted when LDK replays events after node restart.
 
