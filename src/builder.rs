@@ -55,12 +55,14 @@ use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
-	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_scorer,
-	write_node_metrics,
+	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
+	read_scorer, write_node_metrics,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
@@ -73,8 +75,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
-	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister,
-	SyncAndAsyncKVStore,
+	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
+	Persister, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1057,12 +1059,14 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res) = runtime.block_on(async move {
-		tokio::join!(
-			read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
-			read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-		)
-	});
+	let (payment_store_res, node_metris_res, pending_payment_store_res) =
+		runtime.block_on(async move {
+			tokio::join!(
+				read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
+				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
+				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref))
+			)
+		});
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
@@ -1243,6 +1247,20 @@ fn build_with_store_internal(
 		},
 	};
 
+	let pending_payment_store = match pending_payment_store_res {
+		Ok(pending_payments) => Arc::new(PendingPaymentStore::new(
+			pending_payments,
+			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read pending payment data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
@@ -1251,6 +1269,7 @@ fn build_with_store_internal(
 		Arc::clone(&payment_store),
 		Arc::clone(&config),
 		Arc::clone(&logger),
+		Arc::clone(&pending_payment_store),
 	));
 
 	// Initialize the KeysManager
