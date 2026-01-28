@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [ "ldk-server-cli", "ldk-server-client", "ldk-server-protos", "ldk-server"]
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+
+[profile.dev]
+panic = "abort"

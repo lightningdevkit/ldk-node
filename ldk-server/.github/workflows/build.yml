@@ -1,0 +1,49 @@
+name: Continuous Integration Checks
+
+on: [ push, pull_request ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        platform: [
+          ubuntu-latest,
+          macos-latest,
+        ]
+        toolchain:
+          [ stable,
+            beta,
+            1.85.0, # MSRV, same as ldk-node
+          ]
+        include:
+          - toolchain: stable
+            check-fmt: true
+          - toolchain: 1.85.0
+            msrv: true
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+      - name: Install Rust ${{ matrix.toolchain }} toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
+          rustup override set ${{ matrix.toolchain }}
+          if [ "${{ matrix.msrv }}" = "true" ]; then rustup component add clippy; fi
+      - name: Check formatting
+        if: matrix.check-fmt
+        run: rustup component add rustfmt && cargo fmt --all -- --check
+      - name: Pin packages to allow for MSRV
+        if: matrix.msrv
+        run: | # None needed yet
+          echo "No packages need pinning for MSRV ${{ matrix.toolchain }}"
+      - name: Build on Rust ${{ matrix.toolchain }}
+        run: cargo build --verbose --color always
+      - name: Check clippy if on msrv
+        if: matrix.msrv
+        run: cargo clippy --all-features -- -D warnings
+      - name: Test on Rust ${{ matrix.toolchain }}
+        run: cargo test
+      - name: Cargo check release on Rust ${{ matrix.toolchain }}
+        run: cargo check --release
+      - name: Cargo check doc on Rust ${{ matrix.toolchain }}
+        run: cargo doc --release
