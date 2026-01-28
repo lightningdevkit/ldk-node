@@ -1,4 +1,4 @@
-name: RabbitMQ Integration Tests
+name: LDK Server - RabbitMQ Integration Tests
 
 on: [ push, pull_request ]
 
@@ -29,6 +29,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run RabbitMQ integration tests
-        run: cargo test --features integration-tests-events-rabbitmq --verbose --color=always -- --nocapture
+        run: cargo test -p ldk-server --features integration-tests-events-rabbitmq --verbose --color=always -- --nocapture
         env:
           RUST_BACKTRACE: 1
