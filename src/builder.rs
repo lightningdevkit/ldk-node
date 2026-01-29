@@ -32,6 +32,7 @@ use lightning::routing::scoring::{
 	ProbabilisticScoringFeeParameters,
 };
 use lightning::sign::{EntropySource, NodeSigner};
+use lightning::util::config::HTLCInterceptionFlags;
 use lightning::util::persist::{
 	KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -1434,7 +1435,7 @@ fn build_with_store_internal(
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// If we act as an LSPS2 service, we need to be able to intercept HTLCs and forward the
 		// information to the service handler.
-		user_config.accept_intercept_htlcs = true;
+		user_config.htlc_interception_flags = HTLCInterceptionFlags::ToInterceptSCIDs.into();
 
 		// If we act as an LSPS2 service, we allow forwarding to unannounced channels.
 		user_config.accept_forwards_to_priv_channels = true;

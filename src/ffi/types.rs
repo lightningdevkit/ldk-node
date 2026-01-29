@@ -1016,7 +1016,7 @@ impl Bolt11Invoice {
 
 	/// Returns the hash to which we will receive the preimage on completion of the payment
 	pub fn payment_hash(&self) -> PaymentHash {
-		PaymentHash(self.inner.payment_hash().to_byte_array())
+		self.inner.payment_hash()
 	}
 
 	/// Get the payment secret if one was included in the invoice
@@ -1434,10 +1434,7 @@ mod tests {
 
 		let invoice_str = wrapped_invoice.to_string();
 		let parsed_invoice: LdkBolt11Invoice = invoice_str.parse().unwrap();
-		assert_eq!(
-			ldk_invoice.payment_hash().to_byte_array().to_vec(),
-			parsed_invoice.payment_hash().to_byte_array().to_vec()
-		);
+		assert_eq!(ldk_invoice.payment_hash(), parsed_invoice.payment_hash(),);
 	}
 
 	#[test]
