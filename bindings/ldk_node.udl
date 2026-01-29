@@ -26,12 +26,22 @@ dictionary BackgroundSyncConfig {
 	u64 fee_rate_cache_update_interval_secs;
 };
 
+dictionary SyncTimeoutsConfig {
+	u64 onchain_wallet_sync_timeout_secs;
+	u64 lightning_wallet_sync_timeout_secs;
+	u64 fee_rate_cache_update_timeout_secs;
+	u64 tx_broadcast_timeout_secs;
+	u8 per_request_timeout_secs;
+};
+
 dictionary EsploraSyncConfig {
 	BackgroundSyncConfig? background_sync_config;
+	SyncTimeoutsConfig timeouts_config;
 };
 
 dictionary ElectrumSyncConfig {
 	BackgroundSyncConfig? background_sync_config;
+	SyncTimeoutsConfig timeouts_config;
 };
 
 dictionary LSPS2ServiceConfig {

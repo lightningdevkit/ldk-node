@@ -158,7 +158,8 @@ async fn multi_hop_sending() {
 	let mut nodes = Vec::new();
 	for _ in 0..5 {
 		let config = random_config(true);
-		let sync_config = EsploraSyncConfig { background_sync_config: None };
+		let mut sync_config = EsploraSyncConfig::default();
+		sync_config.background_sync_config = None;
 		setup_builder!(builder, config.node_config);
 		builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		let node = builder.build(config.node_entropy.into()).unwrap();
@@ -256,7 +257,8 @@ async fn start_stop_reinit() {
 
 	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
 
-	let sync_config = EsploraSyncConfig { background_sync_config: None };
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
@@ -1709,7 +1711,8 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let sync_config = EsploraSyncConfig { background_sync_config: None };
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
 
 	// Setup three nodes: service, client, and payer
 	let channel_opening_fee_ppm = 10_000;
@@ -2026,7 +2029,8 @@ async fn lsps2_client_trusts_lsp() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let sync_config = EsploraSyncConfig { background_sync_config: None };
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
 
 	// Setup three nodes: service, client, and payer
 	let channel_opening_fee_ppm = 10_000;
@@ -2199,7 +2203,8 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let sync_config = EsploraSyncConfig { background_sync_config: None };
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
 
 	// Setup three nodes: service, client, and payer
 	let channel_opening_fee_ppm = 10_000;
