@@ -98,8 +98,8 @@ impl Bolt11Payment {
 		}
 
 		let invoice = maybe_deref(invoice);
-		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
+		let payment_hash = invoice.payment_hash();
+		let payment_id = PaymentId(invoice.payment_hash().0);
 		if let Some(payment) = self.payment_store.get(&payment_id) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
@@ -204,8 +204,8 @@ impl Bolt11Payment {
 			}
 		}
 
-		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-		let payment_id = PaymentId(invoice.payment_hash().to_byte_array());
+		let payment_hash = invoice.payment_hash();
+		let payment_id = PaymentId(invoice.payment_hash().0);
 		if let Some(payment) = self.payment_store.get(&payment_id) {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
@@ -494,7 +494,7 @@ impl Bolt11Payment {
 			}
 		};
 
-		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+		let payment_hash = invoice.payment_hash();
 		let payment_secret = invoice.payment_secret();
 		let id = PaymentId(payment_hash.0);
 		let preimage = if manual_claim_payment_hash.is_none() {
@@ -712,7 +712,7 @@ impl Bolt11Payment {
 			})?;
 
 		// Register payment in payment store.
-		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+		let payment_hash = invoice.payment_hash();
 		let payment_secret = invoice.payment_secret();
 		let lsp_fee_limits = LSPFeeLimits {
 			max_total_opening_fee_msat: lsp_total_opening_fee,
