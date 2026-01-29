@@ -591,6 +591,11 @@ impl NodeBuilder {
 	///
 	/// `fixed_headers` are included as it is in all the requests made to VSS.
 	///
+	/// `store_id` allows you to segment LDK Node storage from other storage accessed with
+	/// [`VssStoreBuilder`] using the same [`NodeEntropy`] (as storage with different keys is
+	/// obviously segmented to prevent wallets from reading data for unrelated wallets). It can be
+	/// any value.
+	///
 	/// **Caution**: VSS support is in **alpha** and is considered experimental.
 	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
@@ -618,6 +623,11 @@ impl NodeBuilder {
 	/// The LNURL challenge will be retrieved by making a request to the given `lnurl_auth_server_url`.
 	/// The returned JWT token in response to the signed LNURL request, will be used for
 	/// authentication/authorization of all the requests made to VSS.
+	///
+	/// `store_id` allows you to segment LDK Node storage from other storage accessed with
+	/// [`VssStoreBuilder`] using the same authentication (as storage with different keys is
+	/// obviously segmented to prevent wallets from reading data for unrelated wallets). It can be
+	/// any value.
 	///
 	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
 	///
@@ -990,6 +1000,11 @@ impl ArcedNodeBuilder {
 	///
 	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
 	///
+	/// `store_id` allows you to segment LDK Node storage from other storage accessed with
+	/// [`VssStoreBuilder`] using the same [`NodeEntropy`] (as storage with different keys is
+	/// obviously segmented to prevent wallets from reading data for unrelated wallets). It can be
+	/// any value.
+	///
 	/// **Caution**: VSS support is in **alpha** and is considered experimental.
 	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
@@ -1016,6 +1031,11 @@ impl ArcedNodeBuilder {
 	/// authentication/authorization of all the requests made to VSS.
 	///
 	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth server.
+	///
+	/// `store_id` allows you to segment LDK Node storage from other storage accessed with
+	/// [`VssStoreBuilder`] using the same authentication (as storage with different keys is
+	/// obviously segmented to prevent wallets from reading data for unrelated wallets). It can be
+	/// any value.
 	///
 	/// **Caution**: VSS support is in **alpha** and is considered experimental.
 	/// Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are
