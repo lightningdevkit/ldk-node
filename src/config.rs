@@ -30,16 +30,16 @@ const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 
 // The default timeout after which we abort a wallet syncing operation.
-const DEFAULT_BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 20;
+const DEFAULT_BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 60;
 
 // The default timeout after which we abort a wallet syncing operation.
-const DEFAULT_LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 30;
 
 // The default timeout after which we abort a fee rate cache update operation.
-pub(crate) const DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
+pub(crate) const DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 10;
 
 // The default timeout after which we abort a transaction broadcast operation.
-pub(crate) const DEFAULT_TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
+pub(crate) const DEFAULT_TX_BROADCAST_TIMEOUT_SECS: u64 = 10;
 
 // The default {Esplora,Electrum} client timeout we're using.
 const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
@@ -387,10 +387,10 @@ impl Default for BackgroundSyncConfig {
 ///
 /// | Parameter                              | Value              |
 /// |----------------------------------------|--------------------|
-/// | `onchain_wallet_sync_timeout_secs`     | 20                 |
-/// | `lightning_wallet_sync_timeout_secs`   | 10                 |
-/// | `fee_rate_cache_update_timeout_secs`   | 5                  |
-/// | `tx_broadcast_timeout_secs`            | 5                  |
+/// | `onchain_wallet_sync_timeout_secs`     | 60                 |
+/// | `lightning_wallet_sync_timeout_secs`   | 30                 |
+/// | `fee_rate_cache_update_timeout_secs`   | 10                 |
+/// | `tx_broadcast_timeout_secs`            | 10                 |
 /// | `per_request_timeout_secs`             | 10                 |
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SyncTimeoutsConfig {
