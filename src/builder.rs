@@ -518,6 +518,16 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Set the address which [`Node`] will use as a Tor proxy to connect to peer OnionV3 addresses.
+	///
+	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+	///
+	/// [`tor_proxy_address`]: Config::tor_proxy_address
+	pub fn set_tor_proxy_address(&mut self, tor_proxy_address: core::net::SocketAddr) -> &mut Self {
+		self.config.tor_proxy_address = Some(tor_proxy_address);
+		self
+	}
+
 	/// Sets the node alias that will be used when broadcasting announcements to the gossip
 	/// network.
 	///
@@ -902,6 +912,15 @@ impl ArcedNodeBuilder {
 		&self, announcement_addresses: Vec<SocketAddress>,
 	) -> Result<(), BuildError> {
 		self.inner.write().unwrap().set_announcement_addresses(announcement_addresses).map(|_| ())
+	}
+
+	/// Set the address which [`Node`] will use as a Tor proxy to connect to peer OnionV3 addresses.
+	///
+	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+	///
+	/// [`tor_proxy_address`]: Config::tor_proxy_address
+	pub fn set_tor_proxy_address(&mut self, tor_proxy_address: core::net::SocketAddr) {
+		self.config.tor_proxy_address = Some(tor_proxy_address);
 	}
 
 	/// Sets the node alias that will be used when broadcasting announcements to the gossip
@@ -1683,8 +1702,12 @@ fn build_with_store_internal(
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
 
-	let connection_manager =
-		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
+	let connection_manager = Arc::new(ConnectionManager::new(
+		Arc::clone(&peer_manager),
+		config.tor_proxy_address.clone(),
+		ephemeral_bytes,
+		Arc::clone(&logger),
+	));
 
 	let output_sweeper = match sweeper_bytes_res {
 		Ok(output_sweeper) => Arc::new(output_sweeper),
