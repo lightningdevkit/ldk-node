@@ -9,6 +9,8 @@ typedef dictionary EsploraSyncConfig;
 
 typedef dictionary ElectrumSyncConfig;
 
+typedef dictionary TorConfig;
+
 typedef interface NodeEntropy;
 
 typedef enum WordCount;
@@ -52,6 +54,8 @@ interface Builder {
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
 	void set_announcement_addresses(sequence<SocketAddress> announcement_addresses);
+	[Throws=BuildError]
+	void set_tor_config(TorConfig tor_config);
 	[Throws=BuildError]
 	void set_node_alias(string node_alias);
 	[Throws=BuildError]
