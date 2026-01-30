@@ -45,7 +45,7 @@ use vss_client::headers::VssHeaderProvider;
 use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
@@ -165,6 +165,8 @@ pub enum BuildError {
 	InvalidListeningAddresses,
 	/// The given announcement addresses are invalid, e.g. too many were passed.
 	InvalidAnnouncementAddresses,
+	/// The given tor proxy address is invalid, e.g. an onion address was passed.
+	InvalidTorProxyAddress,
 	/// The provided alias is invalid.
 	InvalidNodeAlias,
 	/// An attempt to setup a runtime has failed.
@@ -206,6 +208,7 @@ impl fmt::Display for BuildError {
 			Self::InvalidAnnouncementAddresses => {
 				write!(f, "Given announcement addresses are invalid.")
 			},
+			Self::InvalidTorProxyAddress => write!(f, "Given Tor proxy address is invalid."),
 			Self::RuntimeSetupFailed => write!(f, "Failed to setup a runtime."),
 			Self::ReadFailed => write!(f, "Failed to read from store."),
 			Self::WriteFailed => write!(f, "Failed to write to store."),
@@ -520,6 +523,23 @@ impl NodeBuilder {
 		}
 
 		self.config.announcement_addresses = Some(announcement_addresses);
+		Ok(self)
+	}
+
+	/// Configures the [`Node`] instance to use a Tor SOCKS proxy for outbound connections to peers with OnionV3 addresses.
+	/// Connections to clearnet addresses are not affected, and are not made over Tor.
+	/// The proxy address must not itself be an onion address.
+	///
+	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+	pub fn set_tor_config(&mut self, tor_config: TorConfig) -> Result<&mut Self, BuildError> {
+		match tor_config.proxy_address {
+			SocketAddress::OnionV2 { .. } | SocketAddress::OnionV3 { .. } => {
+				return Err(BuildError::InvalidTorProxyAddress);
+			},
+			_ => {},
+		}
+
+		self.config.tor_config = Some(tor_config);
 		Ok(self)
 	}
 
@@ -920,6 +940,15 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_announcement_addresses(announcement_addresses).map(|_| ())
 	}
 
+	/// Configures the [`Node`] instance to use a Tor SOCKS proxy for outbound connections to peers with OnionV3 addresses.
+	/// Connections to clearnet addresses are not affected, and are not made over Tor.
+	/// The proxy address must not itself be an onion address.
+	///
+	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+	pub fn set_tor_config(&self, tor_config: TorConfig) -> Result<(), BuildError> {
+		self.inner.write().unwrap().set_tor_config(tor_config).map(|_| ())
+	}
+
 	/// Sets the node alias that will be used when broadcasting announcements to the gossip
 	/// network.
 	///
@@ -1073,6 +1102,15 @@ fn build_with_store_internal(
 		if config.node_alias.is_some() {
 			log_error!(logger, "Node alias was set but some required configuration options for node announcement are missing: {}", err);
 			return Err(BuildError::InvalidListeningAddresses);
+		}
+	}
+
+	if let Some(tor_config) = &config.tor_config {
+		match tor_config.proxy_address {
+			SocketAddress::OnionV2 { .. } | SocketAddress::OnionV3 { .. } => {
+				return Err(BuildError::InvalidTorProxyAddress);
+			},
+			_ => {},
 		}
 	}
 
@@ -1709,8 +1747,12 @@ fn build_with_store_internal(
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
 
-	let connection_manager =
-		Arc::new(ConnectionManager::new(Arc::clone(&peer_manager), Arc::clone(&logger)));
+	let connection_manager = Arc::new(ConnectionManager::new(
+		Arc::clone(&peer_manager),
+		config.tor_config.clone(),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+	));
 
 	let output_sweeper = match sweeper_bytes_res {
 		Ok(output_sweeper) => Arc::new(output_sweeper),

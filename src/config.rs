@@ -196,6 +196,13 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// Configuration options for enabling peer connections via the Tor network.
+	///
+	/// Setting [`TorConfig`] enables connecting to peers with OnionV3 addresses. No other connections
+	/// are routed via Tor. Please refer to [`TorConfig`] for further information.
+	///
+	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+	pub tor_config: Option<TorConfig>,
 }
 
 impl Default for Config {
@@ -208,6 +215,7 @@ impl Default for Config {
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
+			tor_config: None,
 			route_parameters: None,
 			node_alias: None,
 		}
@@ -485,6 +493,16 @@ pub struct BitcoindRestClientConfig {
 	pub rest_host: String,
 	/// Host port.
 	pub rest_port: u16,
+}
+
+/// Configuration for connecting to peers via the Tor Network.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TorConfig {
+	/// Tor daemon SOCKS proxy address. Only connections to OnionV3 peers will be made
+	/// via this proxy; other connections (IPv4 peers, Electrum server) will not be
+	/// routed over Tor.
+	pub proxy_address: SocketAddress,
 }
 
 /// Options which apply on a per-channel basis and may change at runtime or based on negotiation
