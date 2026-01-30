@@ -291,6 +291,15 @@ impl StorableObject for PaymentDetails {
 			}
 		}
 
+		if let Some(tx_id) = update.txid {
+			match self.kind {
+				PaymentKind::Onchain { ref mut txid, .. } => {
+					update_if_necessary!(*txid, tx_id);
+				},
+				_ => {},
+			}
+		}
+
 		if updated {
 			self.latest_update_timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -540,6 +549,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
+	pub txid: Option<Txid>,
 }
 
 impl PaymentDetailsUpdate {
@@ -555,6 +565,7 @@ impl PaymentDetailsUpdate {
 			direction: None,
 			status: None,
 			confirmation_status: None,
+			txid: None,
 		}
 	}
 }
@@ -570,9 +581,9 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			_ => (None, None, None),
 		};
 
-		let confirmation_status = match value.kind {
-			PaymentKind::Onchain { status, .. } => Some(status),
-			_ => None,
+		let (confirmation_status, txid) = match &value.kind {
+			PaymentKind::Onchain { status, txid, .. } => (Some(*status), Some(*txid)),
+			_ => (None, None),
 		};
 
 		let counterparty_skimmed_fee_msat = match value.kind {
@@ -593,6 +604,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			direction: Some(value.direction),
 			status: Some(value.status),
 			confirmation_status,
+			txid,
 		}
 	}
 }
