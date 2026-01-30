@@ -84,10 +84,11 @@ impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate
 
 impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	fn from(value: &PendingPaymentDetails) -> Self {
-		Self {
-			id: value.id(),
-			payment_update: Some(value.details.to_update()),
-			conflicting_txids: Some(value.conflicting_txids.clone()),
-		}
+		let conflicting_txids = if value.conflicting_txids.is_empty() {
+			None
+		} else {
+			Some(value.conflicting_txids.clone())
+		};
+		Self { id: value.id(), payment_update: Some(value.details.to_update()), conflicting_txids }
 	}
 }
