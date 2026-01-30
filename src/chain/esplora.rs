@@ -17,11 +17,7 @@ use lightning::util::ser::Writeable;
 use lightning_transaction_sync::EsploraSyncClient;
 
 use super::WalletSyncStatus;
-use crate::config::{
-	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
-	BDK_WALLET_SYNC_TIMEOUT_SECS, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
-};
+use crate::config::{Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP};
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	OnchainFeeEstimator,
@@ -51,7 +47,8 @@ impl EsploraChainSource {
 		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
-		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
+		client_builder =
+			client_builder.timeout(sync_config.timeouts_config.per_request_timeout_secs as u64);
 
 		for (header_name, header_value) in &headers {
 			client_builder = client_builder.header(header_name, header_value);
@@ -183,14 +180,18 @@ impl EsploraChainSource {
 		if incremental_sync {
 			let sync_request = onchain_wallet.get_incremental_sync_request();
 			let wallet_sync_timeout_fut = tokio::time::timeout(
-				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+				Duration::from_secs(
+					self.sync_config.timeouts_config.onchain_wallet_sync_timeout_secs,
+				),
 				self.esplora_client.sync(sync_request, BDK_CLIENT_CONCURRENCY),
 			);
 			get_and_apply_wallet_update!(wallet_sync_timeout_fut)
 		} else {
 			let full_scan_request = onchain_wallet.get_full_scan_request();
 			let wallet_sync_timeout_fut = tokio::time::timeout(
-				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+				Duration::from_secs(
+					self.sync_config.timeouts_config.onchain_wallet_sync_timeout_secs,
+				),
 				self.esplora_client.full_scan(
 					full_scan_request,
 					BDK_CLIENT_STOP_GAP,
@@ -240,7 +241,9 @@ impl EsploraChainSource {
 		];
 
 		let timeout_fut = tokio::time::timeout(
-			Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS),
+			Duration::from_secs(
+				self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs as u64,
+			),
 			self.tx_sync.sync(confirmables),
 		);
 		let now = Instant::now();
@@ -278,7 +281,9 @@ impl EsploraChainSource {
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		let now = Instant::now();
 		let estimates = tokio::time::timeout(
-			Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+			Duration::from_secs(
+				self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
+			),
 			self.esplora_client.get_fee_estimates(),
 		)
 		.await
@@ -351,7 +356,7 @@ impl EsploraChainSource {
 		for tx in &package {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
-				Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
+				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
 				self.esplora_client.broadcast(tx),
 			);
 			match timeout_fut.await {

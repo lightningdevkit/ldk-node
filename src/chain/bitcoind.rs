@@ -31,7 +31,8 @@ use serde::Serialize;
 
 use super::WalletSyncStatus;
 use crate::config::{
-	BitcoindRestClientConfig, Config, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
+	BitcoindRestClientConfig, Config, DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
+	DEFAULT_TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
@@ -466,7 +467,7 @@ impl BitcoindChainSource {
 		macro_rules! get_fee_rate_update {
 			($estimation_fut:expr) => {{
 				let update_res = tokio::time::timeout(
-					Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+					Duration::from_secs(DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
 					$estimation_fut,
 				)
 				.await
@@ -584,7 +585,7 @@ impl BitcoindChainSource {
 		for tx in &package {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
-				Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS),
+				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
 				self.api_client.broadcast_transaction(tx),
 			);
 			match timeout_fut.await {

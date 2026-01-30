@@ -24,10 +24,7 @@ use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
 
 use super::WalletSyncStatus;
-use crate::config::{
-	Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
-};
+use crate::config::{Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP};
 use crate::error::Error;
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
@@ -41,7 +38,6 @@ use crate::NodeMetrics;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
-const ELECTRUM_CLIENT_TIMEOUT_SECS: u8 = 10;
 
 pub(super) struct ElectrumChainSource {
 	server_url: String,
@@ -82,6 +78,7 @@ impl ElectrumChainSource {
 	pub(super) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
 		self.electrum_runtime_status.write().unwrap().start(
 			self.server_url.clone(),
+			self.sync_config.clone(),
 			Arc::clone(&runtime),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
@@ -318,13 +315,14 @@ impl ElectrumRuntimeStatus {
 	}
 
 	pub(super) fn start(
-		&mut self, server_url: String, runtime: Arc<Runtime>, config: Arc<Config>,
-		logger: Arc<Logger>,
+		&mut self, server_url: String, sync_config: ElectrumSyncConfig, runtime: Arc<Runtime>,
+		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Result<(), Error> {
 		match self {
 			Self::Stopped { pending_registered_txs, pending_registered_outputs } => {
 				let client = Arc::new(ElectrumRuntimeClient::new(
-					server_url.clone(),
+					server_url,
+					sync_config,
 					runtime,
 					config,
 					logger,
@@ -380,6 +378,7 @@ impl ElectrumRuntimeStatus {
 
 struct ElectrumRuntimeClient {
 	electrum_client: Arc<ElectrumClient>,
+	sync_config: ElectrumSyncConfig,
 	bdk_electrum_client: Arc<BdkElectrumClient<Arc<ElectrumClient>>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
 	runtime: Arc<Runtime>,
@@ -389,11 +388,12 @@ struct ElectrumRuntimeClient {
 
 impl ElectrumRuntimeClient {
 	fn new(
-		server_url: String, runtime: Arc<Runtime>, config: Arc<Config>, logger: Arc<Logger>,
+		server_url: String, sync_config: ElectrumSyncConfig, runtime: Arc<Runtime>,
+		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Result<Self, Error> {
 		let electrum_config = ElectrumConfigBuilder::new()
 			.retry(ELECTRUM_CLIENT_NUM_RETRIES)
-			.timeout(Some(ELECTRUM_CLIENT_TIMEOUT_SECS))
+			.timeout(Some(sync_config.timeouts_config.per_request_timeout_secs))
 			.build();
 
 		let electrum_client = Arc::new(
@@ -409,7 +409,15 @@ impl ElectrumRuntimeClient {
 				Error::ConnectionFailed
 			})?,
 		);
-		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, config, logger })
+		Ok(Self {
+			electrum_client,
+			sync_config,
+			bdk_electrum_client,
+			tx_sync,
+			runtime,
+			config,
+			logger,
+		})
 	}
 
 	async fn sync_confirmables(
@@ -419,8 +427,12 @@ impl ElectrumRuntimeClient {
 
 		let tx_sync = Arc::clone(&self.tx_sync);
 		let spawn_fut = self.runtime.spawn_blocking(move || tx_sync.sync(confirmables));
-		let timeout_fut =
-			tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), spawn_fut);
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(
+				self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs,
+			),
+			spawn_fut,
+		);
 
 		let res = timeout_fut
 			.await
@@ -461,8 +473,10 @@ impl ElectrumRuntimeClient {
 				true,
 			)
 		});
-		let wallet_sync_timeout_fut =
-			tokio::time::timeout(Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS), spawn_fut);
+		let wallet_sync_timeout_fut = tokio::time::timeout(
+			Duration::from_secs(self.sync_config.timeouts_config.onchain_wallet_sync_timeout_secs),
+			spawn_fut,
+		);
 
 		wallet_sync_timeout_fut
 			.await
@@ -490,8 +504,10 @@ impl ElectrumRuntimeClient {
 		let spawn_fut = self.runtime.spawn_blocking(move || {
 			bdk_electrum_client.sync(request, BDK_ELECTRUM_CLIENT_BATCH_SIZE, true)
 		});
-		let wallet_sync_timeout_fut =
-			tokio::time::timeout(Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS), spawn_fut);
+		let wallet_sync_timeout_fut = tokio::time::timeout(
+			Duration::from_secs(self.sync_config.timeouts_config.onchain_wallet_sync_timeout_secs),
+			spawn_fut,
+		);
 
 		wallet_sync_timeout_fut
 			.await
@@ -517,8 +533,10 @@ impl ElectrumRuntimeClient {
 
 		let spawn_fut =
 			self.runtime.spawn_blocking(move || electrum_client.transaction_broadcast(&tx));
-		let timeout_fut =
-			tokio::time::timeout(Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS), spawn_fut);
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+			spawn_fut,
+		);
 
 		match timeout_fut.await {
 			Ok(res) => match res {
@@ -565,7 +583,9 @@ impl ElectrumRuntimeClient {
 		let spawn_fut = self.runtime.spawn_blocking(move || electrum_client.batch_call(&batch));
 
 		let timeout_fut = tokio::time::timeout(
-			Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
+			Duration::from_secs(
+				self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
+			),
 			spawn_fut,
 		);
 

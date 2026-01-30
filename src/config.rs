@@ -29,6 +29,21 @@ const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
 
+// The default timeout after which we abort a wallet syncing operation.
+const DEFAULT_BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 60;
+
+// The default timeout after which we abort a wallet syncing operation.
+const DEFAULT_LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 30;
+
+// The default timeout after which we abort a fee rate cache update operation.
+pub(crate) const DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 10;
+
+// The default timeout after which we abort a transaction broadcast operation.
+pub(crate) const DEFAULT_TX_BROADCAST_TIMEOUT_SECS: u64 = 10;
+
+// The default {Esplora,Electrum} client timeout we're using.
+const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
+
 /// The default log level.
 pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
@@ -40,9 +55,6 @@ pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
-
-// The default Esplora client timeout we're using.
-pub(crate) const DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS: u64 = 10;
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
 // number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
@@ -69,23 +81,11 @@ pub(crate) const NODE_ANN_BCAST_INTERVAL: Duration = Duration::from_secs(60 * 60
 // The lower limit which we apply to any configured wallet sync intervals.
 pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
 
-// The timeout after which we abort a wallet syncing operation.
-pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 20;
-
-// The timeout after which we abort a wallet syncing operation.
-pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 10;
-
 // The timeout after which we give up waiting on LDK's event handler to exit on shutdown.
 pub(crate) const LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 // The timeout after which we give up waiting on a background task to exit on shutdown.
 pub(crate) const BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
-
-// The timeout after which we abort a fee rate cache update operation.
-pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
-
-// The timeout after which we abort a transaction broadcast operation.
-pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
 
 // The maximum encoded size of an RGS snapshot we'll accept.
 // In practice the maximum we see is around 4MiB.
@@ -381,6 +381,43 @@ impl Default for BackgroundSyncConfig {
 	}
 }
 
+/// Timeout-related parameters for syncing the Lightning and on-chain wallets.
+///
+/// ### Defaults
+///
+/// | Parameter                              | Value              |
+/// |----------------------------------------|--------------------|
+/// | `onchain_wallet_sync_timeout_secs`     | 60                 |
+/// | `lightning_wallet_sync_timeout_secs`   | 30                 |
+/// | `fee_rate_cache_update_timeout_secs`   | 10                 |
+/// | `tx_broadcast_timeout_secs`            | 10                 |
+/// | `per_request_timeout_secs`             | 10                 |
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SyncTimeoutsConfig {
+	/// The timeout after which we abort syncing the onchain wallet.
+	pub onchain_wallet_sync_timeout_secs: u64,
+	/// The timeout after which we abort syncing the LDK wallet.
+	pub lightning_wallet_sync_timeout_secs: u64,
+	/// The timeout after which we abort updating the fee rate cache.
+	pub fee_rate_cache_update_timeout_secs: u64,
+	/// The timeout after which we abort broadcasting a transaction.
+	pub tx_broadcast_timeout_secs: u64,
+	/// The per-request timeout after which we abort a single Electrum or Esplora API request.
+	pub per_request_timeout_secs: u8,
+}
+
+impl Default for SyncTimeoutsConfig {
+	fn default() -> Self {
+		Self {
+			onchain_wallet_sync_timeout_secs: DEFAULT_BDK_WALLET_SYNC_TIMEOUT_SECS,
+			lightning_wallet_sync_timeout_secs: DEFAULT_LDK_WALLET_SYNC_TIMEOUT_SECS,
+			fee_rate_cache_update_timeout_secs: DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
+			tx_broadcast_timeout_secs: DEFAULT_TX_BROADCAST_TIMEOUT_SECS,
+			per_request_timeout_secs: DEFAULT_PER_REQUEST_TIMEOUT_SECS,
+		}
+	}
+}
+
 /// Configuration for syncing with an Esplora backend.
 ///
 /// Background syncing is enabled by default, using the default values specified in
@@ -394,11 +431,16 @@ pub struct EsploraSyncConfig {
 	///
 	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
 	pub background_sync_config: Option<BackgroundSyncConfig>,
+	/// Sync timeouts configuration.
+	pub timeouts_config: SyncTimeoutsConfig,
 }
 
 impl Default for EsploraSyncConfig {
 	fn default() -> Self {
-		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }
+		Self {
+			background_sync_config: Some(BackgroundSyncConfig::default()),
+			timeouts_config: SyncTimeoutsConfig::default(),
+		}
 	}
 }
 
@@ -415,11 +457,16 @@ pub struct ElectrumSyncConfig {
 	///
 	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
 	pub background_sync_config: Option<BackgroundSyncConfig>,
+	/// Sync timeouts configuration.
+	pub timeouts_config: SyncTimeoutsConfig,
 }
 
 impl Default for ElectrumSyncConfig {
 	fn default() -> Self {
-		Self { background_sync_config: Some(BackgroundSyncConfig::default()) }
+		Self {
+			background_sync_config: Some(BackgroundSyncConfig::default()),
+			timeouts_config: SyncTimeoutsConfig::default(),
+		}
 	}
 }
 

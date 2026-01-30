@@ -370,12 +370,14 @@ pub(crate) fn setup_node_for_async_payments(
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let sync_config = EsploraSyncConfig { background_sync_config: None };
+			let mut sync_config = EsploraSyncConfig::default();
+			sync_config.background_sync_config = None;
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		},
 		TestChainSource::Electrum(electrsd) => {
 			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
-			let sync_config = ElectrumSyncConfig { background_sync_config: None };
+			let mut sync_config = ElectrumSyncConfig::default();
+			sync_config.background_sync_config = None;
 			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
 		},
 		TestChainSource::BitcoindRpcSync(bitcoind) => {
