@@ -6,12 +6,12 @@
 // accordance with one or both of these licenses.
 
 use bitcoin::Txid;
-use lightning::{impl_writeable_tlv_based, ln::channelmanager::PaymentId};
+use lightning::impl_writeable_tlv_based;
+use lightning::ln::channelmanager::PaymentId;
 
-use crate::{
-	data_store::{StorableObject, StorableObjectUpdate},
-	payment::{store::PaymentDetailsUpdate, PaymentDetails},
-};
+use crate::data_store::{StorableObject, StorableObjectUpdate};
+use crate::payment::store::PaymentDetailsUpdate;
+use crate::payment::PaymentDetails;
 
 /// Represents a pending payment
 #[derive(Clone, Debug, PartialEq, Eq)]
