@@ -216,29 +216,36 @@ impl Default for Config {
 	}
 }
 
+/// Configuration options for how our node resolves Human-Readable Names (HRNs) when acting as a client.
+#[derive(Debug, Clone)]
+pub enum HRNResolverConfig {
+	/// Use bLIP-32 to ask other nodes to resolve names for us.
+	Blip32Onion,
+	/// Resolve names locally using a specific DNS server.
+	LocalDns {
+		/// The IP and port of the DNS server (e.g., "8.8.8.8:53").
+		dns_server_address: String,
+	},
+}
+
 /// Configuration options for Human-Readable Names ([BIP 353]).
 ///
 /// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 #[derive(Debug, Clone)]
 pub struct HumanReadableNamesConfig {
-	/// The Default DNS resolvers to be used for resolving Human-Readable Names.
-	///
-	/// If not empty, the values set will be used as DNS resolvers when sending to HRNs.
-	///
-	/// **Note:** If empty, DNS resolvers would be selected from the network graph.
-	pub default_dns_resolvers: Vec<PublicKey>,
-	/// This allows us to use our node as a DNS resolver for 3rd party HRN resolutions.
-	pub is_hrn_resolver: bool,
-	/// The DNS Server which will be used for resolving HRNs.
-	pub dns_server_address: String,
+	/// This sets how our node resolves names when we want to send a payment.
+	pub client_resolution_config: HRNResolverConfig,
+	/// if set, this allows others to use our node for HRN resolutions.
+	pub disable_hrn_resolution_service: bool,
 }
 
 impl Default for HumanReadableNamesConfig {
 	fn default() -> Self {
 		HumanReadableNamesConfig {
-			default_dns_resolvers: Vec::new(),
-			is_hrn_resolver: false,
-			dns_server_address: String::new(),
+			client_resolution_config: HRNResolverConfig::LocalDns {
+				dns_server_address: "8.8.8.8:53".to_string(),
+			},
+			disable_hrn_resolution_service: false,
 		}
 	}
 }

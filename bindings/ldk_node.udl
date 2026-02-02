@@ -517,10 +517,15 @@ dictionary RouteParametersConfig {
 	u8 max_channel_saturation_power_of_half;
 };
 
+[Enum]
+interface HRNResolverConfig {
+    Blip32Onion();
+    LocalDns(string dns_server_address);
+};
+
 dictionary HumanReadableNamesConfig {
-	sequence<PublicKey> default_dns_resolvers;
-	boolean is_hrn_resolver;
-	string dns_server_address;
+    HRNResolverConfig client_resolution_config;
+    boolean disable_hrn_resolution_service;
 };
 
 dictionary CustomTlvRecord {
