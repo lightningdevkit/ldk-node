@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use bitcoin_payment_instructions::amount::Amount;
 use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
-use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use bitcoin_payment_instructions::hrn_resolution::{
 	HrnResolutionFuture, HrnResolver, HumanReadableName, LNURLResolutionFuture,
 };
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{OutPoint, ScriptBuf};
