@@ -27,7 +27,8 @@ use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 use ldk_node::config::{
-	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HumanReadableNamesConfig,
+	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
+	HumanReadableNamesConfig,
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
@@ -347,9 +348,10 @@ pub(crate) fn setup_two_nodes_with_store(
 	config_b.store_type = store_type;
 	if second_node_is_hrn_resolver {
 		config_b.node_config.hrn_config = Some(HumanReadableNamesConfig {
-			default_dns_resolvers: Vec::new(),
-			is_hrn_resolver: true,
-			dns_server_address: "8.8.8.8:53".to_string(),
+			client_resolution_config: HRNResolverConfig::LocalDns {
+				dns_server_address: "8.8.8.8:53".to_string(),
+			},
+			disable_hrn_resolution_service: false,
 		});
 	}
 	if allow_0conf {
