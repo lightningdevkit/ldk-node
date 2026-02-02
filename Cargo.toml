@@ -154,17 +154,20 @@ harness = false
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 #lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
 
-#lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
-#lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "21e9a9c0ef80021d0669f2a366f55d08ba8d9b03" }
+[patch.'https://github.com/lightningdevkit/rust-lightning']
+# Cargo won't let us patch a git dependency with another rev from the same git dependency, so we
+# have to pick another copy of `rust-lightning` and pin the rev.
+lightning = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-types = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-invoice = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-net-tokio = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-persister = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-background-processor = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-rapid-gossip-sync = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-block-sync = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-transaction-sync = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-liquidity = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
+lightning-macros = { git = "https://git.bitcoin.ninja/rust-lightning", rev = "0bc5c95484345c6289dffd9a379982a9b66d688f" }
 
 #vss-client-ng = { path = "../vss-client" }
 #vss-client-ng = { git = "https://github.com/lightningdevkit/vss-client", branch = "main" }

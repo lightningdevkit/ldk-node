@@ -10,7 +10,10 @@
 use std::sync::{Arc, RwLock};
 
 use bitcoin::secp256k1::PublicKey;
-use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
+use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::outbound_payment::{
+	RecipientCustomTlvs, RecipientOnionFields, Retry, RetryableSendFailure,
+};
 use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
 use lightning::sign::EntropySource;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -125,15 +128,15 @@ impl SpontaneousPayment {
 				*max_channel_saturation_power_of_half;
 		}
 
-		let recipient_fields = match custom_tlvs {
-			Some(tlvs) => RecipientOnionFields::spontaneous_empty()
-				.with_custom_tlvs(tlvs.into_iter().map(|tlv| (tlv.type_num, tlv.value)).collect())
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to send payment with custom TLVs: {:?}", e);
+		let mut recipient_fields = RecipientOnionFields::spontaneous_empty();
+		if let Some(tlvs) = custom_tlvs {
+			let tlvs_vec = tlvs.into_iter().map(|tlv| (tlv.type_num, tlv.value)).collect();
+			recipient_fields =
+				recipient_fields.with_custom_tlvs(RecipientCustomTlvs::new(tlvs_vec).map_err(|()| {
+					log_error!(self.logger, "Attempted to set payment custom TLVs to a spec-defined value");
 					Error::InvalidCustomTlvs
-				})?,
-			None => RecipientOnionFields::spontaneous_empty(),
-		};
+				})?);
+		}
 
 		match self.channel_manager.send_spontaneous_payment(
 			Some(payment_preimage),
