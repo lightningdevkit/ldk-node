@@ -20,10 +20,8 @@ use lightning::{log_debug, log_error, log_info, log_warn};
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // todo(enigbe): Uncertain about appropriate queue size and if this would need
 // configuring.
@@ -40,7 +38,6 @@ const BACKUP_QUEUE_CAPACITY: usize = 5;
 /// scenarios.
 pub(crate) struct TierStore {
 	inner: Arc<TierStoreInner>,
-	next_version: AtomicU64,
 	runtime: Arc<Runtime>,
 	logger: Arc<Logger>,
 }
@@ -49,7 +46,7 @@ impl TierStore {
 	pub fn new(primary_store: Arc<DynStore>, runtime: Arc<Runtime>, logger: Arc<Logger>) -> Self {
 		let inner = Arc::new(TierStoreInner::new(primary_store, Arc::clone(&logger)));
 
-		Self { inner, next_version: AtomicU64::new(1), runtime, logger }
+		Self { inner, runtime, logger }
 	}
 
 	/// Configures the local backup store for disaster recovery.
@@ -89,7 +86,7 @@ impl TierStore {
 		mut receiver: mpsc::Receiver<BackupOp>, backup_store: Arc<DynStore>, logger: Arc<Logger>,
 	) {
 		while let Some(op) = receiver.recv().await {
-			match Self::apply_backup_operation(&op, &backup_store) {
+			match Self::apply_backup_operation(&op, &backup_store).await {
 				Ok(_) => {
 					log_trace!(
 						logger,
@@ -113,25 +110,21 @@ impl TierStore {
 		}
 	}
 
-	fn apply_backup_operation(op: &BackupOp, store: &Arc<DynStore>) -> io::Result<()> {
+	async fn apply_backup_operation(op: &BackupOp, store: &Arc<DynStore>) -> io::Result<()> {
 		match op {
 			BackupOp::Write { primary_namespace, secondary_namespace, key, data } => {
-				KVStoreSync::write(
+				KVStore::write(
 					store.as_ref(),
 					primary_namespace,
 					secondary_namespace,
 					key,
 					data.clone(),
 				)
+				.await
 			},
 			BackupOp::Remove { primary_namespace, secondary_namespace, key, lazy } => {
-				KVStoreSync::remove(
-					store.as_ref(),
-					primary_namespace,
-					secondary_namespace,
-					key,
-					*lazy,
-				)
+				KVStore::remove(store.as_ref(), primary_namespace, secondary_namespace, key, *lazy)
+					.await
 			},
 		}
 	}
@@ -145,31 +138,6 @@ impl TierStore {
 		);
 
 		inner.ephemeral_store = Some(ephemeral);
-	}
-
-	fn build_locking_key(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> String {
-		if primary_namespace.is_empty() {
-			key.to_owned()
-		} else {
-			format!("{}#{}#{}", primary_namespace, secondary_namespace, key)
-		}
-	}
-
-	fn get_new_version_and_lock_ref(
-		&self, locking_key: String,
-	) -> (Arc<tokio::sync::Mutex<u64>>, u64) {
-		let version = self.next_version.fetch_add(1, Ordering::Relaxed);
-		if version == u64::MAX {
-			panic!("TierStore version counter overflowed");
-		}
-
-		// Get a reference to the inner lock. We do this early so that the arc can double as an in-flight counter for
-		// cleaning up unused locks.
-		let inner_lock_ref = self.inner.get_inner_lock_ref(locking_key);
-
-		(inner_lock_ref, version)
 	}
 }
 
@@ -191,26 +159,11 @@ impl KVStore for TierStore {
 	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let inner = Arc::clone(&self.inner);
 
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 
-		async move {
-			inner
-				.write_internal(
-					inner_lock_ref,
-					locking_key,
-					version,
-					primary_namespace,
-					secondary_namespace,
-					key,
-					buf,
-				)
-				.await
-		}
+		async move { inner.write_internal(primary_namespace, secondary_namespace, key, buf).await }
 	}
 
 	fn remove(
@@ -218,26 +171,11 @@ impl KVStore for TierStore {
 	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 		let inner = Arc::clone(&self.inner);
 
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 
-		async move {
-			inner
-				.remove_internal(
-					inner_lock_ref,
-					locking_key,
-					version,
-					primary_namespace,
-					secondary_namespace,
-					key,
-					lazy,
-				)
-				.await
-		}
+		async move { inner.remove_internal(primary_namespace, secondary_namespace, key, lazy).await }
 	}
 
 	fn list(
@@ -266,17 +204,11 @@ impl KVStoreSync for TierStore {
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 
 		self.runtime.block_on(self.inner.write_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
 			primary_namespace,
 			secondary_namespace,
 			key,
@@ -287,17 +219,11 @@ impl KVStoreSync for TierStore {
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 
 		self.runtime.block_on(self.inner.remove_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
 			primary_namespace,
 			secondary_namespace,
 			key,
@@ -322,9 +248,6 @@ pub struct TierStoreInner {
 	backup_store: Option<Arc<DynStore>>,
 	backup_sender: Option<mpsc::Sender<BackupOp>>,
 	logger: Arc<Logger>,
-	/// Per-key locks for the available data tiers, i.e. (primary, backup, ephemeral),
-	/// that ensures we don't have concurrent writes to the same namespace/key.
-	locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
 }
 
 impl TierStoreInner {
@@ -336,7 +259,6 @@ impl TierStoreInner {
 			backup_store: None,
 			backup_sender: None,
 			logger,
-			locks: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -619,12 +541,13 @@ impl TierStoreInner {
 					// 1. Are there situations where local transient errors may warrant a retry?
 					// 2. Can we reliably identify/detect these transient errors?
 					// 3. Should we fall back to the primary or backup stores in the event of any error?
-					KVStoreSync::read(
+					KVStore::read(
 						eph_store.as_ref(),
 						&primary_namespace,
 						&secondary_namespace,
 						&key,
 					)
+					.await
 				} else {
 					log_debug!(self.logger, "Ephemeral store not configured. Reading non-critical data from primary or backup stores.");
 					self.read_primary(&primary_namespace, &secondary_namespace, &key).await
@@ -635,57 +558,23 @@ impl TierStoreInner {
 	}
 
 	async fn write_internal(
-		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
-		primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
 	) -> io::Result<()> {
-		check_namespace_key_validity(
-			primary_namespace.as_str(),
-			secondary_namespace.as_str(),
-			Some(key.as_str()),
-			"write",
-		)?;
-
 		match (primary_namespace.as_str(), secondary_namespace.as_str(), key.as_str()) {
 			(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
 			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY) => {
 				if let Some(eph_store) = &self.ephemeral_store {
-					self.execute_locked_write(
-						inner_lock_ref,
-						locking_key,
-						version,
-						async move || {
-							KVStoreSync::write(
-								eph_store.as_ref(),
-								primary_namespace.as_str(),
-								secondary_namespace.as_str(),
-								key.as_str(),
-								buf,
-							)
-						},
+					KVStore::write(
+						eph_store.as_ref(),
+						primary_namespace.as_str(),
+						secondary_namespace.as_str(),
+						key.as_str(),
+						buf,
 					)
 					.await
 				} else {
 					log_debug!(self.logger, "Ephemeral store not configured. Writing non-critical data to primary and backup stores.");
 
-					self.execute_locked_write(
-						inner_lock_ref,
-						locking_key,
-						version,
-						async move || {
-							self.primary_write_then_schedule_backup(
-								primary_namespace.as_str(),
-								secondary_namespace.as_str(),
-								key.as_str(),
-								buf,
-							)
-							.await
-						},
-					)
-					.await
-				}
-			},
-			_ => {
-				self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
 					self.primary_write_then_schedule_backup(
 						primary_namespace.as_str(),
 						secondary_namespace.as_str(),
@@ -693,64 +582,38 @@ impl TierStoreInner {
 						buf,
 					)
 					.await
-				})
+				}
+			},
+			_ => {
+				self.primary_write_then_schedule_backup(
+					primary_namespace.as_str(),
+					secondary_namespace.as_str(),
+					key.as_str(),
+					buf,
+				)
 				.await
 			},
 		}
 	}
 
 	async fn remove_internal(
-		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
-		primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
 	) -> io::Result<()> {
-		check_namespace_key_validity(
-			primary_namespace.as_str(),
-			secondary_namespace.as_str(),
-			Some(key.as_str()),
-			"remove",
-		)?;
-
 		match (primary_namespace.as_str(), secondary_namespace.as_str(), key.as_str()) {
 			(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
 			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY) => {
 				if let Some(eph_store) = &self.ephemeral_store {
-					self.execute_locked_write(
-						inner_lock_ref,
-						locking_key,
-						version,
-						async move || {
-							KVStoreSync::remove(
-								eph_store.as_ref(),
-								primary_namespace.as_str(),
-								secondary_namespace.as_str(),
-								key.as_str(),
-								lazy,
-							)
-						},
+					KVStore::remove(
+						eph_store.as_ref(),
+						primary_namespace.as_str(),
+						secondary_namespace.as_str(),
+						key.as_str(),
+						lazy,
 					)
 					.await
 				} else {
 					log_debug!(self.logger, "Ephemeral store not configured. Removing non-critical data from primary and backup stores.");
 
-					self.execute_locked_write(
-						inner_lock_ref,
-						locking_key,
-						version,
-						async move || {
-							self.primary_remove_then_schedule_backup(
-								primary_namespace.as_str(),
-								secondary_namespace.as_str(),
-								key.as_str(),
-								lazy,
-							)
-							.await
-						},
-					)
-					.await
-				}
-			},
-			_ => {
-				self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
 					self.primary_remove_then_schedule_backup(
 						primary_namespace.as_str(),
 						secondary_namespace.as_str(),
@@ -758,7 +621,15 @@ impl TierStoreInner {
 						lazy,
 					)
 					.await
-				})
+				}
+			},
+			_ => {
+				self.primary_remove_then_schedule_backup(
+					primary_namespace.as_str(),
+					secondary_namespace.as_str(),
+					key.as_str(),
+					lazy,
+				)
 				.await
 			},
 		}
@@ -767,13 +638,6 @@ impl TierStoreInner {
 	async fn list_internal(
 		&self, primary_namespace: String, secondary_namespace: String,
 	) -> io::Result<Vec<String>> {
-		check_namespace_key_validity(
-			primary_namespace.as_str(),
-			secondary_namespace.as_str(),
-			None,
-			"list",
-		)?;
-
 		match (primary_namespace.as_str(), secondary_namespace.as_str()) {
 			(
 				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -791,52 +655,6 @@ impl TierStoreInner {
 				}
 			},
 			_ => self.list_primary(&primary_namespace, &secondary_namespace).await,
-		}
-	}
-
-	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
-		let mut outer_lock = self.locks.lock().unwrap();
-		Arc::clone(&outer_lock.entry(locking_key).or_default())
-	}
-
-	async fn execute_locked_write<
-		F: Future<Output = Result<(), lightning::io::Error>>,
-		FN: FnOnce() -> F,
-	>(
-		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
-		callback: FN,
-	) -> Result<(), lightning::io::Error> {
-		let res = {
-			let mut last_written_version = inner_lock_ref.lock().await;
-
-			// Check if we already have a newer version written. This ensures eventual consistency.
-			let is_stale_version = version <= *last_written_version;
-
-			if is_stale_version {
-				Ok(())
-			} else {
-				callback().await.map(|_| {
-					*last_written_version = version;
-				})
-			}
-		};
-
-		self.clean_locks(&inner_lock_ref, locking_key);
-		res
-	}
-
-	fn clean_locks(&self, inner_lock_ref: &Arc<tokio::sync::Mutex<u64>>, locking_key: String) {
-		// If there no arcs in use elsewhere, this means that there are no in-flight writes. We can remove the map entry
-		// to prevent leaking memory. The two arcs that are expected are the one in the map and the one held here in
-		// inner_lock_ref. The outer lock is obtained first, to avoid a new arc being cloned after we've already
-		// counted.
-		let mut outer_lock = self.locks.lock().unwrap();
-
-		let strong_count = Arc::strong_count(&inner_lock_ref);
-		debug_assert!(strong_count >= 2, "Unexpected TierStore strong count");
-
-		if strong_count == 2 {
-			outer_lock.remove(&locking_key);
 		}
 	}
 }
