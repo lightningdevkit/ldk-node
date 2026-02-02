@@ -10,9 +10,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use bitcoin_payment_instructions::amount::Amount;
+use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
+use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
+use bitcoin_payment_instructions::hrn_resolution::{
+	HrnResolutionFuture, HrnResolver, HumanReadableName, LNURLResolutionFuture,
+};
+
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{OutPoint, ScriptBuf};
-use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
+
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
@@ -30,7 +37,6 @@ use lightning::util::persist::{
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
-use lightning_dns_resolver::OMDomainResolver;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
@@ -295,9 +301,39 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	IgnoringMessageHandler,
 >;
 
-pub(crate) type HRNResolver = LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>;
+pub enum HRNResolver {
+	Onion(Arc<LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>>),
+	Local(Arc<DNSHrnResolver>),
+}
 
-pub(crate) type DomainResolver = OMDomainResolver<IgnoringMessageHandler>;
+impl HrnResolver for HRNResolver {
+	fn resolve_hrn<'a>(&'a self, hrn: &'a HumanReadableName) -> HrnResolutionFuture<'a> {
+		match self {
+			HRNResolver::Onion(inner) => inner.resolve_hrn(hrn),
+			HRNResolver::Local(inner) => inner.resolve_hrn(hrn),
+		}
+	}
+
+	fn resolve_lnurl<'a>(&'a self, url: &'a str) -> HrnResolutionFuture<'a> {
+		match self {
+			HRNResolver::Onion(inner) => inner.resolve_lnurl(url),
+			HRNResolver::Local(inner) => inner.resolve_lnurl(url),
+		}
+	}
+
+	fn resolve_lnurl_to_invoice<'a>(
+		&'a self, callback_url: String, amount: Amount, expected_description_hash: [u8; 32],
+	) -> LNURLResolutionFuture<'a> {
+		match self {
+			HRNResolver::Onion(inner) => {
+				inner.resolve_lnurl_to_invoice(callback_url, amount, expected_description_hash)
+			},
+			HRNResolver::Local(inner) => {
+				inner.resolve_lnurl_to_invoice(callback_url, amount, expected_description_hash)
+			},
+		}
+	}
+}
 
 pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,

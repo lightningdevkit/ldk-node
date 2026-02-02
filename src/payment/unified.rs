@@ -195,8 +195,7 @@ impl UnifiedPayment {
 			self.config.network
 		};
 
-		let parse_fut =
-			PaymentInstructions::parse(uri_str, target_network, resolver.as_ref(), false);
+		let parse_fut = PaymentInstructions::parse(uri_str, target_network, &*resolver, false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -222,7 +221,7 @@ impl UnifiedPayment {
 					Error::InvalidAmount
 				})?;
 
-				let fut = instr.set_amount(amt, resolver.as_ref());
+				let fut = instr.set_amount(amt, &*resolver);
 
 				tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), fut)
 					.await

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::default::Default;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Once, RwLock};
+use std::sync::{Arc, Mutex, Once, RwLock, Weak};
 use std::time::SystemTime;
 use std::{fmt, fs};
 
@@ -19,6 +19,7 @@ use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network};
+use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::{chainmonitor, BestBlock};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
@@ -47,7 +48,7 @@ use vss_client::headers::VssHeaderProvider;
 use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
@@ -77,9 +78,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, DomainResolver, DynStore, DynStoreWrapper,
-	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore, Persister, SyncAndAsyncKVStore,
+	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
+	HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	PendingPaymentStore, Persister, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -233,12 +234,6 @@ impl fmt::Display for BuildError {
 }
 
 impl std::error::Error for BuildError {}
-
-enum Resolver {
-	HRN(Arc<HRNResolver>),
-	DNS(Arc<DomainResolver>),
-	Ignore(Arc<IgnoringMessageHandler>),
-}
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
 /// the getgo.
@@ -1530,32 +1525,66 @@ fn build_with_store_internal(
 		})?;
 	}
 
-	let resolver = if let Some(hrn_config) = &config.hrn_config {
-		if hrn_config.is_hrn_resolver {
-			let dns_addr = hrn_config.dns_server_address.as_str();
+	let peer_manager_hook: Arc<Mutex<Option<Weak<PeerManager>>>> = Arc::new(Mutex::new(None));
+	let mut hrn_resolver_out = None;
 
-			Resolver::DNS(Arc::new(OMDomainResolver::ignoring_incoming_proofs(
-				dns_addr.parse().map_err(|_| BuildError::DNSResolverSetupFailed)?,
-			)))
-		} else {
-			Resolver::HRN(Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(
-				&network_graph,
-			))))
-		}
-	} else {
-		// hrn_config is None, default to the IgnoringMessaageHandler.
-		Resolver::Ignore(Arc::new(IgnoringMessageHandler {}))
-	};
+	let om_resolver = match &config.hrn_config {
+		None => Arc::new(IgnoringMessageHandler {}),
+		Some(hrn_config) => {
+			let client_resolver: Arc<dyn DNSResolverMessageHandler + Send + Sync> =
+				match &hrn_config.client_resolution_config {
+					HRNResolverConfig::Blip32Onion => {
+						let hrn_res = Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(
+							&network_graph,
+						)));
+						hrn_resolver_out = Some(Arc::new(HRNResolver::Onion(Arc::clone(&hrn_res))));
 
-	let om_resolver = match resolver {
-		Resolver::DNS(ref dns_resolver) => {
-			Arc::clone(dns_resolver) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
-		},
-		Resolver::HRN(ref hrn_resolver) => {
-			Arc::clone(hrn_resolver) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
-		},
-		Resolver::Ignore(ref ignoring_handler) => {
-			Arc::clone(ignoring_handler) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
+						let pm_hook_clone = Arc::clone(&peer_manager_hook);
+						hrn_res.register_post_queue_action(Box::new(move || {
+							if let Ok(guard) = pm_hook_clone.lock() {
+								if let Some(weak_pm) = &*guard {
+									if let Some(pm) = weak_pm.upgrade() {
+										pm.process_events();
+									}
+								}
+							}
+						}));
+
+						hrn_res
+					},
+					HRNResolverConfig::LocalDns { dns_server_address } => {
+						let addr = dns_server_address
+							.parse()
+							.map_err(|_| BuildError::DNSResolverSetupFailed)?;
+						let hrn_res = Arc::new(DNSHrnResolver(addr));
+						hrn_resolver_out = Some(Arc::new(HRNResolver::Local(hrn_res)));
+						Arc::new(OMDomainResolver::ignoring_incoming_proofs(addr))
+					},
+				};
+
+			let should_act_as_service = if hrn_config.disable_hrn_resolution_service {
+				false
+			} else if may_announce_channel(&config).is_ok() {
+				true
+			} else {
+				false
+			};
+
+			if should_act_as_service {
+				if let HRNResolverConfig::LocalDns { dns_server_address } =
+					&hrn_config.client_resolution_config
+				{
+					let service_dns_addr = dns_server_address
+						.parse()
+						.map_err(|_| BuildError::DNSResolverSetupFailed)?;
+					Arc::new(OMDomainResolver::new(service_dns_addr, Some(client_resolver)))
+				} else {
+					log_error!(logger, "To act as an HRN resolution service, the DNS resolver must be configured to use a DNS server.");
+					return Err(BuildError::DNSResolverSetupFailed);
+				}
+			} else {
+				client_resolver
+			}
 		},
 	};
 
@@ -1703,7 +1732,7 @@ fn build_with_store_internal(
 		BuildError::InvalidSystemTime
 	})?;
 
-	let peer_manager = Arc::new(PeerManager::new(
+	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		msg_handler,
 		cur_time.as_secs().try_into().map_err(|e| {
 			log_error!(logger, "Failed to get current time: {}", e);
@@ -1714,20 +1743,11 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
-	let peer_manager_clone = Arc::downgrade(&peer_manager);
-
-	let hrn_resolver = match resolver {
-		Resolver::DNS(_) => None,
-		Resolver::HRN(ref hrn_resolver) => {
-			hrn_resolver.register_post_queue_action(Box::new(move || {
-				if let Some(upgraded_pointer) = peer_manager_clone.upgrade() {
-					upgraded_pointer.process_events();
-				}
-			}));
-			Some(hrn_resolver)
-		},
-		Resolver::Ignore(_) => None,
-	};
+	if let Ok(mut guard) = peer_manager_hook.lock() {
+		*guard = Some(Arc::downgrade(&peer_manager));
+	} else {
+		return Err(BuildError::DNSResolverSetupFailed);
+	}
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
 
@@ -1834,7 +1854,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
-		hrn_resolver: hrn_resolver.cloned(),
+		hrn_resolver: hrn_resolver_out,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})
