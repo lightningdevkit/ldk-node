@@ -79,12 +79,6 @@ enum WordCount {
 	"Words24",
 };
 
-dictionary RetryConfig {
-	u16 initial_retry_delay_ms;
-	u16 maximum_delay_ms;
-	f32 backoff_multiplier;
-};
-
 enum LogLevel {
 	"Gossip",
 	"Trace",
@@ -180,7 +174,6 @@ interface Builder {
 	void set_announcement_addresses(sequence<SocketAddress> announcement_addresses);
 	[Throws=BuildError]
 	void set_node_alias(string node_alias);
-	void set_tier_store_retry_config(RetryConfig retry_config);
 	void set_tier_store_backup(FfiDynStore backup_store);
 	void set_tier_store_ephemeral(FfiDynStore ephemeral_store);
 	[Throws=BuildError]

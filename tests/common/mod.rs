@@ -34,7 +34,7 @@ use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, DynStore, DynStoreWrapper, Event, LightningBalance, Node, NodeError,
-	PendingSweepBalance, RetryConfig,
+	PendingSweepBalance,
 };
 #[cfg(feature = "uniffi")]
 use ldk_node::{FfiDynStore, ForeignDynStoreTrait, IOError};
@@ -570,7 +570,6 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			if let Some(ephemeral) = ephemeral {
 				builder.set_tier_store_ephemeral(ephemeral);
 			}
-			builder.set_tier_store_retry_config(RetryConfig::default());
 			builder.build_with_tier_store(config.node_entropy.into(), primary).unwrap()
 		},
 	};

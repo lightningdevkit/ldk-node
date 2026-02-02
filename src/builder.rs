@@ -56,7 +56,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::FfiDynStore;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
-use crate::io::tier_store::{RetryConfig, TierStore};
+use crate::io::tier_store::TierStore;
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
 	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
@@ -157,7 +157,6 @@ impl std::fmt::Debug for LogWriterConfig {
 struct TierStoreConfig {
 	ephemeral: Option<Arc<DynStore>>,
 	backup: Option<Arc<DynStore>>,
-	retry: Option<RetryConfig>,
 }
 
 impl std::fmt::Debug for TierStoreConfig {
@@ -165,7 +164,6 @@ impl std::fmt::Debug for TierStoreConfig {
 		f.debug_struct("TierStoreConfig")
 			.field("ephemeral", &self.ephemeral.as_ref().map(|_| "Arc<DynStore>"))
 			.field("backup", &self.backup.as_ref().map(|_| "Arc<DynStore>"))
-			.field("retry", &self.retry)
 			.finish()
 	}
 }
@@ -580,21 +578,6 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Configures retry behavior for transient errors when accessing the primary store.
-	///
-	/// When building with [`build_with_tier_store`], controls the exponential backoff parameters
-	/// used when retrying failed operations on the primary store due to transient errors
-	/// (network issues, timeouts, etc.).
-	///
-	/// If not set, default retry parameters are used. See [`RetryConfig`] for details.
-	///
-	/// [`build_with_tier_store`]: Self::build_with_tier_store
-	pub fn set_tier_store_retry_config(&mut self, config: RetryConfig) -> &mut Self {
-		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
-		tier_store_config.retry = Some(config);
-		self
-	}
-
 	/// Configures the backup store for local disaster recovery.
 	///
 	/// When building with [`build_with_tier_store`], this store receives asynchronous copies
@@ -757,16 +740,14 @@ impl NodeBuilder {
 	///
 	/// ## Configuration
 	///
-	/// Use the setter methods to configure optional stores and retry behavior:
+	/// Use the setter methods to configure optional stores:
 	/// - [`set_tier_store_ephemeral`] - Set local store for network graph and scorer
 	/// - [`set_tier_store_backup`] - Set local backup store for disaster recovery
-	/// - [`set_tier_store_retry_config`] - Configure retry delays and backoff for transient errors
 	///
 	/// ## Example
 	///
 	/// ```ignore
 	/// # use ldk_node::{Builder, Config};
-	/// # use ldk_node::io::tier_store::RetryConfig;
 	/// # use std::sync::Arc;
 	/// let config = Config::default();
 	/// let mut builder = NodeBuilder::from_config(config);
@@ -774,12 +755,10 @@ impl NodeBuilder {
 	/// let primary = Arc::new(VssStore::new(...));
 	/// let ephemeral = Arc::new(FilesystemStore::new(...));
 	/// let backup = Arc::new(SqliteStore::new(...));
-	///	let retry_config = RetryConfig::default();
 	///
 	/// builder
 	///     .set_tier_store_ephemeral(ephemeral)
-	///     .set_tier_store_backup(backup)
-	/// 	.set_tier_store_retry_config(retry_config);
+	///     .set_tier_store_backup(backup);
 	///
 	/// let node = builder.build_with_tier_store(primary)?;
 	/// # Ok::<(), ldk_node::BuildError>(())
@@ -787,7 +766,6 @@ impl NodeBuilder {
 	///
 	/// [`set_tier_store_ephemeral`]: Self::set_tier_store_ephemeral
 	/// [`set_tier_store_backup`]: Self::set_tier_store_backup
-	/// [`set_tier_store_retry_config`]: Self::set_tier_store_retry_config
 	#[cfg(not(feature = "uniffi"))]
 	pub fn build_with_tier_store(
 		&self, node_entropy: NodeEntropy, primary_store: Arc<DynStore>,
@@ -809,10 +787,9 @@ impl NodeBuilder {
 		};
 
 		let ts_config = self.tier_store_config.as_ref();
-		let retry_config = ts_config.and_then(|c| c.retry).unwrap_or_default();
 
 		let mut tier_store =
-			TierStore::new(primary_store, Arc::clone(&runtime), Arc::clone(&logger), retry_config);
+			TierStore::new(primary_store, Arc::clone(&runtime), Arc::clone(&logger));
 
 		if let Some(config) = ts_config {
 			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
@@ -1095,19 +1072,6 @@ impl ArcedNodeBuilder {
 	/// used [`NodeEntropy`].
 	pub fn set_wallet_recovery_mode(&self) {
 		self.inner.write().unwrap().set_wallet_recovery_mode();
-	}
-
-	/// Configures retry behavior for transient errors when accessing the primary store.
-	///
-	/// When building with [`build_with_tier_store`], controls the exponential backoff parameters
-	/// used when retrying failed operations on the primary store due to transient errors
-	/// (network issues, timeouts, etc.).
-	///
-	/// If not set, default retry parameters are used. See [`RetryConfig`] for details.
-	///
-	/// [`build_with_tier_store`]: Self::build_with_tier_store
-	pub fn set_tier_store_retry_config(&self, config: RetryConfig) {
-		self.inner.write().unwrap().set_tier_store_retry_config(config);
 	}
 
 	/// Configures the backup store for local disaster recovery.

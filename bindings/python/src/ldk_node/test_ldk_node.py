@@ -168,12 +168,7 @@ def setup_node_with_tier_store(tmp_dir, esplora_endpoint, listening_addresses):
     primary = TestKvStore("primary")
     backup = TestKvStore("backup")
     ephemeral = TestKvStore("ephemeral")
-    retry_config = RetryConfig(
-        initial_retry_delay_ms=10, 
-        maximum_delay_ms=100, 
-        backoff_multiplier=2.0
-    )
-
+    
     # Set event loop for async Python callbacks from Rust
     # (https://mozilla.github.io/uniffi-rs/0.27/futures.html#python-uniffi_set_event_loop)
     loop = asyncio.new_event_loop()
@@ -191,7 +186,6 @@ def setup_node_with_tier_store(tmp_dir, esplora_endpoint, listening_addresses):
     builder.set_chain_source_esplora(esplora_endpoint, None)
     builder.set_network(DEFAULT_TEST_NETWORK)
     builder.set_listening_addresses(listening_addresses)
-    builder.set_tier_store_retry_config(retry_config)
     builder.set_tier_store_backup(FfiDynStore.from_store(backup))
     builder.set_tier_store_ephemeral(FfiDynStore.from_store(ephemeral))
     

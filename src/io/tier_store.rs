@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::io::utils::{check_namespace_key_validity, is_possibly_transient};
+use crate::io::utils::check_namespace_key_validity;
 use crate::logger::{LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::DynStore;
@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 // todo(enigbe): Uncertain about appropriate queue size and if this would need
 // configuring.
@@ -32,33 +31,6 @@ use std::time::Duration;
 const BACKUP_QUEUE_CAPACITY: usize = 100;
 #[cfg(test)]
 const BACKUP_QUEUE_CAPACITY: usize = 5;
-
-const DEFAULT_INITIAL_RETRY_DELAY_MS: u16 = 10;
-const DEFAULT_MAXIMUM_RETRY_DELAY_MS: u16 = 500;
-const DEFAULT_BACKOFF_MULTIPLIER: f32 = 1.5;
-
-/// Configuration for exponential backoff retry behavior.
-#[derive(Debug, Copy, Clone)]
-pub struct RetryConfig {
-	/// The initial delay before the first retry attempt, in milliseconds.
-	pub initial_retry_delay_ms: u16,
-	/// The maximum delay between retry attempts, in milliseconds.
-	pub maximum_delay_ms: u16,
-	/// The multiplier applied to the delay after each retry attempt.
-	///
-	/// For example, a value of `2.0` doubles the delay after each failed retry.
-	pub backoff_multiplier: f32,
-}
-
-impl Default for RetryConfig {
-	fn default() -> Self {
-		Self {
-			initial_retry_delay_ms: DEFAULT_INITIAL_RETRY_DELAY_MS,
-			maximum_delay_ms: DEFAULT_MAXIMUM_RETRY_DELAY_MS,
-			backoff_multiplier: DEFAULT_BACKOFF_MULTIPLIER,
-		}
-	}
-}
 
 /// A 3-tiered [`KVStoreSync`] implementation that manages data across
 /// three distinct storage locations, i.e. primary (preferably remote)
@@ -74,11 +46,8 @@ pub(crate) struct TierStore {
 }
 
 impl TierStore {
-	pub fn new(
-		primary_store: Arc<DynStore>, runtime: Arc<Runtime>, logger: Arc<Logger>,
-		retry_config: RetryConfig,
-	) -> Self {
-		let inner = Arc::new(TierStoreInner::new(primary_store, Arc::clone(&logger), retry_config));
+	pub fn new(primary_store: Arc<DynStore>, runtime: Arc<Runtime>, logger: Arc<Logger>) -> Self {
+		let inner = Arc::new(TierStoreInner::new(primary_store, Arc::clone(&logger)));
 
 		Self { inner, next_version: AtomicU64::new(1), runtime, logger }
 	}
@@ -353,7 +322,6 @@ pub struct TierStoreInner {
 	backup_store: Option<Arc<DynStore>>,
 	backup_sender: Option<mpsc::Sender<BackupOp>>,
 	logger: Arc<Logger>,
-	retry_config: RetryConfig,
 	/// Per-key locks for the available data tiers, i.e. (primary, backup, ephemeral),
 	/// that ensures we don't have concurrent writes to the same namespace/key.
 	locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
@@ -361,16 +329,13 @@ pub struct TierStoreInner {
 
 impl TierStoreInner {
 	/// Creates a tier store with the primary (remote) data store.
-	pub fn new(
-		primary_store: Arc<DynStore>, logger: Arc<Logger>, retry_config: RetryConfig,
-	) -> Self {
+	pub fn new(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
 		Self {
 			primary_store,
 			ephemeral_store: None,
 			backup_store: None,
 			backup_sender: None,
 			logger,
-			retry_config,
 			locks: Mutex::new(HashMap::new()),
 		}
 	}
@@ -483,272 +448,75 @@ impl TierStoreInner {
 		Ok(())
 	}
 
-	/// Reads data from the backup store (if configured).
-	fn read_from_backup(
+	/// Reads from the primary data store.
+	async fn read_primary(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<Vec<u8>> {
-		if let Some(backup) = self.backup_store.as_ref() {
-			KVStoreSync::read(backup.as_ref(), primary_namespace, secondary_namespace, key)
-		} else {
-			Err(io::Error::new(io::ErrorKind::NotFound, "Backup store not previously configured."))
+		match KVStore::read(
+			self.primary_store.as_ref(),
+			primary_namespace,
+			secondary_namespace,
+			key,
+		)
+		.await
+		{
+			Ok(data) => {
+				log_info!(
+					self.logger,
+					"Read succeeded for key: {}/{}/{}",
+					primary_namespace,
+					secondary_namespace,
+					key
+				);
+				Ok(data)
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to read from primary store for key {}/{}/{}: {}.",
+					primary_namespace,
+					secondary_namespace,
+					key,
+					e
+				);
+				Err(e)
+			},
 		}
 	}
 
-	/// Lists keys from the given primary and secondary namespace pair from the backup
-	/// store (if configured).
-	fn list_from_backup(
+	/// Lists keys from the primary data store.
+	async fn list_primary(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<Vec<String>> {
-		if let Some(backup) = &self.backup_store {
-			KVStoreSync::list(backup.as_ref(), primary_namespace, secondary_namespace)
-		} else {
-			Err(io::Error::new(io::ErrorKind::NotFound, "Backup store not previously configured."))
-		}
-	}
-
-	/// Reads from the primary data store with basic retry logic, or falls back to backup.
-	///
-	/// For transient errors, retries up to a maximum delay time with exponential
-	/// backoff. For any error (transient after exhaustion or non-transient), falls
-	/// to the backup store (if configured).
-	async fn read_primary_or_backup(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
-		let mut tries = 0_u16;
-
-		loop {
-			match KVStore::read(
-				self.primary_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-			)
+		match KVStore::list(self.primary_store.as_ref(), primary_namespace, secondary_namespace)
 			.await
-			{
-				Ok(data) => {
-					log_info!(
-						self.logger,
-						"Read succeeded after {} retries for key: {}/{}/{}",
-						tries,
-						primary_namespace,
-						secondary_namespace,
-						key
-					);
-					return Ok(data);
-				},
-
-				Err(e) if is_possibly_transient(&e) && (delay < maximum_delay) => {
-					log_warn!(
-						self.logger,
-						"Possible transient error reading key {}/{}/{} (attempt {}): {}. Retrying...",
-						primary_namespace,
-						secondary_namespace,
-						key,
-						tries + 1,
-						e
-					);
-					tries += 1;
-					tokio::time::sleep(delay).await;
-					delay = std::cmp::min(
-						delay.mul_f32(self.retry_config.backoff_multiplier),
-						maximum_delay,
-					);
-				},
-
-				Err(e) => {
-					log_error!(self.logger, "Failed to read from primary store for key {}/{}/{}: {}. Falling back to backup.", 
-                          primary_namespace, secondary_namespace, key, e);
-					return self.read_from_backup(primary_namespace, secondary_namespace, key);
-				},
-			}
-		}
-	}
-
-	/// Lists keys from the primary data store with retry logic, or falls back to backup.
-	///
-	/// For transient errors, retries up to a maximum delay time with exponential
-	/// backoff. For any error (transient after exhaustion or non-transient), falls
-	/// back to the backup store (if configured) for disaster recovery.
-	async fn list_primary_or_backup(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
-		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
-		let mut tries = 0_u16;
-
-		loop {
-			match KVStore::list(self.primary_store.as_ref(), primary_namespace, secondary_namespace)
-				.await
-			{
-				Ok(keys) => {
-					log_info!(
-						self.logger,
-						"List succeeded after {} retries for namespace: {}/{}",
-						tries,
-						primary_namespace,
-						secondary_namespace
-					);
-					return Ok(keys);
-				},
-				Err(e) if is_possibly_transient(&e) && (delay < maximum_delay) => {
-					log_warn!(
-                    self.logger,
-                    "Possible transient error listing namespace {}/{} (attempt {}): {}. Retrying...",
-                    primary_namespace,
-                    secondary_namespace,
-                    tries + 1,
-                    e
-                );
-					tries += 1;
-					tokio::time::sleep(delay).await;
-					delay = std::cmp::min(
-						delay.mul_f32(self.retry_config.backoff_multiplier),
-						maximum_delay,
-					);
-				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to list from primary store for namespace {}/{}: {}. Falling back to backup.", 
-                          primary_namespace, secondary_namespace, e);
-					return self.list_from_backup(primary_namespace, secondary_namespace);
-				},
-			}
-		}
-	}
-
-	/// Writes data to the primary store with retry logic.
-	///
-	/// For transient errors, retries up to a maximum delay time with exponential
-	/// backoff.
-	async fn retry_write_with_backoff(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
-		let mut tries = 0_u16;
-
-		loop {
-			match KVStore::write(
-				self.primary_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				buf.clone(),
-			)
-			.await
-			{
-				Ok(res) => {
-					log_info!(
-						self.logger,
-						"Write succeeded after {} retries for key: {}/{}/{}",
-						tries,
-						primary_namespace,
-						secondary_namespace,
-						key
-					);
-					return Ok(res);
-				},
-				Err(e) if is_possibly_transient(&e) && (delay < maximum_delay) => {
-					log_warn!(
-                    self.logger,
-                    "Possible transient error writing key {}/{}/{} (attempt {}): {}. Retrying...",
-                    primary_namespace,
-                    secondary_namespace,
-                    key,
-                    tries + 1,
-                    e
-                );
-					tries += 1;
-					tokio::time::sleep(delay).await;
-					delay = std::cmp::min(
-						delay.mul_f32(self.retry_config.backoff_multiplier),
-						maximum_delay,
-					);
-				},
-				Err(e) => {
-					log_error!(
-						self.logger,
-						"Failed to write to primary store for key {}/{}/{}: {}",
-						primary_namespace,
-						secondary_namespace,
-						key,
-						e
-					);
-					return Err(e);
-				},
-			}
-		}
-	}
-
-	/// Removes data from the primary store with retry logic.
-	///
-	/// For transient errors, retries up to a maximum delay time with exponential
-	/// backoff.
-	async fn retry_remove_with_backoff(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		let mut delay = Duration::from_millis(self.retry_config.initial_retry_delay_ms as u64);
-		let maximum_delay = Duration::from_millis(self.retry_config.maximum_delay_ms as u64);
-		let mut tries = 0_u16;
-
-		loop {
-			match KVStore::remove(
-				self.primary_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				lazy,
-			)
-			.await
-			{
-				Ok(res) => {
-					log_info!(
-						self.logger,
-						"Successfully removed data from primary store after {} retries for key: {}/{}/{}",
-						tries,
-						primary_namespace,
-						secondary_namespace,
-						key
-					);
-					return Ok(res);
-				},
-				Err(e) if is_possibly_transient(&e) && (delay < maximum_delay) => {
-					log_warn!(
-                    self.logger,
-                    "Possible transient error removing key {}/{}/{} from primary store (attempt {}): {}. Retrying...",
-                    primary_namespace,
-                    secondary_namespace,
-                    key,
-                    tries + 1,
-                    e
-                );
-					tries += 1;
-					tokio::time::sleep(delay).await;
-					delay = std::cmp::min(
-						delay.mul_f32(self.retry_config.backoff_multiplier),
-						maximum_delay,
-					);
-				},
-				Err(e) => {
-					log_error!(
-						self.logger,
-						"Failed to remove data from primary store for key {}/{}/{}: {}",
-						primary_namespace,
-						secondary_namespace,
-						key,
-						e
-					);
-					return Err(e);
-				},
-			}
+		{
+			Ok(keys) => {
+				log_info!(
+					self.logger,
+					"List succeeded for namespace: {}/{}",
+					primary_namespace,
+					secondary_namespace
+				);
+				return Ok(keys);
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to list from primary store for namespace {}/{}: {}.",
+					primary_namespace,
+					secondary_namespace,
+					e
+				);
+				Err(e)
+			},
 		}
 	}
 
 	async fn primary_write_then_schedule_backup(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
-		let primary_write_res = match KVStore::write(
+		match KVStore::write(
 			self.primary_store.as_ref(),
 			primary_namespace,
 			secondary_namespace,
@@ -757,23 +525,7 @@ impl TierStoreInner {
 		)
 		.await
 		{
-			Ok(res) => Ok(res),
-			Err(e) if is_possibly_transient(&e) => {
-				self.retry_write_with_backoff(
-					primary_namespace,
-					secondary_namespace,
-					key,
-					buf.clone(),
-				)
-				.await
-			},
-			Err(e) => Err(e),
-		};
-
-		match primary_write_res {
-			Ok(res) => {
-				// We enqueue for backup only what we successfully write to primary. In doing
-				// this we avoid data inconsistencies across stores.
+			Ok(()) => {
 				if let Err(e) =
 					self.enqueue_backup_write(primary_namespace, secondary_namespace, key, buf)
 				{
@@ -788,7 +540,7 @@ impl TierStoreInner {
 					)
 				}
 
-				Ok(res)
+				Ok(())
 			},
 			Err(e) => {
 				log_debug!(
@@ -806,7 +558,7 @@ impl TierStoreInner {
 	async fn primary_remove_then_schedule_backup(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
-		let primary_remove_res = match KVStore::remove(
+		match KVStore::remove(
 			self.primary_store.as_ref(),
 			primary_namespace,
 			secondary_namespace,
@@ -815,16 +567,7 @@ impl TierStoreInner {
 		)
 		.await
 		{
-			Ok(res) => Ok(res),
-			Err(e) if is_possibly_transient(&e) => {
-				self.retry_remove_with_backoff(primary_namespace, secondary_namespace, key, lazy)
-					.await
-			},
-			Err(e) => Err(e),
-		};
-
-		match primary_remove_res {
-			Ok(res) => {
+			Ok(()) => {
 				if let Err(e) =
 					self.enqueue_backup_remove(primary_namespace, secondary_namespace, key, lazy)
 				{
@@ -839,7 +582,7 @@ impl TierStoreInner {
 					)
 				}
 
-				Ok(res)
+				Ok(())
 			},
 			Err(e) => {
 				log_debug!(
@@ -884,11 +627,10 @@ impl TierStoreInner {
 					)
 				} else {
 					log_debug!(self.logger, "Ephemeral store not configured. Reading non-critical data from primary or backup stores.");
-					self.read_primary_or_backup(&primary_namespace, &secondary_namespace, &key)
-						.await
+					self.read_primary(&primary_namespace, &secondary_namespace, &key).await
 				}
 			},
-			_ => self.read_primary_or_backup(&primary_namespace, &secondary_namespace, &key).await,
+			_ => self.read_primary(&primary_namespace, &secondary_namespace, &key).await,
 		}
 	}
 
@@ -1045,10 +787,10 @@ impl TierStoreInner {
 						self.logger,
 						"Ephemeral store not configured. Listing from primary and backup stores."
 					);
-					self.list_primary_or_backup(&primary_namespace, &secondary_namespace).await
+					self.list_primary(&primary_namespace, &secondary_namespace).await
 				}
 			},
-			_ => self.list_primary_or_backup(&primary_namespace, &secondary_namespace).await,
+			_ => self.list_primary(&primary_namespace, &secondary_namespace).await,
 		}
 	}
 
@@ -1132,6 +874,7 @@ mod tests {
 	use std::path::PathBuf;
 	use std::sync::Arc;
 	use std::thread;
+	use std::time::Duration;
 
 	use lightning::util::logger::Level;
 	use lightning::util::persist::{
@@ -1143,7 +886,7 @@ mod tests {
 	use crate::io::test_utils::{
 		do_read_write_remove_list_persist, random_storage_path, DelayedStore,
 	};
-	use crate::io::tier_store::{RetryConfig, TierStore};
+	use crate::io::tier_store::TierStore;
 	use crate::logger::Logger;
 	use crate::runtime::Runtime;
 	#[cfg(not(feature = "uniffi"))]
@@ -1164,8 +907,7 @@ mod tests {
 	fn setup_tier_store(
 		primary_store: Arc<DynStore>, logger: Arc<Logger>, runtime: Arc<Runtime>,
 	) -> TierStore {
-		let retry_config = RetryConfig::default();
-		TierStore::new(primary_store, runtime, logger, retry_config)
+		TierStore::new(primary_store, runtime, logger)
 	}
 
 	#[test]
