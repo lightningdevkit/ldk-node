@@ -138,7 +138,6 @@ use ffi::*;
 pub use ffi::{FfiDynStore, ForeignDynStoreTrait, IOError};
 use gossip::GossipSource;
 use graph::NetworkGraph;
-pub use io::tier_store::RetryConfig;
 use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
