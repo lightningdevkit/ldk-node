@@ -14,8 +14,9 @@ use std::sync::{Arc, RwLock};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use lightning::ln::channelmanager::{
-	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
+	Bolt11InvoiceParameters, OptionalBolt11PaymentParams, PaymentId,
 };
+use lightning::ln::outbound_payment::{Bolt11PaymentError, Retry, RetryableSendFailure};
 use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
@@ -109,17 +110,21 @@ impl Bolt11Payment {
 			}
 		}
 
-		let route_parameters =
+		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let payment_secret = Some(*invoice.payment_secret());
 
+		let optional_params = OptionalBolt11PaymentParams {
+			retry_strategy,
+			route_params_config,
+			..Default::default()
+		};
 		match self.channel_manager.pay_for_bolt11_invoice(
 			invoice,
 			payment_id,
 			None,
-			route_parameters,
-			retry_strategy,
+			optional_params,
 		) {
 			Ok(()) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
@@ -215,17 +220,21 @@ impl Bolt11Payment {
 			}
 		}
 
-		let route_parameters =
+		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let payment_secret = Some(*invoice.payment_secret());
 
+		let optional_params = OptionalBolt11PaymentParams {
+			retry_strategy,
+			route_params_config,
+			..Default::default()
+		};
 		match self.channel_manager.pay_for_bolt11_invoice(
 			invoice,
 			payment_id,
 			Some(amount_msat),
-			route_parameters,
-			retry_strategy,
+			optional_params,
 		) {
 			Ok(()) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
