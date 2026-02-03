@@ -1564,10 +1564,8 @@ fn build_with_store_internal(
 
 			let should_act_as_service = if hrn_config.disable_hrn_resolution_service {
 				false
-			} else if may_announce_channel(&config).is_ok() {
-				true
 			} else {
-				false
+				may_announce_channel(&config).is_ok()
 			};
 
 			if should_act_as_service {
@@ -1580,7 +1578,7 @@ fn build_with_store_internal(
 					Arc::new(OMDomainResolver::with_runtime(
 						service_dns_addr,
 						Some(client_resolver),
-						Some(tokio::runtime::Handle::current()),
+						Some(runtime.handle().clone()),
 					))
 				} else {
 					log_error!(logger, "To act as an HRN resolution service, the DNS resolver must be configured to use a DNS server.");
