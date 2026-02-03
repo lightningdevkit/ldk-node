@@ -439,7 +439,7 @@ pub(crate) fn create_tier_stores(base_path: PathBuf) -> (TestDynStore, TestDynSt
 		.unwrap(),
 	));
 	let backup = Arc::new(DynStoreWrapper(FilesystemStore::new(base_path.join("backup"))));
-	let ephemeral = Arc::new(DynStoreWrapper(TestStore::new(false)));
+	let ephemeral = Arc::new(DynStoreWrapper(FilesystemStore::new(base_path.join("ephemeral"))));
 
 	#[cfg(feature = "uniffi")]
 	{

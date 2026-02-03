@@ -796,7 +796,21 @@ impl NodeBuilder {
 			config.backup.as_ref().map(|s| tier_store.set_backup_store(Arc::clone(s)));
 		}
 
-		self.build_with_store(node_entropy, tier_store)
+		let seed_bytes = node_entropy.to_seed_bytes();
+		let config = Arc::new(self.config.clone());
+
+		build_with_store_internal(
+			config,
+			self.chain_data_source_config.as_ref(),
+			self.gossip_source_config.as_ref(),
+			self.liquidity_source_config.as_ref(),
+			self.pathfinding_scores_sync_config.as_ref(),
+			self.async_payments_role,
+			seed_bytes,
+			runtime,
+			logger,
+			Arc::new(DynStoreWrapper(tier_store)),
+		)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
