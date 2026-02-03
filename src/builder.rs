@@ -1577,7 +1577,11 @@ fn build_with_store_internal(
 					let service_dns_addr = dns_server_address
 						.parse()
 						.map_err(|_| BuildError::DNSResolverSetupFailed)?;
-					Arc::new(OMDomainResolver::new(service_dns_addr, Some(client_resolver)))
+					Arc::new(OMDomainResolver::with_runtime(
+						service_dns_addr,
+						Some(client_resolver),
+						Some(tokio::runtime::Handle::current()),
+					))
 				} else {
 					log_error!(logger, "To act as an HRN resolution service, the DNS resolver must be configured to use a DNS server.");
 					return Err(BuildError::DNSResolverSetupFailed);
