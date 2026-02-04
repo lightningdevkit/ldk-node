@@ -1314,7 +1314,7 @@ where
 		let currency = self.config.network.into();
 		let mut invoice_builder = InvoiceBuilder::new(currency)
 			.invoice_description(description.clone())
-			.payment_hash(payment_hash)
+			.payment_hash(lightning_invoice::PaymentHash(payment_hash.to_byte_array()))
 			.payment_secret(payment_secret)
 			.current_timestamp()
 			.min_final_cltv_expiry_delta(min_final_cltv_expiry_delta.into())
