@@ -7,6 +7,11 @@
   a persisted `ChannelClosed` event.
 - Users of the VSS storage backend must upgrade their VSS server to at least version
   `v0.1.0-alpha.0` before upgrading LDK Node.
+- The `payment_id` field on the `PaymentSuccessful`, `PaymentFailed`, and
+  `PaymentReceived` events is now a required (non-optional) `PaymentId`. Events
+  persisted by LDK Node v0.2.1 or earlier (which stored `payment_id` as
+  optional) will fail to deserialize on read; users upgrading from those
+  versions need to drain pending events before the upgrade.
 
 ## Feature and API updates
 - The Bitcoin Core RPC and REST chain-source builder methods now accept an optional
