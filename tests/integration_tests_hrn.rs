@@ -79,5 +79,5 @@ async fn unified_send_to_hrn() {
 			},
 		};
 
-	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
+	expect_payment_successful_event!(node_a, offer_payment_id, None);
 }

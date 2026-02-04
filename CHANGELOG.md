@@ -5,6 +5,11 @@
   prior LSPS2 fee-limit state stored in `PaymentKind::Bolt11Jit` is not migrated.
 - Users of the VSS storage backend must upgrade their VSS server to at least version
   `v0.1.0-alpha.0` before upgrading LDK Node.
+- The `payment_id` field on the `PaymentSuccessful`, `PaymentFailed`, and
+  `PaymentReceived` events is now a required (non-optional) `PaymentId`. Events
+  persisted by LDK Node v0.2.1 or earlier (which stored `payment_id` as
+  optional) will fail to deserialize on read; users upgrading from those
+  versions need to drain pending events before the upgrade.
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.

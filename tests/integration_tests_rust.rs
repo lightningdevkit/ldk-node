@@ -380,13 +380,12 @@ async fn split_underpaid_bolt11_payment() {
 		.unwrap();
 
 	let receiver_payment_id = expect_payment_received_event!(node_c, amount_msat);
-	assert_eq!(receiver_payment_id, Some(PaymentId(invoice.payment_hash().0)));
-	expect_payment_successful_event!(node_a, Some(payment_id_a), None);
-	expect_payment_successful_event!(node_b, Some(payment_id_b), None);
+	assert_eq!(receiver_payment_id, PaymentId(invoice.payment_hash().0));
+	expect_payment_successful_event!(node_a, payment_id_a, None);
+	expect_payment_successful_event!(node_b, payment_id_b, None);
 
 	// The receiver records the full invoice amount; each payer records only its own half.
-	let receiver_payments =
-		node_c.list_payments_with_filter(|p| p.id == receiver_payment_id.unwrap());
+	let receiver_payments = node_c.list_payments_with_filter(|p| p.id == receiver_payment_id);
 	assert_eq!(receiver_payments.len(), 1);
 	assert_eq!(receiver_payments.first().unwrap().amount_msat, Some(amount_msat));
 
@@ -1202,7 +1201,7 @@ async fn splice_channel() {
 	let payment_id =
 		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).unwrap();
 
-	expect_payment_successful_event!(node_b, Some(payment_id), None);
+	expect_payment_successful_event!(node_b, payment_id, None);
 	expect_payment_received_event!(node_a, amount_msat);
 
 	// Mine a block to give time for the HTLC to resolve
@@ -1298,7 +1297,7 @@ async fn simple_bolt12_send_receive() {
 	match event {
 		ref e @ Event::PaymentSuccessful { payment_id: ref evt_id, ref bolt12_invoice, .. } => {
 			println!("{} got event {:?}", node_a.node_id(), e);
-			assert_eq!(*evt_id, Some(payment_id));
+			assert_eq!(*evt_id, payment_id);
 			assert!(
 				bolt12_invoice.is_some(),
 				"bolt12_invoice should be present for BOLT12 payments"
@@ -1372,7 +1371,7 @@ async fn simple_bolt12_send_receive() {
 		)
 		.unwrap();
 
-	expect_payment_successful_event!(node_a, Some(payment_id), None);
+	expect_payment_successful_event!(node_a, payment_id, None);
 	let node_a_payments = node_a.list_payments_with_filter(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == payment_id
 	});
@@ -1445,7 +1444,7 @@ async fn simple_bolt12_send_receive() {
 		.first()
 		.unwrap()
 		.id;
-	expect_payment_successful_event!(node_b, Some(node_b_payment_id), None);
+	expect_payment_successful_event!(node_b, node_b_payment_id, None);
 
 	let node_b_payments = node_b.list_payments_with_filter(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_b_payment_id
@@ -1619,7 +1618,7 @@ async fn async_payment() {
 
 	node_receiver.start().unwrap();
 
-	expect_payment_successful_event!(node_sender, Some(payment_id), None);
+	expect_payment_successful_event!(node_sender, payment_id, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -1845,7 +1844,7 @@ async fn unified_send_receive_bip21_uri() {
 			},
 		};
 
-	expect_payment_successful_event!(node_a, Some(offer_payment_id), None);
+	expect_payment_successful_event!(node_a, offer_payment_id, None);
 
 	// Cut off the BOLT12 part to fallback to BOLT11.
 	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
@@ -1865,7 +1864,7 @@ async fn unified_send_receive_bip21_uri() {
 				panic!("Expected Bolt11 payment but got error: {:?}", e);
 			},
 		};
-	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
+	expect_payment_successful_event!(node_a, invoice_payment_id, None);
 
 	let expect_onchain_amount_sats = 800_000;
 	let onchain_uni_payment =
@@ -2000,9 +1999,9 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
-	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_successful_event!(payer_node, payment_id, None);
 	let client_payment_id =
-		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
+		expect_payment_received_event!(client_node, expected_received_amount_msat);
 	let client_payment = client_node.payment(&client_payment_id).unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
@@ -2029,7 +2028,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	// are working as expected.
 	println!("Paying regular invoice!");
 	let payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
-	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_successful_event!(payer_node, payment_id, None);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
 
@@ -2075,9 +2074,9 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		.unwrap();
 
 	expect_event!(service_node, PaymentForwarded);
-	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_successful_event!(payer_node, payment_id, None);
 	let client_payment_id =
-		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
+		expect_payment_received_event!(client_node, expected_received_amount_msat);
 	let client_payment = client_node.payment(&client_payment_id).unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
@@ -2182,7 +2181,7 @@ async fn spontaneous_send_with_custom_preimage() {
 		.unwrap();
 
 	// check payment status and verify stored preimage
-	expect_payment_successful_event!(node_a, Some(payment_id), None);
+	expect_payment_successful_event!(node_a, payment_id, None);
 	let details: PaymentDetails =
 		node_a.list_payments_with_filter(|p| p.id == payment_id).first().unwrap().clone();
 	assert_eq!(details.status, PaymentStatus::Succeeded);
@@ -2368,9 +2367,9 @@ async fn lsps2_client_trusts_lsp() {
 		.claim_for_hash(manual_payment_hash, jit_amount_msat, manual_preimage)
 		.unwrap();
 
-	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_successful_event!(payer_node, payment_id, None);
 
-	let _ = expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
+	let _ = expect_payment_received_event!(client_node, expected_received_amount_msat);
 
 	// Check the nodes pick up on the confirmed funding tx now.
 	wait_for_tx(&electrsd.client, funding_txo.txid).await;

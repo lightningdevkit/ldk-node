@@ -302,7 +302,7 @@ async fn expect_current_payment_successful(
 ) {
 	match next_current_event(node).await {
 		ldk_node::Event::PaymentSuccessful { payment_id, .. } => {
-			assert_eq!(payment_id.as_ref(), Some(expected_payment_id));
+			assert_eq!(&payment_id, expected_payment_id);
 			node.event_handled().unwrap();
 		},
 		event => panic!("{} got unexpected event: {:?}", node.node_id(), event),
@@ -311,9 +311,8 @@ async fn expect_current_payment_successful(
 
 async fn expect_current_payment_received(node: &CurrentNode, expected_amount_msat: u64) {
 	match next_current_event(node).await {
-		ldk_node::Event::PaymentReceived { amount_msat, payment_id, .. } => {
+		ldk_node::Event::PaymentReceived { amount_msat, .. } => {
 			assert_eq!(amount_msat, expected_amount_msat);
-			assert!(payment_id.is_some());
 			node.event_handled().unwrap();
 		},
 		event => panic!("{} got unexpected event: {:?}", node.node_id(), event),
