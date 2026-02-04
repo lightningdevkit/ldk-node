@@ -224,7 +224,7 @@ macro_rules! expect_payment_received_event {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
-				let payment = $node.payment(&payment_id.unwrap()).unwrap();
+				let payment = $node.payment(&payment_id).unwrap();
 				if !matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }) {
 					assert_eq!(payment.fee_paid_msat, None);
 				}
@@ -292,7 +292,7 @@ macro_rules! expect_payment_successful_event {
 				if let Some(fee_msat) = $fee_paid_msat {
 					assert_eq!(fee_paid_msat, fee_msat);
 				}
-				let payment = $node.payment(&$payment_id.unwrap()).unwrap();
+				let payment = $node.payment(&$payment_id).unwrap();
 				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
 				$node.event_handled().unwrap();
@@ -1412,7 +1412,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		.claim_for_hash(manual_payment_hash, claimable_amount_msat, manual_preimage)
 		.unwrap();
 	expect_payment_received_event!(node_b, claimable_amount_msat);
-	expect_payment_successful_event!(node_a, Some(manual_payment_id), None);
+	expect_payment_successful_event!(node_a, manual_payment_id, None);
 	assert_eq!(node_a.payment(&manual_payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&manual_payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(
