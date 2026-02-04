@@ -407,25 +407,28 @@ impl ForeignDynStoreTrait for TestForeignDynStoreAdapter {
 	fn read(
 		&self, primary_namespace: String, secondary_namespace: String, key: String,
 	) -> Result<Vec<u8>, IOError> {
-		self.0.read(&primary_namespace, &secondary_namespace, &key).map_err(Into::into)
+		KVStoreSync::read(&*self.0, &primary_namespace, &secondary_namespace, &key)
+			.map_err(Into::into)
 	}
 
 	fn write(
 		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
 	) -> Result<(), IOError> {
-		self.0.write(&primary_namespace, &secondary_namespace, &key, buf).map_err(Into::into)
+		KVStoreSync::write(&*self.0, &primary_namespace, &secondary_namespace, &key, buf)
+			.map_err(Into::into)
 	}
 
 	fn remove(
 		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
 	) -> Result<(), IOError> {
-		self.0.remove(&primary_namespace, &secondary_namespace, &key, lazy).map_err(Into::into)
+		KVStoreSync::remove(&*self.0, &primary_namespace, &secondary_namespace, &key, lazy)
+			.map_err(Into::into)
 	}
 
 	fn list(
 		&self, primary_namespace: String, secondary_namespace: String,
 	) -> Result<Vec<String>, IOError> {
-		self.0.list(&primary_namespace, &secondary_namespace).map_err(Into::into)
+		KVStoreSync::list(&*self.0, &primary_namespace, &secondary_namespace).map_err(Into::into)
 	}
 }
 
