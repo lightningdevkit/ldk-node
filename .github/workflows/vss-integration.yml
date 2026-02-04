@@ -9,6 +9,9 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        authorizer: [noop, sig, jwt]
 
     services:
       postgres:
@@ -39,10 +42,22 @@ jobs:
       - name: Build and Deploy VSS Server
         run: |
           cd vss-server/rust
-          cargo run server/vss-server-config.toml&
-      - name: Run VSS Integration tests
+          if [ "${{ matrix.authorizer }}" == "noop" ]; then
+            RUSTFLAGS="--cfg noop_authorizer" cargo run --release --no-default-features server/vss-server-config.toml &
+          elif [ "${{ matrix.authorizer }}" == "jwt" ]; then
+            # Public key for testing purposes solely.
+            export VSS_JWT_RSA_PEM=$(cat ../../ldk-node/tests/fixtures/vss_jwt_rsa_pub.pem)
+            cargo run --release server/vss-server-config.toml &
+          elif [ "${{ matrix.authorizer }}" == "sig" ]; then
+            cargo run --release server/vss-server-config.toml &
+          else
+            echo "Unknown authorizer: ${{ matrix.authorizer }}" && exit 1
+          fi
+        
+      - name: Run VSS Integration tests for ${{ matrix.authorizer }}
         run: |
           cd ldk-node
           export TEST_VSS_BASE_URL="http://localhost:8080/vss"
-          RUSTFLAGS="--cfg vss_test" cargo test io::vss_store
-          RUSTFLAGS="--cfg vss_test --cfg cycle_tests" cargo test --test integration_tests_vss
+          RUSTFLAGS="--cfg vss_test --cfg ${{ matrix.authorizer }}_auth_test" cargo test --features test_utils io::vss_store
+          RUSTFLAGS="--cfg vss_test --cfg cycle_tests --cfg ${{ matrix.authorizer }}_auth_test" cargo test \
+          --features test_utils --test integration_tests_vss

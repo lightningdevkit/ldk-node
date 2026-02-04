@@ -962,14 +962,12 @@ impl VssStoreBuilder {
 #[cfg(test)]
 #[cfg(vss_test)]
 mod tests {
-	use std::collections::HashMap;
-
 	use rand::distr::Alphanumeric;
 	use rand::{rng, Rng, RngCore};
 	use vss_client::headers::FixedHeaders;
 
 	use super::*;
-	use crate::io::test_utils::do_read_write_remove_list_persist;
+	use crate::io::test_utils::{do_read_write_remove_list_persist, get_fixed_headers};
 
 	#[test]
 	fn vss_read_write_remove_list_persist() {
@@ -978,9 +976,14 @@ mod tests {
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
-		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
+		let header_provider = get_fixed_headers();
+		let vss_store = VssStore::new(
+			vss_base_url,
+			rand_store_id,
+			vss_seed,
+			Arc::new(FixedHeaders::new(header_provider)),
+		)
+		.unwrap();
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
@@ -991,9 +994,14 @@ mod tests {
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut vss_seed = [0u8; 32];
 		rng.fill_bytes(&mut vss_seed);
-		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
-		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
+		let header_provider = get_fixed_headers();
+		let vss_store = VssStore::new(
+			vss_base_url,
+			rand_store_id,
+			vss_seed,
+			Arc::new(FixedHeaders::new(header_provider)),
+		)
+		.unwrap();
 
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)

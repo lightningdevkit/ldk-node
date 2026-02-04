@@ -5,6 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+#![allow(dead_code)]
+
 use std::collections::{hash_map, HashMap};
 use std::future::Future;
 use std::panic::RefUnwindSafe;
@@ -349,4 +351,112 @@ pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 
 	// Make sure everything is persisted as expected after close.
 	check_persisted_data!(persister_0_max_pending_updates * 2 * EXPECTED_UPDATES_PER_PAYMENT + 1);
+}
+
+#[cfg(all(feature = "test_utils", jwt_auth_test))]
+mod jwt_auth {
+	use super::*;
+
+	use std::time::SystemTime;
+
+	use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+	use serde::{Deserialize, Serialize};
+
+	// Private key for testing purposes solely.
+	const VSS_PRIVATE_PEM: &str = include_str!("../../tests/fixtures/vss_jwt_rsa_prv.pem");
+
+	#[derive(Serialize, Deserialize)]
+	struct TestClaims {
+		sub: String,
+		iat: i64,
+		nbf: i64,
+		exp: i64,
+	}
+
+	pub fn generate_test_jwt(private_pem: &str, user_id: &str) -> String {
+		let now =
+			SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+
+		let claims =
+			TestClaims { sub: user_id.to_owned(), iat: now, nbf: now, exp: now + (60 * 10) };
+
+		let encoding_key = EncodingKey::from_rsa_pem(private_pem.as_bytes())
+			.expect("Failed to create EncodingKey");
+
+		encode(&Header::new(Algorithm::RS256), &claims, &encoding_key).unwrap()
+	}
+
+	pub fn get_fixed_headers() -> HashMap<String, String> {
+		let token = generate_test_jwt(VSS_PRIVATE_PEM, "test");
+		let mut headers = HashMap::new();
+		headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+		return headers;
+	}
+}
+
+#[cfg(all(feature = "test_utils", sig_auth_test))]
+mod sig_auth {
+	use super::*;
+
+	use std::time::SystemTime;
+	use std::time::UNIX_EPOCH;
+
+	use bitcoin::hashes::sha256::Hash;
+	use bitcoin::hashes::Hash as _;
+	use bitcoin::secp256k1::{self, SecretKey};
+
+	use crate::hex_utils;
+
+	// Must match vss-server's SignatureAuthorizer constant.
+	// See: https://github.com/lightningdevkit/vss-server/blob/main/rust/auth-impls/src/signature.rs#L21
+	const SIGNING_CONSTANT: &'static [u8] =
+		b"VSS Signature Authorizer Signing Salt Constant..................";
+
+	fn build_auth_token(secret_key: &SecretKey) -> String {
+		let secp = secp256k1::Secp256k1::new();
+		let pubkey = secret_key.public_key(&secp);
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+		let mut bytes_to_sign = Vec::new();
+		bytes_to_sign.extend_from_slice(SIGNING_CONSTANT);
+		bytes_to_sign.extend_from_slice(&pubkey.serialize());
+		bytes_to_sign.extend_from_slice(format!("{now}").as_bytes());
+
+		let hash = Hash::hash(&bytes_to_sign);
+		let msg = secp256k1::Message::from_digest(hash.to_byte_array());
+		let sig = secp.sign_ecdsa(&msg, &secret_key);
+
+		format!("{pubkey:x}{}{now}", hex_utils::to_string(&sig.serialize_compact()))
+	}
+
+	pub fn get_fixed_headers() -> HashMap<String, String> {
+		let secret_key = SecretKey::from_slice(&[42; 32]).unwrap();
+		let token = build_auth_token(&secret_key);
+		let mut headers = HashMap::new();
+		headers.insert("Authorization".to_string(), token);
+		return headers;
+	}
+}
+
+/// Returns a hashmap of fixed headers, where, depending on configuration,
+/// corresponds to valid headers for no-op, signature-based, or jwt-based
+/// authorizers on vss-server.
+pub fn get_fixed_headers() -> HashMap<String, String> {
+	#[cfg(noop_auth_test)]
+	{
+		HashMap::new()
+	}
+
+	#[cfg(all(jwt_auth_test, feature = "test_utils"))]
+	{
+		jwt_auth::get_fixed_headers()
+	}
+
+	#[cfg(all(feature = "test_utils", sig_auth_test))]
+	{
+		sig_auth::get_fixed_headers()
+	}
+
+	#[cfg(not(any(noop_auth_test, all(jwt_auth_test, feature = "test_utils"), sig_auth_test)))]
+	HashMap::new()
 }

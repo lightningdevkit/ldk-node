@@ -25,6 +25,7 @@ panic = 'abort'     # Abort on panic
 
 [features]
 default = []
+test_utils = ["jsonwebtoken", "lightning/_test_utils"]
 
 [dependencies]
 #lightning = { version = "0.2.0", features = ["std"] }
@@ -79,6 +80,7 @@ vss-client = { package = "vss-client-ng", version = "0.4" }
 prost = { version = "0.11.6", default-features = false}
 #bitcoin-payment-instructions = { version = "0.6" }
 bitcoin-payment-instructions = { git = "https://github.com/tnull/bitcoin-payment-instructions", rev = "e4d519b95b26916dc6efa22f8f1cc11a818ce7a7" }
+jsonwebtoken = { version = "9.3.0", optional = true, default-features = false, features = ["use_pem"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
@@ -123,6 +125,9 @@ check-cfg = [
 	"cfg(cln_test)",
 	"cfg(lnd_test)",
 	"cfg(cycle_tests)",
+	"cfg(noop_auth_test)",
+	"cfg(jwt_auth_test)",
+	"cfg(sig_auth_test)",
 ]
 
 [[bench]]

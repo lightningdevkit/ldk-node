@@ -8,8 +8,12 @@
 //! Objects and traits for data persistence.
 
 pub mod sqlite_store;
-#[cfg(test)]
+#[cfg(any(test, feature = "test_utils"))]
 pub(crate) mod test_utils;
+
+#[cfg(feature = "test_utils")]
+pub use test_utils::get_fixed_headers;
+
 pub(crate) mod utils;
 pub mod vss_store;
 

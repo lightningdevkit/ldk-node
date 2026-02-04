@@ -5,15 +5,15 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-#![cfg(vss_test)]
+#![cfg(all(vss_test, feature = "test_utils"))]
 
 mod common;
 
-use std::collections::HashMap;
+use rand::{rng, Rng};
 
 use ldk_node::entropy::NodeEntropy;
+use ldk_node::io::get_fixed_headers;
 use ldk_node::Builder;
-use rand::{rng, Rng};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_with_vss_store() {
@@ -29,7 +29,7 @@ async fn channel_full_cycle_with_vss_store() {
 			config_a.node_entropy,
 			vss_base_url.clone(),
 			"node_1_store".to_string(),
-			HashMap::new(),
+			get_fixed_headers(),
 		)
 		.unwrap();
 	node_a.start().unwrap();
@@ -43,7 +43,7 @@ async fn channel_full_cycle_with_vss_store() {
 			config_b.node_entropy,
 			vss_base_url,
 			"node_2_store".to_string(),
-			HashMap::new(),
+			get_fixed_headers(),
 		)
 		.unwrap();
 	node_b.start().unwrap();
@@ -84,7 +84,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 			.build_with_vss_store_and_fixed_headers(
 				vss_base_url.clone(),
 				store_id.clone(),
-				HashMap::new(),
+				get_fixed_headers(),
 			)
 			.unwrap();
 
@@ -123,7 +123,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 			node_entropy,
 			vss_base_url,
 			store_id,
-			HashMap::new(),
+			get_fixed_headers(),
 		)
 		.unwrap();
 
@@ -158,12 +158,13 @@ async fn vss_node_restart() {
 		builder.set_network(bitcoin::Network::Regtest);
 		builder.set_storage_dir_path(storage_path.clone());
 		builder.set_chain_source_esplora(esplora_url.clone(), None);
+
 		let node = builder
 			.build_with_vss_store_and_fixed_headers(
 				node_entropy,
 				vss_base_url.clone(),
 				store_id.clone(),
-				HashMap::new(),
+				get_fixed_headers(),
 			)
 			.unwrap();
 
@@ -197,7 +198,7 @@ async fn vss_node_restart() {
 			node_entropy,
 			vss_base_url,
 			store_id,
-			HashMap::new(),
+			get_fixed_headers(),
 		)
 		.unwrap();
 
