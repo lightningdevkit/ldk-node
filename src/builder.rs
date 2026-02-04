@@ -1531,6 +1531,8 @@ fn build_with_store_internal(
 	let om_resolver = match &config.hrn_config {
 		None => Arc::new(IgnoringMessageHandler {}),
 		Some(hrn_config) => {
+			let runtime_handle = runtime.handle();
+
 			let client_resolver: Arc<dyn DNSResolverMessageHandler + Send + Sync> =
 				match &hrn_config.client_resolution_config {
 					HRNResolverConfig::Blip32Onion => {
@@ -1550,7 +1552,7 @@ fn build_with_store_internal(
 							}
 						}));
 
-						hrn_res
+						hrn_res as Arc<dyn DNSResolverMessageHandler + Send + Sync>
 					},
 					HRNResolverConfig::LocalDns { dns_server_address } => {
 						let addr = dns_server_address
@@ -1558,7 +1560,9 @@ fn build_with_store_internal(
 							.map_err(|_| BuildError::DNSResolverSetupFailed)?;
 						let hrn_res = Arc::new(DNSHrnResolver(addr));
 						hrn_resolver_out = Some(Arc::new(HRNResolver::Local(hrn_res)));
-						Arc::new(OMDomainResolver::ignoring_incoming_proofs(addr))
+						let resolver = Arc::new(OMDomainResolver::ignoring_incoming_proofs(addr));
+						resolver.set_runtime(runtime_handle.clone());
+						resolver as Arc<dyn DNSResolverMessageHandler + Send + Sync>
 					},
 				};
 
@@ -1578,7 +1582,7 @@ fn build_with_store_internal(
 					Arc::new(OMDomainResolver::with_runtime(
 						service_dns_addr,
 						Some(client_resolver),
-						Some(runtime.handle().clone()),
+						Some(runtime_handle.clone()),
 					))
 				} else {
 					log_error!(logger, "To act as an HRN resolution service, the DNS resolver must be configured to use a DNS server.");
