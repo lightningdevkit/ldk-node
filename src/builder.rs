@@ -1560,7 +1560,12 @@ fn build_with_store_internal(
 							.map_err(|_| BuildError::DNSResolverSetupFailed)?;
 						let hrn_res = Arc::new(DNSHrnResolver(addr));
 						hrn_resolver_out = Some(Arc::new(HRNResolver::Local(hrn_res)));
-						let resolver = Arc::new(OMDomainResolver::ignoring_incoming_proofs(addr));
+						let resolver =
+							Arc::new(OMDomainResolver::<IgnoringMessageHandler>::with_runtime(
+								addr,
+								None,
+								Some(runtime_handle.clone()),
+							));
 						resolver.set_runtime(runtime_handle.clone());
 						resolver as Arc<dyn DNSResolverMessageHandler + Send + Sync>
 					},
