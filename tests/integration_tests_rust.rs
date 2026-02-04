@@ -1829,13 +1829,13 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	// Have the payer_node pay the invoice, to check regular forwards service_node -> client_node
 	// are working as expected.
 	println!("Paying regular invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
-	expect_payment_successful_event!(payer_node, payment_id, None);
+	let payer_payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
 
 	////////////////////////////////////////////////////////////////////////////
-	// receive_via_jit_channel_for_hash and claim_for_hash
+	// receive_via_jit_channel_for_hash and claim_for_id
 	////////////////////////////////////////////////////////////////////////////
 	println!("Generating JIT invoice!");
 	// Increase the amount to make sure it does not fit into the existing channels.
@@ -1855,7 +1855,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1863,22 +1863,22 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
-	let claimable_amount_msat = expect_payment_claimable_event!(
+	let (client_claimable_payment_id, claimable_amount_msat) = expect_payment_claimable_event!(
 		client_node,
-		payment_id,
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
 	println!("Claiming payment!");
 	client_node
 		.bolt11_payment()
-		.claim_for_hash(manual_payment_hash, claimable_amount_msat, manual_preimage)
+		.claim_for_id(client_payment_id, claimable_amount_msat, manual_preimage)
 		.unwrap();
 
 	expect_event!(service_node, PaymentForwarded);
-	expect_payment_successful_event!(payer_node, payment_id, None);
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
 	let client_payment_id =
 		expect_payment_received_event!(client_node, expected_received_amount_msat);
+	assert_eq!(client_payment_id, client_claimable_payment_id);
 	let client_payment = client_node.payment(&client_payment_id).unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
@@ -1888,7 +1888,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	}
 
 	////////////////////////////////////////////////////////////////////////////
-	// receive_via_jit_channel_for_hash and fail_for_hash
+	// receive_via_jit_channel_for_hash and fail_for_id
 	////////////////////////////////////////////////////////////////////////////
 	println!("Generating JIT invoice!");
 	// Increase the amount to make sure it does not fit into the existing channels.
@@ -1908,7 +1908,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1916,17 +1916,16 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
-	expect_payment_claimable_event!(
+	let (client_payment_id, _) = expect_payment_claimable_event!(
 		client_node,
-		payment_id,
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
 	println!("Failing payment!");
-	client_node.bolt11_payment().fail_for_hash(manual_payment_hash).unwrap();
+	client_node.bolt11_payment().fail_for_id(client_payment_id).unwrap();
 
 	expect_event!(payer_node, PaymentFailed);
-	assert_eq!(client_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(client_node.payment(&client_payment_id).unwrap().status, PaymentStatus::Failed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -2158,14 +2157,13 @@ async fn lsps2_client_trusts_lsp() {
 
 	let _ = expect_payment_claimable_event!(
 		client_node,
-		payment_id,
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
 
 	client_node
 		.bolt11_payment()
-		.claim_for_hash(manual_payment_hash, jit_amount_msat, manual_preimage)
+		.claim_for_id(payment_id, jit_amount_msat, manual_preimage)
 		.unwrap();
 
 	expect_payment_successful_event!(payer_node, payment_id, None);

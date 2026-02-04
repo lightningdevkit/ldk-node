@@ -214,9 +214,9 @@ interface Bolt11Payment {
 	[Throws=NodeError]
 	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
+	void claim_for_id(PaymentId payment_id, u64 claimable_amount_msat, PaymentPreimage preimage);
 	[Throws=NodeError]
-	void fail_for_hash(PaymentHash payment_hash);
+	void fail_for_id(PaymentId payment_id);
 	[Throws=NodeError]
 	Bolt11Invoice receive(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
 	[Throws=NodeError]
