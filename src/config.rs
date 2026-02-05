@@ -21,6 +21,30 @@ use lightning::util::config::{
 
 use crate::logger::LogLevel;
 
+/// The mode used for tracking forwarded payments.
+///
+/// This determines how much detail is stored about payment forwarding activity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ForwardedPaymentTrackingMode {
+	/// Store individual forwarded payments for the specified retention period (in minutes),
+	/// then aggregate into channel-pair statistics.
+	///
+	/// Individual payments older than `retention_minutes` are aggregated by channel pair
+	/// and removed. Set to 0 for unlimited retention.
+	Detailed {
+		/// The retention period for individual forwarded payment records, in minutes.
+		/// Individual payments older than this period are aggregated into channel-pair statistics and removed.
+		/// Set to 0 for unlimited retention.
+		retention_minutes: u64,
+	},
+	/// Track only per-channel aggregate statistics without storing individual payment records.
+	///
+	/// This is the default mode. Use this to reduce storage requirements when you only need
+	/// aggregate metrics like total fees earned per channel.
+	#[default]
+	Stats,
+}
+
 // Config defaults
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
@@ -127,9 +151,10 @@ pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `route_parameters`                   | None               |
+/// | `route_parameters`                     | None               |
+/// | `forwarded_payment_tracking_mode`      | Detailed           |
 ///
-/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
+/// See [`AnchorChannelsConfig`], [`RouteParametersConfig`], and [`ForwardedPaymentTrackingMode`] for more information regarding their
 /// respective default values.
 ///
 /// [`Node`]: crate::Node
@@ -192,6 +217,10 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// The mode used for tracking forwarded payments.
+	///
+	/// See [`ForwardedPaymentTrackingMode`] for more information on the available modes.
+	pub forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode,
 }
 
 impl Default for Config {
@@ -206,6 +235,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode::default(),
 		}
 	}
 }
