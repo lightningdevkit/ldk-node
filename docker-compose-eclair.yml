@@ -1,0 +1,84 @@
+services:
+  bitcoin:
+    image: blockstream/bitcoind:27.2
+    platform: linux/amd64
+    command:
+      [
+        "bitcoind",
+        "-printtoconsole",
+        "-regtest=1",
+        "-rpcallowip=0.0.0.0/0",
+        "-rpcbind=0.0.0.0",
+        "-rpcuser=user",
+        "-rpcpassword=pass",
+        "-fallbackfee=0.00001",
+        "-zmqpubrawblock=tcp://0.0.0.0:28332",
+        "-zmqpubrawtx=tcp://0.0.0.0:28333"
+      ]
+    ports:
+      - "18443:18443"  # Regtest RPC port
+      - "18444:18444"  # Regtest P2P port
+      - "28332:28332"  # ZMQ block port
+      - "28333:28333"  # ZMQ tx port
+    networks:
+      - bitcoin-electrs
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=user", "-rpcpassword=pass", "getblockchaininfo"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  electrs:
+    image: mempool/electrs:v3.2.0
+    platform: linux/amd64
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "-vvvv",
+        "--timestamp",
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=bitcoin:18443",
+        "--http-addr=0.0.0.0:3002",
+        "--electrum-rpc-addr=0.0.0.0:50001"
+      ]
+    ports:
+      - "3002:3002"
+      - "50001:50001"
+    networks:
+      - bitcoin-electrs
+
+  eclair:
+    image: acinq/eclair:latest
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    environment:
+      - |
+        JAVA_OPTS=
+        -Xmx512m
+        -Declair.chain=regtest
+        -Declair.server.port=9736
+        -Declair.api.enabled=true
+        -Declair.api.binding-ip=0.0.0.0
+        -Declair.api.port=8080
+        -Declair.api.password=eclairpw
+        -Declair.bitcoind.host=bitcoin
+        -Declair.bitcoind.rpc-port=18443
+        -Declair.bitcoind.rpc-user=user
+        -Declair.bitcoind.rpc-password=pass
+        -Declair.bitcoind.zmqblock=tcp://bitcoin:28332
+        -Declair.bitcoind.zmqtx=tcp://bitcoin:28333
+        -Declair.printToConsole
+    ports:
+      - "8080:8080"   # API
+      - "9736:9736"   # P2P
+    networks:
+      - bitcoin-electrs
+
+networks:
+  bitcoin-electrs:
+    driver: bridge
