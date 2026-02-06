@@ -194,6 +194,8 @@ pub enum BuildError {
 	AsyncPaymentsConfigMismatch,
 	/// An attempt to setup a DNS Resolver failed.
 	DNSResolverSetupFailed,
+	/// Failed to set up the peer manager.
+	PeerManagerSetupFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -228,6 +230,9 @@ impl fmt::Display for BuildError {
 			},
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
+			},
+			Self::PeerManagerSetupFailed => {
+				write!(f, "Failed to set up the peer manager.")
 			},
 		}
 	}
@@ -1757,7 +1762,7 @@ fn build_with_store_internal(
 	if let Ok(mut guard) = peer_manager_hook.lock() {
 		*guard = Some(Arc::downgrade(&peer_manager));
 	} else {
-		return Err(BuildError::DNSResolverSetupFailed);
+		return Err(BuildError::PeerManagerSetupFailed);
 	}
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));

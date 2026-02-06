@@ -398,6 +398,7 @@ enum BuildError {
 	"NetworkMismatch",
 	"AsyncPaymentsConfigMismatch",
 	"DNSResolverSetupFailed",
+	"PeerManagerSetupFailed,
 };
 
 [Trait]
