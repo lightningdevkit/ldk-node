@@ -64,6 +64,13 @@ impl OnchainPayment {
 		Ok(funding_address)
 	}
 
+	/// Retrieve the next unused on-chain/funding address.
+	pub fn next_address(&self) -> Result<Address, Error> {
+		let funding_address = self.wallet.get_next_address()?;
+		log_info!(self.logger, "Generated next funding address: {}", funding_address);
+		Ok(funding_address)
+	}
+
 	/// Send an on-chain payment to the given address.
 	///
 	/// This will respect any on-chain reserve we need to keep, i.e., won't allow to cut into
