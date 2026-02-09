@@ -1547,6 +1547,7 @@ fn build_with_store_internal(
 		Arc::clone(&persister),
 		Arc::clone(&keys_manager),
 		peer_storage_key,
+		true,
 	));
 
 	// Initialize the network graph, scorer, and router
