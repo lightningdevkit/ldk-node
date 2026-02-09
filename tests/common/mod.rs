@@ -1211,8 +1211,13 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	println!("\nB close_channel (force: {})", force_close);
+	// Wait for the background processor to flush deferred monitor writes so that
+	// the channel state no longer has monitor_update_in_progress set.
+	exponential_backoff_poll(|| (node_a.pending_monitor_operation_count() == 0).then_some(()))
+		.await;
+	exponential_backoff_poll(|| (node_b.pending_monitor_operation_count() == 0).then_some(()))
+		.await;
 	if force_close {
-		tokio::time::sleep(Duration::from_secs(1)).await;
 		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	} else {
 		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
