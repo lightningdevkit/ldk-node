@@ -169,15 +169,15 @@ harness = false
 #vss-client-ng = { path = "../vss-client" }
 #vss-client-ng = { git = "https://github.com/lightningdevkit/vss-client", branch = "main" }
 #
-#[patch."https://github.com/lightningdevkit/rust-lightning"]
-#lightning = { path = "../rust-lightning/lightning" }
-#lightning-types = { path = "../rust-lightning/lightning-types" }
-#lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
-#lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
-#lightning-persister = { path = "../rust-lightning/lightning-persister" }
-#lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
-#lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
-#lightning-block-sync = { path = "../rust-lightning/lightning-block-sync" }
-#lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync" }
-#lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
-#lightning-macros = { path = "../rust-lightning/lightning-macros" }
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-types = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-invoice = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-net-tokio = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-persister = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-background-processor = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-rapid-gossip-sync = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-block-sync = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-transaction-sync = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-liquidity = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
+lightning-macros = { git = "https://github.com/joostjager/rust-lightning", branch = "chain-mon-internal-deferred-writes" }
