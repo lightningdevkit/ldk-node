@@ -601,6 +601,10 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider() != 9090:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_builder_set_address_type() != 647:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_builder_set_address_types_to_monitor() != 23561:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_builder_set_announcement_addresses() != 39271:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_builder_set_async_payments_role() != 16463:
@@ -689,11 +693,15 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_get_address_balance() != 45284:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_get_balance_for_address_type() != 34906:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_get_transaction_details() != 65000:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_list_balances() != 57528:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_list_channels() != 7954:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_list_monitored_address_types() != 25084:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_list_payments() != 35002:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -784,6 +792,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_ldk_node_checksum_method_onchainpayment_list_spendable_outputs() != 19144:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_onchainpayment_new_address() != 37251:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_onchainpayment_new_address_for_type() != 9083:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_onchainpayment_select_utxos_with_algorithm() != 14084:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1464,6 +1474,18 @@ _UniffiLib.uniffi_ldk_node_fn_method_builder_build_with_vss_store_and_header_pro
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_builder_build_with_vss_store_and_header_provider.restype = ctypes.c_void_p
+_UniffiLib.uniffi_ldk_node_fn_method_builder_set_address_type.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_builder_set_address_type.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_builder_set_address_types_to_monitor.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_builder_set_address_types_to_monitor.restype = None
 _UniffiLib.uniffi_ldk_node_fn_method_builder_set_announcement_addresses.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
@@ -1802,6 +1824,12 @@ _UniffiLib.uniffi_ldk_node_fn_method_node_get_address_balance.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_node_get_address_balance.restype = ctypes.c_uint64
+_UniffiLib.uniffi_ldk_node_fn_method_node_get_balance_for_address_type.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_get_balance_for_address_type.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_ldk_node_fn_method_node_get_transaction_details.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
@@ -1818,6 +1846,11 @@ _UniffiLib.uniffi_ldk_node_fn_method_node_list_channels.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_node_list_channels.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_ldk_node_fn_method_node_list_monitored_address_types.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_list_monitored_address_types.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_ldk_node_fn_method_node_list_payments.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2129,6 +2162,12 @@ _UniffiLib.uniffi_ldk_node_fn_method_onchainpayment_new_address.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_onchainpayment_new_address.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_ldk_node_fn_method_onchainpayment_new_address_for_type.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_onchainpayment_new_address_for_type.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_ldk_node_fn_method_onchainpayment_select_utxos_with_algorithm.argtypes = (
     ctypes.c_void_p,
     ctypes.c_uint64,
@@ -2832,6 +2871,12 @@ _UniffiLib.uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_fixe
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_builder_set_address_type.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_builder_set_address_type.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_builder_set_address_types_to_monitor.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_builder_set_address_types_to_monitor.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_set_announcement_addresses.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_builder_set_announcement_addresses.restype = ctypes.c_uint16
@@ -2964,6 +3009,9 @@ _UniffiLib.uniffi_ldk_node_checksum_method_node_force_close_channel.restype = ct
 _UniffiLib.uniffi_ldk_node_checksum_method_node_get_address_balance.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_get_address_balance.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_get_balance_for_address_type.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_get_balance_for_address_type.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_get_transaction_details.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_get_transaction_details.restype = ctypes.c_uint16
@@ -2973,6 +3021,9 @@ _UniffiLib.uniffi_ldk_node_checksum_method_node_list_balances.restype = ctypes.c
 _UniffiLib.uniffi_ldk_node_checksum_method_node_list_channels.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_list_channels.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_list_monitored_address_types.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_list_monitored_address_types.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_list_payments.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_list_payments.restype = ctypes.c_uint16
@@ -3108,6 +3159,9 @@ _UniffiLib.uniffi_ldk_node_checksum_method_onchainpayment_list_spendable_outputs
 _UniffiLib.uniffi_ldk_node_checksum_method_onchainpayment_new_address.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_onchainpayment_new_address.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_onchainpayment_new_address_for_type.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_onchainpayment_new_address_for_type.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_onchainpayment_select_utxos_with_algorithm.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_onchainpayment_select_utxos_with_algorithm.restype = ctypes.c_uint16
@@ -4514,6 +4568,10 @@ class BuilderProtocol(typing.Protocol):
         raise NotImplementedError
     def build_with_vss_store_and_header_provider(self, vss_url: "str",store_id: "str",header_provider: "VssHeaderProvider"):
         raise NotImplementedError
+    def set_address_type(self, address_type: "AddressType"):
+        raise NotImplementedError
+    def set_address_types_to_monitor(self, address_types_to_monitor: "typing.List[AddressType]"):
+        raise NotImplementedError
     def set_announcement_addresses(self, announcement_addresses: "typing.List[SocketAddress]"):
         raise NotImplementedError
     def set_async_payments_role(self, role: "typing.Optional[AsyncPaymentsRole]"):
@@ -4663,6 +4721,28 @@ class Builder:
         _UniffiConverterString.lower(store_id),
         _UniffiConverterTypeVssHeaderProvider.lower(header_provider))
         )
+
+
+
+
+
+    def set_address_type(self, address_type: "AddressType") -> None:
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        _uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_method_builder_set_address_type,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type))
+
+
+
+
+
+
+    def set_address_types_to_monitor(self, address_types_to_monitor: "typing.List[AddressType]") -> None:
+        _UniffiConverterSequenceTypeAddressType.check_lower(address_types_to_monitor)
+        
+        _uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_method_builder_set_address_types_to_monitor,self._uniffi_clone_pointer(),
+        _UniffiConverterSequenceTypeAddressType.lower(address_types_to_monitor))
+
 
 
 
@@ -5463,11 +5543,15 @@ class NodeProtocol(typing.Protocol):
         raise NotImplementedError
     def get_address_balance(self, address_str: "str"):
         raise NotImplementedError
+    def get_balance_for_address_type(self, address_type: "AddressType"):
+        raise NotImplementedError
     def get_transaction_details(self, txid: "Txid"):
         raise NotImplementedError
     def list_balances(self, ):
         raise NotImplementedError
     def list_channels(self, ):
+        raise NotImplementedError
+    def list_monitored_address_types(self, ):
         raise NotImplementedError
     def list_payments(self, ):
         raise NotImplementedError
@@ -5683,6 +5767,18 @@ class Node:
 
 
 
+    def get_balance_for_address_type(self, address_type: "AddressType") -> "AddressTypeBalance":
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        return _UniffiConverterTypeAddressTypeBalance.lift(
+            _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_get_balance_for_address_type,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type))
+        )
+
+
+
+
+
     def get_transaction_details(self, txid: "Txid") -> "typing.Optional[TransactionDetails]":
         _UniffiConverterTypeTxid.check_lower(txid)
         
@@ -5707,6 +5803,15 @@ class Node:
     def list_channels(self, ) -> "typing.List[ChannelDetails]":
         return _UniffiConverterSequenceTypeChannelDetails.lift(
             _uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_method_node_list_channels,self._uniffi_clone_pointer(),)
+        )
+
+
+
+
+
+    def list_monitored_address_types(self, ) -> "typing.List[AddressType]":
+        return _UniffiConverterSequenceTypeAddressType.lift(
+            _uniffi_rust_call(_UniffiLib.uniffi_ldk_node_fn_method_node_list_monitored_address_types,self._uniffi_clone_pointer(),)
         )
 
 
@@ -6320,6 +6425,8 @@ class OnchainPaymentProtocol(typing.Protocol):
         raise NotImplementedError
     def new_address(self, ):
         raise NotImplementedError
+    def new_address_for_type(self, address_type: "AddressType"):
+        raise NotImplementedError
     def select_utxos_with_algorithm(self, target_amount_sats: "int",fee_rate: "typing.Optional[FeeRate]",algorithm: "CoinSelectionAlgorithm",utxos: "typing.Optional[typing.List[SpendableUtxo]]"):
         raise NotImplementedError
     def send_all_to_address(self, address: "Address",retain_reserve: "bool",fee_rate: "typing.Optional[FeeRate]"):
@@ -6434,6 +6541,18 @@ class OnchainPayment:
     def new_address(self, ) -> "Address":
         return _UniffiConverterTypeAddress.lift(
             _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_onchainpayment_new_address,self._uniffi_clone_pointer(),)
+        )
+
+
+
+
+
+    def new_address_for_type(self, address_type: "AddressType") -> "Address":
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        return _UniffiConverterTypeAddress.lift(
+            _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_onchainpayment_new_address_for_type,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type))
         )
 
 
@@ -7082,6 +7201,42 @@ class _UniffiConverterTypeVssHeaderProvider:
     @classmethod
     def write(cls, value: VssHeaderProviderProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
+
+
+class AddressTypeBalance:
+    total_sats: "int"
+    spendable_sats: "int"
+    def __init__(self, *, total_sats: "int", spendable_sats: "int"):
+        self.total_sats = total_sats
+        self.spendable_sats = spendable_sats
+
+    def __str__(self):
+        return "AddressTypeBalance(total_sats={}, spendable_sats={})".format(self.total_sats, self.spendable_sats)
+
+    def __eq__(self, other):
+        if self.total_sats != other.total_sats:
+            return False
+        if self.spendable_sats != other.spendable_sats:
+            return False
+        return True
+
+class _UniffiConverterTypeAddressTypeBalance(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return AddressTypeBalance(
+            total_sats=_UniffiConverterUInt64.read(buf),
+            spendable_sats=_UniffiConverterUInt64.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiConverterUInt64.check_lower(value.total_sats)
+        _UniffiConverterUInt64.check_lower(value.spendable_sats)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiConverterUInt64.write(value.total_sats, buf)
+        _UniffiConverterUInt64.write(value.spendable_sats, buf)
 
 
 class AnchorChannelsConfig:
@@ -7741,7 +7896,9 @@ class Config:
     anchor_channels_config: "typing.Optional[AnchorChannelsConfig]"
     route_parameters: "typing.Optional[RouteParametersConfig]"
     include_untrusted_pending_in_spendable: "bool"
-    def __init__(self, *, storage_dir_path: "str", network: "Network", listening_addresses: "typing.Optional[typing.List[SocketAddress]]", announcement_addresses: "typing.Optional[typing.List[SocketAddress]]", node_alias: "typing.Optional[NodeAlias]", trusted_peers_0conf: "typing.List[PublicKey]", probing_liquidity_limit_multiplier: "int", anchor_channels_config: "typing.Optional[AnchorChannelsConfig]", route_parameters: "typing.Optional[RouteParametersConfig]", include_untrusted_pending_in_spendable: "bool"):
+    address_type: "AddressType"
+    address_types_to_monitor: "typing.List[AddressType]"
+    def __init__(self, *, storage_dir_path: "str", network: "Network", listening_addresses: "typing.Optional[typing.List[SocketAddress]]", announcement_addresses: "typing.Optional[typing.List[SocketAddress]]", node_alias: "typing.Optional[NodeAlias]", trusted_peers_0conf: "typing.List[PublicKey]", probing_liquidity_limit_multiplier: "int", anchor_channels_config: "typing.Optional[AnchorChannelsConfig]", route_parameters: "typing.Optional[RouteParametersConfig]", include_untrusted_pending_in_spendable: "bool", address_type: "AddressType", address_types_to_monitor: "typing.List[AddressType]"):
         self.storage_dir_path = storage_dir_path
         self.network = network
         self.listening_addresses = listening_addresses
@@ -7752,9 +7909,11 @@ class Config:
         self.anchor_channels_config = anchor_channels_config
         self.route_parameters = route_parameters
         self.include_untrusted_pending_in_spendable = include_untrusted_pending_in_spendable
+        self.address_type = address_type
+        self.address_types_to_monitor = address_types_to_monitor
 
     def __str__(self):
-        return "Config(storage_dir_path={}, network={}, listening_addresses={}, announcement_addresses={}, node_alias={}, trusted_peers_0conf={}, probing_liquidity_limit_multiplier={}, anchor_channels_config={}, route_parameters={}, include_untrusted_pending_in_spendable={})".format(self.storage_dir_path, self.network, self.listening_addresses, self.announcement_addresses, self.node_alias, self.trusted_peers_0conf, self.probing_liquidity_limit_multiplier, self.anchor_channels_config, self.route_parameters, self.include_untrusted_pending_in_spendable)
+        return "Config(storage_dir_path={}, network={}, listening_addresses={}, announcement_addresses={}, node_alias={}, trusted_peers_0conf={}, probing_liquidity_limit_multiplier={}, anchor_channels_config={}, route_parameters={}, include_untrusted_pending_in_spendable={}, address_type={}, address_types_to_monitor={})".format(self.storage_dir_path, self.network, self.listening_addresses, self.announcement_addresses, self.node_alias, self.trusted_peers_0conf, self.probing_liquidity_limit_multiplier, self.anchor_channels_config, self.route_parameters, self.include_untrusted_pending_in_spendable, self.address_type, self.address_types_to_monitor)
 
     def __eq__(self, other):
         if self.storage_dir_path != other.storage_dir_path:
@@ -7777,6 +7936,10 @@ class Config:
             return False
         if self.include_untrusted_pending_in_spendable != other.include_untrusted_pending_in_spendable:
             return False
+        if self.address_type != other.address_type:
+            return False
+        if self.address_types_to_monitor != other.address_types_to_monitor:
+            return False
         return True
 
 class _UniffiConverterTypeConfig(_UniffiConverterRustBuffer):
@@ -7793,6 +7956,8 @@ class _UniffiConverterTypeConfig(_UniffiConverterRustBuffer):
             anchor_channels_config=_UniffiConverterOptionalTypeAnchorChannelsConfig.read(buf),
             route_parameters=_UniffiConverterOptionalTypeRouteParametersConfig.read(buf),
             include_untrusted_pending_in_spendable=_UniffiConverterBool.read(buf),
+            address_type=_UniffiConverterTypeAddressType.read(buf),
+            address_types_to_monitor=_UniffiConverterSequenceTypeAddressType.read(buf),
         )
 
     @staticmethod
@@ -7807,6 +7972,8 @@ class _UniffiConverterTypeConfig(_UniffiConverterRustBuffer):
         _UniffiConverterOptionalTypeAnchorChannelsConfig.check_lower(value.anchor_channels_config)
         _UniffiConverterOptionalTypeRouteParametersConfig.check_lower(value.route_parameters)
         _UniffiConverterBool.check_lower(value.include_untrusted_pending_in_spendable)
+        _UniffiConverterTypeAddressType.check_lower(value.address_type)
+        _UniffiConverterSequenceTypeAddressType.check_lower(value.address_types_to_monitor)
 
     @staticmethod
     def write(value, buf):
@@ -7820,6 +7987,8 @@ class _UniffiConverterTypeConfig(_UniffiConverterRustBuffer):
         _UniffiConverterOptionalTypeAnchorChannelsConfig.write(value.anchor_channels_config, buf)
         _UniffiConverterOptionalTypeRouteParametersConfig.write(value.route_parameters, buf)
         _UniffiConverterBool.write(value.include_untrusted_pending_in_spendable, buf)
+        _UniffiConverterTypeAddressType.write(value.address_type, buf)
+        _UniffiConverterSequenceTypeAddressType.write(value.address_types_to_monitor, buf)
 
 
 class CustomTlvRecord:
@@ -9134,6 +9303,60 @@ class _UniffiConverterTypeTxOutput(_UniffiConverterRustBuffer):
         _UniffiConverterOptionalString.write(value.scriptpubkey_address, buf)
         _UniffiConverterInt64.write(value.value, buf)
         _UniffiConverterUInt32.write(value.n, buf)
+
+
+
+
+
+class AddressType(enum.Enum):
+    LEGACY = 0
+    
+    NESTED_SEGWIT = 1
+    
+    NATIVE_SEGWIT = 2
+    
+    TAPROOT = 3
+    
+
+
+class _UniffiConverterTypeAddressType(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return AddressType.LEGACY
+        if variant == 2:
+            return AddressType.NESTED_SEGWIT
+        if variant == 3:
+            return AddressType.NATIVE_SEGWIT
+        if variant == 4:
+            return AddressType.TAPROOT
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == AddressType.LEGACY:
+            return
+        if value == AddressType.NESTED_SEGWIT:
+            return
+        if value == AddressType.NATIVE_SEGWIT:
+            return
+        if value == AddressType.TAPROOT:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == AddressType.LEGACY:
+            buf.write_i32(1)
+        if value == AddressType.NESTED_SEGWIT:
+            buf.write_i32(2)
+        if value == AddressType.NATIVE_SEGWIT:
+            buf.write_i32(3)
+        if value == AddressType.TAPROOT:
+            buf.write_i32(4)
+
+
 
 
 
@@ -15247,6 +15470,31 @@ class _UniffiConverterSequenceTypeTxOutput(_UniffiConverterRustBuffer):
 
 
 
+class _UniffiConverterSequenceTypeAddressType(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        for item in value:
+            _UniffiConverterTypeAddressType.check_lower(item)
+
+    @classmethod
+    def write(cls, value, buf):
+        items = len(value)
+        buf.write_i32(items)
+        for item in value:
+            _UniffiConverterTypeAddressType.write(item, buf)
+
+    @classmethod
+    def read(cls, buf):
+        count = buf.read_i32()
+        if count < 0:
+            raise InternalError("Unexpected negative sequence length")
+
+        return [
+            _UniffiConverterTypeAddressType.read(buf) for i in range(count)
+        ]
+
+
+
 class _UniffiConverterSequenceTypeLightningBalance(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -16033,6 +16281,7 @@ def generate_entropy_mnemonic(word_count: "typing.Optional[WordCount]") -> "Mnem
 
 __all__ = [
     "InternalError",
+    "AddressType",
     "AsyncPaymentsRole",
     "BalanceSource",
     "Bolt11InvoiceDescription",
@@ -16058,6 +16307,7 @@ __all__ = [
     "SyncType",
     "VssHeaderProviderError",
     "WordCount",
+    "AddressTypeBalance",
     "AnchorChannelsConfig",
     "BackgroundSyncConfig",
     "BalanceDetails",

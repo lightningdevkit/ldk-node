@@ -1,0 +1,14 @@
+[package]
+name = "bdk-wallet-aggregate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Aggregates multiple BDK wallets (one per address type) into a single logical wallet."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
+bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "keys-bip39"] }
+bitcoin = "0.32.7"
+bip39 = { version = "2.0.0", features = ["rand"] }
+log = { version = "0.4", default-features = false, features = ["std"] }

@@ -1562,6 +1562,10 @@ public protocol BuilderProtocol: AnyObject {
 
     func buildWithVssStoreAndHeaderProvider(vssUrl: String, storeId: String, headerProvider: VssHeaderProvider) throws -> Node
 
+    func setAddressType(addressType: AddressType)
+
+    func setAddressTypesToMonitor(addressTypesToMonitor: [AddressType])
+
     func setAnnouncementAddresses(announcementAddresses: [SocketAddress]) throws
 
     func setAsyncPaymentsRole(role: AsyncPaymentsRole?) throws
@@ -1709,6 +1713,18 @@ open class Builder:
                                                                                        FfiConverterString.lower(storeId),
                                                                                        FfiConverterTypeVssHeaderProvider.lower(headerProvider), $0)
         })
+    }
+
+    open func setAddressType(addressType: AddressType) { try! rustCall {
+        uniffi_ldk_node_fn_method_builder_set_address_type(self.uniffiClonePointer(),
+                                                           FfiConverterTypeAddressType.lower(addressType), $0)
+    }
+    }
+
+    open func setAddressTypesToMonitor(addressTypesToMonitor: [AddressType]) { try! rustCall {
+        uniffi_ldk_node_fn_method_builder_set_address_types_to_monitor(self.uniffiClonePointer(),
+                                                                       FfiConverterSequenceTypeAddressType.lower(addressTypesToMonitor), $0)
+    }
     }
 
     open func setAnnouncementAddresses(announcementAddresses: [SocketAddress]) throws { try rustCallWithError(FfiConverterTypeBuildError.lift) {
@@ -2483,11 +2499,15 @@ public protocol NodeProtocol: AnyObject {
 
     func getAddressBalance(addressStr: String) throws -> UInt64
 
+    func getBalanceForAddressType(addressType: AddressType) throws -> AddressTypeBalance
+
     func getTransactionDetails(txid: Txid) -> TransactionDetails?
 
     func listBalances() -> BalanceDetails
 
     func listChannels() -> [ChannelDetails]
+
+    func listMonitoredAddressTypes() -> [AddressType]
 
     func listPayments() -> [PaymentDetails]
 
@@ -2670,6 +2690,13 @@ open class Node:
         })
     }
 
+    open func getBalanceForAddressType(addressType: AddressType) throws -> AddressTypeBalance {
+        return try FfiConverterTypeAddressTypeBalance.lift(rustCallWithError(FfiConverterTypeNodeError.lift) {
+            uniffi_ldk_node_fn_method_node_get_balance_for_address_type(self.uniffiClonePointer(),
+                                                                        FfiConverterTypeAddressType.lower(addressType), $0)
+        })
+    }
+
     open func getTransactionDetails(txid: Txid) -> TransactionDetails? {
         return try! FfiConverterOptionTypeTransactionDetails.lift(try! rustCall {
             uniffi_ldk_node_fn_method_node_get_transaction_details(self.uniffiClonePointer(),
@@ -2686,6 +2713,12 @@ open class Node:
     open func listChannels() -> [ChannelDetails] {
         return try! FfiConverterSequenceTypeChannelDetails.lift(try! rustCall {
             uniffi_ldk_node_fn_method_node_list_channels(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func listMonitoredAddressTypes() -> [AddressType] {
+        return try! FfiConverterSequenceTypeAddressType.lift(try! rustCall {
+            uniffi_ldk_node_fn_method_node_list_monitored_address_types(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -3174,6 +3207,8 @@ public protocol OnchainPaymentProtocol: AnyObject {
 
     func newAddress() throws -> Address
 
+    func newAddressForType(addressType: AddressType) throws -> Address
+
     func selectUtxosWithAlgorithm(targetAmountSats: UInt64, feeRate: FeeRate?, algorithm: CoinSelectionAlgorithm, utxos: [SpendableUtxo]?) throws -> [SpendableUtxo]
 
     func sendAllToAddress(address: Address, retainReserve: Bool, feeRate: FeeRate?) throws -> Txid
@@ -3274,6 +3309,13 @@ open class OnchainPayment:
     open func newAddress() throws -> Address {
         return try FfiConverterTypeAddress.lift(rustCallWithError(FfiConverterTypeNodeError.lift) {
             uniffi_ldk_node_fn_method_onchainpayment_new_address(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func newAddressForType(addressType: AddressType) throws -> Address {
+        return try FfiConverterTypeAddress.lift(rustCallWithError(FfiConverterTypeNodeError.lift) {
+            uniffi_ldk_node_fn_method_onchainpayment_new_address_for_type(self.uniffiClonePointer(),
+                                                                          FfiConverterTypeAddressType.lower(addressType), $0)
         })
     }
 
@@ -3961,6 +4003,67 @@ public func FfiConverterTypeVssHeaderProvider_lift(_ pointer: UnsafeMutableRawPo
 #endif
 public func FfiConverterTypeVssHeaderProvider_lower(_ value: VssHeaderProvider) -> UnsafeMutableRawPointer {
     return FfiConverterTypeVssHeaderProvider.lower(value)
+}
+
+public struct AddressTypeBalance {
+    public var totalSats: UInt64
+    public var spendableSats: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(totalSats: UInt64, spendableSats: UInt64) {
+        self.totalSats = totalSats
+        self.spendableSats = spendableSats
+    }
+}
+
+extension AddressTypeBalance: Equatable, Hashable {
+    public static func == (lhs: AddressTypeBalance, rhs: AddressTypeBalance) -> Bool {
+        if lhs.totalSats != rhs.totalSats {
+            return false
+        }
+        if lhs.spendableSats != rhs.spendableSats {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(totalSats)
+        hasher.combine(spendableSats)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAddressTypeBalance: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AddressTypeBalance {
+        return
+            try AddressTypeBalance(
+                totalSats: FfiConverterUInt64.read(from: &buf),
+                spendableSats: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: AddressTypeBalance, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.totalSats, into: &buf)
+        FfiConverterUInt64.write(value.spendableSats, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAddressTypeBalance_lift(_ buf: RustBuffer) throws -> AddressTypeBalance {
+    return try FfiConverterTypeAddressTypeBalance.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAddressTypeBalance_lower(_ value: AddressTypeBalance) -> RustBuffer {
+    return FfiConverterTypeAddressTypeBalance.lower(value)
 }
 
 public struct AnchorChannelsConfig {
@@ -4891,10 +4994,12 @@ public struct Config {
     public var anchorChannelsConfig: AnchorChannelsConfig?
     public var routeParameters: RouteParametersConfig?
     public var includeUntrustedPendingInSpendable: Bool
+    public var addressType: AddressType
+    public var addressTypesToMonitor: [AddressType]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(storageDirPath: String, network: Network, listeningAddresses: [SocketAddress]?, announcementAddresses: [SocketAddress]?, nodeAlias: NodeAlias?, trustedPeers0conf: [PublicKey], probingLiquidityLimitMultiplier: UInt64, anchorChannelsConfig: AnchorChannelsConfig?, routeParameters: RouteParametersConfig?, includeUntrustedPendingInSpendable: Bool) {
+    public init(storageDirPath: String, network: Network, listeningAddresses: [SocketAddress]?, announcementAddresses: [SocketAddress]?, nodeAlias: NodeAlias?, trustedPeers0conf: [PublicKey], probingLiquidityLimitMultiplier: UInt64, anchorChannelsConfig: AnchorChannelsConfig?, routeParameters: RouteParametersConfig?, includeUntrustedPendingInSpendable: Bool, addressType: AddressType, addressTypesToMonitor: [AddressType]) {
         self.storageDirPath = storageDirPath
         self.network = network
         self.listeningAddresses = listeningAddresses
@@ -4905,6 +5010,8 @@ public struct Config {
         self.anchorChannelsConfig = anchorChannelsConfig
         self.routeParameters = routeParameters
         self.includeUntrustedPendingInSpendable = includeUntrustedPendingInSpendable
+        self.addressType = addressType
+        self.addressTypesToMonitor = addressTypesToMonitor
     }
 }
 
@@ -4940,6 +5047,12 @@ extension Config: Equatable, Hashable {
         if lhs.includeUntrustedPendingInSpendable != rhs.includeUntrustedPendingInSpendable {
             return false
         }
+        if lhs.addressType != rhs.addressType {
+            return false
+        }
+        if lhs.addressTypesToMonitor != rhs.addressTypesToMonitor {
+            return false
+        }
         return true
     }
 
@@ -4954,6 +5067,8 @@ extension Config: Equatable, Hashable {
         hasher.combine(anchorChannelsConfig)
         hasher.combine(routeParameters)
         hasher.combine(includeUntrustedPendingInSpendable)
+        hasher.combine(addressType)
+        hasher.combine(addressTypesToMonitor)
     }
 }
 
@@ -4973,7 +5088,9 @@ public struct FfiConverterTypeConfig: FfiConverterRustBuffer {
                 probingLiquidityLimitMultiplier: FfiConverterUInt64.read(from: &buf),
                 anchorChannelsConfig: FfiConverterOptionTypeAnchorChannelsConfig.read(from: &buf),
                 routeParameters: FfiConverterOptionTypeRouteParametersConfig.read(from: &buf),
-                includeUntrustedPendingInSpendable: FfiConverterBool.read(from: &buf)
+                includeUntrustedPendingInSpendable: FfiConverterBool.read(from: &buf),
+                addressType: FfiConverterTypeAddressType.read(from: &buf),
+                addressTypesToMonitor: FfiConverterSequenceTypeAddressType.read(from: &buf)
             )
     }
 
@@ -4988,6 +5105,8 @@ public struct FfiConverterTypeConfig: FfiConverterRustBuffer {
         FfiConverterOptionTypeAnchorChannelsConfig.write(value.anchorChannelsConfig, into: &buf)
         FfiConverterOptionTypeRouteParametersConfig.write(value.routeParameters, into: &buf)
         FfiConverterBool.write(value.includeUntrustedPendingInSpendable, into: &buf)
+        FfiConverterTypeAddressType.write(value.addressType, into: &buf)
+        FfiConverterSequenceTypeAddressType.write(value.addressTypesToMonitor, into: &buf)
     }
 }
 
@@ -6910,6 +7029,70 @@ public func FfiConverterTypeTxOutput_lift(_ buf: RustBuffer) throws -> TxOutput 
 public func FfiConverterTypeTxOutput_lower(_ value: TxOutput) -> RustBuffer {
     return FfiConverterTypeTxOutput.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AddressType {
+    case legacy
+    case nestedSegwit
+    case nativeSegwit
+    case taproot
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAddressType: FfiConverterRustBuffer {
+    typealias SwiftType = AddressType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AddressType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .legacy
+
+        case 2: return .nestedSegwit
+
+        case 3: return .nativeSegwit
+
+        case 4: return .taproot
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AddressType, into buf: inout [UInt8]) {
+        switch value {
+        case .legacy:
+            writeInt(&buf, Int32(1))
+
+        case .nestedSegwit:
+            writeInt(&buf, Int32(2))
+
+        case .nativeSegwit:
+            writeInt(&buf, Int32(3))
+
+        case .taproot:
+            writeInt(&buf, Int32(4))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAddressType_lift(_ buf: RustBuffer) throws -> AddressType {
+    return try FfiConverterTypeAddressType.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAddressType_lower(_ value: AddressType) -> RustBuffer {
+    return FfiConverterTypeAddressType.lower(value)
+}
+
+extension AddressType: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -10723,6 +10906,31 @@ private struct FfiConverterSequenceTypeTxOutput: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeAddressType: FfiConverterRustBuffer {
+    typealias SwiftType = [AddressType]
+
+    static func write(_ value: [AddressType], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAddressType.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AddressType] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AddressType]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeAddressType.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeLightningBalance: FfiConverterRustBuffer {
     typealias SwiftType = [LightningBalance]
 
@@ -12038,6 +12246,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider() != 9090 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_ldk_node_checksum_method_builder_set_address_type() != 647 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_builder_set_address_types_to_monitor() != 23561 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_ldk_node_checksum_method_builder_set_announcement_addresses() != 39271 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12170,6 +12384,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_ldk_node_checksum_method_node_get_address_balance() != 45284 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_ldk_node_checksum_method_node_get_balance_for_address_type() != 34906 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_ldk_node_checksum_method_node_get_transaction_details() != 65000 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12177,6 +12394,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_node_list_channels() != 7954 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_node_list_monitored_address_types() != 25084 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_node_list_payments() != 35002 {
@@ -12312,6 +12532,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_onchainpayment_new_address() != 37251 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_onchainpayment_new_address_for_type() != 9083 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_onchainpayment_select_utxos_with_algorithm() != 14084 {

@@ -299,6 +299,10 @@ interface BuilderInterface {
     @Throws(BuildException::class)
     fun `buildWithVssStoreAndHeaderProvider`(`vssUrl`: kotlin.String, `storeId`: kotlin.String, `headerProvider`: VssHeaderProvider): Node
     
+    fun `setAddressType`(`addressType`: AddressType)
+    
+    fun `setAddressTypesToMonitor`(`addressTypesToMonitor`: List<AddressType>)
+    
     @Throws(BuildException::class)
     fun `setAnnouncementAddresses`(`announcementAddresses`: List<SocketAddress>)
     
@@ -441,11 +445,16 @@ interface NodeInterface {
     @Throws(NodeException::class)
     fun `getAddressBalance`(`addressStr`: kotlin.String): kotlin.ULong
     
+    @Throws(NodeException::class)
+    fun `getBalanceForAddressType`(`addressType`: AddressType): AddressTypeBalance
+    
     fun `getTransactionDetails`(`txid`: Txid): TransactionDetails?
     
     fun `listBalances`(): BalanceDetails
     
     fun `listChannels`(): List<ChannelDetails>
+    
+    fun `listMonitoredAddressTypes`(): List<AddressType>
     
     fun `listPayments`(): List<PaymentDetails>
     
@@ -570,6 +579,9 @@ interface OnchainPaymentInterface {
     fun `newAddress`(): Address
     
     @Throws(NodeException::class)
+    fun `newAddressForType`(`addressType`: AddressType): Address
+    
+    @Throws(NodeException::class)
     fun `selectUtxosWithAlgorithm`(`targetAmountSats`: kotlin.ULong, `feeRate`: FeeRate?, `algorithm`: CoinSelectionAlgorithm, `utxos`: List<SpendableUtxo>?): List<SpendableUtxo>
     
     @Throws(NodeException::class)
@@ -657,6 +669,16 @@ interface VssHeaderProviderInterface {
     companion object
 }
 
+
+
+
+@kotlinx.serialization.Serializable
+data class AddressTypeBalance (
+    val `totalSats`: kotlin.ULong, 
+    val `spendableSats`: kotlin.ULong
+) {
+    companion object
+}
 
 
 
@@ -807,7 +829,9 @@ data class Config (
     val `probingLiquidityLimitMultiplier`: kotlin.ULong, 
     val `anchorChannelsConfig`: AnchorChannelsConfig?, 
     val `routeParameters`: RouteParametersConfig?, 
-    val `includeUntrustedPendingInSpendable`: kotlin.Boolean
+    val `includeUntrustedPendingInSpendable`: kotlin.Boolean, 
+    val `addressType`: AddressType, 
+    val `addressTypesToMonitor`: List<AddressType>
 ) {
     companion object
 }
@@ -1160,6 +1184,22 @@ data class TxOutput (
 ) {
     companion object
 }
+
+
+
+
+
+@kotlinx.serialization.Serializable
+enum class AddressType {
+    
+    LEGACY,
+    NESTED_SEGWIT,
+    NATIVE_SEGWIT,
+    TAPROOT;
+    companion object
+}
+
+
 
 
 
@@ -2040,6 +2080,8 @@ enum class WordCount {
     WORDS24;
     companion object
 }
+
+
 
 
 

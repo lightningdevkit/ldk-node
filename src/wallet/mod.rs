@@ -13,16 +13,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 pub use bdk_wallet::coin_selection::CoinSelectionAlgorithm as BdkCoinSelectionAlgorithm;
-use bdk_wallet::coin_selection::{
-	BranchAndBoundCoinSelection, Excess, LargestFirstCoinSelection, OldestFirstCoinSelection,
-	SingleRandomDraw,
-};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::event::WalletEvent;
-#[allow(deprecated)]
-use bdk_wallet::SignOptions;
-use bdk_wallet::{Balance, KeychainKind, LocalOutput, PersistedWallet, Update, WeightedUtxo};
-use bip39::rand::rngs::OsRng;
+use bdk_wallet::{Balance, KeychainKind, LocalOutput, PersistedWallet, Update};
+use bdk_wallet_aggregate::AggregateWallet;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -33,8 +27,8 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
-	Address, Amount, FeeRate, OutPoint, Script, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash,
-	Weight, WitnessProgram, WitnessVersion,
+	Address, Amount, FeeRate, OutPoint, PubkeyHash, Script, ScriptBuf, Transaction, TxOut, Txid,
+	WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
@@ -45,7 +39,6 @@ use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
-use lightning::log_warn;
 use lightning::sign::{
 	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
 	PeerStorageKey, Recipient, SignerProvider, SpendableOutputDescriptor,
@@ -54,7 +47,7 @@ use lightning::util::message_signing;
 use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
-use crate::config::Config;
+use crate::config::{AddressType, Config};
 use crate::event::{TxInput, TxOutput};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -90,9 +83,7 @@ pub(crate) mod persist;
 pub(crate) mod ser;
 
 pub(crate) struct Wallet {
-	// A BDK on-chain wallet.
-	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
-	persister: Mutex<KVStoreWalletPersister>,
+	inner: Mutex<AggregateWallet<AddressType, KVStoreWalletPersister>>,
 	broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	payment_store: Arc<PaymentStore>,
@@ -103,13 +94,19 @@ pub(crate) struct Wallet {
 impl Wallet {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
-		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
-		fee_estimator: Arc<OnchainFeeEstimator>, payment_store: Arc<PaymentStore>,
-		config: Arc<Config>, logger: Arc<Logger>,
+		wallet_persister: KVStoreWalletPersister,
+		additional_wallets: Vec<(
+			AddressType,
+			PersistedWallet<KVStoreWalletPersister>,
+			KVStoreWalletPersister,
+		)>,
+		broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
+		payment_store: Arc<PaymentStore>, config: Arc<Config>, logger: Arc<Logger>,
 	) -> Self {
-		let inner = Mutex::new(wallet);
-		let persister = Mutex::new(wallet_persister);
-		Self { inner, persister, broadcaster, fee_estimator, payment_store, config, logger }
+		let aggregate =
+			AggregateWallet::new(wallet, wallet_persister, config.address_type, additional_wallets);
+		let inner = Mutex::new(aggregate);
+		Self { inner, broadcaster, fee_estimator, payment_store, config, logger }
 	}
 
 	pub(crate) fn is_funding_transaction(
@@ -144,27 +141,25 @@ impl Wallet {
 		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
 	}
 
+	pub(crate) fn get_wallet_sync_request(
+		&self, address_type: AddressType,
+	) -> Result<
+		(FullScanRequest<KeychainKind>, SyncRequest<(KeychainKind, u32)>),
+		bdk_wallet_aggregate::Error,
+	> {
+		self.inner.lock().unwrap().wallet_sync_request(&address_type)
+	}
+
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
-		self.inner.lock().unwrap().tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
+		self.inner.lock().unwrap().cached_txs()
 	}
 
 	pub(crate) fn get_unconfirmed_txids(&self) -> Vec<Txid> {
-		self.inner
-			.lock()
-			.unwrap()
-			.transactions()
-			.filter(|t| t.chain_position.is_unconfirmed())
-			.map(|t| t.tx_node.txid)
-			.collect()
+		self.inner.lock().unwrap().unconfirmed_txids()
 	}
 
 	pub(crate) fn is_tx_confirmed(&self, txid: &Txid) -> bool {
-		self.inner
-			.lock()
-			.unwrap()
-			.get_tx(*txid)
-			.map(|tx_node| tx_node.chain_position.is_confirmed())
-			.unwrap_or(false)
+		self.inner.lock().unwrap().is_tx_confirmed(txid)
 	}
 
 	pub(crate) fn current_best_block(&self) -> BestBlock {
@@ -179,19 +174,18 @@ impl Wallet {
 		Ok(change_address.address.script_pubkey())
 	}
 
+	/// Returns the list of all loaded address types (primary + monitored).
+	pub(crate) fn get_loaded_address_types(&self) -> Vec<AddressType> {
+		self.inner.lock().unwrap().loaded_keys()
+	}
+
 	pub(crate) fn apply_update(
 		&self, update: impl Into<Update>,
 	) -> Result<Vec<WalletEvent>, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		match locked_wallet.apply_update_events(update) {
-			Ok(events) => {
-				let mut locked_persister = self.persister.lock().unwrap();
-				locked_wallet.persist(&mut locked_persister).map_err(|e| {
-					log_error!(self.logger, "Failed to persist wallet: {}", e);
-					Error::PersistenceFailed
-				})?;
-
-				self.update_payment_store(&mut *locked_wallet).map_err(|e| {
+		match locked_wallet.apply_update(update) {
+			Ok((events, _txids)) => {
+				self.update_payment_store(&locked_wallet).map_err(|e| {
 					log_error!(self.logger, "Failed to update payment store: {}", e);
 					Error::PersistenceFailed
 				})?;
@@ -205,20 +199,38 @@ impl Wallet {
 		}
 	}
 
+	pub(crate) fn apply_update_for_address_type(
+		&self, address_type: AddressType, update: impl Into<Update>,
+	) -> Result<Vec<WalletEvent>, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		match locked_wallet.apply_update_to_wallet(address_type, update) {
+			Ok((events, _txids)) => {
+				self.update_payment_store(&locked_wallet).map_err(|e| {
+					log_error!(self.logger, "Failed to update payment store: {}", e);
+					Error::PersistenceFailed
+				})?;
+				Ok(events)
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to apply update for address type {:?}: {}",
+					address_type,
+					e
+				);
+				Err(Error::WalletOperationFailed)
+			},
+		}
+	}
+
 	pub(crate) fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
-		locked_wallet.apply_evicted_txs(evicted_txids);
-
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
+		locked_wallet.apply_mempool_txs(unconfirmed_txs, evicted_txids).map_err(|e| {
+			log_error!(self.logger, "Failed to apply mempool txs: {}", e);
 			Error::PersistenceFailed
-		})?;
-
-		Ok(())
+		})
 	}
 
 	// Bumps the fee of an existing transaction using Replace-By-Fee (RBF).
@@ -235,135 +247,59 @@ impl Wallet {
 			);
 			return Err(Error::CannotRbfFundingTransaction);
 		}
+
 		let mut locked_wallet = self.inner.lock().unwrap();
 
-		// Find the transaction in the wallet
-		let tx_node = locked_wallet.get_tx(*txid).ok_or_else(|| {
-			log_error!(self.logger, "Transaction not found in wallet: {}", txid);
-			Error::TransactionNotFound
+		let (tx, original_fee) = locked_wallet.build_rbf(*txid, fee_rate).map_err(|e| match e {
+			bdk_wallet_aggregate::Error::TransactionNotFound => {
+				log_error!(self.logger, "Transaction not found in any wallet: {}", txid);
+				Error::TransactionNotFound
+			},
+			bdk_wallet_aggregate::Error::TransactionAlreadyConfirmed => {
+				log_error!(self.logger, "Cannot replace confirmed transaction: {}", txid);
+				Error::TransactionAlreadyConfirmed
+			},
+			bdk_wallet_aggregate::Error::InvalidFeeRate => {
+				log_error!(self.logger, "RBF rejected: new fee rate is not higher");
+				Error::InvalidFeeRate
+			},
+			bdk_wallet_aggregate::Error::InsufficientFunds => {
+				log_error!(self.logger, "Insufficient funds for RBF fee bump of {}", txid);
+				Error::InsufficientFunds
+			},
+			bdk_wallet_aggregate::Error::UtxoNotFoundLocally(outpoint) => {
+				log_error!(
+					self.logger,
+					"Cannot calculate fee for RBF of {}: input UTXO {} not found locally. \
+					 Try syncing the wallet first.",
+					txid,
+					outpoint,
+				);
+				Error::OnchainTxCreationFailed
+			},
+			other => {
+				log_error!(self.logger, "Failed to build RBF for {}: {}", txid, other);
+				Error::OnchainTxCreationFailed
+			},
 		})?;
-
-		// Check if transaction is confirmed - can't replace confirmed transactions
-		if tx_node.chain_position.is_confirmed() {
-			log_error!(self.logger, "Cannot replace confirmed transaction: {}", txid);
-			return Err(Error::TransactionAlreadyConfirmed);
-		}
-
-		// Calculate original transaction fee and fee rate
-		let original_tx = &tx_node.tx_node.tx;
-		let original_fee = locked_wallet.calculate_fee(original_tx).map_err(|e| {
-			log_error!(self.logger, "Failed to calculate original fee: {}", e);
-			Error::WalletOperationFailed
-		})?;
-
-		// Use Bitcoin crate's built-in fee rate calculation for accuracy
-		let original_fee_rate = original_fee / original_tx.weight();
-
-		// Log detailed information for debugging
-		log_info!(self.logger, "RBF Analysis for transaction {}", txid);
-		log_info!(self.logger, "  Original fee: {} sats", original_fee.to_sat());
-		log_info!(
-			self.logger,
-			"  Original weight: {} WU ({} vB)",
-			original_tx.weight().to_wu(),
-			original_tx.weight().to_vbytes_ceil()
-		);
-		log_info!(
-			self.logger,
-			"  Original fee rate: {} sat/kwu ({} sat/vB)",
-			original_fee_rate.to_sat_per_kwu(),
-			original_fee_rate.to_sat_per_vb_ceil()
-		);
-		log_info!(
-			self.logger,
-			"  Requested fee rate: {} sat/kwu ({} sat/vB)",
-			fee_rate.to_sat_per_kwu(),
-			fee_rate.to_sat_per_vb_ceil()
-		);
-
-		// Essential validation: new fee rate must be higher than original
-		// This prevents definite rejections by the Bitcoin network
-		if fee_rate <= original_fee_rate {
-			log_error!(
-				self.logger,
-				"RBF rejected: New fee rate ({} sat/vB) must be higher than original fee rate ({} sat/vB)",
-				fee_rate.to_sat_per_vb_ceil(),
-				original_fee_rate.to_sat_per_vb_ceil()
-			);
-			return Err(Error::InvalidFeeRate);
-		}
-
-		log_info!(
-			self.logger,
-			"RBF approved: Fee rate increase from {} to {} sat/vB",
-			original_fee_rate.to_sat_per_vb_ceil(),
-			fee_rate.to_sat_per_vb_ceil()
-		);
-
-		// Build a new transaction with higher fee using BDK's fee bump functionality
-		let mut tx_builder = locked_wallet.build_fee_bump(*txid).map_err(|e| {
-			log_error!(self.logger, "Failed to create fee bump builder: {}", e);
-			Error::OnchainTxCreationFailed
-		})?;
-
-		// Set the new fee rate
-		tx_builder.fee_rate(fee_rate);
-
-		// Finalize the transaction
-		let mut psbt = match tx_builder.finish() {
-			Ok(psbt) => {
-				log_trace!(self.logger, "Created RBF PSBT: {:?}", psbt);
-				psbt
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create RBF transaction: {}", err);
-				return Err(Error::OnchainTxCreationFailed);
-			},
-		};
-
-		// Sign the transaction
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
-			Ok(finalized) => {
-				if !finalized {
-					log_error!(self.logger, "Failed to finalize RBF transaction");
-					return Err(Error::OnchainTxSigningFailed);
-				}
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to sign RBF transaction: {}", err);
-				return Err(Error::OnchainTxSigningFailed);
-			},
-		}
 
 		// Persist wallet changes
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		locked_wallet.persist_all().map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
 
 		// Extract and broadcast the transaction
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			Error::OnchainTxCreationFailed
-		})?;
-
 		self.broadcaster.broadcast_transactions(&[&tx]);
 
 		let new_txid = tx.compute_txid();
 
 		// Calculate and log the actual fee increase achieved
-		let new_fee = locked_wallet.calculate_fee(&tx).unwrap_or(Amount::ZERO);
+		let new_fee = locked_wallet.calculate_tx_fee(&tx).unwrap_or(Amount::ZERO);
 		let actual_fee_rate = new_fee / tx.weight();
 
 		log_info!(self.logger, "RBF transaction created successfully!");
-		log_info!(
-			self.logger,
-			"  Original: {} ({} sat/vB, {} sats fee)",
-			txid,
-			original_fee_rate.to_sat_per_vb_ceil(),
-			original_fee.to_sat()
-		);
+		log_info!(self.logger, "  Original: {} ({} sats fee)", txid, original_fee.to_sat());
 		log_info!(
 			self.logger,
 			"  Replacement: {} ({} sat/vB, {} sats fee)",
@@ -385,173 +321,42 @@ impl Wallet {
 	pub(crate) fn accelerate_by_cpfp(
 		&self, txid: &Txid, fee_rate: FeeRate, destination_address: Option<Address>,
 	) -> Result<Txid, Error> {
+		let destination_script = match destination_address {
+			Some(ref addr) => {
+				self.parse_and_validate_address(addr)?;
+				Some(addr.script_pubkey())
+			},
+			None => None,
+		};
+
 		let mut locked_wallet = self.inner.lock().unwrap();
 
-		// Find the transaction in the wallet
-		let parent_tx_node = locked_wallet.get_tx(*txid).ok_or_else(|| {
-			log_error!(self.logger, "Transaction not found in wallet: {}", txid);
-			Error::TransactionNotFound
-		})?;
-
-		// Check if transaction is confirmed - can't accelerate confirmed transactions
-		if parent_tx_node.chain_position.is_confirmed() {
-			log_error!(self.logger, "Cannot accelerate confirmed transaction: {}", txid);
-			return Err(Error::TransactionAlreadyConfirmed);
-		}
-
-		// Calculate parent transaction fee and fee rate for validation
-		let parent_tx = &parent_tx_node.tx_node.tx;
-		let parent_fee = locked_wallet.calculate_fee(parent_tx).map_err(|e| {
-			log_error!(self.logger, "Failed to calculate parent fee: {}", e);
-			Error::WalletOperationFailed
-		})?;
-
-		// Use Bitcoin crate's built-in fee rate calculation for accuracy
-		let parent_fee_rate = parent_fee / parent_tx.weight();
-
-		// Log detailed information for debugging
-		log_info!(self.logger, "CPFP Analysis for transaction {}", txid);
-		log_info!(self.logger, "  Parent fee: {} sats", parent_fee.to_sat());
-		log_info!(
-			self.logger,
-			"  Parent weight: {} WU ({} vB)",
-			parent_tx.weight().to_wu(),
-			parent_tx.weight().to_vbytes_ceil()
-		);
-		log_info!(
-			self.logger,
-			"  Parent fee rate: {} sat/kwu ({} sat/vB)",
-			parent_fee_rate.to_sat_per_kwu(),
-			parent_fee_rate.to_sat_per_vb_ceil()
-		);
-		log_info!(
-			self.logger,
-			"  Child fee rate: {} sat/kwu ({} sat/vB)",
-			fee_rate.to_sat_per_kwu(),
-			fee_rate.to_sat_per_vb_ceil()
-		);
-
-		// Validate that child fee rate is higher than parent (for effective acceleration)
-		if fee_rate <= parent_fee_rate {
-			log_info!(
-				self.logger,
-				"CPFP warning: Child fee rate ({} sat/vB) is not higher than parent fee rate ({} sat/vB). This may not effectively accelerate confirmation.",
-				fee_rate.to_sat_per_vb_ceil(),
-				parent_fee_rate.to_sat_per_vb_ceil()
-			);
-			// Note: We warn but don't reject - CPFP can still work in some cases
-		} else {
-			let acceleration_ratio =
-				fee_rate.to_sat_per_kwu() as f64 / parent_fee_rate.to_sat_per_kwu() as f64;
-			log_info!(
-				self.logger,
-				"CPFP acceleration: Child fee rate is {:.1}x higher than parent ({} vs {} sat/vB)",
-				acceleration_ratio,
-				fee_rate.to_sat_per_vb_ceil(),
-				parent_fee_rate.to_sat_per_vb_ceil()
-			);
-		}
-
-		// Find spendable outputs from this transaction
-		let utxos = locked_wallet
-			.list_unspent()
-			.filter(|utxo| utxo.outpoint.txid == *txid)
-			.collect::<Vec<_>>();
-
-		if utxos.is_empty() {
-			log_error!(self.logger, "No spendable outputs found for transaction: {}", txid);
-			return Err(Error::NoSpendableOutputs);
-		}
-
-		log_info!(self.logger, "Found {} spendable output(s) from parent transaction", utxos.len());
-		let total_input_value: u64 = utxos.iter().map(|utxo| utxo.txout.value.to_sat()).sum();
-		log_info!(self.logger, "  Total input value: {} sats", total_input_value);
-
-		// Determine where to send the funds
-		let script_pubkey = match destination_address {
-			Some(addr) => {
-				log_info!(self.logger, "  Destination: {} (user-specified)", addr);
-				// Validate the address
-				self.parse_and_validate_address(&addr)?;
-				addr.script_pubkey()
-			},
-			None => {
-				// Create a new address to send the funds to
-				let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
-				log_info!(
-					self.logger,
-					"  Destination: {} (wallet internal address)",
-					address_info.address
-				);
-				address_info.address.script_pubkey()
-			},
-		};
-
-		// Build a transaction that spends these UTXOs
-		let mut tx_builder = locked_wallet.build_tx();
-
-		// Add the UTXOs explicitly
-		for utxo in &utxos {
-			match tx_builder.add_utxo(utxo.outpoint) {
-				Ok(_) => {},
-				Err(e) => {
-					log_error!(self.logger, "Failed to add UTXO: {:?} - {}", utxo.outpoint, e);
-					return Err(Error::OnchainTxCreationFailed);
-				},
-			}
-		}
-
-		// Set the fee rate for the child transaction
-		tx_builder.fee_rate(fee_rate);
-
-		// Drain all inputs to the destination
-		tx_builder.drain_to(script_pubkey);
-
-		// Finalize the transaction
-		let mut psbt = match tx_builder.finish() {
-			Ok(psbt) => {
-				log_trace!(self.logger, "Created CPFP PSBT: {:?}", psbt);
-				psbt
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create CPFP transaction: {}", err);
-				return Err(Error::OnchainTxCreationFailed);
-			},
-		};
-
-		// Sign the transaction
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
-			Ok(finalized) => {
-				if !finalized {
-					log_error!(self.logger, "Failed to finalize CPFP transaction");
-					return Err(Error::OnchainTxSigningFailed);
+		let (tx, parent_fee, parent_fee_rate) =
+			locked_wallet.build_cpfp(*txid, fee_rate, destination_script).map_err(|e| {
+				log_error!(self.logger, "Failed to build CPFP for {}: {}", txid, e);
+				match e {
+					bdk_wallet_aggregate::Error::TransactionNotFound => Error::TransactionNotFound,
+					bdk_wallet_aggregate::Error::TransactionAlreadyConfirmed => {
+						Error::TransactionAlreadyConfirmed
+					},
+					bdk_wallet_aggregate::Error::NoSpendableOutputs => Error::NoSpendableOutputs,
+					_ => Error::OnchainTxCreationFailed,
 				}
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to sign CPFP transaction: {}", err);
-				return Err(Error::OnchainTxSigningFailed);
-			},
-		}
+			})?;
 
 		// Persist wallet changes
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		locked_wallet.persist_all().map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
 
 		// Extract and broadcast the transaction
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			Error::OnchainTxCreationFailed
-		})?;
-
 		self.broadcaster.broadcast_transactions(&[&tx]);
 
 		let child_txid = tx.compute_txid();
 
 		// Calculate and log the actual results
-		let child_fee = locked_wallet.calculate_fee(&tx).unwrap_or(Amount::ZERO);
+		let child_fee = locked_wallet.calculate_tx_fee(&tx).unwrap_or(Amount::ZERO);
 		let actual_child_fee_rate = child_fee / tx.weight();
 
 		log_info!(self.logger, "CPFP transaction created successfully!");
@@ -569,12 +374,6 @@ impl Wallet {
 			actual_child_fee_rate.to_sat_per_vb_ceil(),
 			child_fee.to_sat()
 		);
-		log_info!(
-			self.logger,
-			"  Combined package fee rate: approximately {:.1} sat/vB",
-			((parent_fee.to_sat() + child_fee.to_sat()) as f64)
-				/ ((parent_tx.weight().to_vbytes_ceil() + tx.weight().to_vbytes_ceil()) as f64)
-		);
 
 		Ok(child_txid)
 	}
@@ -583,32 +382,6 @@ impl Wallet {
 	pub(crate) fn calculate_cpfp_fee_rate(
 		&self, parent_txid: &Txid, urgent: bool,
 	) -> Result<FeeRate, Error> {
-		let locked_wallet = self.inner.lock().unwrap();
-
-		// Get the parent transaction
-		let parent_tx_node = locked_wallet.get_tx(*parent_txid).ok_or_else(|| {
-			log_error!(self.logger, "Transaction not found in wallet: {}", parent_txid);
-			Error::TransactionNotFound
-		})?;
-
-		// Make sure it's not confirmed
-		if parent_tx_node.chain_position.is_confirmed() {
-			log_error!(self.logger, "Transaction is already confirmed: {}", parent_txid);
-			return Err(Error::TransactionAlreadyConfirmed);
-		}
-
-		let parent_tx = &parent_tx_node.tx_node.tx;
-
-		// Calculate parent fee and fee rate using accurate method
-		let parent_fee = locked_wallet.calculate_fee(parent_tx).map_err(|e| {
-			log_error!(self.logger, "Failed to calculate parent fee: {}", e);
-			Error::WalletOperationFailed
-		})?;
-
-		// Use Bitcoin crate's built-in fee rate calculation for accuracy
-		let parent_fee_rate = parent_fee / parent_tx.weight();
-
-		// Get current mempool fee rates from fee estimator based on urgency
 		let target = if urgent {
 			ConfirmationTarget::Lightning(
 				lightning::chain::chaininterface::ConfirmationTarget::MaximumFeeEstimate,
@@ -616,151 +389,104 @@ impl Wallet {
 		} else {
 			ConfirmationTarget::OnchainPayment
 		};
-
 		let target_fee_rate = self.fee_estimator.estimate_fee_rate(target);
 
-		log_info!(self.logger, "CPFP Fee Rate Calculation for transaction {}", parent_txid);
-		log_info!(self.logger, "  Parent fee: {} sats", parent_fee.to_sat());
-		log_info!(
-			self.logger,
-			"  Parent weight: {} WU ({} vB)",
-			parent_tx.weight().to_wu(),
-			parent_tx.weight().to_vbytes_ceil()
-		);
-		log_info!(
-			self.logger,
-			"  Parent fee rate: {} sat/kwu ({} sat/vB)",
-			parent_fee_rate.to_sat_per_kwu(),
-			parent_fee_rate.to_sat_per_vb_ceil()
-		);
-		log_info!(
-			self.logger,
-			"  Target fee rate: {} sat/kwu ({} sat/vB)",
-			target_fee_rate.to_sat_per_kwu(),
-			target_fee_rate.to_sat_per_vb_ceil()
-		);
-		log_info!(self.logger, "  Urgency level: {}", if urgent { "HIGH" } else { "NORMAL" });
-
-		// If parent fee rate is already sufficient, return a slightly higher one
-		if parent_fee_rate >= target_fee_rate {
-			let recommended_rate =
-				FeeRate::from_sat_per_kwu(parent_fee_rate.to_sat_per_kwu() + 250); // +1 sat/vB
-			log_info!(
-				self.logger,
-				"Parent fee rate is already sufficient. Recommending slightly higher rate: {} sat/vB",
-				recommended_rate.to_sat_per_vb_ceil()
-			);
-			return Ok(recommended_rate);
-		}
-
-		// Estimate child transaction size (weight units)
-		// Conservative estimate for a typical 1-input, 1-output transaction
-		let estimated_child_weight_units = 480; // ~120 vbytes * 4 = 480 wu
-		let estimated_child_vbytes = estimated_child_weight_units / 4;
-
-		// Calculate the fee deficit for the parent (in sats)
-		// let parent_weight_units = parent_tx.weight().to_wu();
-		let parent_vbytes = parent_tx.weight().to_vbytes_ceil();
-		let parent_fee_deficit = (target_fee_rate.to_sat_per_vb_ceil()
-			- parent_fee_rate.to_sat_per_vb_ceil())
-			* parent_vbytes;
-
-		// Calculate what the child needs to pay to cover both transactions
-		let base_child_fee = target_fee_rate.to_sat_per_vb_ceil() * estimated_child_vbytes;
-		let total_child_fee = base_child_fee + parent_fee_deficit;
-
-		// Calculate the effective fee rate for the child
-		let child_fee_rate_sat_vb = total_child_fee / estimated_child_vbytes;
-		let child_fee_rate = FeeRate::from_sat_per_vb(child_fee_rate_sat_vb)
-			.unwrap_or(FeeRate::from_sat_per_kwu(child_fee_rate_sat_vb * 250));
-
-		log_info!(self.logger, "CPFP Calculation Results:");
-		log_info!(self.logger, "  Parent fee deficit: {} sats", parent_fee_deficit);
-		log_info!(self.logger, "  Base child fee needed: {} sats", base_child_fee);
-		log_info!(self.logger, "  Total child fee needed: {} sats", total_child_fee);
-		log_info!(
-			self.logger,
-			"  Recommended child fee rate: {} sat/vB",
-			child_fee_rate.to_sat_per_vb_ceil()
-		);
-		log_info!(
-			self.logger,
-			"  Combined package rate: ~{} sat/vB",
-			((parent_fee.to_sat() + total_child_fee) / (parent_vbytes + estimated_child_vbytes))
-		);
-
-		Ok(child_fee_rate)
+		let locked_wallet = self.inner.lock().unwrap();
+		locked_wallet.calculate_cpfp_fee_rate(*parent_txid, target_fee_rate).map_err(|e| {
+			log_error!(self.logger, "Failed to calculate CPFP fee rate for {}: {}", parent_txid, e);
+			match e {
+				bdk_wallet_aggregate::Error::TransactionNotFound => Error::TransactionNotFound,
+				bdk_wallet_aggregate::Error::TransactionAlreadyConfirmed => {
+					Error::TransactionAlreadyConfirmed
+				},
+				_ => Error::WalletOperationFailed,
+			}
+		})
 	}
 
-	fn update_payment_store<'a>(
-		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
+	pub(crate) fn update_payment_store_for_all_transactions(&self) -> Result<(), Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		self.update_payment_store(&locked_wallet)
+	}
+
+	fn update_payment_store(
+		&self, locked_wallet: &AggregateWallet<AddressType, KVStoreWalletPersister>,
 	) -> Result<(), Error> {
-		for wtx in locked_wallet.transactions() {
-			let id = PaymentId(wtx.tx_node.txid.to_byte_array());
-			let txid = wtx.tx_node.txid;
-			let (payment_status, confirmation_status) = match wtx.chain_position {
-				bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
-					let confirmation_height = anchor.block_id.height;
-					let cur_height = locked_wallet.latest_checkpoint().height();
-					let payment_status = if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1
-					{
-						PaymentStatus::Succeeded
-					} else {
-						PaymentStatus::Pending
-					};
-					let confirmation_status = ConfirmationStatus::Confirmed {
-						block_hash: anchor.block_id.hash,
-						height: confirmation_height,
-						timestamp: anchor.confirmation_time,
-					};
-					(payment_status, confirmation_status)
-				},
-				bdk_chain::ChainPosition::Unconfirmed { .. } => {
-					(PaymentStatus::Pending, ConfirmationStatus::Unconfirmed)
-				},
-			};
-			// TODO: It would be great to introduce additional variants for
-			// `ChannelFunding` and `ChannelClosing`. For the former, we could just
-			// take a reference to `ChannelManager` here and check against
-			// `list_channels`. But for the latter the best approach is much less
-			// clear: for force-closes/HTLC spends we should be good querying
-			// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
-			// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
-			// spent to a wallet address. The only solution I can come up with is to
-			// create and persist a list of 'static pending outputs' that we could use
-			// here to determine the `PaymentKind`, but that's not really satisfactory, so
-			// we're punting on it until we can come up with a better solution.
-			let kind = crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
-			let fee = locked_wallet.calculate_fee(&wtx.tx_node.tx).unwrap_or(Amount::ZERO);
-			let (sent, received) = locked_wallet.sent_and_received(&wtx.tx_node.tx);
-			let (direction, amount_msat) = if sent > received {
-				let direction = PaymentDirection::Outbound;
-				let amount_msat = Some(
-					sent.to_sat().saturating_sub(fee.to_sat()).saturating_sub(received.to_sat())
-						* 1000,
+		let mut seen_txids = std::collections::HashSet::new();
+		let cur_height = locked_wallet.latest_checkpoint().height();
+
+		for wallet in locked_wallet.wallets().values() {
+			for wtx in wallet.transactions() {
+				let txid = wtx.tx_node.txid;
+				if !seen_txids.insert(txid) {
+					continue;
+				}
+
+				let id = PaymentId(txid.to_byte_array());
+				let (payment_status, confirmation_status) = match wtx.chain_position {
+					bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
+						let confirmation_height = anchor.block_id.height;
+						let payment_status =
+							if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1 {
+								PaymentStatus::Succeeded
+							} else {
+								PaymentStatus::Pending
+							};
+						let confirmation_status = ConfirmationStatus::Confirmed {
+							block_hash: anchor.block_id.hash,
+							height: confirmation_height,
+							timestamp: anchor.confirmation_time,
+						};
+						(payment_status, confirmation_status)
+					},
+					bdk_chain::ChainPosition::Unconfirmed { .. } => {
+						(PaymentStatus::Pending, ConfirmationStatus::Unconfirmed)
+					},
+				};
+				// TODO: It would be great to introduce additional variants for
+				// `ChannelFunding` and `ChannelClosing`. For the former, we could just
+				// take a reference to `ChannelManager` here and check against
+				// `list_channels`. But for the latter the best approach is much less
+				// clear: for force-closes/HTLC spends we should be good querying
+				// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
+				// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
+				// spent to a wallet address. The only solution I can come up with is to
+				// create and persist a list of 'static pending outputs' that we could use
+				// here to determine the `PaymentKind`, but that's not really satisfactory, so
+				// we're punting on it until we can come up with a better solution.
+				let kind =
+					crate::payment::PaymentKind::Onchain { txid, status: confirmation_status };
+
+				let fee = locked_wallet.calculate_tx_fee(&wtx.tx_node.tx).unwrap_or(Amount::ZERO);
+				let (sent_sat, received_sat) =
+					locked_wallet.sent_and_received(txid).unwrap_or((0, 0));
+				let fee_sat = fee.to_sat();
+
+				let (direction, amount_msat) = if sent_sat > received_sat {
+					let direction = PaymentDirection::Outbound;
+					let amount_msat =
+						Some(sent_sat.saturating_sub(fee_sat).saturating_sub(received_sat) * 1000);
+					(direction, amount_msat)
+				} else {
+					let direction = PaymentDirection::Inbound;
+					let amount_msat =
+						Some(received_sat.saturating_sub(sent_sat.saturating_sub(fee_sat)) * 1000);
+					(direction, amount_msat)
+				};
+
+				let fee_paid_msat = Some(fee_sat * 1000);
+
+				let payment = PaymentDetails::new(
+					id,
+					kind,
+					amount_msat,
+					fee_paid_msat,
+					direction,
+					payment_status,
 				);
-				(direction, amount_msat)
-			} else {
-				let direction = PaymentDirection::Inbound;
-				let amount_msat = Some(
-					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee.to_sat()))
-						* 1000,
-				);
-				(direction, amount_msat)
-			};
 
-			let fee_paid_msat = Some(fee.to_sat() * 1000);
-
-			let payment = PaymentDetails::new(
-				id,
-				kind,
-				amount_msat,
-				fee_paid_msat,
-				direction,
-				payment_status,
-			);
-
-			self.payment_store.insert_or_update(payment)?;
+				self.payment_store.insert_or_update(payment)?;
+			}
 		}
 
 		Ok(())
@@ -772,84 +498,98 @@ impl Wallet {
 		locktime: LockTime,
 	) -> Result<Transaction, Error> {
 		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
-
 		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut tx_builder = locked_wallet.build_tx();
+		let primary_type = locked_wallet.primary_key();
 
-		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
-
-		let mut psbt = match tx_builder.finish() {
-			Ok(psbt) => {
-				log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
-				psbt
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create funding transaction: {}", err);
-				return Err(err.into());
-			},
+		let tx = if !primary_type.is_witness_compatible() {
+			log_info!(
+				self.logger,
+				"Primary wallet is Legacy (P2PKH), selecting best witness wallet for channel funding"
+			);
+			locked_wallet.build_and_sign_tx_with_best_wallet(
+				output_script,
+				amount,
+				fee_rate,
+				locktime,
+				|k| k.is_witness_compatible(),
+			)
+		} else {
+			locked_wallet.build_and_sign_funding_tx(output_script, amount, fee_rate, locktime)
 		};
 
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
-			Ok(finalized) => {
-				if !finalized {
-					return Err(Error::OnchainTxCreationFailed);
-				}
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create funding transaction: {}", err);
-				return Err(err.into());
-			},
-		}
-
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			e
-		})?;
-
-		Ok(tx)
+		tx.map_err(|e| {
+			log_error!(self.logger, "Failed to create funding transaction: {}", e);
+			match e {
+				bdk_wallet_aggregate::Error::InsufficientFunds => Error::InsufficientFunds,
+				bdk_wallet_aggregate::Error::OnchainTxSigningFailed => {
+					Error::OnchainTxSigningFailed
+				},
+				bdk_wallet_aggregate::Error::PersistenceFailed => Error::PersistenceFailed,
+				_ => Error::OnchainTxCreationFailed,
+			}
+		})
 	}
 
 	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.new_address().map_err(|e| {
+			log_error!(self.logger, "Failed to get new address: {}", e);
+			Error::WalletOperationFailed
+		})
+	}
 
-		let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-		Ok(address_info.address)
+	pub(crate) fn get_new_address_for_type(
+		&self, address_type: AddressType,
+	) -> Result<bitcoin::Address, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		locked_wallet.new_address_for(&address_type).map_err(|e| {
+			log_error!(self.logger, "Failed to get new address for type {:?}: {}", address_type, e);
+			Error::WalletOperationFailed
+		})
+	}
+
+	/// Returns a new witness-compatible address, falling back to a loaded
+	/// SegWit wallet if the primary is non-witness (e.g. Legacy).
+	pub(crate) fn get_new_witness_address(&self) -> Result<bitcoin::Address, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let primary = locked_wallet.primary_key();
+		if primary.is_witness_compatible() {
+			drop(locked_wallet);
+			return self.get_new_address();
+		}
+
+		// Primary is non-witness.  Find a loaded witness wallet.
+		let witness_key =
+			locked_wallet.loaded_keys().into_iter().find(|k| k.is_witness_compatible());
+		drop(locked_wallet);
+
+		match witness_key {
+			Some(key) => self.get_new_address_for_type(key),
+			None => {
+				log_error!(
+					self.logger,
+					"No witness-compatible wallet loaded. \
+					 Lightning operations require at least one SegWit wallet."
+				);
+				Err(Error::WalletOperationFailed)
+			},
+		}
 	}
 
 	pub(crate) fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
-
-		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-		Ok(address_info.address)
+		locked_wallet.new_internal_address().map_err(|e| {
+			log_error!(self.logger, "Failed to get new internal address: {}", e);
+			Error::WalletOperationFailed
+		})
 	}
 
 	pub(crate) fn cancel_tx(&self, tx: &Transaction) -> Result<(), Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
-
-		locked_wallet.cancel_tx(tx);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
+		locked_wallet.cancel_tx(tx).map_err(|e| {
+			log_error!(self.logger, "Failed to cancel transaction: {}", e);
 			Error::PersistenceFailed
-		})?;
-
-		Ok(())
+		})
 	}
 
 	pub(crate) fn get_balances(
@@ -867,11 +607,23 @@ impl Wallet {
 			);
 		}
 
-		self.get_balances_inner(balance, total_anchor_channels_reserve_sats)
+		self.get_balances_inner(&balance, total_anchor_channels_reserve_sats)
+	}
+
+	pub(crate) fn get_balance_for_address_type(
+		&self, address_type: AddressType,
+	) -> Result<(u64, u64), Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let balance = locked_wallet.balance_for(&address_type).map_err(|e| {
+			log_error!(self.logger, "Failed to get balance for {:?}: {}", address_type, e);
+			Error::WalletOperationFailed
+		})?;
+
+		self.get_balances_inner(&balance, 0)
 	}
 
 	fn get_balances_inner(
-		&self, balance: Balance, total_anchor_channels_reserve_sats: u64,
+		&self, balance: &Balance, total_anchor_channels_reserve_sats: u64,
 	) -> Result<(u64, u64), Error> {
 		let spendable_base = if self.config.include_untrusted_pending_in_spendable {
 			balance.trusted_spendable().to_sat() + balance.untrusted_pending.to_sat()
@@ -893,17 +645,23 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
+	pub(crate) fn get_witness_spendable_amount_sats(
+		&self, total_anchor_channels_reserve_sats: u64,
+	) -> Result<u64, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let balance = locked_wallet.balance_filtered(|k| k.is_witness_compatible());
+		self.get_balances_inner(&balance, total_anchor_channels_reserve_sats).map(|(_, s)| s)
+	}
+
 	// Get transaction details including inputs, outputs, and net amount.
-	// Returns None if the transaction is not found in the wallet.
+	// Returns None if the transaction is not found in any wallet.
 	pub(crate) fn get_tx_details(&self, txid: &Txid) -> Option<(i64, Vec<TxInput>, Vec<TxOutput>)> {
 		let locked_wallet = self.inner.lock().unwrap();
-		let tx_node = locked_wallet.get_tx(*txid)?;
-		let tx = &tx_node.tx_node.tx;
-		let (sent, received) = locked_wallet.sent_and_received(tx);
-		let net_amount = received.to_sat() as i64 - sent.to_sat() as i64;
+		let (sent_sat, received_sat) = locked_wallet.sent_and_received(*txid)?;
+		let tx = locked_wallet.find_tx(*txid)?;
+		let net_amount = received_sat as i64 - sent_sat as i64;
 
-		let inputs: Vec<TxInput> =
-			tx.input.iter().map(|tx_input| TxInput::from_tx_input(tx_input)).collect();
+		let inputs: Vec<TxInput> = tx.input.iter().map(TxInput::from_tx_input).collect();
 
 		let outputs: Vec<TxOutput> = tx
 			.output
@@ -930,8 +688,7 @@ impl Wallet {
 	) -> Result<Vec<LocalOutput>, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
 
-		// Get all unspent outputs from the wallet
-		let all_utxos: Vec<LocalOutput> = locked_wallet.list_unspent().collect();
+		let all_utxos: Vec<LocalOutput> = locked_wallet.list_unspent();
 		let total_count = all_utxos.len();
 
 		// Filter out channel funding transactions
@@ -968,157 +725,66 @@ impl Wallet {
 		&self, target_amount: u64, available_utxos: Vec<LocalOutput>, fee_rate: FeeRate,
 		algorithm: CoinSelectionAlgorithm, drain_script: &Script, channel_manager: &ChannelManager,
 	) -> Result<Vec<OutPoint>, Error> {
-		// First, filter out any funding transactions for safety
-		let safe_utxos: Vec<LocalOutput> = available_utxos
-			.into_iter()
-			.filter(|utxo| {
-				if self.is_funding_transaction(&utxo.outpoint.txid, channel_manager) {
-					log_debug!(
-						self.logger,
-						"Filtering out UTXO {:?} as it's part of a channel funding transaction",
-						utxo.outpoint
-					);
-					false
-				} else {
-					true
-				}
-			})
-			.collect();
-
-		if safe_utxos.is_empty() {
-			log_error!(
-				self.logger,
-				"No spendable UTXOs available after filtering funding transactions"
-			);
-			return Err(Error::NoSpendableOutputs);
-		}
-
-		// Use the improved weight calculation from the second implementation
-		let locked_wallet = self.inner.lock().unwrap();
-		let weighted_utxos: Vec<WeightedUtxo> = safe_utxos
+		let excluded_outpoints: Vec<OutPoint> = available_utxos
 			.iter()
-			.map(|utxo| {
-				// Use BDK's descriptor to calculate satisfaction weight
-				let descriptor = locked_wallet.public_descriptor(utxo.keychain);
-				let satisfaction_weight = descriptor.max_weight_to_satisfy().unwrap_or_else(|_| {
-					// Fallback to manual calculation if BDK method fails
-					log_debug!(
-						self.logger,
-						"Failed to calculate descriptor weight, using fallback for UTXO {:?}",
-						utxo.outpoint
-					);
-					match utxo.txout.script_pubkey.witness_version() {
-						Some(WitnessVersion::V0) => {
-							// P2WPKH input weight calculation:
-							// Non-witness data: 32 (txid) + 4 (vout) + 1 (script_sig length) + 4 (sequence) = 41 bytes
-							// Witness data: 1 (item count) + 1 (sig length) + 72 (sig) + 1 (pubkey length) + 33 (pubkey) = 108 bytes
-							// Total weight = 41 * 4 + 108 = 272 WU
-							Weight::from_wu(272)
-						},
-						Some(WitnessVersion::V1) => {
-							// P2TR key-path spend weight calculation:
-							// Non-witness data: 32 + 4 + 1 + 4 = 41 bytes
-							// Witness data: 1 (item count) + 1 (sig length) + 64 (schnorr sig) = 66 bytes
-							// Total weight = 41 * 4 + 66 = 230 WU
-							Weight::from_wu(230)
-						},
-						_ => {
-							// Conservative fallback for unknown script types
-							log_warn!(
-								self.logger,
-								"Unknown script type for UTXO {:?}, using conservative weight",
-								utxo.outpoint
-							);
-							Weight::from_wu(272)
-						},
-					}
-				});
-
-				WeightedUtxo { satisfaction_weight, utxo: bdk_wallet::Utxo::Local(utxo.clone()) }
-			})
+			.filter(|utxo| self.is_funding_transaction(&utxo.outpoint.txid, channel_manager))
+			.map(|utxo| utxo.outpoint)
 			.collect();
 
-		drop(locked_wallet);
+		let locked_wallet = self.inner.lock().unwrap();
+		let algo = match algorithm {
+			CoinSelectionAlgorithm::BranchAndBound => {
+				bdk_wallet_aggregate::CoinSelectionAlgorithm::BranchAndBound
+			},
+			CoinSelectionAlgorithm::LargestFirst => {
+				bdk_wallet_aggregate::CoinSelectionAlgorithm::LargestFirst
+			},
+			CoinSelectionAlgorithm::OldestFirst => {
+				bdk_wallet_aggregate::CoinSelectionAlgorithm::OldestFirst
+			},
+			CoinSelectionAlgorithm::SingleRandomDraw => {
+				bdk_wallet_aggregate::CoinSelectionAlgorithm::SingleRandomDraw
+			},
+		};
 
-		let target = Amount::from_sat(target_amount);
-		let mut rng = OsRng;
-
-		// Run coin selection based on the algorithm
-		let result =
-			match algorithm {
-				CoinSelectionAlgorithm::BranchAndBound => {
-					BranchAndBoundCoinSelection::<SingleRandomDraw>::default().coin_select(
-						vec![], // required UTXOs
-						weighted_utxos,
-						fee_rate,
-						target,
-						drain_script,
-						&mut rng,
-					)
-				},
-				CoinSelectionAlgorithm::LargestFirst => LargestFirstCoinSelection::default()
-					.coin_select(vec![], weighted_utxos, fee_rate, target, drain_script, &mut rng),
-				CoinSelectionAlgorithm::OldestFirst => OldestFirstCoinSelection::default()
-					.coin_select(vec![], weighted_utxos, fee_rate, target, drain_script, &mut rng),
-				CoinSelectionAlgorithm::SingleRandomDraw => SingleRandomDraw::default()
-					.coin_select(vec![], weighted_utxos, fee_rate, target, drain_script, &mut rng),
-			}
+		locked_wallet
+			.select_utxos(
+				target_amount,
+				available_utxos,
+				fee_rate,
+				algo,
+				drain_script,
+				&excluded_outpoints,
+			)
 			.map_err(|e| {
 				log_error!(self.logger, "Coin selection failed: {}", e);
 				Error::CoinSelectionFailed
-			})?;
-
-		// Validate change amount is not dust
-		if let Excess::Change { amount, .. } = result.excess {
-			if amount.to_sat() > 0 && amount.to_sat() < DUST_LIMIT_SATS {
-				return Err(Error::CoinSelectionFailed);
-			}
-		}
-
-		// Extract the selected outputs
-		let selected_outputs: Vec<LocalOutput> = result
-			.selected
-			.into_iter()
-			.filter_map(|utxo| match utxo {
-				bdk_wallet::Utxo::Local(local) => Some(local),
-				_ => None,
 			})
-			.collect();
-
-		log_info!(
-			self.logger,
-			"Selected {} UTXOs using {:?} algorithm for target {} sats (fee: {} sats)",
-			selected_outputs.len(),
-			algorithm,
-			target_amount,
-			result.fee_amount.to_sat(),
-		);
-		Ok(selected_outputs.into_iter().map(|u| u.outpoint).collect())
 	}
 
 	// Helper that builds a transaction PSBT with shared logic for send_to_address
 	// and calculate_transaction_fee.
+	// Supports cross-wallet spending: UTXOs from non-primary wallets are added as
+	// foreign inputs when the primary wallet alone has insufficient funds.
 	fn build_transaction_psbt(
 		&self, address: &Address, send_amount: OnchainSendAmount, fee_rate: FeeRate,
 		utxos_to_spend: Option<Vec<OutPoint>>, channel_manager: &ChannelManager,
-	) -> Result<(Psbt, MutexGuard<'_, PersistedWallet<KVStoreWalletPersister>>), Error> {
+	) -> Result<(Psbt, MutexGuard<'_, AggregateWallet<AddressType, KVStoreWalletPersister>>), Error>
+	{
 		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let all_utxos = locked_wallet.list_unspent();
 
 		// Validate and check UTXOs if provided
 		if let Some(ref outpoints) = utxos_to_spend {
-			// Get all wallet UTXOs for validation
-			let wallet_utxos: Vec<_> = locked_wallet.list_unspent().collect();
-			let wallet_utxo_set: std::collections::HashSet<_> =
-				wallet_utxos.iter().map(|u| u.outpoint).collect();
+			let all_utxo_set: std::collections::HashSet<_> =
+				all_utxos.iter().map(|u| u.outpoint).collect();
 
-			// Validate all requested UTXOs exist and are safe to spend
 			for outpoint in outpoints {
-				if !wallet_utxo_set.contains(outpoint) {
-					log_error!(self.logger, "UTXO {:?} not found in wallet", outpoint);
+				if !all_utxo_set.contains(outpoint) {
+					log_error!(self.logger, "UTXO {:?} not found in any wallet", outpoint);
 					return Err(Error::WalletOperationFailed);
 				}
-
-				// Check if this UTXO's transaction is a channel funding transaction
 				if self.is_funding_transaction(&outpoint.txid, channel_manager) {
 					log_error!(
 						self.logger,
@@ -1130,7 +796,7 @@ impl Wallet {
 			}
 
 			// Calculate total value of selected UTXOs
-			let selected_value: u64 = wallet_utxos
+			let selected_value: u64 = all_utxos
 				.iter()
 				.filter(|u| outpoints.contains(&u.outpoint))
 				.map(|u| u.txout.value.to_sat())
@@ -1165,11 +831,40 @@ impl Wallet {
 			);
 		}
 
+		let funding_txids: std::collections::HashSet<Txid> = all_utxos
+			.iter()
+			.filter(|u| self.is_funding_transaction(&u.outpoint.txid, channel_manager))
+			.map(|u| u.outpoint.txid)
+			.collect();
+
+		let non_primary_utxo_infos: Option<Vec<bdk_wallet_aggregate::UtxoPsbtInfo>> =
+			match (&utxos_to_spend, send_amount) {
+				(Some(_), _) => None,
+				(None, OnchainSendAmount::AllDrainingReserve)
+				| (None, OnchainSendAmount::AllRetainingReserve { .. }) => locked_wallet
+					.non_primary_foreign_utxos(&funding_txids)
+					.ok()
+					.filter(|v| !v.is_empty()),
+				(None, OnchainSendAmount::ExactRetainingReserve { .. }) => None,
+			};
+
+		let manual_utxo_infos: Option<Vec<bdk_wallet_aggregate::UtxoPsbtInfo>> =
+			if let Some(ref outpoints) = utxos_to_spend {
+				Some(locked_wallet.prepare_outpoints_for_psbt(outpoints).map_err(|e| {
+					log_error!(self.logger, "Failed to prepare manually selected UTXOs: {}", e);
+					Error::WalletOperationFailed
+				})?)
+			} else {
+				None
+			};
+
+		let aggregate_balance = locked_wallet.balance();
+		let primary = locked_wallet.primary_wallet_mut();
+
 		// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
-		const DUST_LIMIT_SATS: u64 = 546;
 		let mut tx_builder = match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
-				let mut tx_builder = locked_wallet.build_tx();
+				let mut tx_builder = primary.build_tx();
 				let amount = Amount::from_sat(amount_sats);
 				tx_builder.add_recipient(address.script_pubkey(), amount).fee_rate(fee_rate);
 				tx_builder
@@ -1177,14 +872,13 @@ impl Wallet {
 			OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats }
 				if cur_anchor_reserve_sats > DUST_LIMIT_SATS =>
 			{
-				let change_address_info = locked_wallet.peek_address(KeychainKind::Internal, 0);
-				let balance = locked_wallet.balance();
+				let change_address_info = primary.peek_address(KeychainKind::Internal, 0);
 				let spendable_amount_sats = self
-					.get_balances_inner(balance, cur_anchor_reserve_sats)
+					.get_balances_inner(&aggregate_balance, cur_anchor_reserve_sats)
 					.map(|(_, s)| s)
 					.unwrap_or(0);
 				let tmp_tx = {
-					let mut tmp_tx_builder = locked_wallet.build_tx();
+					let mut tmp_tx_builder = primary.build_tx();
 					tmp_tx_builder
 						.drain_wallet()
 						.drain_to(address.script_pubkey())
@@ -1223,7 +917,7 @@ impl Wallet {
 					}
 				};
 
-				let estimated_tx_fee = locked_wallet.calculate_fee(&tmp_tx).map_err(|e| {
+				let base_fee = primary.calculate_fee(&tmp_tx).map_err(|e| {
 					log_error!(
 						self.logger,
 						"Failed to calculate fee of temporary transaction: {}",
@@ -1233,7 +927,18 @@ impl Wallet {
 				})?;
 
 				// 'cancel' the transaction to free up any used change addresses
-				locked_wallet.cancel_tx(&tmp_tx);
+				primary.cancel_tx(&tmp_tx);
+
+				// Adjust the fee estimate for non-primary inputs that will be
+				// added to the actual tx (the temp tx only used primary UTXOs).
+				let extra_input_weight: u64 = non_primary_utxo_infos
+					.as_ref()
+					.map(|infos| infos.iter().map(|i| i.weight.to_wu()).sum::<u64>())
+					.unwrap_or(0);
+				let extra_input_fee = fee_rate
+					.fee_wu(bitcoin::Weight::from_wu(extra_input_weight))
+					.unwrap_or(Amount::ZERO);
+				let estimated_tx_fee = base_fee + extra_input_fee;
 
 				let estimated_spendable_amount = Amount::from_sat(
 					spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
@@ -1241,14 +946,14 @@ impl Wallet {
 
 				if estimated_spendable_amount < Amount::from_sat(DUST_LIMIT_SATS) {
 					log_error!(self.logger,
-						"Unable to send payment without infringing on Anchor reserves. Available: {}sats, estimated fee required: {}sats.",
-						spendable_amount_sats,
-						estimated_tx_fee,
-					);
+					"Unable to send payment without infringing on Anchor reserves. Available: {}sats, estimated fee required: {}sats.",
+					spendable_amount_sats,
+					estimated_tx_fee,
+				);
 					return Err(Error::InsufficientFunds);
 				}
 
-				let mut tx_builder = locked_wallet.build_tx();
+				let mut tx_builder = primary.build_tx();
 				tx_builder
 					.add_recipient(address.script_pubkey(), estimated_spendable_amount)
 					.fee_absolute(estimated_tx_fee);
@@ -1256,23 +961,28 @@ impl Wallet {
 			},
 			OnchainSendAmount::AllDrainingReserve
 			| OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats: _ } => {
-				let mut tx_builder = locked_wallet.build_tx();
+				let mut tx_builder = primary.build_tx();
 				tx_builder.drain_wallet().drain_to(address.script_pubkey()).fee_rate(fee_rate);
 				tx_builder
 			},
 		};
 
-		// Add specified UTXOs if provided
-		if let Some(outpoints) = utxos_to_spend {
-			for outpoint in outpoints {
-				tx_builder.add_utxo(outpoint).map_err(|e| {
-					log_error!(self.logger, "Failed to add UTXO {:?}: {}", outpoint, e);
+		if let Some(ref utxo_infos) = manual_utxo_infos {
+			bdk_wallet_aggregate::utxo::add_utxos_to_tx_builder(&mut tx_builder, utxo_infos)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to add manually selected UTXOs: {}", e);
 					Error::OnchainTxCreationFailed
 				})?;
-			}
-
-			// Since UTXOs were specified, only use those
 			tx_builder.manually_selected_only();
+		}
+
+		if let Some(ref infos) = non_primary_utxo_infos {
+			bdk_wallet_aggregate::utxo::add_utxos_to_tx_builder(&mut tx_builder, infos).map_err(
+				|e| {
+					log_error!(self.logger, "Failed to add cross-wallet UTXOs: {}", e);
+					Error::OnchainTxCreationFailed
+				},
+			)?;
 		}
 
 		let psbt = match tx_builder.finish() {
@@ -1281,30 +991,56 @@ impl Wallet {
 				psbt
 			},
 			Err(err) => {
-				log_error!(self.logger, "Failed to create transaction: {}", err);
-				return Err(err.into());
+				let can_retry =
+					matches!(send_amount, OnchainSendAmount::ExactRetainingReserve { .. })
+						&& manual_utxo_infos.is_none()
+						&& non_primary_utxo_infos.is_none();
+
+				if can_retry {
+					let amount_sats = match send_amount {
+						OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => amount_sats,
+						_ => unreachable!(),
+					};
+					locked_wallet
+						.build_psbt_with_cross_wallet_fallback(
+							address.script_pubkey(),
+							Amount::from_sat(amount_sats),
+							fee_rate,
+							&funding_txids,
+							bdk_wallet_aggregate::CoinSelectionAlgorithm::BranchAndBound,
+						)
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to create transaction: {}", e);
+							match e {
+								bdk_wallet_aggregate::Error::InsufficientFunds => {
+									Error::InsufficientFunds
+								},
+								_ => Error::OnchainTxCreationFailed,
+							}
+						})?
+				} else {
+					log_error!(self.logger, "Failed to create transaction: {}", err);
+					return Err(err.into());
+				}
 			},
 		};
 
 		// Check the reserve requirements (again) and return an error if they aren't met.
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats } => {
-				let balance = locked_wallet.balance();
 				let spendable_amount_sats = self
-					.get_balances_inner(balance, cur_anchor_reserve_sats)
+					.get_balances_inner(&aggregate_balance, cur_anchor_reserve_sats)
 					.map(|(_, s)| s)
 					.unwrap_or(0);
-				let tx_fee_sats = locked_wallet
-					.calculate_fee(&psbt.unsigned_tx)
-					.map_err(|e| {
+				let tx_fee_sats =
+					locked_wallet.calculate_fee_with_fallback(&psbt).map_err(|e| {
 						log_error!(
 							self.logger,
 							"Failed to calculate fee of candidate transaction: {}",
 							e
 						);
-						e
-					})?
-					.to_sat();
+						Error::WalletOperationFailed
+					})?;
 				if spendable_amount_sats < amount_sats.saturating_add(tx_fee_sats) {
 					log_error!(self.logger,
 						"Unable to send payment due to insufficient funds. Available: {}sats, Required: {}sats + {}sats fee",
@@ -1316,16 +1052,14 @@ impl Wallet {
 				}
 			},
 			OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
-				let balance = locked_wallet.balance();
 				let spendable_amount_sats = self
-					.get_balances_inner(balance, cur_anchor_reserve_sats)
+					.get_balances_inner(&aggregate_balance, cur_anchor_reserve_sats)
 					.map(|(_, s)| s)
 					.unwrap_or(0);
-				let (sent, received) = locked_wallet.sent_and_received(&psbt.unsigned_tx);
-				let drain_amount = sent - received;
-				if spendable_amount_sats < drain_amount.to_sat() {
+				let drain_amount = locked_wallet.drain_amount_from_psbt(&psbt);
+				if spendable_amount_sats < drain_amount {
 					log_error!(self.logger,
-						"Unable to send payment due to insufficient funds. Available: {}sats, Required: {}",
+						"Unable to send payment due to insufficient funds. Available: {}sats, Required: {}sats",
 						spendable_amount_sats,
 						drain_amount,
 					);
@@ -1357,14 +1091,10 @@ impl Wallet {
 			channel_manager,
 		)?;
 
-		// Calculate the final fee
-		let calculated_fee = locked_wallet
-			.calculate_fee(&psbt.unsigned_tx)
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to calculate fee of final transaction: {}", e);
-				e
-			})?
-			.to_sat();
+		let calculated_fee = locked_wallet.calculate_fee_with_fallback(&psbt).map_err(|e| {
+			log_error!(self.logger, "Failed to calculate transaction fee: {}", e);
+			Error::WalletOperationFailed
+		})?;
 
 		log_info!(
 			self.logger,
@@ -1388,39 +1118,47 @@ impl Wallet {
 		let fee_rate =
 			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
 
-		let (mut psbt, mut locked_wallet) = self.build_transaction_psbt(
-			address,
-			send_amount,
-			fee_rate,
-			utxos_to_spend,
-			channel_manager,
-		)?;
-
-		// Sign the transaction
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
-			Ok(finalized) => {
-				if !finalized {
-					return Err(Error::OnchainTxCreationFailed);
-				}
+		let is_drain_all = match send_amount {
+			OnchainSendAmount::AllDrainingReserve => true,
+			OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
+				cur_anchor_reserve_sats <= DUST_LIMIT_SATS
 			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create transaction: {}", err);
-				return Err(err.into());
-			},
-		}
+			_ => false,
+		};
 
-		// Persist the wallet
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
+		let tx = if is_drain_all && utxos_to_spend.is_none() {
+			let mut locked_wallet = self.inner.lock().unwrap();
+			let tx = locked_wallet
+				.build_and_sign_drain(address.script_pubkey(), fee_rate)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to drain wallets: {}", e);
+					Error::OnchainTxCreationFailed
+				})?;
+			locked_wallet.persist_all().map_err(|e| {
+				log_error!(self.logger, "Failed to persist wallet: {}", e);
+				Error::PersistenceFailed
+			})?;
+			tx
+		} else {
+			let (psbt, mut locked_wallet) = self.build_transaction_psbt(
+				address,
+				send_amount,
+				fee_rate,
+				utxos_to_spend,
+				channel_manager,
+			)?;
 
-		// Extract the transaction
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			e
-		})?;
+			let tx = locked_wallet.sign_psbt_all(psbt).map_err(|e| {
+				log_error!(self.logger, "Failed to sign transaction: {}", e);
+				Error::OnchainTxSigningFailed
+			})?;
+
+			locked_wallet.persist_all().map_err(|e| {
+				log_error!(self.logger, "Failed to persist wallet: {}", e);
+				Error::PersistenceFailed
+			})?;
+			tx
+		};
 
 		self.broadcaster.broadcast_transactions(&[&tx]);
 
@@ -1511,16 +1249,9 @@ impl Wallet {
 	fn list_confirmed_utxos_inner(&self) -> Result<Vec<Utxo>, ()> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let mut utxos = Vec::new();
-		let confirmed_txs: Vec<Txid> = locked_wallet
-			.transactions()
-			.filter(|t| t.chain_position.is_confirmed())
-			.map(|t| t.tx_node.txid)
-			.collect();
-		let unspent_confirmed_utxos =
-			locked_wallet.list_unspent().filter(|u| confirmed_txs.contains(&u.outpoint.txid));
 
-		for u in unspent_confirmed_utxos {
-			let script_pubkey = u.txout.script_pubkey;
+		for u in locked_wallet.list_confirmed_unspent() {
+			let script_pubkey = u.txout.script_pubkey.clone();
 			match script_pubkey.witness_version() {
 				Some(version @ WitnessVersion::V0) => {
 					// According to the SegWit rules of [BIP 141] a witness program is defined as:
@@ -1588,11 +1319,29 @@ impl Wallet {
 					log_error!(self.logger, "Unexpected witness version: {}", version,);
 				},
 				None => {
-					log_error!(
-						self.logger,
-						"Tried to use a non-witness script. This must never happen."
-					);
-					panic!("Tried to use a non-witness script. This must never happen.");
+					let script_bytes = script_pubkey.as_bytes();
+					if script_pubkey.is_p2pkh() {
+						let pkh = PubkeyHash::from_slice(&script_bytes[3..23]).map_err(|e| {
+							log_error!(self.logger, "Failed to extract PubkeyHash: {}", e);
+						})?;
+						utxos.push(Utxo::new_p2pkh(u.outpoint, u.txout.value, &pkh));
+					} else if script_pubkey.is_p2sh() {
+						if let Some(wpkh) = locked_wallet.derive_wpkh_for_p2sh(&u) {
+							utxos.push(Utxo::new_nested_p2wpkh(u.outpoint, u.txout.value, &wpkh));
+						} else {
+							log_debug!(
+								self.logger,
+								"Skipping P2SH UTXO {:?}: could not derive inner WPubkeyHash",
+								u.outpoint
+							);
+						}
+					} else {
+						log_debug!(
+							self.logger,
+							"Skipping non-standard non-witness UTXO {:?}",
+							u.outpoint
+						);
+					}
 				},
 			}
 		}
@@ -1603,81 +1352,23 @@ impl Wallet {
 	#[allow(deprecated)]
 	fn get_change_script_inner(&self) -> Result<ScriptBuf, ()> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
-
-		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			()
-		})?;
-		Ok(address_info.address.script_pubkey())
+		locked_wallet.new_internal_address().map(|addr| addr.script_pubkey()).map_err(|e| {
+			log_error!(self.logger, "Failed to get change script: {}", e);
+		})
 	}
 
-	#[allow(deprecated)]
 	pub(crate) fn sign_owned_inputs(&self, unsigned_tx: Transaction) -> Result<Transaction, ()> {
-		let locked_wallet = self.inner.lock().unwrap();
-
-		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| {
-			log_error!(self.logger, "Failed to construct PSBT: {}", e);
-		})?;
-		for (i, txin) in psbt.unsigned_tx.input.iter().enumerate() {
-			if let Some(utxo) = locked_wallet.get_utxo(txin.previous_output) {
-				debug_assert!(!utxo.is_spent);
-				psbt.inputs[i] = locked_wallet.get_psbt_input(utxo, None, true).map_err(|e| {
-					log_error!(self.logger, "Failed to construct PSBT input: {}", e);
-				})?;
-			}
-		}
-
-		let mut sign_options = SignOptions::default();
-		sign_options.trust_witness_utxo = true;
-
-		match locked_wallet.sign(&mut psbt, sign_options) {
-			Ok(finalized) => debug_assert!(!finalized),
-			Err(e) => {
-				log_error!(self.logger, "Failed to sign owned inputs: {}", e);
-				return Err(());
-			},
-		}
-
-		match psbt.extract_tx() {
-			Ok(tx) => Ok(tx),
-			Err(bitcoin::psbt::ExtractTxError::MissingInputValue { tx }) => Ok(tx),
-			Err(e) => {
-				log_error!(self.logger, "Failed to extract transaction: {}", e);
-				Err(())
-			},
-		}
+		let mut locked_wallet = self.inner.lock().unwrap();
+		locked_wallet.sign_owned_inputs(unsigned_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to sign transaction: {}", e);
+		})
 	}
 
-	#[allow(deprecated)]
-	fn sign_psbt_inner(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
-		let locked_wallet = self.inner.lock().unwrap();
-
-		// While BDK populates both `witness_utxo` and `non_witness_utxo` fields, LDK does not. As
-		// BDK by default doesn't trust the witness UTXO to account for the Segwit bug, we must
-		// disable it here as otherwise we fail to sign.
-		let mut sign_options = SignOptions::default();
-		sign_options.trust_witness_utxo = true;
-
-		match locked_wallet.sign(&mut psbt, sign_options) {
-			Ok(_finalized) => {
-				// BDK will fail to finalize for all LDK-provided inputs of the PSBT. Unfortunately
-				// we can't check more fine grained if it succeeded for all the other inputs here,
-				// so we just ignore the returned `finalized` bool.
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to sign transaction: {}", err);
-				return Err(());
-			},
-		}
-
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			()
-		})?;
-
-		Ok(tx)
+	fn sign_psbt_inner(&self, psbt: Psbt) -> Result<Transaction, ()> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		locked_wallet.sign_psbt_all(psbt).map_err(|e| {
+			log_error!(self.logger, "Failed to sign PSBT: {}", e);
+		})
 	}
 }
 
@@ -1696,8 +1387,9 @@ impl Listen for Wallet {
 		let mut locked_wallet = self.inner.lock().unwrap();
 
 		let pre_checkpoint = locked_wallet.latest_checkpoint();
-		if pre_checkpoint.height() != height - 1
-			|| pre_checkpoint.hash() != block.header.prev_blockhash
+		if height > 0
+			&& (pre_checkpoint.height() != height - 1
+				|| pre_checkpoint.hash() != block.header.prev_blockhash)
 		{
 			log_debug!(
 				self.logger,
@@ -1708,8 +1400,8 @@ impl Listen for Wallet {
 		}
 
 		match locked_wallet.apply_block(block, height) {
-			Ok(()) => {
-				if let Err(e) = self.update_payment_store(&mut *locked_wallet) {
+			Ok(_all_txids) => {
+				if let Err(e) = self.update_payment_store(&locked_wallet) {
 					log_error!(self.logger, "Failed to update payment store: {}", e);
 					return;
 				}
@@ -1720,15 +1412,6 @@ impl Listen for Wallet {
 					"Failed to apply connected block to on-chain wallet: {}",
 					e
 				);
-				return;
-			},
-		};
-
-		let mut locked_persister = self.persister.lock().unwrap();
-		match locked_wallet.persist(&mut locked_persister) {
-			Ok(_) => (),
-			Err(e) => {
-				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
 				return;
 			},
 		};
@@ -1874,15 +1557,15 @@ impl SignerProvider for WalletKeysManager {
 	}
 
 	fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.get_new_address().map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+		let address = self.wallet.get_new_witness_address().map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new witness address from wallet: {}", e);
 		})?;
 		Ok(address.script_pubkey())
 	}
 
 	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
-		let address = self.wallet.get_new_address().map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+		let address = self.wallet.get_new_witness_address().map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new witness address from wallet: {}", e);
 		})?;
 
 		match address.witness_program() {

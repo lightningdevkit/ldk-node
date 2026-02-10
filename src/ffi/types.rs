@@ -42,13 +42,16 @@ pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
 pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
 
+pub use crate::balance::AddressTypeBalance;
 use crate::builder::sanitize_alias;
 pub use crate::config::{
-	default_config, AnchorChannelsConfig, BackgroundSyncConfig, ElectrumSyncConfig,
-	EsploraSyncConfig, MaxDustHTLCExposure,
+	battery_saving_sync_intervals, default_config, AddressType, AnchorChannelsConfig,
+	BackgroundSyncConfig, ElectrumSyncConfig, EsploraSyncConfig, MaxDustHTLCExposure,
+	RuntimeSyncIntervals,
 };
 use crate::error::Error;
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
+pub use crate::io::utils::derive_node_secret_from_mnemonic;
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{

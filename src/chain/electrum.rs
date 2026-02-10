@@ -21,6 +21,7 @@ use electrum_client::{
 	Batch, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
 };
 use lightning::chain::{Confirm, Filter, WatchedOutput};
+use lightning::log_warn;
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
 
@@ -172,10 +173,10 @@ impl ElectrumChainSource {
 
 		let cached_txs = onchain_wallet.get_cached_txs();
 
-		let res = if incremental_sync {
+		let primary_result = if incremental_sync {
 			let incremental_sync_request = onchain_wallet.get_incremental_sync_request();
 			let incremental_sync_fut = electrum_client
-				.get_incremental_sync_wallet_update(incremental_sync_request, cached_txs);
+				.get_incremental_sync_wallet_update(incremental_sync_request, cached_txs.clone());
 
 			let now = Instant::now();
 			let update_res = incremental_sync_fut.await.map(|u| u.into());
@@ -183,13 +184,70 @@ impl ElectrumChainSource {
 		} else {
 			let full_scan_request = onchain_wallet.get_full_scan_request();
 			let full_scan_fut =
-				electrum_client.get_full_scan_wallet_update(full_scan_request, cached_txs);
+				electrum_client.get_full_scan_wallet_update(full_scan_request, cached_txs.clone());
 			let now = Instant::now();
 			let update_res = full_scan_fut.await.map(|u| u.into());
 			apply_wallet_update(update_res, now)
 		};
 
-		res
+		let (mut all_events, primary_error) = match primary_result {
+			Ok(events) => (events, None),
+			Err(e) => (Vec::new(), Some(e)),
+		};
+
+		let sync_requests = super::collect_additional_sync_requests(
+			&self.config,
+			&onchain_wallet,
+			&self.node_metrics,
+			&self.logger,
+		);
+
+		let mut join_set = tokio::task::JoinSet::new();
+		for (address_type, full_scan_req, incremental_req, do_incremental) in sync_requests {
+			let client = Arc::clone(&electrum_client);
+			let txs = cached_txs.clone();
+			join_set.spawn(async move {
+				let result: Result<BdkUpdate, Error> = if do_incremental {
+					client
+						.get_incremental_sync_wallet_update(incremental_req, txs)
+						.await
+						.map(|u| u.into())
+				} else {
+					client.get_full_scan_wallet_update(full_scan_req, txs).await.map(|u| u.into())
+				};
+				(address_type, result)
+			});
+		}
+
+		let mut sync_results = Vec::new();
+		while let Some(join_result) = join_set.join_next().await {
+			match join_result {
+				Ok((address_type, Ok(update))) => {
+					sync_results.push((address_type, Some(update)));
+				},
+				Ok((address_type, Err(e))) => {
+					log_warn!(self.logger, "Failed to sync wallet {:?}: {}", address_type, e);
+					sync_results.push((address_type, None));
+				},
+				Err(e) => {
+					log_warn!(self.logger, "Wallet sync task panicked: {}", e);
+				},
+			};
+		}
+
+		all_events.extend(super::apply_additional_sync_results(
+			sync_results,
+			&onchain_wallet,
+			&self.node_metrics,
+			&self.kv_store,
+			&self.logger,
+		));
+
+		if let Some(e) = primary_error {
+			return Err(e);
+		}
+
+		Ok(all_events)
 	}
 
 	pub(crate) async fn sync_lightning_wallet(

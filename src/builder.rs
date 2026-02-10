@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 use std::{fmt, fs};
 
-use bdk_wallet::template::Bip84;
-use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
+use bdk_wallet::template::{Bip44, Bip49, Bip84, Bip86};
+use bdk_wallet::{KeychainKind, PersistedWallet, Wallet as BdkWallet};
 use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::secp256k1::PublicKey;
@@ -49,7 +49,7 @@ use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvide
 
 use crate::chain::ChainSource;
 use crate::config::{
-	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
+	default_user_config, may_announce_channel, AddressType, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, RuntimeSyncIntervals,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
@@ -567,6 +567,30 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Sets the primary address type for the on-chain wallet.
+	///
+	/// This determines what type of addresses will be generated for new receiving and change
+	/// addresses. Default is [`AddressType::NativeSegwit`].
+	pub fn set_address_type(&mut self, address_type: AddressType) -> &mut Self {
+		self.config.address_type = address_type;
+		self
+	}
+
+	/// Sets additional address types to monitor for existing funds.
+	///
+	/// These address types will be scanned alongside the primary address type during chain
+	/// synchronization. Useful when migrating from one address type to another — for example,
+	/// if switching from Legacy to NativeSegwit, add `Legacy` here to continue monitoring
+	/// old Legacy addresses.
+	///
+	/// Default is empty (only the primary address type is monitored).
+	pub fn set_address_types_to_monitor(
+		&mut self, address_types_to_monitor: Vec<AddressType>,
+	) -> &mut Self {
+		self.config.address_types_to_monitor = address_types_to_monitor;
+		self
+	}
+
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	pub fn set_listening_addresses(
 		&mut self, listening_addresses: Vec<SocketAddress>,
@@ -1064,6 +1088,16 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_network(network);
 	}
 
+	/// Sets the primary address type for the on-chain wallet.
+	pub fn set_address_type(&self, address_type: AddressType) {
+		self.inner.write().unwrap().set_address_type(address_type);
+	}
+
+	/// Sets additional address types to monitor for existing funds.
+	pub fn set_address_types_to_monitor(&self, address_types_to_monitor: Vec<AddressType>) {
+		self.inner.write().unwrap().set_address_types_to_monitor(address_types_to_monitor);
+	}
+
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	pub fn set_listening_addresses(
 		&self, listening_addresses: Vec<SocketAddress>,
@@ -1186,7 +1220,124 @@ impl ArcedNodeBuilder {
 	}
 }
 
-/// Builds a [`Node`] instance according to the options previously configured.
+fn get_or_create_wallet_for_address_type(
+	address_type: AddressType, xprv: Xpriv, network: Network,
+	persister: &mut KVStoreWalletPersister,
+) -> Result<PersistedWallet<KVStoreWalletPersister>, BuildError> {
+	macro_rules! load_or_create {
+		($ext:expr, $int:expr) => {{
+			let wallet_opt = BdkWallet::load()
+				.descriptor(KeychainKind::External, Some($ext))
+				.descriptor(KeychainKind::Internal, Some($int))
+				.extract_keys()
+				.check_network(network)
+				.load_wallet(persister)
+				.map_err(|e| match e {
+					bdk_wallet::LoadWithPersistError::InvalidChangeSet(
+						bdk_wallet::LoadError::Mismatch(bdk_wallet::LoadMismatch::Network {
+							loaded,
+							expected,
+						}),
+					) => {
+						log::error!(
+							"Failed to setup wallet: Networks do not match. Expected {} but got {}",
+							expected,
+							loaded
+						);
+						BuildError::NetworkMismatch
+					},
+					_ => {
+						log::error!("Failed to set up wallet: {}", e);
+						BuildError::WalletSetupFailed
+					},
+				})?;
+			match wallet_opt {
+				Some(w) => Ok(w),
+				None => BdkWallet::create($ext, $int)
+					.network(network)
+					.create_wallet(persister)
+					.map_err(|_| BuildError::WalletSetupFailed),
+			}
+		}};
+	}
+
+	match address_type {
+		AddressType::Legacy => load_or_create!(
+			Bip44(xprv, KeychainKind::External),
+			Bip44(xprv, KeychainKind::Internal)
+		),
+		AddressType::NestedSegwit => load_or_create!(
+			Bip49(xprv, KeychainKind::External),
+			Bip49(xprv, KeychainKind::Internal)
+		),
+		AddressType::NativeSegwit => load_or_create!(
+			Bip84(xprv, KeychainKind::External),
+			Bip84(xprv, KeychainKind::Internal)
+		),
+		AddressType::Taproot => load_or_create!(
+			Bip86(xprv, KeychainKind::External),
+			Bip86(xprv, KeychainKind::Internal)
+		),
+	}
+}
+
+fn build_additional_wallets(
+	config: &Config, xprv: Xpriv, kv_store: Arc<DynStore>, logger: Arc<Logger>,
+	chain_tip_opt: Option<&BestBlock>,
+) -> Vec<(AddressType, PersistedWallet<KVStoreWalletPersister>, KVStoreWalletPersister)> {
+	let mut additional_wallets = Vec::new();
+
+	for address_type in config.additional_address_types() {
+		match (|| -> Result<_, BuildError> {
+			let mut persister = KVStoreWalletPersister::new(
+				Arc::clone(&kv_store),
+				Arc::clone(&logger),
+				address_type,
+			);
+
+			let mut wallet = get_or_create_wallet_for_address_type(
+				address_type,
+				xprv,
+				config.network,
+				&mut persister,
+			)
+			.map_err(|e| {
+				log_error!(logger, "Failed to setup wallet for {:?}: {}", address_type, e);
+				e
+			})?;
+
+			// For newly created wallets, set the chain tip checkpoint.
+			if let Some(best_block) = chain_tip_opt {
+				let mut cp = wallet.latest_checkpoint();
+				let block_id =
+					bdk_chain::BlockId { height: best_block.height, hash: best_block.block_hash };
+				cp = cp.insert(block_id);
+				let update = bdk_wallet::Update { chain: Some(cp), ..Default::default() };
+				wallet.apply_update(update).map_err(|e| {
+					log_error!(logger, "Failed to apply checkpoint for {:?}: {}", address_type, e);
+					BuildError::WalletSetupFailed
+				})?;
+			}
+			Ok((address_type, wallet, persister))
+		})() {
+			Ok(tuple) => {
+				log_info!(logger, "Created additional wallet for {:?}", tuple.0);
+				additional_wallets.push(tuple);
+			},
+			Err(e) => {
+				log_error!(
+					logger,
+					"Failed to create additional wallet for {:?}: {}. Continuing without it.",
+					address_type,
+					e
+				);
+			},
+		}
+	}
+
+	additional_wallets
+}
+
 fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
@@ -1220,8 +1371,6 @@ fn build_with_store_internal(
 		log_error!(logger, "Failed to derive master secret: {}", e);
 		BuildError::InvalidSeedBytes
 	})?;
-	let descriptor = Bip84(xprv, KeychainKind::External);
-	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
 
 	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
 	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
@@ -1242,16 +1391,16 @@ fn build_with_store_internal(
 			read_payments_async(payments_store, payments_logger),
 			tokio::task::spawn_blocking({
 				let network = config.network;
-				let descriptor = descriptor.clone();
-				let change_descriptor = change_descriptor.clone();
+				let address_type = config.address_type;
 				move || {
-					let mut persister = KVStoreWalletPersister::new(wallet_store, wallet_logger);
-					let result = BdkWallet::load()
-						.descriptor(KeychainKind::External, Some(descriptor))
-						.descriptor(KeychainKind::Internal, Some(change_descriptor))
-						.extract_keys()
-						.check_network(network)
-						.load_wallet(&mut persister);
+					let mut persister =
+						KVStoreWalletPersister::new(wallet_store, wallet_logger, address_type);
+					let result = get_or_create_wallet_for_address_type(
+						address_type,
+						xprv,
+						network,
+						&mut persister,
+					);
 					(result, persister)
 				}
 			})
@@ -1291,30 +1440,14 @@ fn build_with_store_internal(
 	};
 
 	// Process wallet result
-	let (wallet_load_result, mut wallet_persister) = match wallet_result {
+	let (wallet_load_result, wallet_persister) = match wallet_result {
 		Ok(result) => result,
 		Err(e) => {
 			log_error!(logger, "Task join error loading wallet: {}", e);
 			return Err(BuildError::WalletSetupFailed);
 		},
 	};
-	let wallet_opt = wallet_load_result.map_err(|e| match e {
-		bdk_wallet::LoadWithPersistError::InvalidChangeSet(bdk_wallet::LoadError::Mismatch(
-			bdk_wallet::LoadMismatch::Network { loaded, expected },
-		)) => {
-			log_error!(
-				logger,
-				"Failed to setup wallet: Networks do not match. Expected {} but got {}",
-				expected,
-				loaded
-			);
-			BuildError::NetworkMismatch
-		},
-		_ => {
-			log_error!(logger, "Failed to set up wallet: {}", e);
-			BuildError::WalletSetupFailed
-		},
-	})?;
+	let bdk_wallet_loaded = wallet_load_result?;
 
 	// Chain source setup
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
@@ -1404,39 +1537,31 @@ fn build_with_store_internal(
 	};
 	let chain_source = Arc::new(chain_source);
 
-	// Initialize the on-chain wallet
-	let bdk_wallet = match wallet_opt {
-		Some(wallet) => wallet,
-		None => {
-			let mut wallet = BdkWallet::create(descriptor, change_descriptor)
-				.network(config.network)
-				.create_wallet(&mut wallet_persister)
-				.map_err(|e| {
-					log_error!(logger, "Failed to set up wallet: {}", e);
-					BuildError::WalletSetupFailed
-				})?;
+	let mut bdk_wallet = bdk_wallet_loaded;
+	if let Some(best_block) = chain_tip_opt {
+		let mut latest_checkpoint = bdk_wallet.latest_checkpoint();
+		let block_id =
+			bdk_chain::BlockId { height: best_block.height, hash: best_block.block_hash };
+		latest_checkpoint = latest_checkpoint.insert(block_id);
+		let update = bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
+		bdk_wallet.apply_update(update).map_err(|e| {
+			log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
+			BuildError::WalletSetupFailed
+		})?;
+	}
 
-			if let Some(best_block) = chain_tip_opt {
-				// Insert the first checkpoint if we have it, to avoid resyncing from genesis.
-				// TODO: Use a proper wallet birthday once BDK supports it.
-				let mut latest_checkpoint = wallet.latest_checkpoint();
-				let block_id =
-					bdk_chain::BlockId { height: best_block.height, hash: best_block.block_hash };
-				latest_checkpoint = latest_checkpoint.insert(block_id);
-				let update =
-					bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
-				wallet.apply_update(update).map_err(|e| {
-					log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
-					BuildError::WalletSetupFailed
-				})?;
-			}
-			wallet
-		},
-	};
+	let additional_wallets = build_additional_wallets(
+		&config,
+		xprv,
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+		chain_tip_opt.as_ref(),
+	);
 
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
+		additional_wallets,
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
 		Arc::clone(&payment_store),

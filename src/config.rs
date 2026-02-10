@@ -99,6 +99,82 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 // The timeout after which we abort a external scores sync operation.
 pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 
+/// Supported Bitcoin address types for the on-chain wallet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AddressType {
+	/// Legacy addresses (P2PKH) - BIP 44.
+	Legacy,
+	/// Nested SegWit addresses (P2SH-wrapped P2WPKH) - BIP 49.
+	NestedSegwit,
+	/// Native SegWit addresses (P2WPKH) - BIP 84.
+	NativeSegwit,
+	/// Taproot addresses (P2TR) - BIP 86.
+	Taproot,
+}
+
+impl AddressType {
+	/// Returns `true` if this address type produces witness inputs when signed.
+	pub fn is_witness_compatible(&self) -> bool {
+		matches!(self, AddressType::NestedSegwit | AddressType::NativeSegwit | AddressType::Taproot)
+	}
+
+	/// Returns a stable string suffix used for namespacing persisted wallet data.
+	pub(crate) fn storage_suffix(&self) -> &'static str {
+		match self {
+			AddressType::Legacy => "legacy",
+			AddressType::NestedSegwit => "nested_segwit",
+			AddressType::NativeSegwit => "native_segwit",
+			AddressType::Taproot => "taproot",
+		}
+	}
+}
+
+impl Default for AddressType {
+	fn default() -> Self {
+		AddressType::NativeSegwit
+	}
+}
+
+impl lightning::util::ser::Writeable for AddressType {
+	fn write<W: lightning::util::ser::Writer>(
+		&self, writer: &mut W,
+	) -> Result<(), bitcoin::io::Error> {
+		match self {
+			AddressType::Legacy => 0u8.write(writer),
+			AddressType::NestedSegwit => 1u8.write(writer),
+			AddressType::NativeSegwit => 2u8.write(writer),
+			AddressType::Taproot => 3u8.write(writer),
+		}
+	}
+}
+
+impl lightning::util::ser::Readable for AddressType {
+	fn read<R: bitcoin::io::Read>(
+		reader: &mut R,
+	) -> Result<Self, lightning::ln::msgs::DecodeError> {
+		let discriminant: u8 = lightning::util::ser::Readable::read(reader)?;
+		match discriminant {
+			0 => Ok(AddressType::Legacy),
+			1 => Ok(AddressType::NestedSegwit),
+			2 => Ok(AddressType::NativeSegwit),
+			3 => Ok(AddressType::Taproot),
+			_ => Err(lightning::ln::msgs::DecodeError::InvalidValue),
+		}
+	}
+}
+
+impl Config {
+	/// Returns the additional address types to monitor, excluding the primary.
+	pub fn additional_address_types(&self) -> Vec<AddressType> {
+		let mut seen = std::collections::HashSet::new();
+		self.address_types_to_monitor
+			.iter()
+			.copied()
+			.filter(|&at| at != self.address_type && seen.insert(at))
+			.collect()
+	}
+}
+
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
 ///
@@ -197,6 +273,10 @@ pub struct Config {
 	///
 	/// [`BalanceDetails::spendable_onchain_balance_sats`]: crate::BalanceDetails::spendable_onchain_balance_sats
 	pub include_untrusted_pending_in_spendable: bool,
+	/// The address type for the on-chain wallet. Default is `NativeSegwit`.
+	pub address_type: AddressType,
+	/// Additional address types to monitor for existing funds.
+	pub address_types_to_monitor: Vec<AddressType>,
 }
 
 impl Default for Config {
@@ -212,6 +292,8 @@ impl Default for Config {
 			route_parameters: None,
 			node_alias: None,
 			include_untrusted_pending_in_spendable: false,
+			address_type: AddressType::default(),
+			address_types_to_monitor: Vec::new(),
 		}
 	}
 }
