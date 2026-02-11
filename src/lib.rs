@@ -180,6 +180,7 @@ use types::{
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
 pub use vss_client;
 
+use crate::liquidity::LspConfig;
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
 
@@ -674,6 +675,29 @@ impl Node {
 			});
 		}
 
+		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
+			let discovery_ls = Arc::clone(&liquidity_source);
+			let discovery_cm = Arc::clone(&self.connection_manager);
+			let discovery_logger = Arc::clone(&self.logger);
+			self.runtime.spawn_background_task(async move {
+				for (node_id, address) in discovery_ls.get_all_lsp_details() {
+					if let Err(e) =
+						discovery_cm.connect_peer_if_necessary(node_id, address.clone()).await
+					{
+						log_error!(
+							discovery_logger,
+							"Failed to connect to LSP {} for protocol discovery: {}",
+							node_id,
+							e
+						);
+						continue;
+					}
+				}
+
+				discovery_ls.discover_all_lsp_protocols().await;
+			});
+		}
+
 		log_info!(self.logger, "Startup complete.");
 		*is_running_lock = true;
 		Ok(())
@@ -1048,7 +1072,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
-			self.liquidity_source.clone(),
+			self.liquidity_source.as_ref().map(|ls| ls.lsps1_client()),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -1062,7 +1086,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
-			self.liquidity_source.clone(),
+			self.liquidity_source.as_ref().map(|ls| ls.lsps1_client()),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -1948,6 +1972,39 @@ impl Node {
 			);
 			Error::PersistenceFailed
 		})
+	}
+
+	/// Configures the [`Node`] instance to source inbound liquidity from the given LSP at runtime,
+	/// without specifying the exact protocol used (e.g., LSPS1 or LSPS2).
+	///
+	/// LSP nodes are automatically trusted for 0-confirmation channels.
+	///
+	/// The given `token` will be used by the LSP to authenticate the user.
+	/// This method is useful when the user wants to connect to an LSP but does not want to be concerned with
+	/// the specific protocol used for liquidity provision. The node will automatically detect and use the
+	/// appropriate protocol supported by the LSP.
+	pub fn add_lsp(
+		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+	) -> Result<(), Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let lsp_config = LspConfig { node_id, address, token };
+		liquidity_source.add_lsp_node(lsp_config.clone())?;
+
+		let con_node_id = lsp_config.node_id;
+		let con_addr = lsp_config.address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_config.node_id, lsp_config.address);
+
+		let node_id = lsp_config.node_id;
+		self.runtime
+			.block_on(async move { liquidity_source.discover_lsp_protocols(&node_id).await })?;
+		Ok(())
 	}
 }
 
