@@ -758,8 +758,8 @@ impl Wallet {
 
 	// Helper that builds a transaction PSBT with shared logic for send_to_address
 	// and calculate_transaction_fee.
-	// Supports cross-wallet spending: UTXOs from non-primary wallets are added as
-	// foreign inputs when the primary wallet alone has insufficient funds.
+	// Supports cross-wallet spending: unified coin selection pools UTXOs from all
+	// loaded wallets and selects optimally across the full set.
 	fn build_transaction_psbt(
 		&self, address: &Address, send_amount: OnchainSendAmount, fee_rate: FeeRate,
 		utxos_to_spend: Option<Vec<OutPoint>>, channel_manager: &ChannelManager,

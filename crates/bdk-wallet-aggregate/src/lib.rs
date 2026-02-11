@@ -35,7 +35,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::psbt::Psbt;
 use bitcoin::{
 	Address, Amount, Block, BlockHash, FeeRate, OutPoint, Script, ScriptBuf, Transaction, Txid,
-	WPubkeyHash, Weight,
+	WPubkeyHash,
 };
 pub use types::{CoinSelectionAlgorithm, Error, UtxoPsbtInfo};
 
@@ -760,8 +760,8 @@ where
 	/// Select the minimum set of non-primary foreign UTXOs needed to cover
 	/// `deficit`, using the given coin selection algorithm.
 	///
-	/// * `witness_only` – if `true`, excludes bare P2PKH UTXOs (required for
-	///   LDK channel funding which mandates witness inputs).
+	/// * `segwit_only` – if `true`, excludes bare P2PKH UTXOs (includes
+	///   P2SH-P2WPKH / NestedSegwit since those carry witness data).
 	/// * `algorithm` – the coin selection strategy to use.
 	///
 	/// Returns prepared `UtxoPsbtInfo` entries ready to add as foreign
@@ -805,76 +805,96 @@ where
 		self.prepare_outpoints_for_psbt(&selected_outpoints)
 	}
 
-	/// Build a channel-funding transaction on the **primary** wallet with a
-	/// try-primary-then-retry-with-foreign-UTXOs strategy.
+	/// Build a transaction using unified coin selection across all eligible
+	/// wallets.
 	///
-	/// 1. Attempts to build the transaction using only the primary wallet.
-	/// 2. If the primary wallet has insufficient funds, retries by adding
-	///    witness-compatible UTXOs from other loaded wallets.
-	/// 3. Signs with all wallets and persists.
-	///
-	/// Only witness-compatible foreign UTXOs are included because LDK
-	/// requires every input to carry a non-empty witness field.
+	/// Pools UTXOs from every wallet that passes `utxo_filter`, runs coin
+	/// selection once on the combined set, then builds a PSBT on the
+	/// `build_key` wallet with primary UTXOs as native inputs and foreign
+	/// UTXOs via `add_foreign_utxo`. Signs with all wallets and persists.
+	#[allow(deprecated, clippy::too_many_arguments)]
+	fn build_tx_unified(
+		&mut self, build_key: &K, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
+		locktime: Option<LockTime>, excluded_txids: &HashSet<Txid>,
+		algorithm: CoinSelectionAlgorithm, utxo_filter: impl Fn(&LocalOutput) -> bool,
+	) -> Result<Psbt, Error> {
+		let all_utxos: Vec<LocalOutput> = self
+			.list_unspent()
+			.into_iter()
+			.filter(|u| !excluded_txids.contains(&u.outpoint.txid))
+			.filter(&utxo_filter)
+			.collect();
+
+		if all_utxos.is_empty() {
+			return Err(Error::NoSpendableOutputs);
+		}
+
+		let drain_script = self
+			.wallet(build_key)
+			.ok_or(Error::WalletNotFound)?
+			.peek_address(KeychainKind::Internal, 0)
+			.address
+			.script_pubkey();
+
+		let selected = utxo::select_utxos_with_algorithm(
+			amount.to_sat(),
+			all_utxos,
+			fee_rate,
+			algorithm,
+			&drain_script,
+			&[],
+			&self.wallets,
+		)?;
+
+		let infos = self.prepare_outpoints_for_psbt(&selected)?;
+		if infos.is_empty() {
+			return Err(Error::InsufficientFunds);
+		}
+
+		let w = self.wallets.get_mut(build_key).ok_or(Error::WalletNotFound)?;
+		let mut b = w.build_tx();
+		b.add_recipient(output_script, amount).fee_rate(fee_rate);
+		if let Some(lt) = locktime {
+			b.nlocktime(lt);
+		}
+		utxo::add_utxos_to_tx_builder(&mut b, &infos)?;
+		// BDK must not add extra UTXOs — we already selected everything.
+		b.manually_selected_only();
+		b.finish().map_err(|e| {
+			log::error!("Failed to build tx with unified selection: {}", e);
+			Error::InsufficientFunds
+		})
+	}
+
+	/// Build a channel-funding transaction using unified coin selection
+	/// across all wallets. Only SegWit-compatible UTXOs are included
+	/// (Legacy/P2PKH excluded) as required by BOLT 2.
 	#[allow(deprecated)]
 	pub fn build_and_sign_funding_tx(
 		&mut self, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate, locktime: LockTime,
 	) -> Result<Transaction, Error> {
-		// Attempt 1: primary-only build.
-		let primary_result = {
-			let primary = self.wallets.get_mut(&self.primary).ok_or(Error::WalletNotFound)?;
-			let mut b = primary.build_tx();
-			b.add_recipient(output_script.clone(), amount).fee_rate(fee_rate).nlocktime(locktime);
-			b.finish()
-		};
-
-		let psbt = match primary_result {
-			Ok(psbt) => psbt,
-			Err(primary_err) => {
-				// Attempt 2: select minimum witness-compatible foreign UTXOs.
-				let primary_spendable = self.primary_wallet().balance().total();
-				let deficit = amount.checked_sub(primary_spendable).unwrap_or(Amount::ZERO)
-					+ Amount::from_sat(
-						fee_rate.fee_wu(Weight::from_wu(400)).unwrap_or(Amount::ZERO).to_sat(),
-					);
-
-				let infos = self.select_non_primary_foreign_utxos(
-					deficit,
-					fee_rate,
-					&HashSet::new(),
-					true,
-					CoinSelectionAlgorithm::BranchAndBound,
-				)?;
-				if infos.is_empty() {
-					log::error!(
-						"Funding tx failed and no cross-wallet UTXOs available: {}",
-						primary_err
-					);
-					return Err(Error::InsufficientFunds);
-				}
-
-				let primary = self.wallets.get_mut(&self.primary).ok_or(Error::WalletNotFound)?;
-				let mut b = primary.build_tx();
-				b.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
-				utxo::add_utxos_to_tx_builder(&mut b, &infos)?;
-				b.finish().map_err(|e| {
-					log::error!("Failed to build funding tx with cross-wallet UTXOs: {}", e);
-					Error::InsufficientFunds
-				})?
+		let psbt = self.build_tx_unified(
+			&self.primary.clone(),
+			output_script,
+			amount,
+			fee_rate,
+			Some(locktime),
+			&HashSet::new(),
+			CoinSelectionAlgorithm::BranchAndBound,
+			|u| {
+				u.txout.script_pubkey.witness_version().is_some() || u.txout.script_pubkey.is_p2sh()
 			},
-		};
+		)?;
 
 		let tx = self.sign_psbt_all(psbt)?;
 		self.persist_all()?;
 		Ok(tx)
 	}
 
-	/// Select the wallet with the highest spendable balance that satisfies
-	/// `filter`, then build and sign a transaction using that wallet (with
-	/// other matching wallets contributing UTXOs as foreign inputs).
-	///
-	/// Useful when the primary wallet is not eligible (e.g. Legacy for
-	/// Lightning channel funding) and a best-fit wallet must be chosen at
-	/// runtime.
+	/// Build a channel-funding transaction when the primary wallet is not
+	/// eligible (e.g. Legacy). Picks the highest-balance wallet from those
+	/// passing `filter` as the PSBT builder, then runs unified coin
+	/// selection across all eligible wallets.
 	#[allow(deprecated)]
 	pub fn build_and_sign_tx_with_best_wallet(
 		&mut self, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate, locktime: LockTime,
@@ -887,7 +907,6 @@ where
 			return Err(Error::InsufficientFunds);
 		}
 
-		// Pick the wallet with the most spendable balance.
 		matching_keys.sort_by(|a, b| {
 			let bal_a = self
 				.balance_for(a)
@@ -901,74 +920,43 @@ where
 		});
 
 		let build_key = matching_keys[0];
-		let additional_keys: Vec<K> =
-			matching_keys.into_iter().filter(|k| *k != build_key).collect();
 
-		self.build_and_sign_tx_with_wallet(
+		let psbt = self.build_tx_unified(
 			&build_key,
 			output_script,
 			amount,
 			fee_rate,
-			locktime,
-			&additional_keys,
-		)
+			Some(locktime),
+			&HashSet::new(),
+			CoinSelectionAlgorithm::BranchAndBound,
+			|u| {
+				u.txout.script_pubkey.witness_version().is_some() || u.txout.script_pubkey.is_p2sh()
+			},
+		)?;
+
+		let tx = self.sign_psbt_all(psbt)?;
+		self.persist_all()?;
+		Ok(tx)
 	}
 
-	/// Build a PSBT for an exact-amount send on the primary wallet, with an
-	/// automatic cross-wallet fallback.
-	///
-	/// 1. Attempts to build on the primary wallet alone.
-	/// 2. If that fails (insufficient funds), retries by adding foreign UTXOs
-	///    from other loaded wallets (excluding UTXOs from `excluded_txids`).
-	/// 3. Returns the **unsigned** PSBT — the caller is responsible for
-	///    signing and persisting.
+	/// Build a PSBT using unified coin selection across all wallets.
+	/// Returns the **unsigned** PSBT — the caller is responsible for
+	/// signing and persisting.
 	#[allow(deprecated)]
 	pub fn build_psbt_with_cross_wallet_fallback(
 		&mut self, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
 		excluded_txids: &HashSet<Txid>, algorithm: CoinSelectionAlgorithm,
 	) -> Result<Psbt, Error> {
-		// Attempt 1: primary-only build.
-		let primary_result = {
-			let primary = self.wallets.get_mut(&self.primary).ok_or(Error::WalletNotFound)?;
-			let mut b = primary.build_tx();
-			b.add_recipient(output_script.clone(), amount).fee_rate(fee_rate);
-			b.finish()
-		};
-
-		match primary_result {
-			Ok(psbt) => Ok(psbt),
-			Err(primary_err) => {
-				let primary_spendable = self.primary_wallet().balance().total();
-				let deficit = amount.checked_sub(primary_spendable).unwrap_or(Amount::ZERO)
-					+ Amount::from_sat(
-						fee_rate.fee_wu(Weight::from_wu(400)).unwrap_or(Amount::ZERO).to_sat(),
-					);
-
-				let infos = self.select_non_primary_foreign_utxos(
-					deficit,
-					fee_rate,
-					excluded_txids,
-					false,
-					algorithm,
-				)?;
-				if infos.is_empty() {
-					log::debug!(
-						"Primary wallet insufficient and no foreign UTXOs available: {}",
-						primary_err
-					);
-					return Err(Error::InsufficientFunds);
-				}
-
-				let primary = self.wallets.get_mut(&self.primary).ok_or(Error::WalletNotFound)?;
-				let mut b = primary.build_tx();
-				b.add_recipient(output_script, amount).fee_rate(fee_rate);
-				utxo::add_utxos_to_tx_builder(&mut b, &infos)?;
-				b.finish().map_err(|e| {
-					log::error!("Failed to build PSBT with cross-wallet UTXOs: {}", e);
-					Error::InsufficientFunds
-				})
-			},
-		}
+		self.build_tx_unified(
+			&self.primary.clone(),
+			output_script,
+			amount,
+			fee_rate,
+			None,
+			excluded_txids,
+			algorithm,
+			|_| true,
+		)
 	}
 
 	/// Aggregate balance across wallets whose keys satisfy `filter`.
@@ -984,116 +972,6 @@ where
 			}
 		}
 		total
-	}
-
-	/// Build and sign a transaction using a specific wallet as the builder,
-	/// with a try-build-wallet-then-retry-with-foreign strategy.
-	///
-	/// This is used when the primary wallet cannot be used directly (e.g.,
-	/// when the primary is P2PKH but channel funding requires SegWit inputs).
-	///
-	/// 1. Attempts to build with `build_key` alone.
-	/// 2. If insufficient, selects minimum UTXOs from `additional_keys` wallets
-	///    using BranchAndBound coin selection.
-	/// 3. Signs with all wallets and persists.
-	#[allow(deprecated)]
-	pub fn build_and_sign_tx_with_wallet(
-		&mut self, build_key: &K, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
-		locktime: LockTime, additional_keys: &[K],
-	) -> Result<Transaction, Error> {
-		// Attempt 1: build_wallet only.
-		let build_result = {
-			let w = self.wallets.get_mut(build_key).ok_or(Error::WalletNotFound)?;
-			let mut b = w.build_tx();
-			b.add_recipient(output_script.clone(), amount).fee_rate(fee_rate).nlocktime(locktime);
-			b.finish()
-		};
-
-		let psbt = match build_result {
-			Ok(psbt) => psbt,
-			Err(build_err) => {
-				if additional_keys.is_empty() {
-					log::error!(
-						"Build wallet {:?} insufficient and no additional wallets: {}",
-						build_key,
-						build_err
-					);
-					return Err(Error::InsufficientFunds);
-				}
-
-				// Attempt 2: select minimum witness-compatible UTXOs from additional wallets.
-				let build_balance =
-					self.balance_for(build_key).map(|b| b.total()).unwrap_or(Amount::ZERO);
-				let deficit = amount.checked_sub(build_balance).unwrap_or(Amount::ZERO)
-					+ Amount::from_sat(
-						fee_rate.fee_wu(Weight::from_wu(400)).unwrap_or(Amount::ZERO).to_sat(),
-					);
-
-				let build_outpoints: HashSet<OutPoint> = self
-					.wallet(build_key)
-					.ok_or(Error::WalletNotFound)?
-					.list_unspent()
-					.map(|u| u.outpoint)
-					.collect();
-
-				let additional_utxos: Vec<LocalOutput> = additional_keys
-					.iter()
-					.filter_map(|k| self.wallet(k))
-					.flat_map(|w| w.list_unspent())
-					.filter(|u| !build_outpoints.contains(&u.outpoint))
-					.collect();
-
-				if additional_utxos.is_empty() {
-					log::error!(
-						"Build wallet {:?} insufficient and no additional UTXOs available: {}",
-						build_key,
-						build_err
-					);
-					return Err(Error::InsufficientFunds);
-				}
-
-				let drain_script = self
-					.wallet(build_key)
-					.ok_or(Error::WalletNotFound)?
-					.peek_address(KeychainKind::Internal, 0)
-					.address
-					.script_pubkey();
-
-				let selected_outpoints = utxo::select_utxos_with_algorithm(
-					deficit.to_sat(),
-					additional_utxos,
-					fee_rate,
-					CoinSelectionAlgorithm::BranchAndBound,
-					&drain_script,
-					&[],
-					&self.wallets,
-				)?;
-
-				let foreign_infos = self.prepare_outpoints_for_psbt(&selected_outpoints)?;
-
-				let w = self.wallets.get_mut(build_key).ok_or(Error::WalletNotFound)?;
-				let mut b = w.build_tx();
-				b.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
-				utxo::add_utxos_to_tx_builder(&mut b, &foreign_infos)?;
-				b.finish().map_err(|e| {
-					log::error!(
-						"Failed to build tx on wallet {:?} with additional inputs: {}",
-						build_key,
-						e
-					);
-					match e {
-						bdk_wallet::error::CreateTxError::CoinSelection(_) => {
-							Error::InsufficientFunds
-						},
-						_ => Error::OnchainTxCreationFailed,
-					}
-				})?
-			},
-		};
-
-		let tx = self.sign_psbt_all(psbt)?;
-		self.persist_all()?;
-		Ok(tx)
 	}
 
 	/// Build and sign a transaction that drains ALL wallets (primary +

@@ -17,9 +17,11 @@
   - `Node::get_balance_for_address_type()` to query per-wallet balances
   - `Node::list_monitored_address_types()` to list loaded wallet types
   - `OnchainPayment::new_address_for_type()` to generate addresses for a specific type
-  - `send_to_address` / `send_all_to_address`: automatically pulls UTXOs from all loaded wallets when the primary wallet has insufficient funds; `send_all` drains all wallets
+  - `send_to_address` / `send_all_to_address`: unified coin selection pools UTXOs from all loaded wallets and selects optimally across the full set; `send_all` drains all wallets
   - RBF and CPFP fee bumping work across wallets (cross-wallet inputs are re-signed)
-  - Channel funding and shutdown scripts always use witness-compatible addresses, even when the primary wallet is Legacy
+  - Channel funding uses unified coin selection across all SegWit wallets (NestedSegwit can fund channels; Legacy excluded per BOLT 2)
+  - Channel shutdown and destination scripts always use native witness addresses, with automatic fallback to a loaded NativeSegwit/Taproot wallet when the primary is Legacy or NestedSegwit
+  - Splicing is restricted to native witness primaries (NativeSegwit/Taproot); non-native primaries return a graceful error
   - Change outputs go to the primary wallet
   - Monitored wallets are synced in parallel alongside the primary (Esplora and Electrum)
   - P2PKH and P2SH UTXOs are now handled in `OutputSpender` (previously panicked on non-witness scripts)
