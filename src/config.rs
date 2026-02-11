@@ -235,7 +235,9 @@ pub enum HRNResolverConfig {
 pub struct HumanReadableNamesConfig {
 	/// This sets how our node resolves names when we want to send a payment.
 	pub client_resolution_config: HRNResolverConfig,
-	/// if set, this allows others to use our node for HRN resolutions.
+	/// If set, this allows others to use our node for HRN resolutions ([bLIP-32]).
+	///
+	/// [bLIP-32]: https://github.com/lightning/blips/blob/master/blip-0032.md
 	pub disable_hrn_resolution_service: bool,
 }
 
