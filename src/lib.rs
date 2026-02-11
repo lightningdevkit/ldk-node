@@ -661,6 +661,29 @@ impl Node {
 			});
 		}
 
+		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
+			let discovery_ls = Arc::clone(&liquidity_source);
+			let discovery_cm = Arc::clone(&self.connection_manager);
+			let discovery_logger = Arc::clone(&self.logger);
+			self.runtime.spawn_background_task(async move {
+				for (node_id, address) in discovery_ls.get_all_lsp_details() {
+					if let Err(e) =
+						discovery_cm.connect_peer_if_necessary(node_id, address.clone()).await
+					{
+						log_error!(
+							discovery_logger,
+							"Failed to connect to LSP {} for protocol discovery: {}",
+							node_id,
+							e
+						);
+						continue;
+					}
+				}
+
+				discovery_ls.discover_all_lsp_protocols().await;
+			});
+		}
+
 		log_info!(self.logger, "Startup complete.");
 		*is_running_lock = true;
 		Ok(())
