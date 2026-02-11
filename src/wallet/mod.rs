@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 pub use bdk_wallet::coin_selection::CoinSelectionAlgorithm as BdkCoinSelectionAlgorithm;
-use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::event::WalletEvent;
 use bdk_wallet::{Balance, KeychainKind, LocalOutput, PersistedWallet, Update};
 use bdk_wallet_aggregate::AggregateWallet;
@@ -501,17 +500,17 @@ impl Wallet {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let primary_type = locked_wallet.primary_key();
 
-		let tx = if !primary_type.is_witness_compatible() {
+		let tx = if primary_type == AddressType::Legacy {
 			log_info!(
 				self.logger,
-				"Primary wallet is Legacy (P2PKH), selecting best witness wallet for channel funding"
+				"Primary is Legacy, using best SegWit wallet for channel funding"
 			);
 			locked_wallet.build_and_sign_tx_with_best_wallet(
 				output_script,
 				amount,
 				fee_rate,
 				locktime,
-				|k| k.is_witness_compatible(),
+				|k| *k != AddressType::Legacy,
 			)
 		} else {
 			locked_wallet.build_and_sign_funding_tx(output_script, amount, fee_rate, locktime)
@@ -548,29 +547,24 @@ impl Wallet {
 		})
 	}
 
-	/// Returns a new witness-compatible address, falling back to a loaded
-	/// SegWit wallet if the primary is non-witness (e.g. Legacy).
+	// Returns a native witness address for Lightning channel scripts.
+	// Falls back to a loaded NativeSegwit/Taproot wallet if the primary is not one.
 	pub(crate) fn get_new_witness_address(&self) -> Result<bitcoin::Address, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
 		let primary = locked_wallet.primary_key();
-		if primary.is_witness_compatible() {
+
+		if primary.is_native_witness() {
 			drop(locked_wallet);
 			return self.get_new_address();
 		}
 
-		// Primary is non-witness.  Find a loaded witness wallet.
-		let witness_key =
-			locked_wallet.loaded_keys().into_iter().find(|k| k.is_witness_compatible());
+		let witness_key = locked_wallet.loaded_keys().into_iter().find(|k| k.is_native_witness());
 		drop(locked_wallet);
 
 		match witness_key {
 			Some(key) => self.get_new_address_for_type(key),
 			None => {
-				log_error!(
-					self.logger,
-					"No witness-compatible wallet loaded. \
-					 Lightning operations require at least one SegWit wallet."
-				);
+				log_error!(self.logger, "No native witness wallet loaded for Lightning operations");
 				Err(Error::WalletOperationFailed)
 			},
 		}
@@ -649,7 +643,7 @@ impl Wallet {
 		&self, total_anchor_channels_reserve_sats: u64,
 	) -> Result<u64, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
-		let balance = locked_wallet.balance_filtered(|k| k.is_witness_compatible());
+		let balance = locked_wallet.balance_filtered(|k| *k != AddressType::Legacy);
 		self.get_balances_inner(&balance, total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
@@ -1200,14 +1194,16 @@ impl Wallet {
 		&self, must_spend: Vec<Input>, must_pay_to: &[TxOut], fee_rate: FeeRate,
 	) -> Result<Vec<FundingTxInput>, ()> {
 		let mut locked_wallet = self.inner.lock().unwrap();
-		debug_assert!(matches!(
-			locked_wallet.public_descriptor(KeychainKind::External),
-			ExtendedDescriptor::Wpkh(_)
-		));
-		debug_assert!(matches!(
-			locked_wallet.public_descriptor(KeychainKind::Internal),
-			ExtendedDescriptor::Wpkh(_)
-		));
+
+		// Splicing requires native witness (P2WPKH/P2TR) primary because
+		// FundingTxInput only supports native witness script types.
+		if !locked_wallet.primary_key().is_native_witness() {
+			log_error!(
+				self.logger,
+				"Splicing requires a native witness primary wallet (NativeSegwit or Taproot)"
+			);
+			return Err(());
+		}
 
 		let mut tx_builder = locked_wallet.build_tx();
 		tx_builder.only_witness_utxo();
@@ -1575,9 +1571,10 @@ impl SignerProvider for WalletKeysManager {
 			_ => {
 				log_error!(
 					self.logger,
-					"Tried to use a non-witness address. This must never happen."
+					"get_shutdown_scriptpubkey received a non-native-witness address. \
+					 This is a bug in get_new_witness_address."
 				);
-				panic!("Tried to use a non-witness address. This must never happen.");
+				Err(())
 			},
 		}
 	}

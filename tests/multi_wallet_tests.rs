@@ -2915,6 +2915,52 @@ async fn test_open_channel_legacy_primary_uses_segwit_wallet() {
 	node_b.stop().unwrap();
 }
 
+// A node whose primary wallet is not native witness (e.g. Legacy) must be
+// able to accept inbound channels as long as a native witness wallet is loaded.
+// The shutdown and destination scripts must come from the native witness wallet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_inbound_channel_with_non_native_witness_primary() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config_a = common::random_config(true);
+	config_a.node_config.address_type = AddressType::Legacy;
+	config_a.node_config.address_types_to_monitor = vec![AddressType::Taproot];
+	let node_a = setup_node(&chain_source, config_a, None);
+
+	let config_b = common::random_config(true);
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	// Node B opens toward node A (inbound). This calls get_destination_script
+	// and get_shutdown_scriptpubkey on node A, which must produce native witness
+	// addresses from the Taproot wallet rather than Legacy P2PKH addresses.
+	let _funding_txo = open_channel(&node_b, &node_a, 100_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	assert!(!node_a.list_channels().is_empty(), "Node A should have an inbound channel");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
 // Test that send_all works correctly when primary wallet is Legacy.
 // The drain should include UTXOs from all wallets (Legacy + monitored witness).
 // Run with: cargo test test_send_all_legacy_primary -- --nocapture
@@ -3590,15 +3636,13 @@ async fn test_send_all_drain_reserve_multi_wallet() {
 
 	let mut config = common::random_config(true);
 	config.node_config.address_type = AddressType::NativeSegwit;
-	config.node_config.address_types_to_monitor =
-		vec![AddressType::Legacy, AddressType::Taproot];
+	config.node_config.address_types_to_monitor = vec![AddressType::Legacy, AddressType::Taproot];
 	let node = setup_node(&chain_source, config, None);
 
 	// Fund all three wallets.
 	let native_addr = node.onchain_payment().new_address().unwrap();
 	let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
-	let taproot_addr =
-		node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+	let taproot_addr = node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
 
 	for addr in [native_addr, legacy_addr, taproot_addr] {
 		premine_and_distribute_funds(

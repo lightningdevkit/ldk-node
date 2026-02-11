@@ -768,7 +768,7 @@ where
 	/// inputs, or an empty vec if no non-primary UTXOs are available.
 	pub fn select_non_primary_foreign_utxos(
 		&self, deficit: Amount, fee_rate: FeeRate, excluded_txids: &HashSet<Txid>,
-		witness_only: bool, algorithm: CoinSelectionAlgorithm,
+		segwit_only: bool, algorithm: CoinSelectionAlgorithm,
 	) -> Result<Vec<UtxoPsbtInfo>, Error> {
 		let primary_outpoints: HashSet<OutPoint> =
 			self.primary_wallet().list_unspent().map(|u| u.outpoint).collect();
@@ -779,7 +779,7 @@ where
 			.filter(|u| !primary_outpoints.contains(&u.outpoint))
 			.filter(|u| !excluded_txids.contains(&u.outpoint.txid))
 			.filter(|u| {
-				!witness_only
+				!segwit_only
 					|| u.txout.script_pubkey.witness_version().is_some()
 					|| u.txout.script_pubkey.is_p2sh()
 			})

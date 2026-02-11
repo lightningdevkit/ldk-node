@@ -113,9 +113,10 @@ pub enum AddressType {
 }
 
 impl AddressType {
-	/// Returns `true` if this address type produces witness inputs when signed.
-	pub fn is_witness_compatible(&self) -> bool {
-		matches!(self, AddressType::NestedSegwit | AddressType::NativeSegwit | AddressType::Taproot)
+	/// Returns `true` for address types with a native witness `scriptPubKey`
+	/// (`NativeSegwit` and `Taproot`). Required by BOLT 2 for channel scripts.
+	pub fn is_native_witness(&self) -> bool {
+		matches!(self, AddressType::NativeSegwit | AddressType::Taproot)
 	}
 
 	/// Returns a stable string suffix used for namespacing persisted wallet data.
