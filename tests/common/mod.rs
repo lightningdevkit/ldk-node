@@ -29,7 +29,7 @@ use electrum_client::ElectrumApi;
 use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus, TransactionType};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
 };
@@ -765,14 +765,21 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	// Check we now see the channel funding transaction as outbound.
-	assert_eq!(
-		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
-				&& matches!(p.kind, PaymentKind::Onchain { .. }))
-			.len(),
-		1
-	);
+	// Check we now see the channel funding transaction as outbound with the correct type.
+	let funding_payments_a = node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Onchain { .. })
+	});
+	assert_eq!(funding_payments_a.len(), 1);
+	match funding_payments_a[0].kind {
+		PaymentKind::Onchain { ref tx_type, .. } => {
+			assert!(
+				matches!(tx_type, Some(TransactionType::Funding { .. })),
+				"Expected Funding transaction type, got {:?}",
+				tx_type
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 
 	let onchain_fee_buffer_sat = 5000;
 	let node_a_anchor_reserve_sat = if expect_anchor_channel { 25_000 } else { 0 };
@@ -1115,13 +1122,21 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	assert_eq!(
-		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
-				&& matches!(p.kind, PaymentKind::Onchain { .. }))
-			.len(),
-		2
-	);
+	let inbound_onchain_a = node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Onchain { .. })
+	});
+	assert_eq!(inbound_onchain_a.len(), 2);
+	// The second inbound on-chain payment should be from the splice-out.
+	match inbound_onchain_a[1].kind {
+		PaymentKind::Onchain { ref tx_type, .. } => {
+			assert!(
+				matches!(tx_type, Some(TransactionType::Splice { .. })),
+				"Expected Splice transaction type, got {:?}",
+				tx_type
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 
 	println!("\nA splices in the splice-out payment from B");
 	let splice_in_sat = splice_out_sat;
@@ -1137,13 +1152,21 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	assert_eq!(
-		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
-				&& matches!(p.kind, PaymentKind::Onchain { .. }))
-			.len(),
-		2
-	);
+	let outbound_onchain_a = node_a.list_payments_with_filter(|p| {
+		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Onchain { .. })
+	});
+	assert_eq!(outbound_onchain_a.len(), 2);
+	// The second outbound on-chain payment should be from the splice-in.
+	match outbound_onchain_a[1].kind {
+		PaymentKind::Onchain { ref tx_type, .. } => {
+			assert!(
+				matches!(tx_type, Some(TransactionType::Splice { .. })),
+				"Expected Splice transaction type, got {:?}",
+				tx_type
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
