@@ -77,10 +77,13 @@ where
 
 	match psbt.extract_tx() {
 		Ok(tx) => Ok(tx),
-		// MissingInputValue means we can't verify the fee, but the transaction
-		// is otherwise valid. This can happen with cross-wallet PSBTs where
-		// some inputs lack full UTXO data.
-		Err(psbt::ExtractTxError::MissingInputValue { tx }) => Ok(tx),
+		Err(psbt::ExtractTxError::MissingInputValue { tx }) => {
+			log::warn!(
+				"extract_tx could not verify fee (MissingInputValue) for txid {}",
+				tx.compute_txid()
+			);
+			Ok(tx)
+		},
 		Err(e) => {
 			log::error!("Failed to extract signed transaction: {}", e);
 			Err(Error::OnchainTxSigningFailed)
