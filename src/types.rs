@@ -23,9 +23,7 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{
-	KVStore, KVStoreSync, MonitorUpdatingPersister, MonitorUpdatingPersisterAsync,
-};
+use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersisterAsync};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
@@ -135,6 +133,35 @@ impl<'a> KVStoreSync for dyn DynStoreTrait + 'a {
 
 pub(crate) type DynStore = dyn DynStoreTrait;
 
+#[derive(Clone)]
+pub(crate) struct DynStoreRef(pub(crate) Arc<DynStore>);
+
+impl KVStore for DynStoreRef {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::read_async(&*self.0, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::write_async(&*self.0, primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::remove_async(&*self.0, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::list_async(&*self.0, primary_namespace, secondary_namespace)
+	}
+}
+
 pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub(crate) T);
 
 impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
@@ -188,17 +215,8 @@ impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> 
 }
 
 pub(crate) type AsyncPersister = MonitorUpdatingPersisterAsync<
-	Arc<DynStore>,
+	DynStoreRef,
 	RuntimeSpawner,
-	Arc<Logger>,
-	Arc<KeysManager>,
-	Arc<KeysManager>,
-	Arc<Broadcaster>,
-	Arc<OnchainFeeEstimator>,
->;
-
-pub type Persister = MonitorUpdatingPersister<
-	Arc<DynStore>,
 	Arc<Logger>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
@@ -212,7 +230,15 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<Broadcaster>,
 	Arc<OnchainFeeEstimator>,
 	Arc<Logger>,
-	Arc<Persister>,
+	chainmonitor::AsyncPersister<
+		DynStoreRef,
+		RuntimeSpawner,
+		Arc<Logger>,
+		Arc<KeysManager>,
+		Arc<KeysManager>,
+		Arc<Broadcaster>,
+		Arc<OnchainFeeEstimator>,
+	>,
 	Arc<KeysManager>,
 >;
 
