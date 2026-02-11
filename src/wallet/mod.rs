@@ -648,7 +648,10 @@ impl Wallet {
 			})?
 		};
 
-		self.broadcaster.broadcast_transactions(&[&tx]);
+		self.broadcaster.broadcast_transactions(&[(
+			&tx,
+			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
+		)]);
 
 		let txid = tx.compute_txid();
 

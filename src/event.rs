@@ -1118,10 +1118,10 @@ where
 					liquidity_source.handle_htlc_handling_failed(failure_type).await;
 				}
 			},
-			LdkEvent::SpendableOutputs { outputs, channel_id } => {
+			LdkEvent::SpendableOutputs { outputs, channel_id, counterparty_node_id } => {
 				match self
 					.output_sweeper
-					.track_spendable_outputs(outputs, channel_id, true, None)
+					.track_spendable_outputs(outputs, channel_id, counterparty_node_id, true, None)
 					.await
 				{
 					Ok(_) => return Ok(()),
