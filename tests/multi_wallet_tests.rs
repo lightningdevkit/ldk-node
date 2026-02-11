@@ -3227,9 +3227,9 @@ async fn test_cross_wallet_send_uses_minimum_inputs() {
 		.require_network(bitcoin::Network::Regtest)
 		.unwrap();
 
-	// Send 15k sats. Primary has 10k, so fallback will pull from Legacy.
-	// With smart selection, only 1 Legacy UTXO should be needed (any of them
-	// covers the ~5k deficit + fees), NOT all 3.
+	// Send 15k sats. Unified selection pools all 4 UTXOs (10k + 20k + 30k + 50k).
+	// BranchAndBound should pick an efficient combination — e.g. just the 20k
+	// Legacy UTXO alone — not all 4.
 	let txid = node.onchain_payment().send_to_address(&recipient, 15_000, None, None).unwrap();
 	wait_for_tx(&electrsd.client, txid).await;
 
@@ -3368,15 +3368,15 @@ async fn test_channel_funding_uses_minimum_witness_inputs() {
 	node_b.sync_wallets().unwrap();
 	std::thread::sleep(std::time::Duration::from_secs(2));
 
-	// Open a 50k channel. Primary has 20k, so ~30k deficit → 1 Taproot UTXO should suffice.
+	// Open a 50k channel. Unified selection picks from all 4 UTXOs (20k + 3x40k).
 	let channel_amount = 50_000;
 	let funding_txo = open_channel(&node_a, &node_b, channel_amount, false, &electrsd).await;
 
 	let funding_tx = electrsd.client.transaction_get(&funding_txo.txid).unwrap();
-	// Should be 2 inputs (1 primary + 1 Taproot), not 4.
+	// BranchAndBound should not need all 4 UTXOs for a 50k target.
 	assert!(
-		funding_tx.input.len() <= 2,
-		"Channel funding should use minimum witness inputs, got {} (expected <= 2)",
+		funding_tx.input.len() <= 3,
+		"Channel funding should not use all UTXOs, got {} (expected <= 3)",
 		funding_tx.input.len()
 	);
 
@@ -3459,11 +3459,11 @@ async fn test_rbf_fallback_uses_minimum_foreign_inputs() {
 	node.stop().unwrap();
 }
 
-// When primary is Legacy, channel funding falls back to build_and_sign_tx_with_wallet.
-// Verify it selects minimum foreign UTXOs from additional SegWit wallets rather than
-// dumping all of them.
+// When primary is Legacy, channel funding uses unified coin selection across
+// all eligible SegWit wallets. Verify Legacy UTXOs are excluded and the
+// channel opens successfully.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn test_legacy_primary_channel_funding_uses_minimum_inputs() {
+async fn test_legacy_primary_channel_funding_excludes_legacy_inputs() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 
@@ -3477,9 +3477,17 @@ async fn test_legacy_primary_channel_funding_uses_minimum_inputs() {
 	let config_b = common::random_config(true);
 	let node_b = setup_node(&chain_source, config_b, None);
 
-	// Fund NativeSegwit with 100k — highest witness wallet balance,
-	// picked as "best" by build_and_sign_tx_with_best_wallet,
-	// but NOT enough for the 120k channel by itself.
+	// Fund Legacy (primary) — should NOT be used for channel funding.
+	let legacy_addr = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![legacy_addr],
+		Amount::from_sat(200_000),
+	)
+	.await;
+
+	// Fund NativeSegwit with 100k.
 	let native_addr =
 		node_a.onchain_payment().new_address_for_type(AddressType::NativeSegwit).unwrap();
 	premine_and_distribute_funds(
@@ -3490,24 +3498,15 @@ async fn test_legacy_primary_channel_funding_uses_minimum_inputs() {
 	)
 	.await;
 
-	// Fund Taproot with 3 separate UTXOs of 30k each (90k total, less than
-	// NativeSegwit's 100k).  Only 1 should be needed to cover the deficit.
-	let taproot_addr1 =
-		node_a.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
-	let taproot_addr2 =
-		node_a.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
-	let taproot_addr3 =
-		node_a.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
-
-	for addr in [taproot_addr1, taproot_addr2, taproot_addr3] {
-		premine_and_distribute_funds(
-			&bitcoind.client,
-			&electrsd.client,
-			vec![addr],
-			Amount::from_sat(30_000),
-		)
-		.await;
-	}
+	// Fund Taproot with 100k.
+	let taproot_addr = node_a.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![taproot_addr],
+		Amount::from_sat(100_000),
+	)
+	.await;
 
 	// Fund node B.
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -3524,17 +3523,10 @@ async fn test_legacy_primary_channel_funding_uses_minimum_inputs() {
 	node_b.sync_wallets().unwrap();
 	std::thread::sleep(std::time::Duration::from_secs(2));
 
-	// Open a 120k channel. NativeSegwit (100k) is the best wallet but can't
-	// cover it alone, so minimum Taproot UTXOs (1 x 30k) should be selected.
+	// Open a 120k channel. Legacy has 200k (enough alone) but must be excluded.
 	let funding_txo = open_channel(&node_a, &node_b, 120_000, false, &electrsd).await;
 
 	let funding_tx = electrsd.client.transaction_get(&funding_txo.txid).unwrap();
-	// Should be 2 inputs (1 NativeSegwit + 1 Taproot), not 4 (1 + 3).
-	assert!(
-		funding_tx.input.len() <= 2,
-		"Legacy-primary channel funding should use minimum witness inputs, got {} (expected <= 2)",
-		funding_tx.input.len()
-	);
 
 	// All inputs must have witness data (no Legacy inputs).
 	for input in &funding_tx.input {
@@ -3544,6 +3536,14 @@ async fn test_legacy_primary_channel_funding_uses_minimum_inputs() {
 			input.previous_output
 		);
 	}
+
+	// Legacy balance should be untouched.
+	let legacy_balance = node_a.get_balance_for_address_type(AddressType::Legacy).unwrap();
+	assert!(
+		legacy_balance.total_sats >= 190_000,
+		"Legacy wallet should be untouched, got {} sats",
+		legacy_balance.total_sats
+	);
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
@@ -3687,6 +3687,347 @@ async fn test_send_all_drain_reserve_multi_wallet() {
 		drain_tx.input.len() >= 3,
 		"Drain tx should have inputs from all 3 wallets, got {}",
 		drain_tx.input.len()
+	);
+
+	node.stop().unwrap();
+}
+
+// NestedSegwit-only (no native witness wallet) must fail channel open gracefully,
+// because channel scripts require a native witness address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_open_channel_nested_segwit_only_returns_error() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config_a = common::random_config(true);
+	config_a.node_config.address_type = AddressType::NestedSegwit;
+	config_a.node_config.address_types_to_monitor = vec![];
+	let node_a = setup_node(&chain_source, config_a, None);
+
+	let config_b = common::random_config(true);
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	let nested_addr = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![nested_addr],
+		Amount::from_sat(500_000),
+	)
+	.await;
+
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(2));
+
+	let balance = node_a.list_balances();
+	assert!(balance.total_onchain_balance_sats >= 400_000);
+
+	let result = node_a.open_channel(
+		node_b.node_id(),
+		node_b.listening_addresses().unwrap().first().unwrap().clone(),
+		100_000,
+		None,
+		None,
+	);
+
+	assert!(result.is_err(), "Opening a channel with only NestedSegwit should fail");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+// NestedSegwit primary with a native witness wallet monitored should be able to
+// open a channel. The funding tx is built by the NestedSegwit wallet (since it's
+// not Legacy), but channel scripts come from the native witness wallet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_open_channel_nested_primary_with_native_monitor() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config_a = common::random_config(true);
+	config_a.node_config.address_type = AddressType::NestedSegwit;
+	config_a.node_config.address_types_to_monitor = vec![AddressType::NativeSegwit];
+	let node_a = setup_node(&chain_source, config_a, None);
+
+	let config_b = common::random_config(true);
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	// Fund only the NestedSegwit (primary) wallet.
+	let nested_addr = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![nested_addr],
+		Amount::from_sat(300_000),
+	)
+	.await;
+
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(2));
+
+	// Channel open should succeed — NestedSegwit builds the funding tx,
+	// NativeSegwit provides channel scripts.
+	let funding_txo = open_channel(&node_a, &node_b, 100_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	assert!(!node_a.list_channels().is_empty(), "Node A should have an open channel");
+
+	// All funding inputs should have witness data (NestedSegwit is SegWit).
+	let funding_tx = electrsd.client.transaction_get(&funding_txo.txid).unwrap();
+	for input in &funding_tx.input {
+		assert!(
+			!input.witness.is_empty(),
+			"All funding inputs must have witness data, but {:?} has empty witness",
+			input.previous_output
+		);
+	}
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+// NestedSegwit primary with NativeSegwit monitored: funding tx should use inputs
+// from both wallets when NestedSegwit alone is not enough.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_open_channel_nested_primary_mixed_inputs() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config_a = common::random_config(true);
+	config_a.node_config.address_type = AddressType::NestedSegwit;
+	config_a.node_config.address_types_to_monitor = vec![AddressType::NativeSegwit];
+	let node_a = setup_node(&chain_source, config_a, None);
+
+	let config_b = common::random_config(true);
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	// Fund NestedSegwit (primary) with 80k — not enough for 120k channel.
+	let nested_addr = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![nested_addr],
+		Amount::from_sat(80_000),
+	)
+	.await;
+
+	// Fund NativeSegwit with 80k — together they have enough.
+	let native_addr =
+		node_a.onchain_payment().new_address_for_type(AddressType::NativeSegwit).unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![native_addr],
+		Amount::from_sat(80_000),
+	)
+	.await;
+
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(2));
+
+	// Open 120k channel — needs inputs from both wallets.
+	let funding_txo = open_channel(&node_a, &node_b, 120_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	assert!(!node_a.list_channels().is_empty(), "Node A should have an open channel");
+
+	let funding_tx = electrsd.client.transaction_get(&funding_txo.txid).unwrap();
+	// Must have inputs from both wallets (at least 2 inputs).
+	assert!(
+		funding_tx.input.len() >= 2,
+		"Funding tx should use inputs from both wallets, got {}",
+		funding_tx.input.len()
+	);
+
+	// All inputs must have witness data.
+	for input in &funding_tx.input {
+		assert!(
+			!input.witness.is_empty(),
+			"All funding inputs must have witness data, but {:?} has empty witness",
+			input.previous_output
+		);
+	}
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+// NativeSegwit primary with NestedSegwit monitored: funding tx should pull
+// NestedSegwit inputs when primary alone is not enough.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_open_channel_native_primary_with_nested_inputs() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config_a = common::random_config(true);
+	config_a.node_config.address_type = AddressType::NativeSegwit;
+	config_a.node_config.address_types_to_monitor = vec![AddressType::NestedSegwit];
+	let node_a = setup_node(&chain_source, config_a, None);
+
+	let config_b = common::random_config(true);
+	let node_b = setup_node(&chain_source, config_b, None);
+
+	// Fund NativeSegwit (primary) with 80k — not enough for 120k channel.
+	let native_addr = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![native_addr],
+		Amount::from_sat(80_000),
+	)
+	.await;
+
+	// Fund NestedSegwit with 80k — together they have enough.
+	let nested_addr =
+		node_a.onchain_payment().new_address_for_type(AddressType::NestedSegwit).unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![nested_addr],
+		Amount::from_sat(80_000),
+	)
+	.await;
+
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(2));
+
+	// Open 120k channel — needs inputs from both wallets.
+	let funding_txo = open_channel(&node_a, &node_b, 120_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	assert!(!node_a.list_channels().is_empty(), "Node A should have an open channel");
+
+	let funding_tx = electrsd.client.transaction_get(&funding_txo.txid).unwrap();
+	assert!(
+		funding_tx.input.len() >= 2,
+		"Funding tx should use inputs from both wallets, got {}",
+		funding_tx.input.len()
+	);
+
+	// All inputs must have witness data (both NativeSegwit and NestedSegwit are SegWit).
+	for input in &funding_tx.input {
+		assert!(
+			!input.witness.is_empty(),
+			"All funding inputs must have witness data, but {:?} has empty witness",
+			input.previous_output
+		);
+	}
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+// Unified coin selection should prefer a single large foreign UTXO over
+// combining multiple small primary UTXOs when it produces a better result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_unified_selection_prefers_optimal_utxo() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let mut config = common::random_config(true);
+	config.node_config.address_type = AddressType::NativeSegwit;
+	config.node_config.address_types_to_monitor = vec![AddressType::Taproot];
+	let node = setup_node(&chain_source, config, None);
+
+	// Fund primary (NativeSegwit) with 3 small UTXOs of 10k each.
+	for _ in 0..3 {
+		let addr = node.onchain_payment().new_address().unwrap();
+		premine_and_distribute_funds(
+			&bitcoind.client,
+			&electrsd.client,
+			vec![addr],
+			Amount::from_sat(10_000),
+		)
+		.await;
+	}
+
+	// Fund Taproot with a single 25k UTXO — can cover the send alone.
+	let taproot_addr = node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![taproot_addr],
+		Amount::from_sat(25_000),
+	)
+	.await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node.sync_wallets().unwrap();
+	std::thread::sleep(std::time::Duration::from_secs(1));
+
+	let recipient = Address::from_str("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")
+		.unwrap()
+		.require_network(bitcoin::Network::Regtest)
+		.unwrap();
+
+	// Send 20k sats. Old behavior would use all 3 primary UTXOs (30k total).
+	// Unified selection has all 4 UTXOs to choose from and should find an
+	// optimal solution — e.g. the single 25k Taproot UTXO, or 2 x 10k primary
+	// + 1 Taproot — but never all 4.
+	let txid = node.onchain_payment().send_to_address(&recipient, 20_000, None, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+
+	let tx = electrsd.client.transaction_get(&txid).unwrap();
+	assert!(
+		tx.input.len() <= 3,
+		"Unified selection should pick optimal UTXOs, got {} inputs",
+		tx.input.len()
 	);
 
 	node.stop().unwrap();
