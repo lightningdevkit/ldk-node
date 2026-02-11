@@ -15,7 +15,7 @@ use lightning::events::ClosureReason;
 use lightning::ln::functional_test_utils::{
 	check_added_monitors, check_closed_event, connect_block, create_announced_chan_between_nodes,
 	create_chanmon_cfgs, create_dummy_block, create_network, create_node_cfgs,
-	create_node_chanmgrs, send_payment, TestChanMonCfg,
+	create_node_chanmgrs, send_payment, test_legacy_channel_config, TestChanMonCfg,
 };
 use lightning::util::persist::{
 	KVStore, KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
@@ -259,7 +259,9 @@ pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 	let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	node_cfgs[0].chain_monitor = chain_mon_0;
 	node_cfgs[1].chain_monitor = chain_mon_1;
-	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+	let legacy_cfg = test_legacy_channel_config();
+	let node_chanmgrs =
+		create_node_chanmgrs(2, &node_cfgs, &[Some(legacy_cfg.clone()), Some(legacy_cfg)]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 	// Check that the persisted channel data is empty before any channels are

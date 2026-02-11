@@ -8,7 +8,7 @@
 use std::ops::Deref;
 
 use bitcoin::Transaction;
-use lightning::chain::chaininterface::BroadcasterInterface;
+use lightning::chain::chaininterface::{BroadcasterInterface, TransactionType};
 use tokio::sync::{mpsc, Mutex, MutexGuard};
 
 use crate::logger::{log_error, LdkLogger};
@@ -44,8 +44,8 @@ impl<L: Deref> BroadcasterInterface for TransactionBroadcaster<L>
 where
 	L::Target: LdkLogger,
 {
-	fn broadcast_transactions(&self, txs: &[&Transaction]) {
-		let package = txs.iter().map(|&t| t.clone()).collect::<Vec<Transaction>>();
+	fn broadcast_transactions(&self, txs: &[(&Transaction, TransactionType)]) {
+		let package = txs.iter().map(|(t, _)| (*t).clone()).collect::<Vec<Transaction>>();
 		self.queue_sender.try_send(package).unwrap_or_else(|e| {
 			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
 		});
