@@ -75,9 +75,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
-	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
-	Persister, SyncAndAsyncKVStore,
+	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
+	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	PendingPaymentStore, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1289,8 +1289,8 @@ fn build_with_store_internal(
 	));
 
 	let peer_storage_key = keys_manager.get_peer_storage_key();
-	let monitor_reader = Arc::new(AsyncPersister::new(
-		Arc::clone(&kv_store),
+	let persister = Arc::new(AsyncPersister::new(
+		DynStoreRef(Arc::clone(&kv_store)),
 		RuntimeSpawner::new(Arc::clone(&runtime)),
 		Arc::clone(&logger),
 		PERSISTER_MAX_PENDING_UPDATES,
@@ -1303,9 +1303,9 @@ fn build_with_store_internal(
 	// Read ChannelMonitors and the NetworkGraph
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (monitor_read_res, network_graph_res) = runtime.block_on(async move {
+	let (monitor_read_res, network_graph_res) = runtime.block_on(async {
 		tokio::join!(
-			monitor_reader.read_all_channel_monitors_with_updates_parallel(),
+			persister.read_all_channel_monitors_with_updates_parallel(),
 			read_network_graph(&*kv_store_ref, logger_ref),
 		)
 	});
@@ -1323,23 +1323,16 @@ fn build_with_store_internal(
 		},
 	};
 
-	let persister = Arc::new(Persister::new(
-		Arc::clone(&kv_store),
-		Arc::clone(&logger),
-		PERSISTER_MAX_PENDING_UPDATES,
-		Arc::clone(&keys_manager),
-		Arc::clone(&keys_manager),
-		Arc::clone(&tx_broadcaster),
-		Arc::clone(&fee_estimator),
-	));
+	let persister = Arc::try_unwrap(persister)
+		.unwrap_or_else(|_| panic!("Arc<AsyncPersister> should have no other references"));
 
 	// Initialize the ChainMonitor
-	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
+	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new_async_beta(
 		Some(Arc::clone(&chain_source)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
 		Arc::clone(&fee_estimator),
-		Arc::clone(&persister),
+		persister,
 		Arc::clone(&keys_manager),
 		peer_storage_key,
 		true,
