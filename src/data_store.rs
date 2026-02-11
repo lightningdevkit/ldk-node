@@ -21,7 +21,7 @@ pub(crate) trait StorableObject: Clone + Readable + Writeable {
 	type Update: StorableObjectUpdate<Self>;
 
 	fn id(&self) -> Self::Id;
-	fn update(&mut self, update: &Self::Update) -> bool;
+	fn update(&mut self, update: Self::Update) -> bool;
 	fn to_update(&self) -> Self::Update;
 }
 
@@ -79,7 +79,7 @@ where
 		match locked_objects.entry(object.id()) {
 			hash_map::Entry::Occupied(mut e) => {
 				let update = object.to_update();
-				updated = e.get_mut().update(&update);
+				updated = e.get_mut().update(update);
 				if updated {
 					self.persist(&e.get())?;
 				}
@@ -124,7 +124,7 @@ where
 		self.objects.lock().unwrap().get(id).cloned()
 	}
 
-	pub(crate) fn update(&self, update: &SO::Update) -> Result<DataStoreUpdateResult, Error> {
+	pub(crate) fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
 		let mut locked_objects = self.objects.lock().unwrap();
 
 		if let Some(object) = locked_objects.get_mut(&update.id()) {
@@ -219,7 +219,7 @@ mod tests {
 			self.id
 		}
 
-		fn update(&mut self, update: &Self::Update) -> bool {
+		fn update(&mut self, update: Self::Update) -> bool {
 			if self.data != update.data {
 				self.data = update.data;
 				true
@@ -276,17 +276,17 @@ mod tests {
 
 		// Check update returns `Updated`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };
-		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(&update));
+		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(update));
 		assert_eq!(data_store.get(&id).unwrap().data, [25u8; 3]);
 
 		// Check no-op update yields `Unchanged`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };
-		assert_eq!(Ok(DataStoreUpdateResult::Unchanged), data_store.update(&update));
+		assert_eq!(Ok(DataStoreUpdateResult::Unchanged), data_store.update(update));
 
 		// Check bogus update yields `NotFound`
 		let bogus_id = TestObjectId { id: [84u8; 4] };
 		let update = TestObjectUpdate { id: bogus_id, data: [12u8; 3] };
-		assert_eq!(Ok(DataStoreUpdateResult::NotFound), data_store.update(&update));
+		assert_eq!(Ok(DataStoreUpdateResult::NotFound), data_store.update(update));
 
 		// Check `insert_or_update` inserts unknown objects
 		let iou_id = TestObjectId { id: [55u8; 4] };
