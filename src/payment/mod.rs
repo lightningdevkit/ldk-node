@@ -22,6 +22,7 @@ pub use onchain::OnchainPayment;
 pub use pending_payment_store::PendingPaymentDetails;
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
-	ConfirmationStatus, LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
+	Channel, ConfirmationStatus, LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentKind,
+	PaymentStatus, TransactionType,
 };
 pub use unified::{UnifiedPayment, UnifiedPaymentResult};

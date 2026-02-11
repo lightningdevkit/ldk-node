@@ -29,7 +29,6 @@ use bitcoin::{
 	Address, Amount, FeeRate, OutPoint, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
 	WitnessProgram, WitnessVersion,
 };
-use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BestBlock, Listen};
 use lightning::events::bump_transaction::{Input, Utxo, WalletSource};
@@ -648,12 +647,10 @@ impl Wallet {
 			})?
 		};
 
-		self.broadcaster.broadcast_transactions(&[(
-			&tx,
-			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
-		)]);
-
 		let txid = tx.compute_txid();
+
+		self.broadcaster
+			.broadcast_with_type(tx, crate::payment::store::TransactionType::OnchainSend);
 
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
@@ -914,19 +911,8 @@ impl Wallet {
 		payment_id: PaymentId, tx: &Transaction, payment_status: PaymentStatus,
 		confirmation_status: ConfirmationStatus,
 	) -> PaymentDetails {
-		// TODO: It would be great to introduce additional variants for
-		// `ChannelFunding` and `ChannelClosing`. For the former, we could just
-		// take a reference to `ChannelManager` here and check against
-		// `list_channels`. But for the latter the best approach is much less
-		// clear: for force-closes/HTLC spends we should be good querying
-		// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
-		// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
-		// spent to a wallet address. The only solution I can come up with is to
-		// create and persist a list of 'static pending outputs' that we could use
-		// here to determine the `PaymentKind`, but that's not really satisfactory, so
-		// we're punting on it until we can come up with a better solution.
-
-		let kind = PaymentKind::Onchain { txid, status: confirmation_status };
+		let tx_type = self.broadcaster.remove_tx_type(&txid);
+		let kind = PaymentKind::Onchain { txid, status: confirmation_status, tx_type };
 
 		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
 		let (sent, received) = locked_wallet.sent_and_received(tx);

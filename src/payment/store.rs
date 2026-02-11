@@ -7,9 +7,12 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Txid};
+use lightning::chain::chaininterface::TransactionType as LdkTransactionType;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
+use lightning::ln::types::ChannelId;
 use lightning::offers::offer::OfferId;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
@@ -21,6 +24,138 @@ use lightning_types::string::UntrustedString;
 
 use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
 use crate::hex_utils;
+
+/// A helper struct pairing a counterparty node id with a channel id.
+///
+/// This is used in [`TransactionType`] variants that may reference one or more channels.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct Channel {
+	/// The `node_id` of the channel counterparty.
+	pub counterparty_node_id: PublicKey,
+	/// The ID of the channel.
+	pub channel_id: ChannelId,
+}
+
+impl_writeable_tlv_based!(Channel, {
+	(0, counterparty_node_id, required),
+	(2, channel_id, required),
+});
+
+/// Represents the class of transaction being broadcast.
+///
+/// This is used to provide context about the type of transaction being broadcast, which may be
+/// useful for logging, filtering, or prioritization purposes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransactionType {
+	/// A funding transaction establishing a new channel.
+	Funding {
+		/// The counterparty node IDs and channel IDs of the channels being funded.
+		///
+		/// A single funding transaction may establish multiple channels when using batch funding.
+		channels: Vec<Channel>,
+	},
+	/// A transaction cooperatively closing a channel.
+	CooperativeClose {
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The ID of the channel being closed.
+		channel_id: ChannelId,
+	},
+	/// A transaction being broadcast to force-close the channel.
+	UnilateralClose {
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The ID of the channel being force-closed.
+		channel_id: ChannelId,
+	},
+	/// An anchor bumping transaction used for CPFP fee-bumping a closing transaction.
+	AnchorBump {
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The ID of the channel whose closing transaction is being fee-bumped.
+		channel_id: ChannelId,
+	},
+	/// A transaction which is resolving an output spendable by both us and our counterparty.
+	///
+	/// When a channel closes via the unilateral close path, there may be transaction outputs which
+	/// are spendable by either our counterparty or us and represent some lightning state. In order
+	/// to resolve that state, any such outputs will be spent, ensuring funds are only available to
+	/// us. This transaction is one such transaction - resolving in-flight HTLCs or punishing our
+	/// counterparty if they broadcasted an outdated state.
+	Claim {
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The ID of the channel from which outputs are being claimed.
+		channel_id: ChannelId,
+	},
+	/// A transaction sweeping spendable outputs to the user's wallet.
+	Sweep {
+		/// The counterparty node IDs and channel IDs from which outputs are being swept, if known.
+		///
+		/// A single sweep transaction may aggregate outputs from multiple channels.
+		channels: Vec<Channel>,
+	},
+	/// A splice transaction modifying an existing channel's funding.
+	Splice {
+		/// The `node_id` of the channel counterparty.
+		counterparty_node_id: PublicKey,
+		/// The ID of the channel being spliced.
+		channel_id: ChannelId,
+	},
+	/// A user-initiated on-chain payment to an external address.
+	OnchainSend,
+}
+
+impl_writeable_tlv_based_enum!(TransactionType,
+	(0, Funding) => { (0, channels, optional_vec) },
+	(2, CooperativeClose) => { (0, counterparty_node_id, required), (2, channel_id, required) },
+	(4, UnilateralClose) => { (0, counterparty_node_id, required), (2, channel_id, required) },
+	(6, AnchorBump) => { (0, counterparty_node_id, required), (2, channel_id, required) },
+	(8, Claim) => { (0, counterparty_node_id, required), (2, channel_id, required) },
+	(10, Sweep) => { (0, channels, optional_vec) },
+	(12, Splice) => { (0, counterparty_node_id, required), (2, channel_id, required) },
+	(14, OnchainSend) => {}
+);
+
+impl From<LdkTransactionType> for TransactionType {
+	fn from(ldk_type: LdkTransactionType) -> Self {
+		match ldk_type {
+			LdkTransactionType::Funding { channels } => TransactionType::Funding {
+				channels: channels
+					.into_iter()
+					.map(|(node_id, chan_id)| Channel {
+						counterparty_node_id: node_id,
+						channel_id: chan_id,
+					})
+					.collect(),
+			},
+			LdkTransactionType::CooperativeClose { counterparty_node_id, channel_id } => {
+				TransactionType::CooperativeClose { counterparty_node_id, channel_id }
+			},
+			LdkTransactionType::UnilateralClose { counterparty_node_id, channel_id } => {
+				TransactionType::UnilateralClose { counterparty_node_id, channel_id }
+			},
+			LdkTransactionType::AnchorBump { counterparty_node_id, channel_id } => {
+				TransactionType::AnchorBump { counterparty_node_id, channel_id }
+			},
+			LdkTransactionType::Claim { counterparty_node_id, channel_id } => {
+				TransactionType::Claim { counterparty_node_id, channel_id }
+			},
+			LdkTransactionType::Sweep { channels } => TransactionType::Sweep {
+				channels: channels
+					.into_iter()
+					.map(|(node_id, chan_id)| Channel {
+						counterparty_node_id: node_id,
+						channel_id: chan_id,
+					})
+					.collect(),
+			},
+			LdkTransactionType::Splice { counterparty_node_id, channel_id } => {
+				TransactionType::Splice { counterparty_node_id, channel_id }
+			},
+		}
+	}
+}
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +426,19 @@ impl StorableObject for PaymentDetails {
 			}
 		}
 
+		if let Some(Some(ref new_tx_type)) = update.tx_type {
+			match self.kind {
+				PaymentKind::Onchain { ref mut tx_type, .. } => {
+					debug_assert!(
+						tx_type.is_none() || tx_type.as_ref() == Some(new_tx_type),
+						"We should never change a transaction type after being initially set"
+					);
+					update_if_necessary!(*tx_type, Some(new_tx_type.clone()));
+				},
+				_ => {},
+			}
+		}
+
 		if updated {
 			self.latest_update_timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -351,6 +499,8 @@ pub enum PaymentKind {
 		txid: Txid,
 		/// The confirmation status of this payment.
 		status: ConfirmationStatus,
+		/// The type of the on-chain transaction, if known.
+		tx_type: Option<TransactionType>,
 	},
 	/// A [BOLT 11] payment.
 	///
@@ -448,6 +598,7 @@ pub enum PaymentKind {
 impl_writeable_tlv_based_enum!(PaymentKind,
 	(0, Onchain) => {
 		(0, txid, required),
+		(1, tx_type, option),
 		(2, status, required),
 	},
 	(2, Bolt11) => {
@@ -540,6 +691,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
+	pub tx_type: Option<Option<TransactionType>>,
 }
 
 impl PaymentDetailsUpdate {
@@ -555,6 +707,7 @@ impl PaymentDetailsUpdate {
 			direction: None,
 			status: None,
 			confirmation_status: None,
+			tx_type: None,
 		}
 	}
 }
@@ -570,9 +723,11 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			_ => (None, None, None),
 		};
 
-		let confirmation_status = match value.kind {
-			PaymentKind::Onchain { status, .. } => Some(status),
-			_ => None,
+		let (confirmation_status, tx_type) = match value.kind {
+			PaymentKind::Onchain { status, ref tx_type, .. } => {
+				(Some(status), Some(tx_type.clone()))
+			},
+			_ => (None, None),
 		};
 
 		let counterparty_skimmed_fee_msat = match value.kind {
@@ -593,6 +748,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			direction: Some(value.direction),
 			status: Some(value.status),
 			confirmation_status,
+			tx_type,
 		}
 	}
 }
@@ -760,5 +916,109 @@ mod tests {
 				},
 			}
 		}
+	}
+
+	#[test]
+	fn transaction_type_serialization_roundtrip() {
+		use lightning::util::ser::Writeable;
+
+		let pubkey = PublicKey::from_slice(&[
+			2, 238, 199, 36, 93, 107, 125, 44, 203, 48, 56, 11, 251, 226, 163, 100, 140, 215, 169,
+			66, 101, 63, 90, 163, 64, 237, 206, 161, 242, 131, 104, 102, 25,
+		])
+		.unwrap();
+		let channel_id = ChannelId([42u8; 32]);
+		let channel = Channel { counterparty_node_id: pubkey, channel_id };
+
+		// Test all variants
+		let variants: Vec<TransactionType> = vec![
+			TransactionType::Funding { channels: vec![channel.clone()] },
+			TransactionType::CooperativeClose { counterparty_node_id: pubkey, channel_id },
+			TransactionType::UnilateralClose { counterparty_node_id: pubkey, channel_id },
+			TransactionType::AnchorBump { counterparty_node_id: pubkey, channel_id },
+			TransactionType::Claim { counterparty_node_id: pubkey, channel_id },
+			TransactionType::Sweep { channels: vec![channel.clone()] },
+			TransactionType::Splice { counterparty_node_id: pubkey, channel_id },
+			TransactionType::OnchainSend,
+			// Also test empty channel lists
+			TransactionType::Funding { channels: vec![] },
+			TransactionType::Sweep { channels: vec![] },
+		];
+
+		for variant in variants {
+			let encoded = variant.encode();
+			let decoded = TransactionType::read(&mut &*encoded).unwrap();
+			assert_eq!(variant, decoded);
+		}
+	}
+
+	#[test]
+	fn onchain_payment_kind_backward_compat() {
+		// Simulate the old serialization format for PaymentKind::Onchain (without tx_type).
+		// The old format only had fields (0, txid) and (2, status).
+		use bitcoin::hashes::Hash;
+		use lightning::util::ser::Writeable;
+
+		let txid = bitcoin::Txid::from_slice(&[42u8; 32]).unwrap();
+		let status = ConfirmationStatus::Unconfirmed;
+
+		// Manually create a PaymentKind::Onchain with tx_type = None and verify roundtrip.
+		let kind = PaymentKind::Onchain { txid, status, tx_type: None };
+		let encoded = kind.encode();
+		let decoded = PaymentKind::read(&mut &*encoded).unwrap();
+		assert_eq!(kind, decoded);
+
+		// Also test with tx_type = Some
+		let kind_with_type =
+			PaymentKind::Onchain { txid, status, tx_type: Some(TransactionType::OnchainSend) };
+		let encoded_with_type = kind_with_type.encode();
+		let decoded_with_type = PaymentKind::read(&mut &*encoded_with_type).unwrap();
+		assert_eq!(kind_with_type, decoded_with_type);
+
+		// Verify that the encoding without tx_type is shorter (backward compat: old readers
+		// skip the unknown odd field).
+		assert!(encoded.len() < encoded_with_type.len());
+	}
+
+	#[test]
+	fn from_ldk_transaction_type() {
+		let pubkey = PublicKey::from_slice(&[
+			2, 238, 199, 36, 93, 107, 125, 44, 203, 48, 56, 11, 251, 226, 163, 100, 140, 215, 169,
+			66, 101, 63, 90, 163, 64, 237, 206, 161, 242, 131, 104, 102, 25,
+		])
+		.unwrap();
+		let channel_id = ChannelId([42u8; 32]);
+
+		// Test Funding conversion
+		let ldk_funding = LdkTransactionType::Funding { channels: vec![(pubkey, channel_id)] };
+		let local_funding = TransactionType::from(ldk_funding);
+		assert_eq!(
+			local_funding,
+			TransactionType::Funding {
+				channels: vec![Channel { counterparty_node_id: pubkey, channel_id }]
+			}
+		);
+
+		// Test CooperativeClose conversion
+		let ldk_coop =
+			LdkTransactionType::CooperativeClose { counterparty_node_id: pubkey, channel_id };
+		let local_coop = TransactionType::from(ldk_coop);
+		assert_eq!(
+			local_coop,
+			TransactionType::CooperativeClose { counterparty_node_id: pubkey, channel_id }
+		);
+
+		// Test Sweep conversion with empty channels
+		let ldk_sweep = LdkTransactionType::Sweep { channels: vec![] };
+		let local_sweep = TransactionType::from(ldk_sweep);
+		assert_eq!(local_sweep, TransactionType::Sweep { channels: vec![] });
+
+		// Test Splice conversion
+		let ldk_splice = LdkTransactionType::Splice { counterparty_node_id: pubkey, channel_id };
+		let local_splice = TransactionType::from(ldk_splice);
+		assert_eq!(
+			local_splice,
+			TransactionType::Splice { counterparty_node_id: pubkey, channel_id }
+		);
 	}
 }

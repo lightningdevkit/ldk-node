@@ -457,7 +457,7 @@ async fn onchain_send_receive() {
 
 	let payment_a = node_a.payment(&payment_id).unwrap();
 	match payment_a.kind {
-		PaymentKind::Onchain { txid: _txid, status } => {
+		PaymentKind::Onchain { txid: _txid, status, .. } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
 		},
@@ -466,7 +466,7 @@ async fn onchain_send_receive() {
 
 	let payment_b = node_a.payment(&payment_id).unwrap();
 	match payment_b.kind {
-		PaymentKind::Onchain { txid: _txid, status } => {
+		PaymentKind::Onchain { txid: _txid, status, .. } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
 		},
