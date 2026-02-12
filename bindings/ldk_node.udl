@@ -17,6 +17,8 @@ dictionary Config {
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
 	boolean include_untrusted_pending_in_spendable;
+	AddressType address_type;
+	sequence<AddressType> address_types_to_monitor;
 };
 
 dictionary AnchorChannelsConfig {
@@ -63,6 +65,13 @@ enum WordCount {
 	"Words18",
 	"Words21",
 	"Words24",
+};
+
+enum AddressType {
+	"Legacy",
+	"NestedSegwit",
+	"NativeSegwit",
+	"Taproot",
 };
 
 enum LogLevel {
@@ -114,6 +123,8 @@ interface Builder {
 	void set_log_facade_logger();
 	void set_custom_logger(LogWriter log_writer);
 	void set_network(Network network);
+	void set_address_type(AddressType address_type);
+	void set_address_types_to_monitor(sequence<AddressType> address_types_to_monitor);
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]
@@ -184,6 +195,9 @@ interface Node {
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentId payment_id);
 	BalanceDetails list_balances();
+	[Throws=NodeError]
+	AddressTypeBalance get_balance_for_address_type(AddressType address_type);
+	sequence<AddressType> list_monitored_address_types();
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
@@ -275,6 +289,8 @@ interface SpontaneousPayment {
 interface OnchainPayment {
     [Throws=NodeError]
     Address new_address();
+    [Throws=NodeError]
+    Address new_address_for_type(AddressType address_type);
     [Throws=NodeError]
     sequence<SpendableUtxo> list_spendable_outputs();
     [Throws=NodeError]
@@ -392,8 +408,8 @@ enum NodeError {
     "TransactionAlreadyConfirmed",
     "NoSpendableOutputs",
     "CoinSelectionFailed",
-	"InvalidMnemonic",
-	"BackgroundSyncNotEnabled",
+    "InvalidMnemonic",
+    "BackgroundSyncNotEnabled",
 };
 
 dictionary NodeStatus {
@@ -769,6 +785,11 @@ dictionary BalanceDetails {
 	u64 total_lightning_balance_sats;
 	sequence<LightningBalance> lightning_balances;
 	sequence<PendingSweepBalance> pending_balances_from_channel_closures;
+};
+
+dictionary AddressTypeBalance {
+	u64 total_sats;
+	u64 spendable_sats;
 };
 
 dictionary ChannelConfig {

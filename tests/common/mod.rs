@@ -295,9 +295,14 @@ pub(crate) fn random_port() -> u16 {
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 	let num_addresses = 2;
 	let mut listening_addresses = Vec::with_capacity(num_addresses);
+	let mut used_ports = std::collections::HashSet::new();
 
 	for _ in 0..num_addresses {
-		let rand_port = random_port();
+		let mut rand_port = random_port();
+		while used_ports.contains(&rand_port) {
+			rand_port = random_port();
+		}
+		used_ports.insert(rand_port);
 		let address: SocketAddress = format!("127.0.0.1:{}", rand_port).parse().unwrap();
 		listening_addresses.push(address);
 	}

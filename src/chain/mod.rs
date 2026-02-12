@@ -12,19 +12,23 @@ mod esplora;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::event::WalletEvent as BdkWalletEvent;
+use bdk_wallet::{KeychainKind, Update as BdkUpdate};
 use bitcoin::{Script, Txid};
 use lightning::chain::{BestBlock, Filter};
+use lightning::log_warn;
 use lightning_block_sync::gossip::UtxoSource;
 
 use crate::chain::bitcoind::BitcoindChainSource;
 use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
 use crate::config::{
-	BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	AddressType, BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig,
+	EsploraSyncConfig, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL,
+	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::event::{Event, EventQueue, SyncType, TransactionDetails};
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -160,6 +164,66 @@ fn get_transaction_details(
 	let (amount_sats, inputs, outputs) = wallet.get_tx_details(txid)?;
 
 	Some(TransactionDetails { amount_sats, inputs, outputs })
+}
+
+pub(super) fn collect_additional_sync_requests(
+	config: &Config, onchain_wallet: &Wallet, node_metrics: &Arc<RwLock<NodeMetrics>>,
+	logger: &Arc<Logger>,
+) -> Vec<(AddressType, FullScanRequest<KeychainKind>, SyncRequest<(KeychainKind, u32)>, bool)> {
+	config
+		.additional_address_types()
+		.into_iter()
+		.filter_map(|address_type| {
+			let do_incremental =
+				node_metrics.read().unwrap().get_wallet_sync_timestamp(address_type).is_some();
+			match onchain_wallet.get_wallet_sync_request(address_type) {
+				Ok((full_scan_req, incremental_req)) => {
+					Some((address_type, full_scan_req, incremental_req, do_incremental))
+				},
+				Err(e) => {
+					log_info!(logger, "Skipping sync for wallet {:?}: {}", address_type, e);
+					None
+				},
+			}
+		})
+		.collect()
+}
+
+pub(super) fn apply_additional_sync_results(
+	results: Vec<(AddressType, Option<BdkUpdate>)>, onchain_wallet: &Wallet,
+	node_metrics: &Arc<RwLock<NodeMetrics>>, kv_store: &Arc<DynStore>, logger: &Arc<Logger>,
+) -> Vec<BdkWalletEvent> {
+	let mut events = Vec::new();
+	for (address_type, update_opt) in results {
+		if let Some(update) = update_opt {
+			let wallet_events = onchain_wallet
+				.apply_update_for_address_type(address_type, update)
+				.unwrap_or_else(|e| {
+					log_warn!(logger, "Failed to apply update to wallet {:?}: {}", address_type, e);
+					Vec::new()
+				});
+			if let Some(ts) = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+			{
+				node_metrics.write().unwrap().set_wallet_sync_timestamp(address_type, ts);
+			}
+			events.extend(wallet_events);
+		}
+	}
+
+	{
+		let locked_node_metrics = node_metrics.read().unwrap();
+		if let Err(e) =
+			write_node_metrics(&locked_node_metrics, Arc::clone(kv_store), Arc::clone(logger))
+		{
+			log_error!(logger, "Failed to persist node metrics: {}", e);
+		}
+	}
+
+	if let Err(e) = onchain_wallet.update_payment_store_for_all_transactions() {
+		log_info!(logger, "Failed to update payment store after wallet syncs: {}", e);
+	}
+
+	events
 }
 
 // Process BDK wallet events and emit corresponding ldk-node events via the event queue.

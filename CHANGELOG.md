@@ -1,6 +1,7 @@
-# 0.7.0-rc.18 (Synonym Fork)
+# 0.7.0-rc.22 (Synonym Fork)
 
 ## Bug Fixes
+
 - Backported upstream Electrum sync fix (PR #4341): Skip unconfirmed `get_history` entries in
   `ElectrumSyncClient`. Previously, mempool entries (height=0 or -1) were incorrectly treated as
   confirmed, causing `get_merkle` to fail for 0-conf channel funding transactions.
@@ -8,6 +9,23 @@
   emitted when LDK replays events after node restart.
 
 ## Synonym Fork Additions
+
+- Added multi-address type wallet support with a new `bdk-wallet-aggregate` crate:
+  - `AddressType` enum: `Legacy`, `NestedSegwit`, `NativeSegwit`, `Taproot`
+  - `NodeBuilder::set_address_type()` to configure the primary wallet address type
+  - `NodeBuilder::set_address_types_to_monitor()` to track funds across multiple address types
+  - `Node::get_balance_for_address_type()` to query per-wallet balances
+  - `Node::list_monitored_address_types()` to list loaded wallet types
+  - `OnchainPayment::new_address_for_type()` to generate addresses for a specific type
+  - `send_to_address` / `send_all_to_address`: unified coin selection pools UTXOs from all loaded wallets and selects optimally across the full set; `send_all` drains all wallets
+  - RBF and CPFP fee bumping work across wallets (cross-wallet inputs are re-signed)
+  - Channel funding uses unified coin selection across all SegWit wallets (NestedSegwit can fund channels; Legacy excluded per BOLT 2)
+  - Channel shutdown and destination scripts always use native witness addresses, with automatic fallback to a loaded NativeSegwit/Taproot wallet when the primary is Legacy or NestedSegwit
+  - Splicing is restricted to native witness primaries (NativeSegwit/Taproot); non-native primaries return a graceful error
+  - Change outputs go to the primary wallet
+  - Monitored wallets are synced in parallel alongside the primary (Esplora and Electrum)
+  - P2PKH and P2SH UTXOs are now handled in `OutputSpender` (previously panicked on non-witness scripts)
+  - Migration-safe persistence: existing NativeSegwit wallet data is read from the legacy (un-namespaced) storage location
 - Upgraded to Kotlin 2.2.0 for compatibility with consuming apps using Kotlin 2.x
 - Added JitPack support for `ldk-node-jvm` module to enable unit testing in consuming apps
 - Added runtime-adjustable wallet sync intervals for battery optimization on mobile:
@@ -88,11 +106,13 @@
   would use internally.
 
 # 0.7.0 - Dec. 3, 2025
+
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 
 ## Feature and API updates
+
 - Experimental support for channel splicing has been added. (#677)
-    - **Note**: Splicing-related transactions might currently still get misclassified in the payment store.
+  - **Note**: Splicing-related transactions might currently still get misclassified in the payment store.
 - Support for serving and paying static invoices for Async Payments has been added. (#621, #632)
 - Sourcing chain data via Bitcoin Core's REST interface is now supported. (#526)
 - A new `Builder::set_chain_source_esplora_with_headers` method has been added
@@ -111,6 +131,7 @@ This seventh minor release introduces numerous new features, bug fixes, and API 
 - The `generate_entropy_mnemonic` method now supports specifying a word count. (#699)
 
 ## Bug Fixes and Improvements
+
 - Robustness of the shutdown procedure has been improved, minimizing risk of blocking during `Node::stop`. (#592, #612, #619, #622)
 - The VSS storage backend now supports 'lazy' deletes, allowing it to avoid
   unnecessarily waiting on remote calls for certain operations. (#689, #722)
@@ -127,6 +148,7 @@ This seventh minor release introduces numerous new features, bug fixes, and API 
 - The node now listens on all provided listening addresses. (#644)
 
 ## Compatibility Notes
+
 - The minimum supported Rust version (MSRV) has been bumped to `rustc` v1.85 (#606)
 - The LDK dependency has been bumped to v0.2.
 - The BDK dependency has been bumped to v2.2. (#656)
@@ -155,11 +177,13 @@ deletions in 264 commits from 14 authors in alphabetical order:
 - tosynthegeek
 
 # 0.6.2 - Aug. 14, 2025
+
 This patch release fixes a panic that could have been hit when syncing to a
 TLS-enabled Electrum server, as well as some minor issues when shutting down
 the node.
 
 ## Bug Fixes and Improvements
+
 - If not set by the user, we now install a default `CryptoProvider` for the
   `rustls` TLS library. This fixes an issue that would have the node panic
   whenever they first try to access an Electrum server behind an `ssl://`
@@ -176,15 +200,18 @@ deletions in 13 commits from 2 authors in alphabetical order:
 - moisesPomilio
 
 # 0.6.1 - Jun. 19, 2025
+
 This patch release fixes minor issues with the recently-exposed `Bolt11Invoice`
 type in bindings.
 
 ## Feature and API updates
+
 - The `Bolt11Invoice::description` method is now exposed as
   `Bolt11Invoice::invoice_description` in bindings, to avoid collisions with a
   Swift standard method of same name (#576)
 
 ## Bug Fixes and Improvements
+
 - The `Display` implementation of `Bolt11Invoice` is now exposed in bindings,
   (re-)allowing to render the invoice as a string. (#574)
 
@@ -194,16 +221,19 @@ in 8 commits from 1 author in alphabetical order:
 - Elias Rohrer
 
 # 0.6.0 - Jun. 9, 2025
+
 This sixth minor release mainly fixes an issue that could have left the
 on-chain wallet unable to spend funds if transactions that had previously been
 accepted to the mempool ended up being evicted.
 
 ## Feature and API updates
+
 - Onchain addresses are now validated against the expected network before use (#519).
 - The API methods on the `Bolt11Invoice` type are now exposed in bindings (#522).
 - The `UnifiedQrPayment::receive` flow no longer aborts if we're unable to generate a BOLT12 offer (#548).
 
 ## Bug Fixes and Improvements
+
 - Previously, the node could potentially enter a state that would have left the
   onchain wallet unable spend any funds if previously-generated transactions
   had been first accepted, and then evicted from the mempool. This has been
@@ -213,6 +243,7 @@ accepted to the mempool ended up being evicted.
 - The output of the `log` facade logger has been corrected (#547).
 
 ## Compatibility Notes
+
 - The BDK dependency has been bumped to `bdk_wallet` v2.0 (#551).
 
 In total, this release features 20 files changed, 1188 insertions, 447 deletions, in 18 commits from 3 authors in alphabetical order:
@@ -222,9 +253,11 @@ In total, this release features 20 files changed, 1188 insertions, 447 deletions
 - Elias Rohrer
 
 # 0.5.0 - Apr. 29, 2025
+
 Besides numerous API improvements and bugfixes this fifth minor release notably adds support for sourcing chain and fee rate data from an Electrum backend, requesting channels via the [bLIP-51 / LSPS1](https://github.com/lightning/blips/blob/master/blip-0051.md) protocol, as well as experimental support for operating as a [bLIP-52 / LSPS2](https://github.com/lightning/blips/blob/master/blip-0052.md) service.
 
 ## Feature and API updates
+
 - The `PaymentSuccessful` event now exposes a `payment_preimage` field (#392).
 - The node now emits `PaymentForwarded` events for forwarded payments (#404).
 - The ability to send custom TLVs as part of spontaneous payments has been added (#411).
@@ -238,7 +271,7 @@ Besides numerous API improvements and bugfixes this fifth minor release notably 
 - On-chain transactions are now added to the internal payment store and exposed via `Node::list_payments` (#432).
 - Inbound announced channels are now rejected if not all requirements for operating as a forwarding node (set listening addresses and node alias) have been met (#467).
 - Initial support for operating as an bLIP-52 / LSPS2 service has been added (#420).
-    - **Note**: bLIP-52 / LSPS2 support is considered 'alpha'/'experimental' and should *not* yet be used in production.
+  - **Note**: bLIP-52 / LSPS2 support is considered 'alpha'/'experimental' and should _not_ yet be used in production.
 - The `Builder::set_entropy_seed_bytes` method now takes an array rather than a `Vec` (#493).
 - The builder will now return a `NetworkMismatch` error in case of network switching (#485).
 - The `Bolt11Jit` payment variant now exposes a field telling how much fee the LSP withheld (#497).
@@ -248,6 +281,7 @@ Besides numerous API improvements and bugfixes this fifth minor release notably 
 - The ability to sync the node via an Electrum backend has been added (#486).
 
 ## Bug Fixes and Improvements
+
 - When syncing from Bitcoin Core RPC, syncing mempool entries has been made more efficient (#410, #465).
 - We now ensure the our configured fallback rates are used when the configured chain source would return huge bogus values during fee estimation (#430).
 - We now re-enabled trying to bump Anchor channel transactions for trusted counterparties in the `ContentiousClaimable` case to reduce the risk of losing funds in certain edge cases (#461).
@@ -255,6 +289,7 @@ Besides numerous API improvements and bugfixes this fifth minor release notably 
 - The `Node::remove_payment` now also removes the respective entry from the in-memory state, not only from the persisted payment store (#514).
 
 ## Compatibility Notes
+
 - The filesystem logger was simplified and its default path changed to `ldk_node.log` in the configured storage directory (#394).
 - The BDK dependency has been bumped to `bdk_wallet` v1.0 (#426).
 - The LDK dependency has been bumped to `lightning` v0.1 (#426).
@@ -295,7 +330,6 @@ In total, this release features 1 files changed, 40 insertions, 4 deletions in 3
 - Fuyin
 - Elias Rohrer
 
-
 # 0.4.1 - Oct 18, 2024
 
 This patch release fixes a wallet syncing issue where full syncs were used instead of incremental syncs, and vice versa (#383).
@@ -311,10 +345,11 @@ In total, this release features 3 files changed, 13 insertions, 9 deletions in 6
 Besides numerous API improvements and bugfixes this fourth minor release notably adds support for sourcing chain and fee rate data from a Bitcoin Core RPC backend, as well as experimental support for the [VSS] remote storage backend.
 
 ## Feature and API updates
+
 - Support for multiple chain sources has been added. To this end, Esplora-specific configuration options can now be given via `EsploraSyncConfig` to `Builder::set_chain_source_esplora`. Furthermore, all configuration objects (including the main `Config`) is now exposed via the `config` sub-module (#365).
 - Support for sourcing chain and fee estimation data from a Bitcoin Core RPC backed has been added (#370).
 - Initial experimental support for an encrypted [VSS] remote storage backend has been added (#369, #376, #378).
-    - **Caution**: VSS support is in **alpha** and is considered experimental. Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
+  - **Caution**: VSS support is in **alpha** and is considered experimental. Using VSS (or any remote persistence) may cause LDK to panic if persistence failures are unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 - Support for setting the `NodeAlias` in public node announcements as been added. We now ensure that announced channels can only be opened and accepted when the required configuration options to operate as a public forwarding node are set (listening addresses and node alias). As part of this `Node::connect_open_channel` was split into `open_channel` and `open_announced_channel` API methods. (#330, #366).
 - The `Node` can now be started via a new `Node::start_with_runtime` call that allows to reuse an outer `tokio` runtime context, avoiding runtime stacking when run in `async` environments (#319).
 - Support for generating and paying unified QR codes has been added (#302).
@@ -322,16 +357,19 @@ Besides numerous API improvements and bugfixes this fourth minor release notably
 - Support for setting additional parameters when sending BOLT11 payments has been added (#336, #351).
 
 ## Bug Fixes
+
 - The `ChannelConfig` object has been refactored, now allowing to query the currently applied `MaxDustHTLCExposure` limit (#350).
 - A bug potentially leading to panicking on shutdown when stacking `tokio` runtime contexts has been fixed (#373).
 - We now no longer panic when hitting a persistence failure during event handling. Instead, events will be replayed until successful (#374).
-,
+  ,
+
 ## Compatibility Notes
+
 - The LDK dependency has been updated to version 0.0.125 (#358, #375).
 - The BDK dependency has been updated to version 1.0-beta.4 (#358).
-    - Going forward, the BDK state will be persisted in the configured `KVStore` backend.
-    - **Note**: The old descriptor state will *not* be automatically migrated on upgrade, potentially leading to address reuse. Privacy-concious users might want to manually advance the descriptor by requesting new addresses until it reaches the previously observed height.
-    - After the node as been successfully upgraded users may safely delete `bdk_wallet_*.sqlite` from the storage path.
+  - Going forward, the BDK state will be persisted in the configured `KVStore` backend.
+  - **Note**: The old descriptor state will _not_ be automatically migrated on upgrade, potentially leading to address reuse. Privacy-concious users might want to manually advance the descriptor by requesting new addresses until it reaches the previously observed height.
+  - After the node as been successfully upgraded users may safely delete `bdk_wallet_*.sqlite` from the storage path.
 - The `rust-bitcoin` dependency has been updated to version 0.32.2 (#358).
 - The UniFFI dependency has been updated to version 0.27.3 (#379).
 - The `bip21` dependency has been updated to version 0.5 (#358).
@@ -354,6 +392,7 @@ This third minor release notably adds support for BOLT12 payments, Anchor
 channels, and sourcing inbound liquidity via LSPS2 just-in-time channels.
 
 ## Feature and API updates
+
 - Support for creating and paying BOLT12 offers and refunds has been added (#265).
 - Support for Anchor channels has been added (#141).
 - Support for sourcing inbound liquidity via LSPS2 just-in-time (JIT) channels has been added (#223).
@@ -371,6 +410,7 @@ channels, and sourcing inbound liquidity via LSPS2 just-in-time channels.
 - The ability to register and claim from custom payment hashes generated outside of LDK Node has been added (#308).
 
 ## Bug Fixes
+
 - Node announcements are now correctly only broadcast if we have any public, sufficiently confirmed channels (#248, #314).
 - Falling back to default fee values is now disallowed on mainnet, ensuring we won't startup without a successful fee cache update (#249).
 - Persisted peers are now correctly reconnected after startup (#265).
@@ -378,6 +418,7 @@ channels, and sourcing inbound liquidity via LSPS2 just-in-time channels.
 - Several steps have been taken to reduce the risk of blocking node operation on wallet syncing in the face of unresponsive Esplora services (#281).
 
 ## Compatibility Notes
+
 - LDK has been updated to version 0.0.123 (#291).
 
 In total, this release features 54 files changed, 7282 insertions, 2410 deletions in 165 commits from 3 authors, in alphabetical order:
@@ -406,9 +447,11 @@ This is a bugfix release bumping the used LDK and BDK dependencies to the
 latest stable versions.
 
 ## Bug Fixes
+
 - Swift bindings now can be built on macOS again.
 
 ## Compatibility Notes
+
 - LDK has been updated to version 0.0.121 (#214, #229)
 - BDK has been updated to version 0.29.0 (#229)
 
@@ -422,6 +465,7 @@ deletions in 26 commits from 3 authors, in alphabetical order:
 # 0.2.0 - Dec 13, 2023
 
 ## Feature and API updates
+
 - The capability to send pre-flight probes has been added (#147).
 - Pre-flight probes will skip outbound channels based on the liquidity available (#156).
 - Additional fields are now exposed via `ChannelDetails` (#165).
@@ -432,10 +476,12 @@ deletions in 26 commits from 3 authors, in alphabetical order:
 - A module persisting, sweeping, and rebroadcasting output spends has been added (#152).
 
 ## Bug Fixes
+
 - No errors are logged anymore when we choose to omit spending of `StaticOutput`s (#137).
 - An inconsistent state of the log file symlink no longer results in an error during startup (#153).
 
 ## Compatibility Notes
+
 - Our currently supported minimum Rust version (MSRV) is 1.63.0.
 - The Rust crate edition has been bumped to 2021.
 - Building on Windows is now supported (#160).
@@ -454,6 +500,7 @@ In total, this release features 57 files changed, 7369 insertions, 1738 deletion
 - Orbital
 
 # 0.1.0 - Jun 22, 2023
+
 This is the first non-experimental release of LDK Node.
 
 - Log files are now split based on the start date of the node (#116).
@@ -467,15 +514,18 @@ This is the first non-experimental release of LDK Node.
 - The API has been updated to be more aligned between Rust and bindings (#114).
 
 ## Compatibility Notes
+
 - Our currently supported minimum Rust version (MSRV) is 1.60.0.
 - The superfluous `SendingFailed` payment status has been removed, breaking serialization compatibility with alpha releases (#125).
 - The serialization formats of `PaymentDetails` and `Event` types have been updated, ensuring users upgrading from an alpha release fail to start rather than continuing operating with bogus data. Alpha users should wipe their persisted payment metadata (`payments/*`) and event queue (`events`) after the update (#130).
 
 In total, this release includes changes in 52 commits from 2 authors:
+
 - Elias Rohrer
 - Richard Ulrich
 
 # 0.1-alpha.1 - Jun 6, 2023
+
 - Generation of Swift, Kotlin (JVM and Android), and Python bindings is now supported through UniFFI (#25).
 - Lists of connected peers and channels may now be retrieved in bindings (#56).
 - Gossip data may now be sourced from the P2P network, or a Rapid Gossip Sync server (#70).
@@ -490,8 +540,8 @@ In total, this release includes changes in 52 commits from 2 authors:
 - The wallet sync intervals are now configurable (#102).
 - Granularity of logging can now be configured (#108).
 
-
 In total, this release includes changes in 64 commits from 4 authors:
+
 - Steve Myers
 - Elias Rohrer
 - Jurvis Tan
@@ -501,6 +551,7 @@ In total, this release includes changes in 64 commits from 4 authors:
 production, and no compatibility guarantees are given until the release of 0.1.
 
 # 0.1-alpha - Apr 27, 2023
+
 This is the first alpha release of LDK Node. It features support for sourcing
 chain data via an Esplora server, file system persistence, gossip sourcing via
 the Lightning peer-to-peer network, and configurable entropy sources for the

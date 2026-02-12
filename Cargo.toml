@@ -1,6 +1,10 @@
+[workspace]
+members = [".", "crates/bdk-wallet-aggregate"]
+exclude = ["bindings/uniffi-bindgen"]
+
 [package]
 name = "ldk-node"
-version = "0.7.0-rc.18"
+version = "0.7.0-rc.22"
 authors = ["Elias Rohrer <dev@tnull.de>"]
 homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
@@ -45,6 +49,7 @@ bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
 bdk_electrum = { version = "0.23.0", default-features = false, features = ["use-rustls-ring"]}
 bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "keys-bip39"]}
+bdk-wallet-aggregate = { path = "crates/bdk-wallet-aggregate" }
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = { version = "0.23", default-features = false }

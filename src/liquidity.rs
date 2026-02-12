@@ -745,8 +745,10 @@ where
 				let channel_amount_sats = (amt_to_forward_msat + over_provisioning_msat) / 1000;
 				let cur_anchor_reserve_sats =
 					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-				let spendable_amount_sats =
-					self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+				let spendable_amount_sats = self
+					.wallet
+					.get_witness_spendable_amount_sats(cur_anchor_reserve_sats)
+					.unwrap_or(0);
 				let required_funds_sats = channel_amount_sats
 					+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
 						if init_features.requires_anchors_zero_fee_htlc_tx()

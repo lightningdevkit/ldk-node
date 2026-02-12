@@ -13,6 +13,15 @@ use lightning::sign::SpendableOutputDescriptor;
 use lightning::util::sweep::{OutputSpendStatus, TrackedSpendableOutput};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
+/// Balance details for a specific address type wallet.
+#[derive(Debug, Clone)]
+pub struct AddressTypeBalance {
+	/// The total balance of the wallet for this address type.
+	pub total_sats: u64,
+	/// The currently spendable balance of the wallet for this address type.
+	pub spendable_sats: u64,
+}
+
 /// Details of the known available balances returned by [`Node::list_balances`].
 ///
 /// [`Node::list_balances`]: crate::Node::list_balances

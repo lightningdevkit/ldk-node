@@ -421,24 +421,57 @@ macro_rules! impl_read_write_change_set_type {
 		$key:expr
 	) => {
 		pub(crate) fn $read_name<L: Deref>(
-			kv_store: Arc<DynStore>, logger: L,
+			kv_store: Arc<DynStore>, logger: L, address_type: crate::config::AddressType,
 		) -> Result<Option<$change_set_type>, std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
+			let suffix = address_type.storage_suffix();
+			let secondary_namespace = if $secondary_namespace.is_empty() {
+				suffix.to_string()
+			} else {
+				format!("{}/{}", $secondary_namespace, suffix)
+			};
 			let bytes =
-				match KVStoreSync::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
+				match KVStoreSync::read(&*kv_store, $primary_namespace, &secondary_namespace, $key)
 				{
 					Ok(bytes) => bytes,
 					Err(e) => {
 						if e.kind() == lightning::io::ErrorKind::NotFound {
-							return Ok(None);
+							// Fallback: try the un-namespaced key for pre-multi-wallet data.
+							if address_type == crate::config::AddressType::NativeSegwit {
+								match KVStoreSync::read(
+									&*kv_store,
+									$primary_namespace,
+									$secondary_namespace,
+									$key,
+								) {
+									Ok(bytes) => bytes,
+									Err(e2) => {
+										if e2.kind() == lightning::io::ErrorKind::NotFound {
+											return Ok(None);
+										} else {
+											log_error!(
+												logger,
+												"Reading legacy data from key {}/{}/{} failed due to: {}",
+												$primary_namespace,
+												$secondary_namespace,
+												$key,
+												e2
+											);
+											return Err(e2.into());
+										}
+									},
+								}
+							} else {
+								return Ok(None);
+							}
 						} else {
 							log_error!(
 								logger,
 								"Reading data from key {}/{}/{} failed due to: {}",
 								$primary_namespace,
-								$secondary_namespace,
+								secondary_namespace,
 								$key,
 								e
 							);
@@ -464,18 +497,25 @@ macro_rules! impl_read_write_change_set_type {
 
 		pub(crate) fn $write_name<L: Deref>(
 			value: &$change_set_type, kv_store: Arc<DynStore>, logger: L,
+			address_type: crate::config::AddressType,
 		) -> Result<(), std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
+			let suffix = address_type.storage_suffix();
+			let secondary_namespace = if $secondary_namespace.is_empty() {
+				suffix.to_string()
+			} else {
+				format!("{}/{}", $secondary_namespace, suffix)
+			};
 			let data = ChangeSetSerWrapper(value).encode();
-			KVStoreSync::write(&*kv_store, $primary_namespace, $secondary_namespace, $key, data)
+			KVStoreSync::write(&*kv_store, $primary_namespace, &secondary_namespace, $key, data)
 				.map_err(|e| {
 					log_error!(
 						logger,
 						"Writing data to key {}/{}/{} failed due to: {}",
 						$primary_namespace,
-						$secondary_namespace,
+						secondary_namespace,
 						$key,
 						e
 					);
@@ -541,13 +581,13 @@ impl_read_write_change_set_type!(
 
 // Reads the full BdkWalletChangeSet or returns default fields
 pub(crate) fn read_bdk_wallet_change_set(
-	kv_store: Arc<DynStore>, logger: Arc<Logger>,
+	kv_store: Arc<DynStore>, logger: Arc<Logger>, address_type: crate::config::AddressType,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 
 	// We require a descriptor and return `None` to signal creation of a new wallet otherwise.
 	if let Some(descriptor) =
-		read_bdk_wallet_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
+		read_bdk_wallet_descriptor(Arc::clone(&kv_store), Arc::clone(&logger), address_type)?
 	{
 		change_set.descriptor = Some(descriptor);
 	} else {
@@ -556,7 +596,7 @@ pub(crate) fn read_bdk_wallet_change_set(
 
 	// We require a change_descriptor and return `None` to signal creation of a new wallet otherwise.
 	if let Some(change_descriptor) =
-		read_bdk_wallet_change_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
+		read_bdk_wallet_change_descriptor(Arc::clone(&kv_store), Arc::clone(&logger), address_type)?
 	{
 		change_set.change_descriptor = Some(change_descriptor);
 	} else {
@@ -564,17 +604,19 @@ pub(crate) fn read_bdk_wallet_change_set(
 	}
 
 	// We require a network and return `None` to signal creation of a new wallet otherwise.
-	if let Some(network) = read_bdk_wallet_network(Arc::clone(&kv_store), Arc::clone(&logger))? {
+	if let Some(network) =
+		read_bdk_wallet_network(Arc::clone(&kv_store), Arc::clone(&logger), address_type)?
+	{
 		change_set.network = Some(network);
 	} else {
 		return Ok(None);
 	}
 
-	read_bdk_wallet_local_chain(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_local_chain(Arc::clone(&kv_store), Arc::clone(&logger), address_type)?
 		.map(|local_chain| change_set.local_chain = local_chain);
-	read_bdk_wallet_tx_graph(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_tx_graph(Arc::clone(&kv_store), Arc::clone(&logger), address_type)?
 		.map(|tx_graph| change_set.tx_graph = tx_graph);
-	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger), address_type)?
 		.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }

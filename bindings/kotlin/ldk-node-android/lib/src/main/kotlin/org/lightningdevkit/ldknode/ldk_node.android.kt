@@ -1498,6 +1498,16 @@ internal typealias UniffiVTableCallbackInterfaceVssHeaderProviderUniffiByValue =
 
 
 
+
+
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1949,6 +1959,16 @@ internal interface UniffiLib : Library {
         `headerProvider`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
+    fun uniffi_ldk_node_fn_method_builder_set_address_type(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    fun uniffi_ldk_node_fn_method_builder_set_address_types_to_monitor(
+        `ptr`: Pointer?,
+        `addressTypesToMonitor`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
     fun uniffi_ldk_node_fn_method_builder_set_announcement_addresses(
         `ptr`: Pointer?,
         `announcementAddresses`: RustBufferByValue,
@@ -2230,6 +2250,11 @@ internal interface UniffiLib : Library {
         `addressStr`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Long
+    fun uniffi_ldk_node_fn_method_node_get_balance_for_address_type(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
     fun uniffi_ldk_node_fn_method_node_get_transaction_details(
         `ptr`: Pointer?,
         `txid`: RustBufferByValue,
@@ -2240,6 +2265,10 @@ internal interface UniffiLib : Library {
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
     fun uniffi_ldk_node_fn_method_node_list_channels(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    fun uniffi_ldk_node_fn_method_node_list_monitored_address_types(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
@@ -2498,6 +2527,11 @@ internal interface UniffiLib : Library {
     ): RustBufferByValue
     fun uniffi_ldk_node_fn_method_onchainpayment_new_address(
         `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    fun uniffi_ldk_node_fn_method_onchainpayment_new_address_for_type(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
     fun uniffi_ldk_node_fn_method_onchainpayment_select_utxos_with_algorithm(
@@ -3039,6 +3073,10 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider(
     ): Short
+    fun uniffi_ldk_node_checksum_method_builder_set_address_type(
+    ): Short
+    fun uniffi_ldk_node_checksum_method_builder_set_address_types_to_monitor(
+    ): Short
     fun uniffi_ldk_node_checksum_method_builder_set_announcement_addresses(
     ): Short
     fun uniffi_ldk_node_checksum_method_builder_set_async_payments_role(
@@ -3127,11 +3165,15 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_ldk_node_checksum_method_node_get_address_balance(
     ): Short
+    fun uniffi_ldk_node_checksum_method_node_get_balance_for_address_type(
+    ): Short
     fun uniffi_ldk_node_checksum_method_node_get_transaction_details(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_list_balances(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_list_channels(
+    ): Short
+    fun uniffi_ldk_node_checksum_method_node_list_monitored_address_types(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_list_payments(
     ): Short
@@ -3222,6 +3264,8 @@ internal interface UniffiLib : Library {
     fun uniffi_ldk_node_checksum_method_onchainpayment_list_spendable_outputs(
     ): Short
     fun uniffi_ldk_node_checksum_method_onchainpayment_new_address(
+    ): Short
+    fun uniffi_ldk_node_checksum_method_onchainpayment_new_address_for_type(
     ): Short
     fun uniffi_ldk_node_checksum_method_onchainpayment_select_utxos_with_algorithm(
     ): Short
@@ -3508,6 +3552,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider() != 9090.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_ldk_node_checksum_method_builder_set_address_type() != 647.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_builder_set_address_types_to_monitor() != 23561.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_ldk_node_checksum_method_builder_set_announcement_addresses() != 39271.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3640,6 +3690,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_ldk_node_checksum_method_node_get_address_balance() != 45284.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_ldk_node_checksum_method_node_get_balance_for_address_type() != 34906.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_ldk_node_checksum_method_node_get_transaction_details() != 65000.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3647,6 +3700,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_node_list_channels() != 7954.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_node_list_monitored_address_types() != 25084.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_node_list_payments() != 35002.toShort()) {
@@ -3782,6 +3838,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_onchainpayment_new_address() != 37251.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_onchainpayment_new_address_for_type() != 9083.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_onchainpayment_select_utxos_with_algorithm() != 14084.toShort()) {
@@ -5641,6 +5700,30 @@ open class Builder: Disposable, BuilderInterface {
         })
     }
 
+    override fun `setAddressType`(`addressType`: AddressType) {
+        callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_builder_set_address_type(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
+    override fun `setAddressTypesToMonitor`(`addressTypesToMonitor`: List<AddressType>) {
+        callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_builder_set_address_types_to_monitor(
+                    it,
+                    FfiConverterSequenceTypeAddressType.lower(`addressTypesToMonitor`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
     @Throws(BuildException::class)
     override fun `setAnnouncementAddresses`(`announcementAddresses`: List<SocketAddress>) {
         callWithPointer {
@@ -6953,6 +7036,19 @@ open class Node: Disposable, NodeInterface {
         })
     }
 
+    @Throws(NodeException::class)
+    override fun `getBalanceForAddressType`(`addressType`: AddressType): AddressTypeBalance {
+        return FfiConverterTypeAddressTypeBalance.lift(callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_get_balance_for_address_type(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
     override fun `getTransactionDetails`(`txid`: Txid): TransactionDetails? {
         return FfiConverterOptionalTypeTransactionDetails.lift(callWithPointer {
             uniffiRustCall { uniffiRustCallStatus ->
@@ -6980,6 +7076,17 @@ open class Node: Disposable, NodeInterface {
         return FfiConverterSequenceTypeChannelDetails.lift(callWithPointer {
             uniffiRustCall { uniffiRustCallStatus ->
                 UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_list_channels(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    override fun `listMonitoredAddressTypes`(): List<AddressType> {
+        return FfiConverterSequenceTypeAddressType.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_list_monitored_address_types(
                     it,
                     uniffiRustCallStatus,
                 )
@@ -7840,6 +7947,19 @@ open class OnchainPayment: Disposable, OnchainPaymentInterface {
             uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
                 UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_onchainpayment_new_address(
                     it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    @Throws(NodeException::class)
+    override fun `newAddressForType`(`addressType`: AddressType): Address {
+        return FfiConverterTypeAddress.lift(callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_onchainpayment_new_address_for_type(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
                     uniffiRustCallStatus,
                 )
             }
@@ -8737,6 +8857,28 @@ object FfiConverterTypeVssHeaderProvider: FfiConverter<VssHeaderProvider, Pointe
 
 
 
+object FfiConverterTypeAddressTypeBalance: FfiConverterRustBuffer<AddressTypeBalance> {
+    override fun read(buf: ByteBuffer): AddressTypeBalance {
+        return AddressTypeBalance(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AddressTypeBalance) = (
+            FfiConverterULong.allocationSize(value.`totalSats`) +
+            FfiConverterULong.allocationSize(value.`spendableSats`)
+    )
+
+    override fun write(value: AddressTypeBalance, buf: ByteBuffer) {
+        FfiConverterULong.write(value.`totalSats`, buf)
+        FfiConverterULong.write(value.`spendableSats`, buf)
+    }
+}
+
+
+
+
 object FfiConverterTypeAnchorChannelsConfig: FfiConverterRustBuffer<AnchorChannelsConfig> {
     override fun read(buf: ByteBuffer): AnchorChannelsConfig {
         return AnchorChannelsConfig(
@@ -9086,6 +9228,8 @@ object FfiConverterTypeConfig: FfiConverterRustBuffer<Config> {
             FfiConverterOptionalTypeAnchorChannelsConfig.read(buf),
             FfiConverterOptionalTypeRouteParametersConfig.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterTypeAddressType.read(buf),
+            FfiConverterSequenceTypeAddressType.read(buf),
         )
     }
 
@@ -9099,7 +9243,9 @@ object FfiConverterTypeConfig: FfiConverterRustBuffer<Config> {
             FfiConverterULong.allocationSize(value.`probingLiquidityLimitMultiplier`) +
             FfiConverterOptionalTypeAnchorChannelsConfig.allocationSize(value.`anchorChannelsConfig`) +
             FfiConverterOptionalTypeRouteParametersConfig.allocationSize(value.`routeParameters`) +
-            FfiConverterBoolean.allocationSize(value.`includeUntrustedPendingInSpendable`)
+            FfiConverterBoolean.allocationSize(value.`includeUntrustedPendingInSpendable`) +
+            FfiConverterTypeAddressType.allocationSize(value.`addressType`) +
+            FfiConverterSequenceTypeAddressType.allocationSize(value.`addressTypesToMonitor`)
     )
 
     override fun write(value: Config, buf: ByteBuffer) {
@@ -9113,6 +9259,8 @@ object FfiConverterTypeConfig: FfiConverterRustBuffer<Config> {
         FfiConverterOptionalTypeAnchorChannelsConfig.write(value.`anchorChannelsConfig`, buf)
         FfiConverterOptionalTypeRouteParametersConfig.write(value.`routeParameters`, buf)
         FfiConverterBoolean.write(value.`includeUntrustedPendingInSpendable`, buf)
+        FfiConverterTypeAddressType.write(value.`addressType`, buf)
+        FfiConverterSequenceTypeAddressType.write(value.`addressTypesToMonitor`, buf)
     }
 }
 
@@ -9847,6 +9995,24 @@ object FfiConverterTypeTxOutput: FfiConverterRustBuffer<TxOutput> {
         FfiConverterOptionalString.write(value.`scriptpubkeyAddress`, buf)
         FfiConverterLong.write(value.`value`, buf)
         FfiConverterUInt.write(value.`n`, buf)
+    }
+}
+
+
+
+
+
+object FfiConverterTypeAddressType: FfiConverterRustBuffer<AddressType> {
+    override fun read(buf: ByteBuffer) = try {
+        AddressType.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: AddressType) = 4UL
+
+    override fun write(value: AddressType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -13480,6 +13646,31 @@ object FfiConverterSequenceTypeTxOutput: FfiConverterRustBuffer<List<TxOutput>> 
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeTxOutput.write(it, buf)
+        }
+    }
+}
+
+
+
+
+object FfiConverterSequenceTypeAddressType: FfiConverterRustBuffer<List<AddressType>> {
+    override fun read(buf: ByteBuffer): List<AddressType> {
+        val len = buf.getInt()
+        return List<AddressType>(len) {
+            FfiConverterTypeAddressType.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AddressType>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeAddressType.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AddressType>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAddressType.write(it, buf)
         }
     }
 }

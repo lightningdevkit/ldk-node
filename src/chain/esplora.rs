@@ -14,6 +14,7 @@ use bdk_wallet::event::WalletEvent;
 use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
 use esplora_client::AsyncClient as EsploraAsyncClient;
 use lightning::chain::{Confirm, Filter, WatchedOutput};
+use lightning::log_warn;
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::EsploraSyncClient;
 
@@ -190,7 +191,7 @@ impl EsploraChainSource {
 			}}
 		}
 
-		if incremental_sync {
+		let primary_result = if incremental_sync {
 			let sync_request = onchain_wallet.get_incremental_sync_request();
 			let wallet_sync_timeout_fut = tokio::time::timeout(
 				Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
@@ -208,7 +209,80 @@ impl EsploraChainSource {
 				),
 			);
 			get_and_apply_wallet_update!(wallet_sync_timeout_fut)
+		};
+
+		let (mut all_events, primary_error) = match primary_result {
+			Ok(events) => (events, None),
+			Err(e) => (Vec::new(), Some(e)),
+		};
+
+		let sync_requests = super::collect_additional_sync_requests(
+			&self.config,
+			&onchain_wallet,
+			&self.node_metrics,
+			&self.logger,
+		);
+
+		let mut join_set = tokio::task::JoinSet::new();
+		for (address_type, full_scan_req, incremental_req, do_incremental) in sync_requests {
+			let client = self.esplora_client.clone();
+			join_set.spawn(async move {
+				let result = if do_incremental {
+					tokio::time::timeout(
+						Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+						client.sync(incremental_req, BDK_CLIENT_CONCURRENCY),
+					)
+					.await
+					.map(|r| r.map(|u| bdk_wallet::Update::from(u)))
+				} else {
+					tokio::time::timeout(
+						Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+						client.full_scan(
+							full_scan_req,
+							BDK_CLIENT_STOP_GAP,
+							BDK_CLIENT_CONCURRENCY,
+						),
+					)
+					.await
+					.map(|r| r.map(|u| bdk_wallet::Update::from(u)))
+				};
+				(address_type, result)
+			});
 		}
+
+		let mut sync_results = Vec::new();
+		while let Some(join_result) = join_set.join_next().await {
+			match join_result {
+				Ok((address_type, Ok(Ok(update)))) => {
+					sync_results.push((address_type, Some(update)));
+				},
+				Ok((address_type, Ok(Err(e)))) => {
+					log_warn!(self.logger, "Failed to sync wallet {:?}: {}", address_type, e);
+					sync_results.push((address_type, None));
+				},
+				Ok((address_type, Err(_))) => {
+					log_warn!(self.logger, "Sync timeout for wallet {:?}", address_type);
+					sync_results.push((address_type, None));
+				},
+				Err(e) => {
+					log_warn!(self.logger, "Wallet sync task panicked: {}", e);
+				},
+			};
+		}
+
+		all_events.extend(super::apply_additional_sync_results(
+			sync_results,
+			&onchain_wallet,
+			&self.node_metrics,
+			&self.kv_store,
+			&self.logger,
+		));
+
+		if let Some(e) = primary_error {
+			return Err(e);
+		}
+
+		Ok(all_events)
 	}
 
 	pub(super) async fn sync_lightning_wallet(
