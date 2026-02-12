@@ -170,7 +170,7 @@ impl StorableObject for PaymentDetails {
 		self.id
 	}
 
-	fn update(&mut self, update: &Self::Update) -> bool {
+	fn update(&mut self, update: Self::Update) -> bool {
 		debug_assert_eq!(
 			self.id, update.id,
 			"We should only ever override payment data for the same payment id"

@@ -53,17 +53,17 @@ impl StorableObject for PendingPaymentDetails {
 		self.details.id
 	}
 
-	fn update(&mut self, update: &Self::Update) -> bool {
+	fn update(&mut self, update: Self::Update) -> bool {
 		let mut updated = false;
 
 		// Update the underlying payment details if present
-		if let Some(payment_update) = &update.payment_update {
+		if let Some(payment_update) = update.payment_update {
 			updated |= self.details.update(payment_update);
 		}
 
-		if let Some(new_conflicting_txids) = &update.conflicting_txids {
-			if &self.conflicting_txids != new_conflicting_txids {
-				self.conflicting_txids = new_conflicting_txids.clone();
+		if let Some(new_conflicting_txids) = update.conflicting_txids {
+			if self.conflicting_txids != new_conflicting_txids {
+				self.conflicting_txids = new_conflicting_txids;
 				updated = true;
 			}
 		}

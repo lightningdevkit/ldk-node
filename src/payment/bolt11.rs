@@ -383,7 +383,7 @@ impl Bolt11Payment {
 			..PaymentDetailsUpdate::new(payment_id)
 		};
 
-		match self.payment_store.update(&update) {
+		match self.payment_store.update(update) {
 			Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (),
 			Ok(DataStoreUpdateResult::NotFound) => {
 				log_error!(
