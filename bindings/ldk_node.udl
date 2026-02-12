@@ -116,6 +116,7 @@ interface Builder {
 	void set_pathfinding_scores_source(string url);
 	void set_liquidity_source_lsps1(PublicKey node_id, SocketAddress address, string? token);
 	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
+	void add_lsp(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(string? log_file_path, LogLevel? max_log_level);
 	void set_log_facade_logger();
@@ -298,6 +299,8 @@ interface UnifiedPayment {
 interface LSPS1Liquidity {
 	[Throws=NodeError]
 	LSPS1OrderStatus request_channel(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel);
+	[Throws=NodeError]
+	LSPS1OrderStatus request_channel_from_lsp(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel, PublicKey node_id);
 	[Throws=NodeError]
 	LSPS1OrderStatus check_order_status(LSPS1OrderId order_id);
 };
