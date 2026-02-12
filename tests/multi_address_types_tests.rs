@@ -183,6 +183,9 @@ mod setup {
 				let addr = node.onchain_payment().new_address().unwrap();
 				assert!(!addr.to_string().is_empty());
 				node.stop().unwrap();
+
+				// Brief delay to allow OS to release ports (TIME_WAIT) before next bind
+				std::thread::sleep(std::time::Duration::from_millis(100));
 			}
 		}
 	}
@@ -342,13 +345,64 @@ mod setup {
 }
 
 // ---------------------------------------------------------------------------
+// Electrum chain source
+// ---------------------------------------------------------------------------
+mod electrum_chain {
+	use ldk_node::config::AddressType;
+
+	use crate::common::{setup_bitcoind_and_electrsd, setup_node, wait_for_tx, TestChainSource};
+	use crate::helpers::{confirm_and_sync, fund_multiple_and_sync, node_config, test_recipient};
+
+	/// Electrum chain source: balance sync and send work with multi-address-types.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_electrum_sync_and_send() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Electrum(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 100_000), (legacy_addr, 100_000)],
+		)
+		.await;
+
+		let native_balance = node.get_balance_for_address_type(AddressType::NativeSegwit).unwrap();
+		let legacy_balance = node.get_balance_for_address_type(AddressType::Legacy).unwrap();
+		assert!(native_balance.total_sats >= 99_000);
+		assert!(legacy_balance.total_sats >= 99_000);
+
+		let txid = node
+			.onchain_payment()
+			.send_to_address(&test_recipient(), 50_000, None, None)
+			.expect("Send with Electrum should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node]).await;
+
+		let total_after = node.list_balances().total_onchain_balance_sats;
+		assert!(total_after < 200_000 - 50_000 + 5_000);
+
+		node.stop().unwrap();
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Balance
 // ---------------------------------------------------------------------------
 mod balance {
 	use ldk_node::config::AddressType;
 
-	use crate::common::{setup_bitcoind_and_electrsd, setup_node, TestChainSource};
-	use crate::helpers::{fund_and_sync, fund_multiple_and_sync, node_config, test_recipient};
+	use crate::common::{setup_bitcoind_and_electrsd, setup_node, wait_for_tx, TestChainSource};
+	use crate::helpers::{
+		confirm_and_sync, fund_and_sync, fund_multiple_and_sync, node_config, test_recipient,
+	};
 
 	// --- Balance sync & queries ---
 
@@ -457,6 +511,215 @@ mod balance {
 
 		node.stop().unwrap();
 	}
+
+	/// Send fails with InsufficientFunds when total across all wallets is insufficient.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_insufficient_funds_returns_error() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config =
+			node_config(AddressType::NativeSegwit, vec![AddressType::Legacy, AddressType::Taproot]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		let taproot_addr =
+			node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+
+		// Total ~150k across all wallets.
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 50_000), (legacy_addr, 50_000), (taproot_addr, 50_000)],
+		)
+		.await;
+
+		let total = node.list_balances().total_onchain_balance_sats;
+		assert!(total < 200_000);
+
+		let result = node.onchain_payment().send_to_address(&test_recipient(), 200_000, None, None);
+		assert!(result.is_err(), "Send should fail when total balance is insufficient");
+		let err = result.unwrap_err();
+		assert!(
+			matches!(
+				err,
+				ldk_node::NodeError::InsufficientFunds
+					| ldk_node::NodeError::OnchainTxCreationFailed
+			),
+			"Expected InsufficientFunds or OnchainTxCreationFailed, got {:?}",
+			err
+		);
+
+		node.stop().unwrap();
+	}
+
+	// --- Balance consistency ---
+
+	/// Asserts listBalances().spendableOnchainBalanceSats equals sum of listSpendableOutputs() values.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_list_balances_matches_utxo_sum() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Taproot]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let taproot_addr =
+			node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 100_000), (taproot_addr, 200_000)],
+		)
+		.await;
+
+		let balances = node.list_balances();
+		let utxos = node.onchain_payment().list_spendable_outputs().unwrap();
+		let utxo_sum: u64 = utxos.iter().map(|u| u.value_sats).sum();
+
+		assert_eq!(
+			balances.spendable_onchain_balance_sats,
+			utxo_sum,
+			"listBalances spendable should equal UTXO sum (spendable={} utxo_sum={})",
+			balances.spendable_onchain_balance_sats,
+			utxo_sum
+		);
+
+		node.stop().unwrap();
+	}
+
+	/// Asserts sum of per-type spendable equals listBalances().spendableOnchainBalanceSats.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_per_type_sum_equals_aggregate_spendable() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(
+			AddressType::NativeSegwit,
+			vec![AddressType::Legacy, AddressType::Taproot],
+		);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		let taproot_addr =
+			node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![
+				(native_addr, 80_000),
+				(legacy_addr, 70_000),
+				(taproot_addr, 90_000),
+			],
+		)
+		.await;
+
+		let aggregate_spendable = node.list_balances().spendable_onchain_balance_sats;
+		let per_type_sum: u64 = node
+			.list_monitored_address_types()
+			.iter()
+			.filter_map(|t| node.get_balance_for_address_type(*t).ok())
+			.map(|b| b.spendable_sats)
+			.sum();
+
+		assert_eq!(
+			per_type_sum,
+			aggregate_spendable,
+			"Sum of per-type spendable should equal aggregate (per_type_sum={} aggregate={})",
+			per_type_sum,
+			aggregate_spendable
+		);
+
+		node.stop().unwrap();
+	}
+
+	/// Asserts no phantom balance after spend-all: listSpendableOutputs empty, total==0.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_no_phantom_balance_after_spend_all() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Taproot]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let taproot_addr =
+			node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 50_000), (taproot_addr, 50_000)],
+		)
+		.await;
+
+		let txid = node
+			.onchain_payment()
+			.send_all_to_address(&test_recipient(), false, None)
+			.expect("spend-all should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node]).await;
+
+		// Poll a few times to catch sync timing issues
+		for _ in 0..5 {
+			let utxos = node.onchain_payment().list_spendable_outputs().unwrap();
+			let balances = node.list_balances();
+
+			assert!(
+				utxos.is_empty(),
+				"listSpendableOutputs should be empty after spend-all"
+			);
+			assert_eq!(
+				balances.total_onchain_balance_sats,
+				0,
+				"total_onchain_balance_sats should be 0"
+			);
+			assert_eq!(
+				balances.spendable_onchain_balance_sats,
+				0,
+				"spendable_onchain_balance_sats should be 0"
+			);
+
+			std::thread::sleep(std::time::Duration::from_secs(1));
+		}
+
+		node.stop().unwrap();
+	}
+
+	/// Asserts spendable equals UTXO sum for a single-address-type wallet.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_balance_consistency_single_address_type() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		let addr = node.onchain_payment().new_address().unwrap();
+		fund_and_sync(&bitcoind, &electrsd, &node, addr, 150_000).await;
+
+		let balances = node.list_balances();
+		let utxos = node.onchain_payment().list_spendable_outputs().unwrap();
+		let utxo_sum: u64 = utxos.iter().map(|u| u.value_sats).sum();
+
+		assert_eq!(
+			balances.spendable_onchain_balance_sats,
+			utxo_sum,
+			"Single-type: spendable should equal UTXO sum"
+		);
+
+		node.stop().unwrap();
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +775,41 @@ mod send {
 
 			node.stop().unwrap();
 		}
+	}
+
+	/// Send with custom fee rate across address types.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_send_with_custom_fee_rate() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 100_000), (legacy_addr, 100_000)],
+		)
+		.await;
+
+		let custom_fee_rate = bitcoin::FeeRate::from_sat_per_kwu(800);
+		let txid = node
+			.onchain_payment()
+			.send_to_address(&test_recipient(), 50_000, Some(custom_fee_rate), None)
+			.expect("Send with custom fee rate should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node]).await;
+
+		let new_balance = node.list_balances().total_onchain_balance_sats;
+		assert!(new_balance < 200_000 - 50_000);
+
+		node.stop().unwrap();
 	}
 
 	/// Send requiring UTXOs from two different wallet types.
@@ -702,6 +1000,40 @@ mod send {
 			"Should drain all 3 wallets, got {} inputs",
 			drain_tx.input.len()
 		);
+
+		node.stop().unwrap();
+	}
+
+	/// send_all with custom fee rate drains all wallets.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_send_all_with_custom_fee_rate() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 100_000), (legacy_addr, 100_000)],
+		)
+		.await;
+
+		let custom_fee_rate = bitcoin::FeeRate::from_sat_per_kwu(1000);
+		let txid = node
+			.onchain_payment()
+			.send_all_to_address(&test_recipient(), true, Some(custom_fee_rate))
+			.expect("send_all with custom fee rate should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node]).await;
+
+		assert!(node.list_balances().total_onchain_balance_sats < 10_000);
 
 		node.stop().unwrap();
 	}
@@ -1331,6 +1663,127 @@ mod channel_funding {
 		assert!(
 			segwit_after <= segwit_after_open + 1000,
 			"Close output should not land in NativeSegwit (after_open: {}, after_close: {})",
+			segwit_after_open,
+			segwit_after
+		);
+
+		node_a.stop().unwrap();
+		node_b.stop().unwrap();
+	}
+
+	/// Cooperative channel close: verify funds return to NativeSegwit when primary is NativeSegwit.
+	/// With NativeSegwit primary, get_shutdown_scriptpubkey returns a NativeSegwit address.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_channel_close_funds_return_to_native_segwit() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config_a = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node_a = setup_node(&chain_source, config_a, None);
+
+		let config_b = crate::common::random_config(true);
+		let node_b = setup_node(&chain_source, config_b, None);
+
+		let segwit_addr = node_a.onchain_payment().new_address().unwrap();
+		let legacy_addr =
+			node_a.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node_a,
+			vec![(segwit_addr, 200_000), (legacy_addr, 200_000)],
+		)
+		.await;
+		fund_peer_node_and_sync(&bitcoind, &electrsd, &node_b, addr_b, CHANNEL_PEER_FUNDING_SATS)
+			.await;
+
+		let funding_txo = open_channel(&node_a, &node_b, 100_000, false, &electrsd).await;
+
+		confirm_and_sync(&bitcoind, &electrsd, 6, &[&node_a, &node_b]).await;
+
+		let segwit_after_open =
+			node_a.get_balance_for_address_type(AddressType::NativeSegwit).unwrap().total_sats;
+
+		let user_channel_id = expect_channel_ready_event!(node_a, node_b.node_id());
+		expect_channel_ready_event!(node_b, node_a.node_id());
+
+		node_a.close_channel(&user_channel_id, node_b.node_id()).unwrap();
+		expect_event!(node_a, ChannelClosed);
+		expect_event!(node_b, ChannelClosed);
+
+		wait_for_outpoint_spend(&electrsd.client, funding_txo).await;
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node_a, &node_b]).await;
+
+		let segwit_after =
+			node_a.get_balance_for_address_type(AddressType::NativeSegwit).unwrap().total_sats;
+
+		assert!(
+			segwit_after > segwit_after_open,
+			"NativeSegwit balance should increase after close (after_open: {}, after_close: {})",
+			segwit_after_open,
+			segwit_after
+		);
+		let legacy_after = node_a.get_balance_for_address_type(AddressType::Legacy).unwrap();
+		assert!(legacy_after.total_sats >= 199_000, "Legacy balance should be untouched");
+
+		node_a.stop().unwrap();
+		node_b.stop().unwrap();
+	}
+
+	/// Cooperative channel close: NestedSegwit primary uses monitored NativeSegwit for shutdown.
+	/// Verify funds return to NativeSegwit (monitored native witness) on close.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_channel_close_nested_primary_funds_return_to_native_segwit() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		// NestedSegwit primary cannot use its own script for shutdown; uses monitored NativeSegwit.
+		let config_a = node_config(AddressType::NestedSegwit, vec![AddressType::NativeSegwit]);
+		let node_a = setup_node(&chain_source, config_a, None);
+
+		let config_b = crate::common::random_config(true);
+		let node_b = setup_node(&chain_source, config_b, None);
+
+		let nested_addr = node_a.onchain_payment().new_address().unwrap();
+		let segwit_addr =
+			node_a.onchain_payment().new_address_for_type(AddressType::NativeSegwit).unwrap();
+		let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node_a,
+			vec![(nested_addr, 200_000), (segwit_addr, 200_000)],
+		)
+		.await;
+		fund_peer_node_and_sync(&bitcoind, &electrsd, &node_b, addr_b, CHANNEL_PEER_FUNDING_SATS)
+			.await;
+
+		let funding_txo = open_channel(&node_a, &node_b, 100_000, false, &electrsd).await;
+
+		confirm_and_sync(&bitcoind, &electrsd, 6, &[&node_a, &node_b]).await;
+
+		let segwit_after_open =
+			node_a.get_balance_for_address_type(AddressType::NativeSegwit).unwrap().total_sats;
+
+		let user_channel_id = expect_channel_ready_event!(node_a, node_b.node_id());
+		expect_channel_ready_event!(node_b, node_a.node_id());
+
+		node_a.close_channel(&user_channel_id, node_b.node_id()).unwrap();
+		expect_event!(node_a, ChannelClosed);
+		expect_event!(node_b, ChannelClosed);
+
+		wait_for_outpoint_spend(&electrsd.client, funding_txo).await;
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node_a, &node_b]).await;
+
+		let segwit_after =
+			node_a.get_balance_for_address_type(AddressType::NativeSegwit).unwrap().total_sats;
+
+		assert!(
+			segwit_after > segwit_after_open,
+			"NativeSegwit (shutdown script) should increase after close (after_open: {}, after_close: {})",
 			segwit_after_open,
 			segwit_after
 		);
@@ -2109,6 +2562,48 @@ mod coin_selection {
 			.unwrap();
 
 		assert!(!selected.is_empty());
+	}
+
+	/// list_spendable_outputs returns UTXOs from multiple address types when funded.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_list_spendable_outputs_includes_multiple_address_types() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config =
+			node_config(AddressType::NativeSegwit, vec![AddressType::Legacy, AddressType::Taproot]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		let taproot_addr =
+			node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 60_000), (legacy_addr, 50_000), (taproot_addr, 55_000)],
+		)
+		.await;
+
+		let spendable = node.onchain_payment().list_spendable_outputs().unwrap();
+		assert!(
+			spendable.len() >= 3,
+			"Should have at least 3 UTXOs from 3 address types, got {}",
+			spendable.len()
+		);
+
+		let total_value: u64 = spendable.iter().map(|u| u.value_sats).sum();
+		let expected_min = 60_000 + 50_000 + 55_000 - 5_000;
+		assert!(
+			total_value >= expected_min,
+			"Total spendable value should be >= {} (got {})",
+			expected_min,
+			total_value
+		);
+
+		node.stop().unwrap();
 	}
 
 	/// Fee calculation considers all wallets.
