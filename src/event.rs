@@ -669,6 +669,26 @@ where
 					if info.status == PaymentStatus::Succeeded
 						|| matches!(info.kind, PaymentKind::Spontaneous { .. })
 					{
+						let stored_preimage = match info.kind {
+							PaymentKind::Bolt11 { preimage, .. }
+							| PaymentKind::Bolt11Jit { preimage, .. }
+							| PaymentKind::Bolt12Offer { preimage, .. }
+							| PaymentKind::Bolt12Refund { preimage, .. }
+							| PaymentKind::Spontaneous { preimage, .. } => preimage,
+							_ => None,
+						};
+
+						if let Some(preimage) = stored_preimage {
+							log_info!(
+								self.logger,
+								"Re-claiming previously succeeded payment with hash {} of {}msat",
+								hex_utils::to_string(&payment_hash.0),
+								amount_msat,
+							);
+							self.channel_manager.claim_funds(preimage);
+							return Ok(());
+						}
+
 						log_info!(
 							self.logger,
 							"Refused duplicate inbound payment from payment hash {} of {}msat",
