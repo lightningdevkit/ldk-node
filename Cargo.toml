@@ -4,7 +4,7 @@ exclude = ["bindings/uniffi-bindgen"]
 
 [package]
 name = "ldk-node"
-version = "0.7.0-rc.20"
+version = "0.7.0-rc.21"
 authors = ["Elias Rohrer <dev@tnull.de>"]
 homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
