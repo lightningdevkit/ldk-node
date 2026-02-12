@@ -127,7 +127,8 @@ pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `route_parameters`                   | None               |
+/// | `route_parameters`                     | None               |
+/// | `hrn_config`                           | Some(..)           |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -192,6 +193,10 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// Configuration options for Human-Readable Names ([BIP 353]).
+	///
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	pub hrn_config: Option<HumanReadableNamesConfig>,
 }
 
 impl Default for Config {
@@ -206,6 +211,43 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			hrn_config: Some(HumanReadableNamesConfig::default()),
+		}
+	}
+}
+
+/// Configuration options for how our node resolves Human-Readable Names (HRNs) when acting as a client.
+#[derive(Debug, Clone)]
+pub enum HRNResolverConfig {
+	/// Use bLIP-32 to ask other nodes to resolve names for us.
+	Blip32Onion,
+	/// Resolve names locally using a specific DNS server.
+	LocalDns {
+		/// The IP and port of the DNS server (e.g., "8.8.8.8:53").
+		dns_server_address: String,
+	},
+}
+
+/// Configuration options for Human-Readable Names ([BIP 353]).
+///
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+#[derive(Debug, Clone)]
+pub struct HumanReadableNamesConfig {
+	/// This sets how our node resolves names when we want to send a payment.
+	pub client_resolution_config: HRNResolverConfig,
+	/// If set, this allows others to use our node for HRN resolutions ([bLIP-32]).
+	///
+	/// [bLIP-32]: https://github.com/lightning/blips/blob/master/blip-0032.md
+	pub disable_hrn_resolution_service: bool,
+}
+
+impl Default for HumanReadableNamesConfig {
+	fn default() -> Self {
+		HumanReadableNamesConfig {
+			client_resolution_config: HRNResolverConfig::LocalDns {
+				dns_server_address: "8.8.8.8:53".to_string(),
+			},
+			disable_hrn_resolution_service: false,
 		}
 	}
 }

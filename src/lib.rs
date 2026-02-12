@@ -226,7 +226,7 @@ pub struct Node {
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
-	hrn_resolver: Arc<HRNResolver>,
+	hrn_resolver: Option<Arc<HRNResolver>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -979,7 +979,7 @@ impl Node {
 			self.bolt12_payment().into(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
-			Arc::clone(&self.hrn_resolver),
+			Arc::new(self.hrn_resolver.clone()),
 		)
 	}
 
@@ -1000,7 +1000,7 @@ impl Node {
 			self.bolt12_payment(),
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
-			Arc::clone(&self.hrn_resolver),
+			Arc::new(self.hrn_resolver.clone()),
 		))
 	}
 
@@ -1877,4 +1877,63 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
+}
+
+/// Testing utils for DNSSEC proof resolution of offers associated with the given Human-Readable Name.
+
+#[cfg(feature = "hrn_tests")]
+pub mod dnssec_testing_utils {
+	use std::collections::HashMap;
+	#[cfg(feature = "uniffi")]
+	use std::sync::Arc;
+	use std::sync::{LazyLock, Mutex};
+
+	#[cfg(not(feature = "uniffi"))]
+	type Offer = lightning::offers::offer::Offer;
+	#[cfg(feature = "uniffi")]
+	type Offer = Arc<crate::ffi::Offer>;
+
+	#[cfg(not(feature = "uniffi"))]
+	type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
+	#[cfg(feature = "uniffi")]
+	type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
+
+	static OFFER_OVERRIDE_MAP: LazyLock<Mutex<HashMap<HumanReadableName, Offer>>> =
+		LazyLock::new(|| Mutex::new(HashMap::new()));
+
+	/// Sets a testing override for DNSSEC proof resolution of offers associated with the given Human-Readable Name.
+	pub fn set_testing_dnssec_proof_offer_resolution_override(hrn: &str, offer: Offer) {
+		let hrn_key = {
+			#[cfg(not(feature = "uniffi"))]
+			{
+				lightning::onion_message::dns_resolution::HumanReadableName::from_encoded(hrn)
+					.unwrap()
+			}
+
+			#[cfg(feature = "uniffi")]
+			{
+				Arc::new(crate::ffi::HumanReadableName::from_encoded(hrn).unwrap())
+			}
+		};
+
+		OFFER_OVERRIDE_MAP.lock().unwrap().insert(hrn_key, offer);
+	}
+
+	/// Retrieves a testing override for DNSSEC proof resolution of offers associated with the given Human-Readable Names.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn get_testing_offer_override(hrn: Option<HumanReadableName>) -> Option<Offer> {
+		OFFER_OVERRIDE_MAP.lock().unwrap().get(&hrn?).cloned()
+	}
+
+	/// Retrieves a testing override for DNSSEC proof resolution of offers associated with the given Human-Readable Names.
+	#[cfg(feature = "uniffi")]
+	pub fn get_testing_offer_override(hrn: Option<HumanReadableName>) -> Option<Offer> {
+		let offer = OFFER_OVERRIDE_MAP.lock().unwrap().get(&hrn?).cloned().unwrap();
+		Some(offer)
+	}
+
+	/// Clears all testing overrides for DNSSEC proof resolution of offers.
+	pub fn clear_testing_overrides() {
+		OFFER_OVERRIDE_MAP.lock().unwrap().clear();
+	}
 }

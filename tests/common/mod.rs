@@ -26,7 +26,10 @@ use bitcoin::{
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
-use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
+use ldk_node::config::{
+	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
+	HumanReadableNamesConfig,
+};
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
@@ -319,7 +322,7 @@ pub(crate) use setup_builder;
 
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool,
+	anchors_trusted_no_reserve: bool, first_node_is_not_hrn_resolver: bool,
 ) -> (TestNode, TestNode) {
 	setup_two_nodes_with_store(
 		chain_source,
@@ -327,21 +330,31 @@ pub(crate) fn setup_two_nodes(
 		anchor_channels,
 		anchors_trusted_no_reserve,
 		TestStoreType::TestSyncStore,
+		first_node_is_not_hrn_resolver,
 	)
 }
 
 pub(crate) fn setup_two_nodes_with_store(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
+	first_node_is_not_hrn_resolver: bool,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let mut config_a = random_config(anchor_channels);
 	config_a.store_type = store_type;
+
+	if first_node_is_not_hrn_resolver {
+		config_a.node_config.hrn_config = Some(HumanReadableNamesConfig {
+			client_resolution_config: HRNResolverConfig::Blip32Onion,
+			disable_hrn_resolution_service: true,
+		});
+	}
 	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	config_b.store_type = store_type;
+
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}

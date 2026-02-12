@@ -46,7 +46,8 @@ pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
 use crate::builder::sanitize_alias;
 pub use crate::config::{
 	default_config, AnchorChannelsConfig, BackgroundSyncConfig, ElectrumSyncConfig,
-	EsploraSyncConfig, MaxDustHTLCExposure, SyncTimeoutsConfig,
+	EsploraSyncConfig, HRNResolverConfig, HumanReadableNamesConfig, MaxDustHTLCExposure,
+	SyncTimeoutsConfig,
 };
 pub use crate::entropy::{generate_entropy_mnemonic, EntropyError, NodeEntropy, WordCount};
 use crate::error::Error;
@@ -297,6 +298,7 @@ impl std::fmt::Display for Offer {
 /// This struct can also be used for LN-Address recipients.
 ///
 /// [Homograph Attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
+#[derive(Eq, Hash, PartialEq)]
 pub struct HumanReadableName {
 	pub(crate) inner: LdkHumanReadableName,
 }
