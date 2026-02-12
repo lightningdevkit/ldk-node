@@ -148,7 +148,7 @@ use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
-use liquidity::{LSPS1Liquidity, LiquiditySource};
+use liquidity::{LSPS1Liquidity, LSPS5Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
@@ -1026,6 +1026,32 @@ impl Node {
 		Arc::new(LSPS1Liquidity::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
+			Arc::clone(&self.logger),
+		))
+	}
+
+	/// Returns a liquidity handler allowing to handle webhooks and notifications via the [bLIP-55 / LSPS5] protocol.
+	///
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	#[cfg(not(feature = "uniffi"))]
+	pub fn lsps5_liquidity(&self) -> LSPS5Liquidity {
+		LSPS5Liquidity::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
+			Arc::clone(&self.logger),
+		)
+	}
+
+	/// Returns a liquidity handler allowing to handle webhooks and notifications via the [bLIP-55 / LSPS5] protocol.
+	///
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	#[cfg(feature = "uniffi")]
+	pub fn lsps5_liquidity(&self) -> Arc<LSPS5Liquidity> {
+		Arc::new(LSPS5Liquidity::new(
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.logger),
