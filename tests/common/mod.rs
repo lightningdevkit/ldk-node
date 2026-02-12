@@ -682,6 +682,38 @@ pub async fn open_channel_push_amt(
 	funding_txo_a
 }
 
+pub async fn open_channel_with_all(
+	node_a: &TestNode, node_b: &TestNode, should_announce: bool, electrsd: &ElectrsD,
+) -> OutPoint {
+	if should_announce {
+		node_a
+			.open_announced_channel_with_all(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				None,
+				None,
+			)
+			.unwrap();
+	} else {
+		node_a
+			.open_channel_with_all(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				None,
+				None,
+			)
+			.unwrap();
+	}
+	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
+
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(funding_txo_a, funding_txo_b);
+	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
+
+	funding_txo_a
+}
+
 pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 	expect_anchor_channel: bool, force_close: bool,

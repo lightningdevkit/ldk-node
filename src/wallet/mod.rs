@@ -65,6 +65,8 @@ pub(crate) enum OnchainSendAmount {
 pub(crate) mod persist;
 pub(crate) mod ser;
 
+const DUST_LIMIT_SATS: u64 = 546;
+
 pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
@@ -459,6 +461,87 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
+	/// Returns the maximum amount available for funding a channel, accounting for on-chain fees
+	/// and anchor reserves.
+	///
+	/// Uses a two-pass approach: first builds a temporary transaction to estimate fees, then
+	/// returns the spendable balance minus those fees.
+	pub(crate) fn get_max_funding_amount(
+		&self, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
+	) -> Result<u64, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		let balance = locked_wallet.balance();
+		let spendable_amount_sats =
+			self.get_balances_inner(balance, cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+
+		if spendable_amount_sats == 0 {
+			log_error!(
+				self.logger,
+				"Unable to determine max funding amount: no spendable funds available."
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		// Use a dummy P2WSH script (34 bytes) to match the size of a real funding output.
+		let dummy_p2wsh_script = ScriptBuf::new().to_p2wsh();
+
+		let tmp_tx = if cur_anchor_reserve_sats > DUST_LIMIT_SATS {
+			let change_address_info = locked_wallet.peek_address(KeychainKind::Internal, 0);
+			let mut tmp_tx_builder = locked_wallet.build_tx();
+			tmp_tx_builder
+				.drain_wallet()
+				.drain_to(dummy_p2wsh_script)
+				.add_recipient(
+					change_address_info.address.script_pubkey(),
+					Amount::from_sat(cur_anchor_reserve_sats),
+				)
+				.fee_rate(fee_rate);
+			match tmp_tx_builder.finish() {
+				Ok(psbt) => psbt.unsigned_tx,
+				Err(err) => {
+					log_error!(
+						self.logger,
+						"Failed to create temporary transaction for fee estimation: {err}"
+					);
+					return Err(err.into());
+				},
+			}
+		} else {
+			let mut tmp_tx_builder = locked_wallet.build_tx();
+			tmp_tx_builder.drain_wallet().drain_to(dummy_p2wsh_script).fee_rate(fee_rate);
+			match tmp_tx_builder.finish() {
+				Ok(psbt) => psbt.unsigned_tx,
+				Err(err) => {
+					log_error!(
+						self.logger,
+						"Failed to create temporary transaction for fee estimation: {err}"
+					);
+					return Err(err.into());
+				},
+			}
+		};
+
+		let estimated_tx_fee = locked_wallet.calculate_fee(&tmp_tx).map_err(|e| {
+			log_error!(self.logger, "Failed to calculate fee of temporary transaction: {e}");
+			e
+		})?;
+
+		// Cancel the temporary transaction to free up any used change addresses.
+		locked_wallet.cancel_tx(&tmp_tx);
+
+		let max_amount = spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat());
+
+		if max_amount < DUST_LIMIT_SATS {
+			log_error!(
+				self.logger,
+				"Unable to open channel: available funds would be consumed entirely by fees. Available: {spendable_amount_sats}sats, estimated fee: {estimated_tx_fee}sats.",
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		Ok(max_amount)
+	}
+
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?
@@ -482,7 +565,6 @@ impl Wallet {
 			let mut locked_wallet = self.inner.lock().unwrap();
 
 			// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
-			const DUST_LIMIT_SATS: u64 = 546;
 			let tx_builder = match send_amount {
 				OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
 					let mut tx_builder = locked_wallet.build_tx();

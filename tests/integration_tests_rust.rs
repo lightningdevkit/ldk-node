@@ -21,10 +21,10 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
 	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
-	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_config,
-	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType,
-	TestSyncStore,
+	open_channel_with_all, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	random_config, random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder,
+	setup_node, setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource,
+	TestStoreType, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
@@ -2505,4 +2505,108 @@ async fn persistence_backwards_compatibility() {
 	assert_eq!(old_balance, new_balance);
 
 	node_new.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_with_all_with_anchors() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 1_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let funding_txo = open_channel_with_all(&node_a, &node_b, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// After opening a channel with all balance, the remaining on-chain balance should only
+	// be the anchor reserve (25k sats by default) plus a small margin for change
+	let anchor_reserve_sat = 25_000;
+	let remaining_balance = node_a.list_balances().spendable_onchain_balance_sats;
+	assert!(
+		remaining_balance < anchor_reserve_sat + 500,
+		"Remaining balance {remaining_balance} should be close to the anchor reserve {anchor_reserve_sat}"
+	);
+
+	// Verify a channel was opened with most of the funds
+	let channels = node_a.list_channels();
+	assert_eq!(channels.len(), 1);
+	let channel = &channels[0];
+	assert!(channel.channel_value_sats > premine_amount_sat - anchor_reserve_sat - 500);
+	assert_eq!(channel.counterparty_node_id, node_b.node_id());
+	assert_eq!(channel.funding_txo.unwrap(), funding_txo);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_with_all_without_anchors() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 1_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let funding_txo = open_channel_with_all(&node_a, &node_b, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Without anchors, there should be no remaining balance
+	let remaining_balance = node_a.list_balances().spendable_onchain_balance_sats;
+	assert_eq!(
+		remaining_balance, 0,
+		"Remaining balance {remaining_balance} should be zero without anchor reserve"
+	);
+
+	// Verify a channel was opened with all the funds accounting for fees
+	let channels = node_a.list_channels();
+	assert_eq!(channels.len(), 1);
+	let channel = &channels[0];
+	assert!(channel.channel_value_sats > premine_amount_sat - 500);
+	assert_eq!(channel.counterparty_node_id, node_b.node_id());
+	assert_eq!(channel.funding_txo.unwrap(), funding_txo);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
 }
