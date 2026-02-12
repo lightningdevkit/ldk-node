@@ -458,9 +458,26 @@ interface ClosureReason {
 	PeerFeerateTooLow(u32 peer_feerate_sat_per_kw, u32 required_feerate_sat_per_kw);
 };
 
+dictionary Channel {
+	PublicKey counterparty_node_id;
+	ChannelId channel_id;
+};
+
+[Enum]
+interface TransactionType {
+	Funding(sequence<Channel> channels);
+	CooperativeClose(PublicKey counterparty_node_id, ChannelId channel_id);
+	UnilateralClose(PublicKey counterparty_node_id, ChannelId channel_id);
+	AnchorBump(PublicKey counterparty_node_id, ChannelId channel_id);
+	Claim(PublicKey counterparty_node_id, ChannelId channel_id);
+	Sweep(sequence<Channel> channels);
+	Splice(PublicKey counterparty_node_id, ChannelId channel_id);
+	OnchainSend();
+};
+
 [Enum]
 interface PaymentKind {
-	Onchain(Txid txid, ConfirmationStatus status);
+	Onchain(Txid txid, ConfirmationStatus status, TransactionType? tx_type);
 	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
 	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, u64? counterparty_skimmed_fee_msat, LSPFeeLimits lsp_fee_limits);
 	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);

@@ -54,7 +54,8 @@ pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, Nod
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
-	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
+	Channel, ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
+	TransactionType,
 };
 pub use crate::payment::UnifiedPaymentResult;
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
