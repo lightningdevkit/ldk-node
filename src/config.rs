@@ -149,6 +149,12 @@ pub struct Config {
 	///
 	/// [`listening_addresses`]: Config::listening_addresses
 	pub announcement_addresses: Option<Vec<SocketAddress>>,
+	/// The address which the node will use as a Tor proxy to connect to peer OnionV3 addresses.
+	///
+	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+	///
+	/// [`tor_proxy_address`]: Config::tor_proxy_address
+	pub tor_proxy_address: Option<core::net::SocketAddr>,
 	/// The node alias that will be used when broadcasting announcements to the gossip network.
 	///
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
@@ -201,6 +207,7 @@ impl Default for Config {
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
 			announcement_addresses: None,
+			tor_proxy_address: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
+use lightning::sign::RandomBytes;
 
 use crate::logger::{log_error, log_info, LdkLogger};
 use crate::types::PeerManager;
@@ -25,6 +26,8 @@ where
 	pending_connections:
 		Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>,
 	peer_manager: Arc<PeerManager>,
+	tor_proxy_addr: Option<core::net::SocketAddr>,
+	tor_proxy_rng: Arc<RandomBytes>,
 	logger: L,
 }
 
@@ -32,9 +35,14 @@ impl<L: Deref + Clone + Sync + Send> ConnectionManager<L>
 where
 	L::Target: LdkLogger,
 {
-	pub(crate) fn new(peer_manager: Arc<PeerManager>, logger: L) -> Self {
+	pub(crate) fn new(
+		peer_manager: Arc<PeerManager>, tor_proxy_addr: Option<core::net::SocketAddr>,
+		ephemeral_random_data: [u8; 32], logger: L,
+	) -> Self {
 		let pending_connections = Mutex::new(HashMap::new());
-		Self { pending_connections, peer_manager, logger }
+		let tor_proxy_rng = Arc::new(RandomBytes::new(ephemeral_random_data));
+
+		Self { pending_connections, peer_manager, tor_proxy_addr, tor_proxy_rng, logger }
 	}
 
 	pub(crate) async fn connect_peer_if_necessary(
@@ -64,27 +72,73 @@ where
 
 		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
 
-		let socket_addr = addr
-			.to_socket_addrs()
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to resolve network address {}: {}", addr, e);
-				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
-				Error::InvalidSocketAddress
-			})?
-			.next()
-			.ok_or_else(|| {
-				log_error!(self.logger, "Failed to resolve network address {}", addr);
+		let res = if let SocketAddress::OnionV2(old_onion_addr) = addr {
+			log_error!(
+				self.logger,
+				"Failed to resolve network address {:?}: Resolution of OnionV2 addresses is currently unsupported.",
+				old_onion_addr
+			);
+			self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
+			return Err(Error::InvalidSocketAddress);
+		} else if let SocketAddress::OnionV3 { .. } = addr {
+			let proxy_addr = self.tor_proxy_addr.ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to resolve network address {:?}: Tor proxy address is unset.",
+					addr
+				);
 				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
 				Error::InvalidSocketAddress
 			})?;
+			let connection_future = lightning_net_tokio::tor_connect_outbound(
+				Arc::clone(&self.peer_manager),
+				node_id,
+				addr.clone(),
+				proxy_addr,
+				self.tor_proxy_rng.clone(),
+			);
+			self.await_connection(connection_future, node_id, addr).await
+		} else {
+			let socket_addr = addr
+				.to_socket_addrs()
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to resolve network address {}: {}", addr, e);
+					self.propagate_result_to_subscribers(
+						&node_id,
+						Err(Error::InvalidSocketAddress),
+					);
+					Error::InvalidSocketAddress
+				})?
+				.next()
+				.ok_or_else(|| {
+					log_error!(self.logger, "Failed to resolve network address {}", addr);
+					self.propagate_result_to_subscribers(
+						&node_id,
+						Err(Error::InvalidSocketAddress),
+					);
+					Error::InvalidSocketAddress
+				})?;
+			let connection_future = lightning_net_tokio::connect_outbound(
+				Arc::clone(&self.peer_manager),
+				node_id,
+				socket_addr,
+			);
+			self.await_connection(connection_future, node_id, addr).await
+		};
 
-		let connection_future = lightning_net_tokio::connect_outbound(
-			Arc::clone(&self.peer_manager),
-			node_id,
-			socket_addr,
-		);
+		self.propagate_result_to_subscribers(&node_id, res);
 
-		let res = match connection_future.await {
+		res
+	}
+
+	async fn await_connection<F, CF>(
+		&self, connection_future: F, node_id: PublicKey, addr: SocketAddress,
+	) -> Result<(), Error>
+	where
+		F: std::future::Future<Output = Option<CF>>,
+		CF: std::future::Future<Output = ()>,
+	{
+		match connection_future.await {
 			Some(connection_closed_future) => {
 				let mut connection_closed_future = Box::pin(connection_closed_future);
 				loop {
@@ -106,11 +160,7 @@ where
 				log_error!(self.logger, "Failed to connect to peer: {}@{}", node_id, addr);
 				Err(Error::ConnectionFailed)
 			},
-		};
-
-		self.propagate_result_to_subscribers(&node_id, res);
-
-		res
+		}
 	}
 
 	fn register_or_subscribe_pending_connection(
