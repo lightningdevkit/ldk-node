@@ -62,9 +62,7 @@ pub enum Event {
 	/// A sent payment was successful.
 	PaymentSuccessful {
 		/// A local identifier used to track the payment.
-		///
-		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
-		payment_id: Option<PaymentId>,
+		payment_id: PaymentId,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The preimage to the `payment_hash`.
@@ -79,9 +77,7 @@ pub enum Event {
 	/// A sent payment has failed.
 	PaymentFailed {
 		/// A local identifier used to track the payment.
-		///
-		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
-		payment_id: Option<PaymentId>,
+		payment_id: PaymentId,
 		/// The hash of the payment.
 		///
 		/// This will be `None` if the payment failed before receiving an invoice when paying a
@@ -97,9 +93,7 @@ pub enum Event {
 	/// A payment has been received.
 	PaymentReceived {
 		/// A local identifier used to track the payment.
-		///
-		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
-		payment_id: Option<PaymentId>,
+		payment_id: PaymentId,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The value, in thousandths of a satoshi, that has been received.
@@ -262,17 +256,17 @@ impl_writeable_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
-		(3, payment_id, option),
+		(3, payment_id, required),
 		(5, payment_preimage, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, option),
 		(1, reason, upgradable_option),
-		(3, payment_id, option),
+		(3, payment_id, required),
 	},
 	(2, PaymentReceived) => {
 		(0, payment_hash, required),
-		(1, payment_id, option),
+		(1, payment_id, required),
 		(2, amount_msat, required),
 		(3, custom_records, optional_vec),
 	},
@@ -641,9 +635,10 @@ where
 				claim_deadline,
 				onion_fields,
 				counterparty_skimmed_fee_msat,
+				payment_id,
 				..
 			} => {
-				let payment_id = PaymentId(payment_hash.0);
+				let payment_id = payment_id.unwrap_or(PaymentId(payment_hash.0));
 				if let Some(info) = self.payment_store.get(&payment_id) {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -750,46 +745,6 @@ where
 							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for JIT payments."),
 						}
 					}
-
-					// If this is known by the store but ChannelManager doesn't know the preimage,
-					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
-					// user interaction.
-					match info.kind {
-						PaymentKind::Bolt11 { preimage, .. }
-						| PaymentKind::Bolt11Jit { preimage, .. } => {
-							if purpose.preimage().is_none() {
-								debug_assert!(
-									preimage.is_none(),
-									"We would have registered the preimage if we knew"
-								);
-
-								let custom_records = onion_fields
-									.map(|cf| {
-										cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect()
-									})
-									.unwrap_or_default();
-								let event = Event::PaymentClaimable {
-									payment_id,
-									payment_hash,
-									claimable_amount_msat: amount_msat,
-									claim_deadline,
-									custom_records,
-								};
-								match self.event_queue.add_event(event).await {
-									Ok(_) => return Ok(()),
-									Err(e) => {
-										log_error!(
-											self.logger,
-											"Failed to push to event queue: {}",
-											e
-										);
-										return Err(ReplayEvent());
-									},
-								};
-							}
-						},
-						_ => {},
-					}
 				}
 
 				log_info!(
@@ -799,7 +754,46 @@ where
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => {
+					PaymentPurpose::Bolt11InvoicePayment {
+						payment_preimage,
+						payment_secret,
+						..
+					} => {
+						let kind = PaymentKind::Bolt11 {
+							hash: payment_hash,
+							preimage: payment_preimage,
+							secret: Some(payment_secret),
+						};
+
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(amount_msat),
+							None,
+							PaymentDirection::Inbound,
+							PaymentStatus::Pending,
+						);
+
+						match self.payment_store.insert(payment) {
+							Ok(false) => (),
+							Ok(true) => {
+								log_error!(
+									self.logger,
+									"Bolt11InvoicePayment with ID {} was previously known",
+									payment_id,
+								);
+								debug_assert!(false);
+							},
+							Err(e) => {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								debug_assert!(false);
+							},
+						}
 						payment_preimage
 					},
 					PaymentPurpose::Bolt12OfferPayment {
@@ -898,25 +892,47 @@ where
 				if let Some(preimage) = payment_preimage {
 					self.channel_manager.claim_funds(preimage);
 				} else {
-					log_error!(
-						self.logger,
-						"Failed to claim payment with ID {}: preimage unknown.",
+					// If ChannelManager doesn't know the preimage the payment  needs to be
+					// manually claimed via user interaction.
+					//if purpose.preimage().is_none() {
+					let custom_records = onion_fields
+						.map(|cf| cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect())
+						.unwrap_or_default();
+					let event = Event::PaymentClaimable {
 						payment_id,
-					);
-					self.channel_manager.fail_htlc_backwards(&payment_hash);
-
-					let update = PaymentDetailsUpdate {
-						hash: Some(Some(payment_hash)),
-						status: Some(PaymentStatus::Failed),
-						..PaymentDetailsUpdate::new(payment_id)
+						payment_hash,
+						claimable_amount_msat: amount_msat,
+						claim_deadline,
+						custom_records,
 					};
-					match self.payment_store.update(&update) {
+					match self.event_queue.add_event(event).await {
 						Ok(_) => return Ok(()),
 						Err(e) => {
-							log_error!(self.logger, "Failed to access payment store: {}", e);
+							log_error!(self.logger, "Failed to push to event queue: {}", e);
 							return Err(ReplayEvent());
 						},
 					};
+					//}
+
+					//log_error!(
+					//	self.logger,
+					//	"Failed to claim payment with ID {}: preimage unknown.",
+					//	payment_id,
+					//);
+					//self.channel_manager.fail_htlc_backwards(&payment_hash);
+
+					//let update = PaymentDetailsUpdate {
+					//	hash: Some(Some(payment_hash)),
+					//	status: Some(PaymentStatus::Failed),
+					//	..PaymentDetailsUpdate::new(payment_id)
+					//};
+					//match self.payment_store.update(&update) {
+					//	Ok(_) => return Ok(()),
+					//	Err(e) => {
+					//		log_error!(self.logger, "Failed to access payment store: {}", e);
+					//		return Err(ReplayEvent());
+					//	},
+					//};
 				}
 			},
 			LdkEvent::PaymentClaimed {
@@ -927,9 +943,9 @@ where
 				htlcs: _,
 				sender_intended_total_msat: _,
 				onion_fields,
-				payment_id: _,
+				payment_id,
 			} => {
-				let payment_id = PaymentId(payment_hash.0);
+				let payment_id = payment_id.unwrap_or(PaymentId(payment_hash.0));
 				log_info!(
 					self.logger,
 					"Claimed payment with ID {} from payment hash {} of {}msat.",
@@ -1002,7 +1018,7 @@ where
 				}
 
 				let event = Event::PaymentReceived {
-					payment_id: Some(payment_id),
+					payment_id,
 					payment_hash,
 					amount_msat,
 					custom_records: onion_fields
@@ -1063,7 +1079,7 @@ where
 					);
 				});
 				let event = Event::PaymentSuccessful {
-					payment_id: Some(payment_id),
+					payment_id,
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
@@ -1098,8 +1114,7 @@ where
 					},
 				};
 
-				let event =
-					Event::PaymentFailed { payment_id: Some(payment_id), payment_hash, reason };
+				let event = Event::PaymentFailed { payment_id, payment_hash, reason };
 				match self.event_queue.add_event(event).await {
 					Ok(_) => return Ok(()),
 					Err(e) => {

@@ -214,9 +214,9 @@ interface Bolt11Payment {
 	[Throws=NodeError]
 	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
-	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
+	void claim_for_id(PaymentId payment_id, u64 claimable_amount_msat, PaymentPreimage preimage);
 	[Throws=NodeError]
-	void fail_for_hash(PaymentHash payment_hash);
+	void fail_for_id(PaymentId payment_id);
 	[Throws=NodeError]
 	Bolt11Invoice receive(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
 	[Throws=NodeError]
@@ -413,9 +413,9 @@ enum VssHeaderProviderError {
 
 [Enum]
 interface Event {
-	PaymentSuccessful(PaymentId? payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat);
-	PaymentFailed(PaymentId? payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
-	PaymentReceived(PaymentId? payment_id, PaymentHash payment_hash, u64 amount_msat, sequence<CustomTlvRecord> custom_records);
+	PaymentSuccessful(PaymentId payment_id, PaymentHash payment_hash, PaymentPreimage? payment_preimage, u64? fee_paid_msat);
+	PaymentFailed(PaymentId payment_id, PaymentHash? payment_hash, PaymentFailureReason? reason);
+	PaymentReceived(PaymentId payment_id, PaymentHash payment_hash, u64 amount_msat, sequence<CustomTlvRecord> custom_records);
 	PaymentClaimable(PaymentId payment_id, PaymentHash payment_hash, u64 claimable_amount_msat, u32? claim_deadline, sequence<CustomTlvRecord> custom_records);
 	PaymentForwarded(ChannelId prev_channel_id, ChannelId next_channel_id, UserChannelId?
 	prev_user_channel_id, UserChannelId? next_user_channel_id, PublicKey? prev_node_id, PublicKey? next_node_id, u64? total_fee_earned_msat, u64? skimmed_fee_msat, boolean claim_from_onchain_tx, u64? outbound_amount_forwarded_msat);

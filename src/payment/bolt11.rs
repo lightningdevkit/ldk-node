@@ -22,6 +22,7 @@ use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use rand::RngCore;
 
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
@@ -99,20 +100,23 @@ impl Bolt11Payment {
 		}
 
 		let invoice = maybe_deref(invoice);
-		let payment_hash = invoice.payment_hash();
-		let payment_id = PaymentId(invoice.payment_hash().0);
-		if let Some(payment) = self.payment_store.get(&payment_id) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
+		let mut random_bytes = [0u8; 32];
+		rand::rng().fill_bytes(&mut random_bytes);
+		let payment_id = PaymentId(random_bytes);
+		// TODO: re-add checking for duplicate payments?
+		//if let Some(payment) = self.payment_store.get(&payment_id) {
+		//	if payment.status == PaymentStatus::Pending
+		//		|| payment.status == PaymentStatus::Succeeded
+		//	{
+		//		log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+		//		return Err(Error::DuplicatePayment);
+		//	}
+		//}
 
 		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let payment_hash = invoice.payment_hash();
 		let payment_secret = Some(*invoice.payment_secret());
 
 		let optional_params = OptionalBolt11PaymentParams {
@@ -210,15 +214,18 @@ impl Bolt11Payment {
 		}
 
 		let payment_hash = invoice.payment_hash();
-		let payment_id = PaymentId(invoice.payment_hash().0);
-		if let Some(payment) = self.payment_store.get(&payment_id) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
+		let mut random_bytes = [0u8; 32];
+		rand::rng().fill_bytes(&mut random_bytes);
+		let payment_id = PaymentId(random_bytes);
+		// TODO: re-add checking for duplicate payments?
+		//if let Some(payment) = self.payment_store.get(&payment_id) {
+		//	if payment.status == PaymentStatus::Pending
+		//		|| payment.status == PaymentStatus::Succeeded
+		//	{
+		//		log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+		//		return Err(Error::DuplicatePayment);
+		//	}
+		//}
 
 		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
@@ -313,32 +320,42 @@ impl Bolt11Payment {
 	/// [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`PaymentReceived`]: crate::Event::PaymentReceived
-	pub fn claim_for_hash(
-		&self, payment_hash: PaymentHash, claimable_amount_msat: u64, preimage: PaymentPreimage,
+	pub fn claim_for_id(
+		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
-		let payment_id = PaymentId(payment_hash.0);
-
-		let expected_payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
-
-		if expected_payment_hash != payment_hash {
-			log_error!(
-				self.logger,
-				"Failed to manually claim payment as the given preimage doesn't match the hash {}",
-				payment_hash
-			);
-			return Err(Error::InvalidPaymentPreimage);
-		}
-
 		if let Some(details) = self.payment_store.get(&payment_id) {
 			// For payments requested via `receive*_via_jit_channel_for_hash()`
 			// `skimmed_fee_msat` held by LSP must be taken into account.
-			let skimmed_fee_msat = match details.kind {
+			let (skimmed_fee_msat, payment_hash_opt) = match details.kind {
+				PaymentKind::Bolt11 { hash, .. } => (0, Some(hash)),
+				PaymentKind::Bolt12Offer { hash, .. } => (0, hash),
+				PaymentKind::Bolt12Refund { hash, .. } => (0, hash),
 				PaymentKind::Bolt11Jit {
+					hash,
 					counterparty_skimmed_fee_msat: Some(skimmed_fee_msat),
 					..
-				} => skimmed_fee_msat,
-				_ => 0,
+				} => (skimmed_fee_msat, Some(hash)),
+				_ => (0, None),
 			};
+
+			let payment_hash = payment_hash_opt.ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to manually claim payment due to unknown payment hash",
+				);
+				Error::InvalidPaymentId
+			})?;
+
+			let expected_payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
+			if expected_payment_hash != payment_hash {
+				log_error!(
+					self.logger,
+					"Failed to manually claim payment as the given preimage doesn't match the hash {}",
+					payment_hash
+				);
+				return Err(Error::InvalidPaymentPreimage);
+			}
+
 			if let Some(invoice_amount_msat) = details.amount_msat {
 				if claimable_amount_msat < invoice_amount_msat - skimmed_fee_msat {
 					log_error!(
@@ -352,10 +369,10 @@ impl Bolt11Payment {
 		} else {
 			log_error!(
 				self.logger,
-				"Failed to manually claim unknown payment with hash: {}",
-				payment_hash
+				"Failed to manually claim unknown payment with ID: {}",
+				payment_id
 			);
-			return Err(Error::InvalidPaymentHash);
+			return Err(Error::InvalidPaymentId);
 		}
 
 		self.channel_manager.claim_funds(preimage);
@@ -375,8 +392,31 @@ impl Bolt11Payment {
 	/// [`receive_for_hash`]: Self::receive_for_hash
 	/// [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
-	pub fn fail_for_hash(&self, payment_hash: PaymentHash) -> Result<(), Error> {
-		let payment_id = PaymentId(payment_hash.0);
+	pub fn fail_for_id(&self, payment_id: PaymentId) -> Result<(), Error> {
+		let payment_hash = if let Some(details) = self.payment_store.get(&payment_id) {
+			let payment_hash_opt = match details.kind {
+				PaymentKind::Bolt11 { hash, .. } => Some(hash),
+				PaymentKind::Bolt12Offer { hash, .. } => hash,
+				PaymentKind::Bolt12Refund { hash, .. } => hash,
+				PaymentKind::Bolt11Jit { hash, .. } => Some(hash),
+				_ => None,
+			};
+
+			payment_hash_opt.ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to manually fail payment due to unknown payment hash",
+				);
+				Error::InvalidPaymentId
+			})?
+		} else {
+			log_error!(
+				self.logger,
+				"Failed to manually fail unknown payment with ID: {}",
+				payment_id
+			);
+			return Err(Error::InvalidPaymentId);
+		};
 
 		let update = PaymentDetailsUpdate {
 			status: Some(PaymentStatus::Failed),
@@ -388,16 +428,16 @@ impl Bolt11Payment {
 			Ok(DataStoreUpdateResult::NotFound) => {
 				log_error!(
 					self.logger,
-					"Failed to manually fail unknown payment with hash {}",
-					payment_hash,
+					"Failed to manually fail unknown payment with ID {}",
+					payment_id,
 				);
-				return Err(Error::InvalidPaymentHash);
+				return Err(Error::InvalidPaymentId);
 			},
 			Err(e) => {
 				log_error!(
 					self.logger,
-					"Failed to manually fail payment with hash {}: {}",
-					payment_hash,
+					"Failed to manually fail payment with ID {}: {}",
+					payment_id,
 					e
 				);
 				return Err(e);
@@ -502,36 +542,6 @@ impl Bolt11Payment {
 				},
 			}
 		};
-
-		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
-		let id = PaymentId(payment_hash.0);
-		let preimage = if manual_claim_payment_hash.is_none() {
-			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
-			// will know the preimage at this point.
-			let res = self
-				.channel_manager
-				.get_payment_preimage(payment_hash, payment_secret.clone())
-				.ok();
-			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
-			res
-		} else {
-			None
-		};
-		let kind = PaymentKind::Bolt11 {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.payment_store.insert(payment)?;
 
 		Ok(invoice)
 	}
@@ -727,7 +737,9 @@ impl Bolt11Payment {
 			max_total_opening_fee_msat: lsp_total_opening_fee,
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
 		};
-		let id = PaymentId(payment_hash.0);
+		let mut random_bytes = [0u8; 32];
+		rand::rng().fill_bytes(&mut random_bytes);
+		let id = PaymentId(random_bytes);
 		let preimage =
 			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
 		let kind = PaymentKind::Bolt11Jit {
