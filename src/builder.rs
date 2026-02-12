@@ -1294,6 +1294,7 @@ fn build_with_store_internal(
 		wallet_persister,
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
+		Arc::clone(&chain_source),
 		Arc::clone(&payment_store),
 		Arc::clone(&config),
 		Arc::clone(&logger),

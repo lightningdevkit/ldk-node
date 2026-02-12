@@ -54,7 +54,7 @@ use crate::payment::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PendingPaymentDetails,
 };
 use crate::types::{Broadcaster, PaymentStore, PendingPaymentStore};
-use crate::Error;
+use crate::{ChainSource, Error};
 
 pub(crate) enum OnchainSendAmount {
 	ExactRetainingReserve { amount_sats: u64, cur_anchor_reserve_sats: u64 },
@@ -71,6 +71,7 @@ pub(crate) struct Wallet {
 	persister: Mutex<KVStoreWalletPersister>,
 	broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
+	chain_source: Arc<ChainSource>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
@@ -81,8 +82,9 @@ impl Wallet {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
 		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
-		fee_estimator: Arc<OnchainFeeEstimator>, payment_store: Arc<PaymentStore>,
-		config: Arc<Config>, logger: Arc<Logger>, pending_payment_store: Arc<PendingPaymentStore>,
+		fee_estimator: Arc<OnchainFeeEstimator>, chain_source: Arc<ChainSource>,
+		payment_store: Arc<PaymentStore>, config: Arc<Config>, logger: Arc<Logger>,
+		pending_payment_store: Arc<PendingPaymentStore>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
@@ -91,6 +93,7 @@ impl Wallet {
 			persister,
 			broadcaster,
 			fee_estimator,
+			chain_source,
 			payment_store,
 			config,
 			logger,
@@ -186,19 +189,6 @@ impl Wallet {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
 			Error::PersistenceFailed
 		})?;
-
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-
-		Ok(())
-	}
-
-	pub(crate) fn insert_txo(&self, outpoint: OutPoint, txout: TxOut) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		locked_wallet.insert_txout(outpoint, txout);
 
 		let mut locked_persister = self.persister.lock().unwrap();
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
@@ -1038,6 +1028,25 @@ impl Listen for Wallet {
 				block.header.block_hash(),
 				height
 			);
+		}
+
+		// In order to be able to reliably calculate fees the `Wallet` needs access to the previous
+		// ouput data. To this end, we here insert any ouputs of transactions that LDK is intersted
+		// in (e.g., funding transaction ouputs) into the wallet's transaction graph when we see
+		// them, so it is reliably able to calculate fees for subsequent spends.
+		//
+		// FIXME: technically, we should also do this for mempool transactions. However, at the
+		// current time fixing the edge case doesn't seem worth the additional conplexity /
+		// additional overhead..
+		let registered_txids = self.chain_source.registered_txids();
+		for tx in &block.txdata {
+			let txid = tx.compute_txid();
+			if registered_txids.contains(&txid) {
+				for (vout, txout) in tx.output.iter().enumerate() {
+					let outpoint = OutPoint { txid, vout: vout as u32 };
+					locked_wallet.insert_txout(outpoint, txout.clone());
+				}
+			}
 		}
 
 		match locked_wallet.apply_block_events(block, height) {
