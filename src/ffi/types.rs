@@ -54,7 +54,8 @@ pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, Nod
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
-	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
+	ConfirmationStatus, ForwardedPaymentId, LSPFeeLimits, PaymentDirection, PaymentKind,
+	PaymentStatus,
 };
 pub use crate::payment::UnifiedPaymentResult;
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
@@ -722,6 +723,24 @@ impl UniffiCustomTypeConverter for PaymentId {
 	}
 }
 
+impl UniffiCustomTypeConverter for ForwardedPaymentId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
+			let bytes_res = bytes_vec.try_into();
+			if let Ok(bytes) = bytes_res {
+				return Ok(ForwardedPaymentId(bytes));
+			}
+		}
+		Err(Error::InvalidPaymentId.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&obj.0)
+	}
+}
+
 impl UniffiCustomTypeConverter for PaymentHash {
 	type Builtin = String;
 
@@ -786,6 +805,27 @@ impl UniffiCustomTypeConverter for ChannelId {
 			}
 		}
 		Err(Error::InvalidChannelId.into())
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		hex_utils::to_string(&obj.0)
+	}
+}
+
+use crate::payment::store::ChannelPairStatsId;
+
+impl UniffiCustomTypeConverter for ChannelPairStatsId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		if let Some(hex_vec) = hex_utils::to_vec(&val) {
+			if hex_vec.len() == 72 {
+				let mut id = [0u8; 72];
+				id.copy_from_slice(&hex_vec[..]);
+				return Ok(Self(id));
+			}
+		}
+		Err(Error::InvalidChannelId.into()) // Reuse this error for now
 	}
 
 	fn from_custom(obj: Self) -> Self::Builtin {
