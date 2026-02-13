@@ -134,6 +134,8 @@ use event::{EventHandler, EventQueue};
 use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 #[cfg(feature = "uniffi")]
 use ffi::*;
+#[cfg(feature = "uniffi")]
+pub use ffi::{FfiDynStore, ForeignDynStoreTrait, IOError};
 use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
@@ -160,11 +162,13 @@ use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
 use runtime::Runtime;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
-	Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, HRNResolver,
+	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{
+	ChannelDetails, CustomTlvRecord, DynStore, DynStoreWrapper, PeerDetails, SyncAndAsyncKVStore,
+	UserChannelId,
+};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
