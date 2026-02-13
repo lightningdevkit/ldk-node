@@ -131,6 +131,12 @@ pub enum Error {
 	AsyncPaymentServicesDisabled,
 	/// Parsing a Human-Readable Name has failed.
 	HrnParsingFailed,
+	/// LNURL-auth authentication failed.
+	LnurlAuthFailed,
+	/// LNURL-auth authentication timed out.
+	LnurlAuthTimeout,
+	/// The provided lnurl is invalid.
+	InvalidLnurl,
 }
 
 impl fmt::Display for Error {
@@ -213,6 +219,9 @@ impl fmt::Display for Error {
 			Self::HrnParsingFailed => {
 				write!(f, "Failed to parse a human-readable name.")
 			},
+			Self::LnurlAuthFailed => write!(f, "LNURL-auth authentication failed."),
+			Self::LnurlAuthTimeout => write!(f, "LNURL-auth authentication timed out."),
+			Self::InvalidLnurl => write!(f, "The provided lnurl is invalid."),
 		}
 	}
 }

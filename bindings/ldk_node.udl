@@ -165,6 +165,8 @@ interface Node {
 	UnifiedPayment unified_payment();
 	LSPS1Liquidity lsps1_liquidity();
 	[Throws=NodeError]
+	void lnurl_auth(string lnurl);
+	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
@@ -361,6 +363,9 @@ enum NodeError {
 	"InvalidBlindedPaths",
 	"AsyncPaymentServicesDisabled",
 	"HrnParsingFailed",
+	"LnurlAuthFailed",
+	"LnurlAuthTimeout",
+	"InvalidLnurl",
 };
 
 dictionary NodeStatus {
