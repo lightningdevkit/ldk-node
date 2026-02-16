@@ -1411,36 +1411,40 @@ where
 					},
 				};
 
-				let network_graph = self.network_graph.read_only();
-				let channels =
-					self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
-				if let Some(pending_channel) =
-					channels.into_iter().find(|c| c.channel_id == channel_id)
-				{
-					if !pending_channel.is_outbound
-						&& self.peer_store.get_peer(&counterparty_node_id).is_none()
-					{
-						if let Some(address) = network_graph
+				let maybe_peer_info = {
+					let network_graph = self.network_graph.read_only();
+					let channels =
+						self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+					let should_add = channels
+						.into_iter()
+						.find(|c| c.channel_id == channel_id)
+						.map_or(false, |c| !c.is_outbound)
+						&& self.peer_store.get_peer(&counterparty_node_id).is_none();
+
+					if should_add {
+						network_graph
 							.nodes()
 							.get(&NodeId::from_pubkey(&counterparty_node_id))
 							.and_then(|node_info| node_info.announcement_info.as_ref())
 							.and_then(|ann_info| ann_info.addresses().first())
-						{
-							let peer = PeerInfo {
+							.map(|address| PeerInfo {
 								node_id: counterparty_node_id,
 								address: address.clone(),
-							};
-
-							self.peer_store.add_peer(peer).unwrap_or_else(|e| {
-								log_error!(
-									self.logger,
-									"Failed to add peer {} to peer store: {}",
-									counterparty_node_id,
-									e
-								);
-							});
-						}
+							})
+					} else {
+						None
 					}
+				};
+
+				if let Some(peer) = maybe_peer_info {
+					self.peer_store.add_peer(peer).await.unwrap_or_else(|e| {
+						log_error!(
+							self.logger,
+							"Failed to add peer {} to peer store: {}",
+							counterparty_node_id,
+							e
+						);
+					});
 				}
 			},
 			LdkEvent::ChannelReady {

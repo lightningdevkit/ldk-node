@@ -126,9 +126,9 @@ proptest! {
 				let funding = nodes_funding_tx.get(&node.node_id()).expect("Funding tx not exist");
 
 				if force_close {
-					node.force_close_channel(&user_channel_id, next_node.node_id(), None).unwrap();
+					node.force_close_channel(&user_channel_id, next_node.node_id(), None).await.unwrap();
 				} else {
-					node.close_channel(&user_channel_id, next_node.node_id()).unwrap();
+					node.close_channel(&user_channel_id, next_node.node_id()).await.unwrap();
 				}
 
 				expect_event!(node, ChannelClosed);

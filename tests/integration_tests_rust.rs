@@ -139,13 +139,15 @@ async fn channel_open_fails_when_funds_insufficient() {
 	println!("\nA -- open_channel -> B");
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.open_channel(
-			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
-			120000,
-			None,
-			None,
-		)
+		node_a
+			.open_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				120000,
+				None,
+				None,
+			)
+			.await
 	);
 }
 
@@ -847,8 +849,8 @@ async fn connection_multi_listen() {
 
 	let node_addrs_b = node_b.listening_addresses().unwrap();
 	for node_addr_b in &node_addrs_b {
-		node_a.connect(node_id_b, node_addr_b.clone(), false).unwrap();
-		node_a.disconnect(node_id_b).unwrap();
+		node_a.connect(node_id_b, node_addr_b.clone(), false).await.unwrap();
+		node_a.disconnect(node_id_b).await.unwrap();
 	}
 }
 
@@ -867,7 +869,7 @@ async fn do_connection_restart_behavior(persist: bool) {
 	let node_id_b = node_b.node_id();
 
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-	node_a.connect(node_id_b, node_addr_b, persist).unwrap();
+	node_a.connect(node_id_b, node_addr_b, persist).await.unwrap();
 
 	let peer_details_a = node_a.list_peers().first().unwrap().clone();
 	assert_eq!(peer_details_a.node_id, node_id_b);
@@ -920,14 +922,14 @@ async fn concurrent_connections_succeed() {
 	for _ in 0..10 {
 		let thread_node = Arc::clone(&node_a);
 		let thread_addr = node_addr_b.clone();
-		let handle = std::thread::spawn(move || {
-			thread_node.connect(node_id_b, thread_addr, false).unwrap();
+		let handle = tokio::spawn(async move {
+			thread_node.connect(node_id_b, thread_addr, false).await.unwrap();
 		});
 		handles.push(handle);
 	}
 
 	for h in handles {
-		h.join().unwrap();
+		h.await.unwrap();
 	}
 }
 

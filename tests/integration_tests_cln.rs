@@ -90,6 +90,7 @@ async fn test_cln() {
 	let funding_amount_sat = 1_000_000;
 
 	node.open_channel(cln_node_id, cln_address, funding_amount_sat, Some(500_000_000), None)
+		.await
 		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
@@ -121,7 +122,7 @@ async fn test_cln() {
 	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
 	common::expect_event!(node, PaymentReceived);
 
-	node.close_channel(&user_channel_id, cln_node_id).unwrap();
+	node.close_channel(&user_channel_id, cln_node_id).await.unwrap();
 	common::expect_event!(node, ChannelClosed);
 	node.stop().unwrap();
 }

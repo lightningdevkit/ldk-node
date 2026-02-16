@@ -660,6 +660,7 @@ pub async fn open_channel_push_amt(
 				push_amount_msat,
 				None,
 			)
+			.await
 			.unwrap();
 	} else {
 		node_a
@@ -670,6 +671,7 @@ pub async fn open_channel_push_amt(
 				push_amount_msat,
 				None,
 			)
+			.await
 			.unwrap();
 	}
 	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
@@ -748,6 +750,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			Some(push_msat),
 			None,
 		)
+		.await
 		.unwrap();
 
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
@@ -1166,9 +1169,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
 		tokio::time::sleep(Duration::from_secs(1)).await;
-		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).await.unwrap();
 	} else {
-		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+		node_a.close_channel(&user_channel_id_a, node_b.node_id()).await.unwrap();
 	}
 
 	expect_event!(node_a, ChannelClosed);

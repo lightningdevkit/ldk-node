@@ -1044,7 +1044,7 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
-	pub fn connect(
+	pub async fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
@@ -1053,20 +1053,14 @@ impl Node {
 
 		let peer_info = PeerInfo { node_id, address };
 
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		self.connection_manager
+			.connect_peer_if_necessary(peer_info.node_id, peer_info.address.clone())
+			.await?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if persist {
-			self.peer_store.add_peer(peer_info)?;
+			self.peer_store.add_peer(peer_info).await?;
 		}
 
 		Ok(())
@@ -1076,14 +1070,14 @@ impl Node {
 	///
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
-	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
+	pub async fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
-		match self.peer_store.remove_peer(&counterparty_node_id) {
+		match self.peer_store.remove_peer(&counterparty_node_id).await {
 			Ok(()) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
@@ -1094,7 +1088,7 @@ impl Node {
 		Ok(())
 	}
 
-	fn open_channel_inner(
+	async fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool,
@@ -1105,15 +1099,9 @@ impl Node {
 
 		let peer_info = PeerInfo { node_id, address };
 
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		self.connection_manager
+			.connect_peer_if_necessary(peer_info.node_id, peer_info.address.clone())
+			.await?;
 
 		// Check funds availability after connection (includes anchor reserve calculation)
 		self.check_sufficient_funds_for_channel(channel_amount_sats, &node_id)?;
@@ -1147,7 +1135,7 @@ impl Node {
 					"Initiated channel creation with peer {}. ",
 					peer_info.node_id
 				);
-				self.peer_store.add_peer(peer_info)?;
+				self.peer_store.add_peer(peer_info).await?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
@@ -1219,7 +1207,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_channel(
+	pub async fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1231,6 +1219,7 @@ impl Node {
 			channel_config,
 			false,
 		)
+		.await
 	}
 
 	/// Connect to a node and open a new announced channel.
@@ -1254,7 +1243,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_announced_channel(
+	pub async fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1271,6 +1260,7 @@ impl Node {
 			channel_config,
 			true,
 		)
+		.await
 	}
 
 	/// Add funds from the on-chain wallet into an existing channel.
@@ -1512,10 +1502,10 @@ impl Node {
 	///
 	/// Will attempt to close a channel coopertively. If this fails, users might need to resort to
 	/// [`Node::force_close_channel`].
-	pub fn close_channel(
+	pub async fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None).await
 	}
 
 	/// Force-close a previously opened channel.
@@ -1531,14 +1521,14 @@ impl Node {
 	/// for more information).
 	///
 	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
-	pub fn force_close_channel(
+	pub async fn force_close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		reason: Option<String>,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason).await
 	}
 
-	fn close_channel_internal(
+	async fn close_channel_internal(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
 		force_close_reason: Option<String>,
 	) -> Result<(), Error> {
@@ -1573,7 +1563,7 @@ impl Node {
 
 			// Check if this was the last open channel, if so, forget the peer.
 			if open_channels.len() == 1 {
-				self.peer_store.remove_peer(&counterparty_node_id)?;
+				self.peer_store.remove_peer(&counterparty_node_id).await?;
 			}
 		}
 
