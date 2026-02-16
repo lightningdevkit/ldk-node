@@ -706,7 +706,6 @@ mod tests {
 	use crate::io::tier_store::TierStore;
 	use crate::logger::Logger;
 	use crate::runtime::Runtime;
-	#[cfg(not(feature = "uniffi"))]
 	use crate::types::DynStore;
 	use crate::types::DynStoreWrapper;
 
