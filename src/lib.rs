@@ -164,7 +164,7 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,

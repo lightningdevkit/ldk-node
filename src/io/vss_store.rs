@@ -23,7 +23,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Network;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
 use prost::Message;
 use rand::RngCore;
@@ -75,7 +75,7 @@ const VSS_SCHEMA_VERSION_KEY: &str = "vss_schema_version";
 // would hit a blocking case
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
 
-/// A [`KVStore`]/[`KVStoreSync`] implementation that writes to and reads from a [VSS] backend.
+/// A [`KVStore`] implementation that writes to and reads from a [VSS] backend.
 ///
 /// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 pub struct VssStore {
@@ -134,14 +134,12 @@ impl VssStore {
 			})
 		})?;
 
-		let async_retry_policy = retry_policy();
-		let async_client =
-			VssClient::new_with_headers(base_url, async_retry_policy, header_provider);
+		let retry_pol = retry_policy();
+		let client = VssClient::new_with_headers(base_url, retry_pol, header_provider);
 
 		let inner = Arc::new(VssStoreInner::new(
 			schema_version,
-			blocking_client,
-			async_client,
+			client,
 			store_id,
 			data_encryption_key,
 			key_obfuscator,
@@ -183,111 +181,6 @@ impl VssStore {
 	}
 }
 
-impl KVStoreSync for VssStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
-			debug_assert!(false, "Failed to access internal runtime");
-			let msg = format!("Failed to access internal runtime");
-			Error::new(ErrorKind::Other, msg)
-		})?;
-		let primary_namespace = primary_namespace.to_string();
-		let secondary_namespace = secondary_namespace.to_string();
-		let key = key.to_string();
-		let inner = Arc::clone(&self.inner);
-		let fut = async move {
-			inner
-				.read_internal(&inner.blocking_client, primary_namespace, secondary_namespace, key)
-				.await
-		};
-		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
-			debug_assert!(false, "Failed to access internal runtime");
-			let msg = format!("Failed to access internal runtime");
-			Error::new(ErrorKind::Other, msg)
-		})?;
-		let primary_namespace = primary_namespace.to_string();
-		let secondary_namespace = secondary_namespace.to_string();
-		let key = key.to_string();
-		let inner = Arc::clone(&self.inner);
-		let locking_key = self.build_locking_key(&primary_namespace, &secondary_namespace, &key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		let fut = async move {
-			inner
-				.write_internal(
-					&inner.blocking_client,
-					inner_lock_ref,
-					locking_key,
-					version,
-					primary_namespace,
-					secondary_namespace,
-					key,
-					buf,
-				)
-				.await
-		};
-		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
-			debug_assert!(false, "Failed to access internal runtime");
-			let msg = format!("Failed to access internal runtime");
-			Error::new(ErrorKind::Other, msg)
-		})?;
-		let primary_namespace = primary_namespace.to_string();
-		let secondary_namespace = secondary_namespace.to_string();
-		let key = key.to_string();
-		let inner = Arc::clone(&self.inner);
-		let locking_key = self.build_locking_key(&primary_namespace, &secondary_namespace, &key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		let fut = async move {
-			inner
-				.remove_internal(
-					&inner.blocking_client,
-					inner_lock_ref,
-					locking_key,
-					version,
-					primary_namespace,
-					secondary_namespace,
-					key,
-				)
-				.await
-		};
-		if lazy {
-			internal_runtime.spawn(async { fut.await });
-			Ok(())
-		} else {
-			tokio::task::block_in_place(move || internal_runtime.block_on(fut))
-		}
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
-			debug_assert!(false, "Failed to access internal runtime");
-			let msg = format!("Failed to access internal runtime");
-			Error::new(ErrorKind::Other, msg)
-		})?;
-		let primary_namespace = primary_namespace.to_string();
-		let secondary_namespace = secondary_namespace.to_string();
-		let inner = Arc::clone(&self.inner);
-		let fut = async move {
-			inner
-				.list_internal(&inner.blocking_client, primary_namespace, secondary_namespace)
-				.await
-		};
-		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
-	}
-}
-
 impl KVStore for VssStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
@@ -297,9 +190,7 @@ impl KVStore for VssStore {
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
 		async move {
-			inner
-				.read_internal(&inner.async_client, primary_namespace, secondary_namespace, key)
-				.await
+			inner.read_internal(&inner.client, primary_namespace, secondary_namespace, key).await
 		}
 	}
 	fn write(
@@ -314,7 +205,7 @@ impl KVStore for VssStore {
 		async move {
 			inner
 				.write_internal(
-					&inner.async_client,
+					&inner.client,
 					inner_lock_ref,
 					locking_key,
 					version,
@@ -338,7 +229,7 @@ impl KVStore for VssStore {
 		let fut = async move {
 			inner
 				.remove_internal(
-					&inner.async_client,
+					&inner.client,
 					inner_lock_ref,
 					locking_key,
 					version,
@@ -363,9 +254,7 @@ impl KVStore for VssStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		async move {
-			inner.list_internal(&inner.async_client, primary_namespace, secondary_namespace).await
-		}
+		async move { inner.list_internal(&inner.client, primary_namespace, secondary_namespace).await }
 	}
 }
 
@@ -378,10 +267,7 @@ impl Drop for VssStore {
 
 struct VssStoreInner {
 	schema_version: VssSchemaVersion,
-	blocking_client: VssClient<CustomRetryPolicy>,
-	// A secondary client that will only be used for async persistence via `KVStore`, to ensure TCP
-	// connections aren't shared between our outer and the internal runtime.
-	async_client: VssClient<CustomRetryPolicy>,
+	client: VssClient<CustomRetryPolicy>,
 	store_id: String,
 	data_encryption_key: [u8; 32],
 	key_obfuscator: KeyObfuscator,
@@ -392,20 +278,11 @@ struct VssStoreInner {
 
 impl VssStoreInner {
 	pub(crate) fn new(
-		schema_version: VssSchemaVersion, blocking_client: VssClient<CustomRetryPolicy>,
-		async_client: VssClient<CustomRetryPolicy>, store_id: String,
+		schema_version: VssSchemaVersion, client: VssClient<CustomRetryPolicy>, store_id: String,
 		data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator,
 	) -> Self {
 		let locks = Mutex::new(HashMap::new());
-		Self {
-			schema_version,
-			blocking_client,
-			async_client,
-			store_id,
-			data_encryption_key,
-			key_obfuscator,
-			locks,
-		}
+		Self { schema_version, client, store_id, data_encryption_key, key_obfuscator, locks }
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {

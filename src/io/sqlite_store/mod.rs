@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lightning::io;
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::KVStore;
 use lightning_types::string::PrintableString;
 use rusqlite::{named_params, Connection};
 
@@ -36,7 +36,7 @@ pub const DEFAULT_KV_TABLE_NAME: &str = "ldk_data";
 // The current SQLite `user_version`, which we can use if we'd ever need to do a schema migration.
 const SCHEMA_USER_VERSION: u16 = 2;
 
-/// A [`KVStoreSync`] implementation that writes to and reads from an [SQLite] database.
+/// A [`KVStore`] implementation that writes to and reads from an [SQLite] database.
 ///
 /// [SQLite]: https://sqlite.org
 pub struct SqliteStore {
@@ -176,49 +176,6 @@ impl KVStore for SqliteStore {
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
 		}
-	}
-}
-
-impl KVStoreSync for SqliteStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		self.inner.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		self.inner.write_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			buf,
-		)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
-	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		self.inner.remove_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
-			primary_namespace,
-			secondary_namespace,
-			key,
-		)
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.inner.list_internal(primary_namespace, secondary_namespace)
 	}
 }
 
@@ -516,9 +473,7 @@ impl SqliteStoreInner {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::io::test_utils::{
-		do_read_write_remove_list_persist, do_test_store, random_storage_path,
-	};
+	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
 
 	impl Drop for SqliteStore {
 		fn drop(&mut self) {
@@ -540,25 +495,6 @@ mod tests {
 		)
 		.unwrap();
 		do_read_write_remove_list_persist(&store);
-	}
-
-	#[test]
-	fn test_sqlite_store() {
-		let mut temp_path = random_storage_path();
-		temp_path.push("test_sqlite_store");
-		let store_0 = SqliteStore::new(
-			temp_path.clone(),
-			Some("test_db_0".to_string()),
-			Some("test_table".to_string()),
-		)
-		.unwrap();
-		let store_1 = SqliteStore::new(
-			temp_path,
-			Some("test_db_1".to_string()),
-			Some("test_table".to_string()),
-		)
-		.unwrap();
-		do_test_store(&store_0, &store_1)
 	}
 }
 

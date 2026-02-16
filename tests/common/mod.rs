@@ -45,6 +45,7 @@ use logging::TestLogWriter;
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 use serde_json::{json, Value};
+use tokio::runtime::Runtime;
 
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
@@ -1425,6 +1426,7 @@ struct TestSyncStoreInner {
 	test_store: TestStore,
 	fs_store: FilesystemStore,
 	sqlite_store: SqliteStore,
+	rt: Runtime,
 }
 
 impl TestSyncStoreInner {
@@ -1442,15 +1444,19 @@ impl TestSyncStoreInner {
 		)
 		.unwrap();
 		let test_store = TestStore::new(false);
-		Self { serializer, fs_store, sqlite_store, test_store }
+		let rt = Runtime::new().unwrap();
+		Self { serializer, fs_store, sqlite_store, test_store, rt }
 	}
 
 	fn do_list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> lightning::io::Result<Vec<String>> {
 		let fs_res = KVStoreSync::list(&self.fs_store, primary_namespace, secondary_namespace);
-		let sqlite_res =
-			KVStoreSync::list(&self.sqlite_store, primary_namespace, secondary_namespace);
+		let sqlite_res = self.rt.block_on(KVStore::list(
+			&self.sqlite_store,
+			primary_namespace,
+			secondary_namespace,
+		));
 		let test_res = KVStoreSync::list(&self.test_store, primary_namespace, secondary_namespace);
 
 		match fs_res {
@@ -1481,8 +1487,12 @@ impl TestSyncStoreInner {
 		let _guard = self.serializer.read().unwrap();
 
 		let fs_res = KVStoreSync::read(&self.fs_store, primary_namespace, secondary_namespace, key);
-		let sqlite_res =
-			KVStoreSync::read(&self.sqlite_store, primary_namespace, secondary_namespace, key);
+		let sqlite_res = self.rt.block_on(KVStore::read(
+			&self.sqlite_store,
+			primary_namespace,
+			secondary_namespace,
+			key,
+		));
 		let test_res =
 			KVStoreSync::read(&self.test_store, primary_namespace, secondary_namespace, key);
 
@@ -1513,13 +1523,13 @@ impl TestSyncStoreInner {
 			key,
 			buf.clone(),
 		);
-		let sqlite_res = KVStoreSync::write(
+		let sqlite_res = self.rt.block_on(KVStore::write(
 			&self.sqlite_store,
 			primary_namespace,
 			secondary_namespace,
 			key,
 			buf.clone(),
-		);
+		));
 		let test_res = KVStoreSync::write(
 			&self.test_store,
 			primary_namespace,
@@ -1553,13 +1563,13 @@ impl TestSyncStoreInner {
 		let _guard = self.serializer.write().unwrap();
 		let fs_res =
 			KVStoreSync::remove(&self.fs_store, primary_namespace, secondary_namespace, key, lazy);
-		let sqlite_res = KVStoreSync::remove(
+		let sqlite_res = self.rt.block_on(KVStore::remove(
 			&self.sqlite_store,
 			primary_namespace,
 			secondary_namespace,
 			key,
 			lazy,
-		);
+		));
 		let test_res = KVStoreSync::remove(
 			&self.test_store,
 			primary_namespace,
