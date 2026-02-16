@@ -132,14 +132,14 @@ impl Wallet {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		match locked_wallet.apply_update_events(update) {
 			Ok(events) => {
-				let mut locked_persister = self.persister.lock().unwrap();
-				locked_wallet.persist(&mut locked_persister).map_err(|e| {
-					log_error!(self.logger, "Failed to persist wallet: {}", e);
+				self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
+					log_error!(self.logger, "Failed to update payment store: {}", e);
 					Error::PersistenceFailed
 				})?;
 
-				self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
-					log_error!(self.logger, "Failed to update payment store: {}", e);
+				let mut locked_persister = self.persister.lock().unwrap();
+				locked_wallet.persist(&mut locked_persister).map_err(|e| {
+					log_error!(self.logger, "Failed to persist wallet: {}", e);
 					Error::PersistenceFailed
 				})?;
 
