@@ -146,7 +146,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning_background_processor::process_events_async;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -1760,13 +1760,14 @@ impl Node {
 
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
 	/// a limited view of the network.
-	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
-		KVStoreSync::read(
+	pub async fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
+		KVStore::read(
 			&*self.kv_store,
 			lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 			lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 			lightning::util::persist::SCORER_PERSISTENCE_KEY,
 		)
+		.await
 		.map_err(|e| {
 			log_error!(
 				self.logger,

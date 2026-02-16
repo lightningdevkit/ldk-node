@@ -194,7 +194,7 @@ interface Node {
 	NetworkGraph network_graph();
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
-	[Throws=NodeError]
+	[Async, Throws=NodeError]
 	bytes export_pathfinding_scores();
 };
 
