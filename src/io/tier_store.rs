@@ -10,13 +10,13 @@ use crate::logger::{LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::DynStore;
 
+use lightning::io;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
-use lightning::{io, log_trace};
-use lightning::{log_debug, log_error, log_info, log_warn};
+use lightning::{log_debug, log_error, log_warn};
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 
@@ -231,8 +231,8 @@ impl KVStoreSync for TierStore {
 	}
 }
 
-pub struct TierStoreInner {
-	/// For remote data.
+struct TierStoreInner {
+	/// For local or remote data.
 	primary_store: Arc<DynStore>,
 	/// For local non-critical/ephemeral data.
 	ephemeral_store: Option<Arc<DynStore>>,
@@ -396,9 +396,7 @@ impl TierStoreInner {
 		match KVStore::list(self.primary_store.as_ref(), primary_namespace, secondary_namespace)
 			.await
 		{
-			Ok(keys) => {
-				return Ok(keys);
-			},
+			Ok(keys) => Ok(keys),
 			Err(e) => {
 				log_error!(
 					self.logger,
@@ -506,104 +504,76 @@ impl TierStoreInner {
 			"read",
 		)?;
 
-		match (primary_namespace.as_str(), secondary_namespace.as_str(), key.as_str()) {
-			(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
-			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY) => {
-				if let Some(eph_store) = self.ephemeral_store.as_ref() {
-					// We only try once here (without retry logic) because local failure might be indicative
-					// of a more serious issue (e.g. full memory, memory corruption, permissions change) that
-					// do not self-resolve such that retrying would negate the latency benefits.
+		if let Some(eph_store) = self
+			.ephemeral_store
+			.as_ref()
+			.filter(|_s| is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key))
+		{
+			// We only try once here (without retry logic) because local failure might be indicative
+			// of a more serious issue (e.g. full memory, memory corruption, permissions change) that
+			// do not self-resolve such that retrying would negate the latency benefits.
 
-					// The following questions remain:
-					// 1. Are there situations where local transient errors may warrant a retry?
-					// 2. Can we reliably identify/detect these transient errors?
-					// 3. Should we fall back to the primary or backup stores in the event of any error?
-					KVStore::read(
-						eph_store.as_ref(),
-						&primary_namespace,
-						&secondary_namespace,
-						&key,
-					)
-					.await
-				} else {
-					self.read_primary(&primary_namespace, &secondary_namespace, &key).await
-				}
-			},
-			_ => self.read_primary(&primary_namespace, &secondary_namespace, &key).await,
+			// The following questions remain:
+			// 1. Are there situations where local transient errors may warrant a retry?
+			// 2. Can we reliably identify/detect these transient errors?
+			// 3. Should we fall back to the primary or backup stores in the event of any error?
+			KVStore::read(eph_store.as_ref(), &primary_namespace, &secondary_namespace, &key).await
+		} else {
+			self.read_primary(&primary_namespace, &secondary_namespace, &key).await
 		}
 	}
 
 	async fn write_internal(
 		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
 	) -> io::Result<()> {
-		match (primary_namespace.as_str(), secondary_namespace.as_str(), key.as_str()) {
-			(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
-			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY) => {
-				if let Some(eph_store) = &self.ephemeral_store {
-					KVStore::write(
-						eph_store.as_ref(),
-						primary_namespace.as_str(),
-						secondary_namespace.as_str(),
-						key.as_str(),
-						buf,
-					)
-					.await
-				} else {
-					self.primary_write_then_schedule_backup(
-						primary_namespace.as_str(),
-						secondary_namespace.as_str(),
-						key.as_str(),
-						buf,
-					)
-					.await
-				}
-			},
-			_ => {
-				self.primary_write_then_schedule_backup(
-					primary_namespace.as_str(),
-					secondary_namespace.as_str(),
-					key.as_str(),
-					buf,
-				)
-				.await
-			},
+		if let Some(eph_store) = self
+			.ephemeral_store
+			.as_ref()
+			.filter(|_s| is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key))
+		{
+			KVStore::write(
+				eph_store.as_ref(),
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				buf,
+			)
+			.await
+		} else {
+			self.primary_write_then_schedule_backup(
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				buf,
+			)
+			.await
 		}
 	}
 
 	async fn remove_internal(
 		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
 	) -> io::Result<()> {
-		match (primary_namespace.as_str(), secondary_namespace.as_str(), key.as_str()) {
-			(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
-			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY) => {
-				if let Some(eph_store) = &self.ephemeral_store {
-					KVStore::remove(
-						eph_store.as_ref(),
-						primary_namespace.as_str(),
-						secondary_namespace.as_str(),
-						key.as_str(),
-						lazy,
-					)
-					.await
-				} else {
-					self.primary_remove_then_schedule_backup(
-						primary_namespace.as_str(),
-						secondary_namespace.as_str(),
-						key.as_str(),
-						lazy,
-					)
-					.await
-				}
-			},
-			_ => {
-				self.primary_remove_then_schedule_backup(
-					primary_namespace.as_str(),
-					secondary_namespace.as_str(),
-					key.as_str(),
-					lazy,
-				)
-				.await
-			},
+		if let Some(eph_store) = self
+			.ephemeral_store
+			.as_ref()
+			.filter(|_s| is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key))
+		{
+			KVStore::remove(
+				eph_store.as_ref(),
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				lazy,
+			)
+			.await
+		} else {
+			self.primary_remove_then_schedule_backup(
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				lazy,
+			)
+			.await
 		}
 	}
 
@@ -617,7 +587,8 @@ impl TierStoreInner {
 			)
 			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _) => {
 				if let Some(eph_store) = self.ephemeral_store.as_ref() {
-					KVStoreSync::list(eph_store.as_ref(), &primary_namespace, &secondary_namespace)
+					KVStore::list(eph_store.as_ref(), &primary_namespace, &secondary_namespace)
+						.await
 				} else {
 					self.list_primary(&primary_namespace, &secondary_namespace).await
 				}
@@ -652,6 +623,14 @@ impl BackupOp {
 			BackupOp::Write { key, .. } | BackupOp::Remove { key, .. } => key,
 		}
 	}
+}
+
+fn is_ephemeral_cached_key(pn: &str, sn: &str, key: &str) -> bool {
+	matches!(
+		(pn, sn, key),
+		(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
+			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY)
+	)
 }
 
 #[cfg(test)]

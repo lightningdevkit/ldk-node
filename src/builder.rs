@@ -806,6 +806,7 @@ impl NodeBuilder {
 			self.liquidity_source_config.as_ref(),
 			self.pathfinding_scores_sync_config.as_ref(),
 			self.async_payments_role,
+			self.recovery_mode,
 			seed_bytes,
 			runtime,
 			logger,
