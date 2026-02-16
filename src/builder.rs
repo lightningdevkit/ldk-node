@@ -1558,12 +1558,16 @@ fn build_with_store_internal(
 			{
 				let mut locked_node_metrics = node_metrics.write().unwrap();
 				locked_node_metrics.latest_rgs_snapshot_timestamp = None;
-				write_node_metrics(&*locked_node_metrics, &*kv_store, Arc::clone(&logger))
-					.map_err(|e| {
-						log_error!(logger, "Failed writing to store: {}", e);
-						BuildError::WriteFailed
-					})?;
 			}
+			runtime
+				.block_on(async {
+					let snapshot = node_metrics.read().unwrap().clone();
+					write_node_metrics(&snapshot, &*kv_store, Arc::clone(&logger)).await
+				})
+				.map_err(|e| {
+					log_error!(logger, "Failed writing to store: {}", e);
+					BuildError::WriteFailed
+				})?;
 			p2p_source
 		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {

@@ -128,52 +128,48 @@ impl ElectrumChainSource {
 		let incremental_sync =
 			self.node_metrics.read().unwrap().latest_onchain_wallet_sync_timestamp.is_some();
 
-		let apply_wallet_update =
-			|update_res: Result<BdkUpdate, Error>, now: Instant| match update_res {
-				Ok(update) => match onchain_wallet.apply_update(update) {
-					Ok(()) => {
-						log_debug!(
-							self.logger,
-							"{} of on-chain wallet finished in {}ms.",
-							if incremental_sync { "Incremental sync" } else { "Sync" },
-							now.elapsed().as_millis()
-						);
-						let unix_time_secs_opt =
-							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-						{
-							let mut locked_node_metrics = self.node_metrics.write().unwrap();
-							locked_node_metrics.latest_onchain_wallet_sync_timestamp =
-								unix_time_secs_opt;
-							write_node_metrics(
-								&*locked_node_metrics,
-								&*self.kv_store,
-								&*self.logger,
-							)?;
-						}
-						Ok(())
-					},
-					Err(e) => Err(e),
-				},
-				Err(e) => Err(e),
-			};
-
 		let cached_txs = onchain_wallet.get_cached_txs();
 
-		let res = if incremental_sync {
+		let update_res: Result<(BdkUpdate, Instant), Error> = if incremental_sync {
 			let incremental_sync_request = onchain_wallet.get_incremental_sync_request();
 			let incremental_sync_fut = electrum_client
 				.get_incremental_sync_wallet_update(incremental_sync_request, cached_txs);
 
 			let now = Instant::now();
-			let update_res = incremental_sync_fut.await.map(|u| u.into());
-			apply_wallet_update(update_res, now)
+			incremental_sync_fut.await.map(|u| (u.into(), now))
 		} else {
 			let full_scan_request = onchain_wallet.get_full_scan_request();
 			let full_scan_fut =
 				electrum_client.get_full_scan_wallet_update(full_scan_request, cached_txs);
 			let now = Instant::now();
-			let update_res = full_scan_fut.await.map(|u| u.into());
-			apply_wallet_update(update_res, now)
+			full_scan_fut.await.map(|u| (u.into(), now))
+		};
+
+		let res = match update_res {
+			Ok((update, now)) => match onchain_wallet.apply_update(update) {
+				Ok(()) => {
+					log_debug!(
+						self.logger,
+						"{} of on-chain wallet finished in {}ms.",
+						if incremental_sync { "Incremental sync" } else { "Sync" },
+						now.elapsed().as_millis()
+					);
+					let unix_time_secs_opt =
+						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+					{
+						let mut locked_node_metrics = self.node_metrics.write().unwrap();
+						locked_node_metrics.latest_onchain_wallet_sync_timestamp =
+							unix_time_secs_opt;
+					}
+					{
+						let snapshot = self.node_metrics.read().unwrap().clone();
+						write_node_metrics(&snapshot, &*self.kv_store, &*self.logger).await?;
+					}
+					Ok(())
+				},
+				Err(e) => Err(e),
+			},
+			Err(e) => Err(e),
 		};
 
 		res
@@ -236,7 +232,10 @@ impl ElectrumChainSource {
 			{
 				let mut locked_node_metrics = self.node_metrics.write().unwrap();
 				locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
-				write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
+			}
+			{
+				let snapshot = self.node_metrics.read().unwrap().clone();
+				write_node_metrics(&snapshot, &*self.kv_store, &*self.logger).await?;
 			}
 		}
 
@@ -269,7 +268,10 @@ impl ElectrumChainSource {
 		{
 			let mut locked_node_metrics = self.node_metrics.write().unwrap();
 			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
-			write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
+		}
+		{
+			let snapshot = self.node_metrics.read().unwrap().clone();
+			write_node_metrics(&snapshot, &*self.kv_store, &*self.logger).await?;
 		}
 
 		Ok(())

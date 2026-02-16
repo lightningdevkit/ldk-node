@@ -348,20 +348,21 @@ where
 	})
 }
 
-pub(crate) fn write_node_metrics<L: Deref>(
+pub(crate) async fn write_node_metrics<L: Deref>(
 	node_metrics: &NodeMetrics, kv_store: &DynStore, logger: L,
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
 {
 	let data = node_metrics.encode();
-	KVStoreSync::write(
+	KVStore::write(
 		&*kv_store,
 		NODE_METRICS_PRIMARY_NAMESPACE,
 		NODE_METRICS_SECONDARY_NAMESPACE,
 		NODE_METRICS_KEY,
 		data,
 	)
+	.await
 	.map_err(|e| {
 		log_error!(
 			logger,
