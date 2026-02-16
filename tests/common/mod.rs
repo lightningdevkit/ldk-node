@@ -206,6 +206,31 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	(bitcoind, electrsd)
 }
 
+pub(crate) fn random_chain_source<'a>(
+	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
+) -> TestChainSource<'a> {
+	let r = rand::random_range(0..3);
+	match r {
+		0 => {
+			println!("Randomly setting up Esplora chain syncing...");
+			TestChainSource::Esplora(electrsd)
+		},
+		1 => {
+			println!("Randomly setting up Electrum chain syncing...");
+			TestChainSource::Electrum(electrsd)
+		},
+		2 => {
+			println!("Randomly setting up Bitcoind RPC chain syncing...");
+			TestChainSource::BitcoindRpcSync(bitcoind)
+		},
+		3 => {
+			println!("Randomly setting up Bitcoind REST chain syncing...");
+			TestChainSource::BitcoindRestSync(bitcoind)
+		},
+		_ => unreachable!(),
+	}
+}
+
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
 	let mut rng = rng();
@@ -292,6 +317,8 @@ pub(crate) struct TestConfig {
 	pub log_writer: TestLogWriter,
 	pub store_type: TestStoreType,
 	pub node_entropy: NodeEntropy,
+	pub async_payments_role: Option<AsyncPaymentsRole>,
+	pub recovery_mode: bool,
 }
 
 impl Default for TestConfig {
@@ -302,7 +329,16 @@ impl Default for TestConfig {
 
 		let mnemonic = generate_entropy_mnemonic(None);
 		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
-		TestConfig { node_config, log_writer, store_type, node_entropy }
+		let async_payments_role = None;
+		let recovery_mode = false;
+		TestConfig {
+			node_config,
+			log_writer,
+			store_type,
+			node_entropy,
+			async_payments_role,
+			recovery_mode,
+		}
 	}
 }
 
@@ -359,13 +395,6 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
-	setup_node_for_async_payments(chain_source, config, None)
-}
-
-pub(crate) fn setup_node_for_async_payments(
-	chain_source: &TestChainSource, config: TestConfig,
-	async_payments_role: Option<AsyncPaymentsRole>,
-) -> TestNode {
 	setup_builder!(builder, config.node_config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
@@ -419,7 +448,11 @@ pub(crate) fn setup_node_for_async_payments(
 		},
 	}
 
-	builder.set_async_payments_role(async_payments_role).unwrap();
+	builder.set_async_payments_role(config.async_payments_role).unwrap();
+
+	if config.recovery_mode {
+		builder.set_wallet_recovery_mode();
+	}
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
@@ -428,6 +461,10 @@ pub(crate) fn setup_node_for_async_payments(
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
 	};
+
+	if config.recovery_mode {
+		builder.set_wallet_recovery_mode();
+	}
 
 	node.start().unwrap();
 	assert!(node.status().is_running);

@@ -8,7 +8,7 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::Amount;
 use common::{
 	expect_channel_ready_event, generate_blocks_and_wait, premine_and_distribute_funds,
-	setup_bitcoind_and_electrsd, setup_two_nodes_with_store, TestChainSource,
+	random_chain_source, setup_bitcoind_and_electrsd, setup_two_nodes_with_store,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use ldk_node::{Event, Node};
@@ -119,7 +119,7 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 fn payment_benchmark(c: &mut Criterion) {
 	// Set up two nodes. Because this is slow, we reuse the same nodes for each sample.
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let (node_a, node_b) = setup_two_nodes_with_store(
 		&chain_source,

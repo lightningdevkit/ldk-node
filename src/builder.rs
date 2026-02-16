@@ -244,6 +244,7 @@ pub struct NodeBuilder {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
+	recovery_mode: bool,
 }
 
 impl NodeBuilder {
@@ -261,6 +262,7 @@ impl NodeBuilder {
 		let log_writer_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
+		let recovery_mode = false;
 		Self {
 			config,
 			chain_data_source_config,
@@ -270,6 +272,7 @@ impl NodeBuilder {
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
+			recovery_mode,
 		}
 	}
 
@@ -544,6 +547,16 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
+	/// historical wallet funds.
+	///
+	/// This should only be set on first startup when importing an older wallet from a previously
+	/// used [`NodeEntropy`].
+	pub fn set_wallet_recovery_mode(&mut self) -> &mut Self {
+		self.recovery_mode = true;
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -679,6 +692,7 @@ impl NodeBuilder {
 			self.liquidity_source_config.as_ref(),
 			self.pathfinding_scores_sync_config.as_ref(),
 			self.async_payments_role,
+			self.recovery_mode,
 			seed_bytes,
 			runtime,
 			logger,
@@ -919,6 +933,15 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_async_payments_role(role).map(|_| ())
 	}
 
+	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
+	/// historical wallet funds.
+	///
+	/// This should only be set on first startup when importing an older wallet from a previously
+	/// used [`NodeEntropy`].
+	pub fn set_wallet_recovery_mode(&self) {
+		self.inner.write().unwrap().set_wallet_recovery_mode();
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
@@ -1033,8 +1056,8 @@ fn build_with_store_internal(
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
-	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
-	logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
+	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1230,19 +1253,23 @@ fn build_with_store_internal(
 					BuildError::WalletSetupFailed
 				})?;
 
-			if let Some(best_block) = chain_tip_opt {
-				// Insert the first checkpoint if we have it, to avoid resyncing from genesis.
-				// TODO: Use a proper wallet birthday once BDK supports it.
-				let mut latest_checkpoint = wallet.latest_checkpoint();
-				let block_id =
-					bdk_chain::BlockId { height: best_block.height, hash: best_block.block_hash };
-				latest_checkpoint = latest_checkpoint.insert(block_id);
-				let update =
-					bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
-				wallet.apply_update(update).map_err(|e| {
-					log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
-					BuildError::WalletSetupFailed
-				})?;
+			if !recovery_mode {
+				if let Some(best_block) = chain_tip_opt {
+					// Insert the first checkpoint if we have it, to avoid resyncing from genesis.
+					// TODO: Use a proper wallet birthday once BDK supports it.
+					let mut latest_checkpoint = wallet.latest_checkpoint();
+					let block_id = bdk_chain::BlockId {
+						height: best_block.height,
+						hash: best_block.block_hash,
+					};
+					latest_checkpoint = latest_checkpoint.insert(block_id);
+					let update =
+						bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
+					wallet.apply_update(update).map_err(|e| {
+						log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
+						BuildError::WalletSetupFailed
+					})?;
+				}
 			}
 			wallet
 		},
@@ -1267,6 +1294,7 @@ fn build_with_store_internal(
 		wallet_persister,
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
+		Arc::clone(&chain_source),
 		Arc::clone(&payment_store),
 		Arc::clone(&config),
 		Arc::clone(&logger),
