@@ -105,7 +105,7 @@ impl UnifiedPayment {
 	pub async fn receive(
 		&self, amount_sats: u64, description: &str, expiry_sec: u32,
 	) -> Result<String, Error> {
-		let onchain_address = self.onchain_payment.new_address()?;
+		let onchain_address = self.onchain_payment.new_address().await?;
 
 		let amount_msats = amount_sats * 1_000;
 
@@ -274,7 +274,8 @@ impl UnifiedPayment {
 						Error::InvalidAmount
 					})?;
 
-					let txid = self.onchain_payment.send_to_address(&address, amt_sats, None)?;
+					let txid =
+						self.onchain_payment.send_to_address(&address, amt_sats, None).await?;
 					return Ok(UnifiedPaymentResult::Onchain { txid });
 				},
 			}

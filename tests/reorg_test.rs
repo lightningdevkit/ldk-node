@@ -51,8 +51,10 @@ proptest! {
 			}
 
 			let amount_sat = 2_100_000;
-			let addr_nodes =
-				nodes.iter().map(|node| node.onchain_payment().new_address().unwrap()).collect::<Vec<_>>();
+			let mut addr_nodes = Vec::new();
+			for node in &nodes {
+				addr_nodes.push(node.onchain_payment().new_address().await.unwrap());
+			}
 			premine_and_distribute_funds(bitcoind, electrs, addr_nodes, Amount::from_sat(amount_sat)).await;
 
 			macro_rules! sync_wallets {

@@ -444,11 +444,12 @@ impl BitcoindChainSource {
 					evicted_txids.len(),
 					now.elapsed().unwrap().as_millis()
 				);
-				onchain_wallet.apply_mempool_txs(unconfirmed_txs, evicted_txids).unwrap_or_else(
-					|e| {
+				onchain_wallet
+					.apply_mempool_txs(unconfirmed_txs, evicted_txids)
+					.await
+					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to apply mempool transactions: {:?}", e);
-					},
-				);
+					});
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to poll for mempool transactions: {:?}", e);

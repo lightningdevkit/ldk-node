@@ -1193,12 +1193,15 @@ fn build_with_store_internal(
 	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
 	let mut wallet_persister =
 		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
-	let wallet_opt = BdkWallet::load()
-		.descriptor(KeychainKind::External, Some(descriptor.clone()))
-		.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
-		.extract_keys()
-		.check_network(config.network)
-		.load_wallet(&mut wallet_persister)
+	let wallet_opt = runtime
+		.block_on(
+			BdkWallet::load()
+				.descriptor(KeychainKind::External, Some(descriptor.clone()))
+				.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
+				.extract_keys()
+				.check_network(config.network)
+				.load_wallet_async(&mut wallet_persister),
+		)
 		.map_err(|e| match e {
 			bdk_wallet::LoadWithPersistError::InvalidChangeSet(
 				bdk_wallet::LoadError::Mismatch(bdk_wallet::LoadMismatch::Network {
@@ -1222,9 +1225,12 @@ fn build_with_store_internal(
 	let bdk_wallet = match wallet_opt {
 		Some(wallet) => wallet,
 		None => {
-			let mut wallet = BdkWallet::create(descriptor, change_descriptor)
-				.network(config.network)
-				.create_wallet(&mut wallet_persister)
+			let mut wallet = runtime
+				.block_on(
+					BdkWallet::create(descriptor, change_descriptor)
+						.network(config.network)
+						.create_wallet_async(&mut wallet_persister),
+				)
 				.map_err(|e| {
 					log_error!(logger, "Failed to set up wallet: {}", e);
 					BuildError::WalletSetupFailed

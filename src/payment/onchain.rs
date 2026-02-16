@@ -57,8 +57,8 @@ impl OnchainPayment {
 	}
 
 	/// Retrieve a new on-chain/funding address.
-	pub fn new_address(&self) -> Result<Address, Error> {
-		let funding_address = self.wallet.get_new_address()?;
+	pub async fn new_address(&self) -> Result<Address, Error> {
+		let funding_address = self.wallet.get_new_address().await?;
 		log_info!(self.logger, "Generated new funding address: {}", funding_address);
 		Ok(funding_address)
 	}
@@ -72,7 +72,7 @@ impl OnchainPayment {
 	/// a reasonable estimate from the configured chain source.
 	///
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
-	pub fn send_to_address(
+	pub async fn send_to_address(
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().unwrap() {
@@ -84,7 +84,7 @@ impl OnchainPayment {
 		let send_amount =
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt).await
 	}
 
 	/// Send an on-chain payment to the given address, draining the available funds.
@@ -102,7 +102,7 @@ impl OnchainPayment {
 	/// we'll retrieve an estimate from the configured chain source.
 	///
 	/// [`BalanceDetails::spendable_onchain_balance_sats`]: crate::balance::BalanceDetails::spendable_onchain_balance_sats
-	pub fn send_all_to_address(
+	pub async fn send_all_to_address(
 		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().unwrap() {
@@ -118,6 +118,6 @@ impl OnchainPayment {
 		};
 
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt).await
 	}
 }

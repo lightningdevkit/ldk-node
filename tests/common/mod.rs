@@ -688,8 +688,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 	expect_anchor_channel: bool, force_close: bool,
 ) {
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = if expect_anchor_channel { 2_125_000 } else { 2_100_000 };
 
@@ -1122,9 +1122,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 
 	println!("\nB splices out to pay A");
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
 	let splice_out_sat = funding_amount_sat / 2;
-	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
+	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).await.unwrap();
 
 	expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
@@ -1146,7 +1146,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nA splices in the splice-out payment from B");
 	let splice_in_sat = splice_out_sat;
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).await.unwrap();
 
 	expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());

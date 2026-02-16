@@ -1273,7 +1273,7 @@ impl Node {
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
-	pub fn splice_in(
+	pub async fn splice_in(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
@@ -1325,9 +1325,9 @@ impl Node {
 
 			// insert channel's funding utxo into the wallet so we can later calculate fees
 			// correctly when viewing this splice-in.
-			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output)?;
+			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output).await?;
 
-			let change_address = self.wallet.get_new_internal_address()?;
+			let change_address = self.wallet.get_new_internal_address().await?;
 
 			let contribution = SpliceContribution::splice_in(
 				Amount::from_sat(splice_amount_sats),
@@ -1343,30 +1343,32 @@ impl Node {
 				},
 			};
 
-			self.channel_manager
-				.splice_channel(
-					&channel_details.channel_id,
-					&counterparty_node_id,
-					contribution,
-					funding_feerate_per_kw,
-					None,
-				)
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to splice channel: {:?}", e);
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: vec![bitcoin::TxOut {
-							value: Amount::ZERO,
-							script_pubkey: change_address.script_pubkey(),
-						}],
-					};
-					match self.wallet.cancel_tx(&tx) {
-						Ok(()) => Error::ChannelSplicingFailed,
-						Err(e) => e,
-					}
-				})
+			let splice_res = self.channel_manager.splice_channel(
+				&channel_details.channel_id,
+				&counterparty_node_id,
+				contribution,
+				funding_feerate_per_kw,
+				None,
+			);
+
+			if let Err(e) = splice_res {
+				log_error!(self.logger, "Failed to splice channel: {:?}", e);
+				let tx = bitcoin::Transaction {
+					version: bitcoin::transaction::Version::TWO,
+					lock_time: bitcoin::absolute::LockTime::ZERO,
+					input: vec![],
+					output: vec![bitcoin::TxOut {
+						value: Amount::ZERO,
+						script_pubkey: change_address.script_pubkey(),
+					}],
+				};
+				return match self.wallet.cancel_tx(&tx).await {
+					Ok(()) => Err(Error::ChannelSplicingFailed),
+					Err(e) => Err(e),
+				};
+			}
+
+			Ok(())
 		} else {
 			log_error!(
 				self.logger,
@@ -1390,7 +1392,7 @@ impl Node {
 	/// This API is experimental. Currently, a splice-out will be marked as an inbound payment if
 	/// paid to an address associated with the on-chain wallet, but this classification may change
 	/// in the future.
-	pub fn splice_out(
+	pub async fn splice_out(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
@@ -1430,7 +1432,7 @@ impl Node {
 				Error::ChannelSplicingFailed
 			})?;
 
-			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output)?;
+			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output).await?;
 
 			self.channel_manager
 				.splice_channel(

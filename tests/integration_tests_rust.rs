@@ -119,8 +119,8 @@ async fn channel_open_fails_when_funds_insufficient() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = 100_000;
 
@@ -169,7 +169,10 @@ async fn multi_hop_sending() {
 		nodes.push(node);
 	}
 
-	let addresses = nodes.iter().map(|n| n.onchain_payment().new_address().unwrap()).collect();
+	let mut addresses = Vec::new();
+	for n in &nodes {
+		addresses.push(n.onchain_payment().new_address().await.unwrap());
+	}
 	let premine_amount_sat = 5_000_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -272,7 +275,7 @@ async fn start_stop_reinit() {
 	let expected_node_id = node.node_id();
 	assert_eq!(node.start(), Err(NodeError::AlreadyRunning));
 
-	let funding_address = node.onchain_payment().new_address().unwrap();
+	let funding_address = node.onchain_payment().new_address().await.unwrap();
 
 	assert_eq!(node.list_balances().total_onchain_balance_sats, 0);
 
@@ -329,8 +332,8 @@ async fn onchain_send_receive() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
 	// This is a Bitcoin Testnet address. Sending funds to this address from the Regtest network will fail
 	let static_address = "tb1q0d40e5rta4fty63z64gztf8c3v20cvet6v2jdh";
 	let unchecked_address = Address::<NetworkUnchecked>::from_str(static_address).unwrap();
@@ -397,22 +400,22 @@ async fn onchain_send_receive() {
 
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None)
+		node_a.onchain_payment().send_to_address(&addr_b, expected_node_a_balance + 1, None).await
 	);
 
 	assert_eq!(
 		Err(NodeError::InvalidAddress),
-		node_a.onchain_payment().send_to_address(&addr_c, expected_node_a_balance + 1, None)
+		node_a.onchain_payment().send_to_address(&addr_c, expected_node_a_balance + 1, None).await
 	);
 
 	assert_eq!(
 		Err(NodeError::InvalidAddress),
-		node_a.onchain_payment().send_all_to_address(&addr_c, true, None)
+		node_a.onchain_payment().send_all_to_address(&addr_c, true, None).await
 	);
 
 	let amount_to_send_sats = 54321;
 	let txid =
-		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).await.unwrap();
 	wait_for_tx(&electrsd.client, txid).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
@@ -476,8 +479,8 @@ async fn onchain_send_receive() {
 		_ => panic!("Unexpected payment kind"),
 	}
 
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).await.unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	wait_for_tx(&electrsd.client, txid).await;
 
@@ -499,8 +502,8 @@ async fn onchain_send_receive() {
 		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_b_payments.len(), 4);
 
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false, None).unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, false, None).await.unwrap();
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	wait_for_tx(&electrsd.client, txid).await;
 
@@ -531,8 +534,8 @@ async fn onchain_send_all_retains_reserve() {
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	// Setup nodes
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = 1_000_000;
 	let reserve_amount_sat = 25_000;
@@ -551,7 +554,7 @@ async fn onchain_send_all_retains_reserve() {
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	// Send all over, with 0 reserve as we don't have any channels open.
-	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b, true, None).await.unwrap();
 
 	wait_for_tx(&electrsd.client, txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
@@ -592,7 +595,7 @@ async fn onchain_send_all_retains_reserve() {
 		.contains(&node_b.list_balances().spendable_onchain_balance_sats));
 
 	// Send all over again, this time ensuring the reserve is accounted for
-	let txid = node_b.onchain_payment().send_all_to_address(&addr_a, true, None).unwrap();
+	let txid = node_b.onchain_payment().send_all_to_address(&addr_a, true, None).await.unwrap();
 
 	wait_for_tx(&electrsd.client, txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
@@ -620,7 +623,7 @@ async fn onchain_wallet_recovery() {
 
 	let premine_amount_sat = 100_000;
 
-	let addr_1 = original_node.onchain_payment().new_address().unwrap();
+	let addr_1 = original_node.onchain_payment().new_address().await.unwrap();
 
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -632,7 +635,7 @@ async fn onchain_wallet_recovery() {
 	original_node.sync_wallets().unwrap();
 	assert_eq!(original_node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
-	let addr_2 = original_node.onchain_payment().new_address().unwrap();
+	let addr_2 = original_node.onchain_payment().new_address().await.unwrap();
 
 	let txid = bitcoind
 		.client
@@ -666,10 +669,10 @@ async fn onchain_wallet_recovery() {
 	);
 
 	// Check we sync even when skipping some addresses.
-	let _addr_3 = recovered_node.onchain_payment().new_address().unwrap();
-	let _addr_4 = recovered_node.onchain_payment().new_address().unwrap();
-	let _addr_5 = recovered_node.onchain_payment().new_address().unwrap();
-	let addr_6 = recovered_node.onchain_payment().new_address().unwrap();
+	let _addr_3 = recovered_node.onchain_payment().new_address().await.unwrap();
+	let _addr_4 = recovered_node.onchain_payment().new_address().await.unwrap();
+	let _addr_5 = recovered_node.onchain_payment().new_address().await.unwrap();
+	let addr_6 = recovered_node.onchain_payment().new_address().await.unwrap();
 
 	let txid = bitcoind
 		.client
@@ -726,8 +729,10 @@ async fn run_rbf_test(is_insert_block: bool) {
 	premine_blocks(bitcoind, electrs).await;
 
 	// Helpers declaration before starting the test
-	let all_addrs =
-		nodes.iter().map(|node| node.onchain_payment().new_address().unwrap()).collect::<Vec<_>>();
+	let mut all_addrs = Vec::new();
+	for node in &nodes {
+		all_addrs.push(node.onchain_payment().new_address().await.unwrap());
+	}
 	let amount_sat = 2_100_000;
 	let mut txid;
 	macro_rules! distribute_funds_all_nodes {
@@ -814,10 +819,10 @@ async fn run_rbf_test(is_insert_block: bool) {
 	// Check if it is possible to send all funds from the node
 	let mut txids = Vec::new();
 	let addr = bitcoind.new_address().unwrap();
-	nodes.iter().for_each(|node| {
-		let txid = node.onchain_payment().send_all_to_address(&addr, true, None).unwrap();
+	for node in &nodes {
+		let txid = node.onchain_payment().send_all_to_address(&addr, true, None).await.unwrap();
 		txids.push(txid);
-	});
+	}
 	for txid in txids {
 		wait_for_tx(electrs, txid).await;
 	}
@@ -942,8 +947,8 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	};
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
-	let address_a = node_a.onchain_payment().new_address().unwrap();
-	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let address_a = node_a.onchain_payment().new_address().await.unwrap();
+	let address_b = node_b.onchain_payment().new_address().await.unwrap();
 	let premine_amount_sat = 5_000_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -985,15 +990,15 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 0);
 
 	// Test that splicing and payments fail when there are insufficient funds
-	let address = node_b.onchain_payment().new_address().unwrap();
+	let address = node_b.onchain_payment().new_address().await.unwrap();
 	let amount_msat = 400_000_000;
 
 	assert_eq!(
-		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000),
+		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000).await,
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
-		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000),
+		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000).await,
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
@@ -1002,7 +1007,7 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	);
 
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).await.unwrap();
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
@@ -1044,8 +1049,11 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000 - amount_msat / 1000);
 
 	// Splice-out funds for Node A from the payment sent by Node B
-	let address = node_a.onchain_payment().new_address().unwrap();
-	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000).unwrap();
+	let address = node_a.onchain_payment().new_address().await.unwrap();
+	node_a
+		.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000)
+		.await
+		.unwrap();
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
@@ -1087,7 +1095,7 @@ async fn simple_bolt12_send_receive() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
-	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_a = node_a.onchain_payment().new_address().await.unwrap();
 	let premine_amount_sat = 5_000_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -1356,10 +1364,10 @@ async fn async_payment() {
 		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
 	let node_receiver = setup_node(&chain_source, config_receiver);
 
-	let address_sender = node_sender.onchain_payment().new_address().unwrap();
-	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().unwrap();
-	let address_receiver_lsp = node_receiver_lsp.onchain_payment().new_address().unwrap();
-	let address_receiver = node_receiver.onchain_payment().new_address().unwrap();
+	let address_sender = node_sender.onchain_payment().new_address().await.unwrap();
+	let address_sender_lsp = node_sender_lsp.onchain_payment().new_address().await.unwrap();
+	let address_receiver_lsp = node_receiver_lsp.onchain_payment().new_address().await.unwrap();
+	let address_receiver = node_receiver.onchain_payment().new_address().await.unwrap();
 	let premine_amount_sat = 4_000_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -1484,7 +1492,7 @@ async fn test_node_announcement_propagation() {
 	let node_a = setup_node(&chain_source, config_a);
 	let node_b = setup_node(&chain_source, config_b);
 
-	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_a = node_a.onchain_payment().new_address().await.unwrap();
 	let premine_amount_sat = 5_000_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -1551,7 +1559,7 @@ async fn generate_bip21_uri() {
 
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
-	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_a = node_a.onchain_payment().new_address().await.unwrap();
 	let premined_sats = 5_000_000;
 
 	let expected_amount_sats = 100_000;
@@ -1608,7 +1616,7 @@ async fn unified_send_receive_bip21_uri() {
 
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
-	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_a = node_a.onchain_payment().new_address().await.unwrap();
 	let premined_sats = 5_000_000;
 
 	premine_and_distribute_funds(
@@ -1766,9 +1774,9 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
-	let service_addr = service_node.onchain_payment().new_address().unwrap();
-	let client_addr = client_node.onchain_payment().new_address().unwrap();
-	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+	let service_addr = service_node.onchain_payment().new_address().await.unwrap();
+	let client_addr = client_node.onchain_payment().new_address().await.unwrap();
+	let payer_addr = payer_node.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = 10_000_000;
 
@@ -1972,7 +1980,7 @@ async fn spontaneous_send_with_custom_preimage() {
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
-	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_a = node_a.onchain_payment().new_address().await.unwrap();
 	let premine_sat = 1_000_000;
 	premine_and_distribute_funds(
 		&bitcoind.client,
@@ -2091,9 +2099,9 @@ async fn lsps2_client_trusts_lsp() {
 	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
-	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
-	let client_addr_onchain = client_node.onchain_payment().new_address().unwrap();
-	let payer_addr_onchain = payer_node.onchain_payment().new_address().unwrap();
+	let service_addr_onchain = service_node.onchain_payment().new_address().await.unwrap();
+	let client_addr_onchain = client_node.onchain_payment().new_address().await.unwrap();
+	let payer_addr_onchain = payer_node.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = 10_000_000;
 
@@ -2268,9 +2276,9 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
-	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
-	let client_addr_onchain = client_node.onchain_payment().new_address().unwrap();
-	let payer_addr_onchain = payer_node.onchain_payment().new_address().unwrap();
+	let service_addr_onchain = service_node.onchain_payment().new_address().await.unwrap();
+	let client_addr_onchain = client_node.onchain_payment().new_address().await.unwrap();
+	let payer_addr_onchain = payer_node.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = 10_000_000;
 
@@ -2367,8 +2375,8 @@ async fn payment_persistence_after_restart() {
 		let config_b = random_config(true);
 		let node_b = setup_node(&chain_source, config_b);
 
-		let addr_a = node_a.onchain_payment().new_address().unwrap();
-		let addr_b = node_b.onchain_payment().new_address().unwrap();
+		let addr_a = node_a.onchain_payment().new_address().await.unwrap();
+		let addr_b = node_b.onchain_payment().new_address().await.unwrap();
 
 		// Premine sufficient funds for a large channel and many payments
 		let premine_amount_sat = 10_000_000;

@@ -10,6 +10,8 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use bdk_wallet::AsyncWalletPersister;
+
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::event::WalletEvent;
@@ -68,7 +70,7 @@ pub(crate) mod ser;
 pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
-	persister: Mutex<KVStoreWalletPersister>,
+	persister: tokio::sync::Mutex<KVStoreWalletPersister>,
 	broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	payment_store: Arc<PaymentStore>,
@@ -85,7 +87,7 @@ impl Wallet {
 		config: Arc<Config>, logger: Arc<Logger>, pending_payment_store: Arc<PendingPaymentStore>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
-		let persister = Mutex::new(wallet_persister);
+		let persister = tokio::sync::Mutex::new(wallet_persister);
 		Self {
 			inner,
 			persister,
@@ -96,6 +98,33 @@ impl Wallet {
 			logger,
 			pending_payment_store,
 		}
+	}
+
+	async fn persist_wallet(&self) -> Result<(), Error> {
+		let change_set = {
+			let locked_wallet = self.inner.lock().unwrap();
+			match locked_wallet.staged() {
+				Some(cs) => cs.clone(),
+				None => return Ok(()),
+			}
+		};
+
+		{
+			let mut locked_persister = self.persister.lock().await;
+			KVStoreWalletPersister::persist(&mut locked_persister, &change_set).await.map_err(
+				|e| {
+					log_error!(self.logger, "Failed to persist wallet: {}", e);
+					Error::PersistenceFailed
+				},
+			)?;
+		}
+
+		{
+			let mut locked_wallet = self.inner.lock().unwrap();
+			locked_wallet.take_staged();
+		}
+
+		Ok(())
 	}
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
@@ -129,20 +158,15 @@ impl Wallet {
 		let events = {
 			let mut locked_wallet = self.inner.lock().unwrap();
 			match locked_wallet.apply_update_events(update) {
-				Ok(events) => {
-					let mut locked_persister = self.persister.lock().unwrap();
-					locked_wallet.persist(&mut locked_persister).map_err(|e| {
-						log_error!(self.logger, "Failed to persist wallet: {}", e);
-						Error::PersistenceFailed
-					})?;
-					events
-				},
+				Ok(events) => events,
 				Err(e) => {
 					log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
 					return Err(Error::WalletOperationFailed);
 				},
 			}
 		};
+
+		self.persist_wallet().await?;
 
 		self.update_payment_store(events).await.map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
@@ -152,33 +176,25 @@ impl Wallet {
 		Ok(())
 	}
 
-	pub(crate) fn apply_mempool_txs(
+	pub(crate) async fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
-		locked_wallet.apply_evicted_txs(evicted_txids);
+		{
+			let mut locked_wallet = self.inner.lock().unwrap();
+			locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
+			locked_wallet.apply_evicted_txs(evicted_txids);
+		}
 
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-
-		Ok(())
+		self.persist_wallet().await
 	}
 
-	pub(crate) fn insert_txo(&self, outpoint: OutPoint, txout: TxOut) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		locked_wallet.insert_txout(outpoint, txout);
+	pub(crate) async fn insert_txo(&self, outpoint: OutPoint, txout: TxOut) -> Result<(), Error> {
+		{
+			let mut locked_wallet = self.inner.lock().unwrap();
+			locked_wallet.insert_txout(outpoint, txout);
+		}
 
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-
-		Ok(())
+		self.persist_wallet().await
 	}
 
 	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
@@ -367,45 +383,45 @@ impl Wallet {
 	}
 
 	#[allow(deprecated)]
-	pub(crate) fn create_funding_transaction(
+	pub(crate) async fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
 		locktime: LockTime,
 	) -> Result<Transaction, Error> {
 		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut tx_builder = locked_wallet.build_tx();
+		let psbt = {
+			let mut locked_wallet = self.inner.lock().unwrap();
+			let mut tx_builder = locked_wallet.build_tx();
 
-		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
+			tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
 
-		let mut psbt = match tx_builder.finish() {
-			Ok(psbt) => {
-				log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
-				psbt
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create funding transaction: {}", err);
-				return Err(err.into());
-			},
+			let mut psbt = match tx_builder.finish() {
+				Ok(psbt) => {
+					log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
+					psbt
+				},
+				Err(err) => {
+					log_error!(self.logger, "Failed to create funding transaction: {}", err);
+					return Err(err.into());
+				},
+			};
+
+			match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+				Ok(finalized) => {
+					if !finalized {
+						return Err(Error::OnchainTxCreationFailed);
+					}
+				},
+				Err(err) => {
+					log_error!(self.logger, "Failed to create funding transaction: {}", err);
+					return Err(err.into());
+				},
+			}
+
+			psbt
 		};
 
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
-			Ok(finalized) => {
-				if !finalized {
-					return Err(Error::OnchainTxCreationFailed);
-				}
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create funding transaction: {}", err);
-				return Err(err.into());
-			},
-		}
-
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
+		self.persist_wallet().await?;
 
 		let tx = psbt.extract_tx().map_err(|e| {
 			log_error!(self.logger, "Failed to extract transaction: {}", e);
@@ -415,41 +431,30 @@ impl Wallet {
 		Ok(tx)
 	}
 
-	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
-
-		let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
+	pub(crate) async fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
+		let address_info = {
+			let mut locked_wallet = self.inner.lock().unwrap();
+			locked_wallet.reveal_next_address(KeychainKind::External)
+		};
+		self.persist_wallet().await?;
 		Ok(address_info.address)
 	}
 
-	pub(crate) fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
-
-		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
+	pub(crate) async fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
+		let address_info = {
+			let mut locked_wallet = self.inner.lock().unwrap();
+			locked_wallet.next_unused_address(KeychainKind::Internal)
+		};
+		self.persist_wallet().await?;
 		Ok(address_info.address)
 	}
 
-	pub(crate) fn cancel_tx(&self, tx: &Transaction) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
-
-		locked_wallet.cancel_tx(tx);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-
-		Ok(())
+	pub(crate) async fn cancel_tx(&self, tx: &Transaction) -> Result<(), Error> {
+		{
+			let mut locked_wallet = self.inner.lock().unwrap();
+			locked_wallet.cancel_tx(tx);
+		}
+		self.persist_wallet().await
 	}
 
 	pub(crate) fn get_balances(
@@ -495,7 +500,7 @@ impl Wallet {
 	}
 
 	#[allow(deprecated)]
-	pub(crate) fn send_to_address(
+	pub(crate) async fn send_to_address(
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
 		fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
@@ -664,17 +669,13 @@ impl Wallet {
 				},
 			}
 
-			let mut locked_persister = self.persister.lock().unwrap();
-			locked_wallet.persist(&mut locked_persister).map_err(|e| {
-				log_error!(self.logger, "Failed to persist wallet: {}", e);
-				Error::PersistenceFailed
-			})?;
-
 			psbt.extract_tx().map_err(|e| {
 				log_error!(self.logger, "Failed to extract transaction: {}", e);
 				e
 			})?
 		};
+
+		self.persist_wallet().await?;
 
 		self.broadcaster.broadcast_transactions(&[(
 			&tx,
@@ -858,14 +859,13 @@ impl Wallet {
 	}
 
 	#[allow(deprecated)]
-	fn get_change_script_inner(&self) -> Result<ScriptBuf, ()> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
-
-		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+	async fn get_change_script_inner(&self) -> Result<ScriptBuf, ()> {
+		let address_info = {
+			let mut locked_wallet = self.inner.lock().unwrap();
+			locked_wallet.next_unused_address(KeychainKind::Internal)
+		};
+		self.persist_wallet().await.map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			()
 		})?;
 		Ok(address_info.address.script_pubkey())
 	}
@@ -1038,7 +1038,7 @@ impl Listen for Wallet {
 				);
 			}
 
-			let events = match locked_wallet.apply_block_events(block, height) {
+			match locked_wallet.apply_block_events(block, height) {
 				Ok(events) => events,
 				Err(e) => {
 					log_error!(
@@ -1048,22 +1048,15 @@ impl Listen for Wallet {
 					);
 					return;
 				},
-			};
-
-			let mut locked_persister = self.persister.lock().unwrap();
-			match locked_wallet.persist(&mut locked_persister) {
-				Ok(_) => (),
-				Err(e) => {
-					log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
-					return;
-				},
-			};
-
-			events
+			}
 		};
 
 		let rt_handle = tokio::runtime::Handle::current();
 		tokio::task::block_in_place(|| {
+			if let Err(e) = rt_handle.block_on(self.persist_wallet()) {
+				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
+				return;
+			}
 			if let Err(e) = rt_handle.block_on(self.update_payment_store(events)) {
 				log_error!(self.logger, "Failed to update payment store: {}", e);
 			}
@@ -1085,7 +1078,7 @@ impl WalletSource for Wallet {
 	}
 
 	fn get_change_script<'a>(&'a self) -> impl Future<Output = Result<ScriptBuf, ()>> + Send + 'a {
-		async move { self.get_change_script_inner() }
+		async move { self.get_change_script_inner().await }
 	}
 
 	fn sign_psbt<'a>(
@@ -1208,16 +1201,22 @@ impl SignerProvider for WalletKeysManager {
 	}
 
 	fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.get_new_address().map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
+		let rt_handle = tokio::runtime::Handle::current();
+		let address =
+			tokio::task::block_in_place(|| rt_handle.block_on(self.wallet.get_new_address()))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+				})?;
 		Ok(address.script_pubkey())
 	}
 
 	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
-		let address = self.wallet.get_new_address().map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
+		let rt_handle = tokio::runtime::Handle::current();
+		let address =
+			tokio::task::block_in_place(|| rt_handle.block_on(self.wallet.get_new_address()))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+				})?;
 
 		match address.witness_program() {
 			Some(program) => ShutdownScript::new_witness_program(&program).map_err(|e| {
@@ -1241,6 +1240,7 @@ impl ChangeDestinationSource for WalletKeysManager {
 		async move {
 			self.wallet
 				.get_new_internal_address()
+				.await
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
 				})

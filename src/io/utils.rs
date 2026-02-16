@@ -26,7 +26,7 @@ use lightning::routing::scoring::{
 	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 };
 use lightning::util::persist::{
-	KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
 	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_KEY,
 	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -476,14 +476,15 @@ macro_rules! impl_read_write_change_set_type {
 		$secondary_namespace:expr,
 		$key:expr
 	) => {
-		pub(crate) fn $read_name<L: Deref>(
+		pub(crate) async fn $read_name<L: Deref>(
 			kv_store: &DynStore, logger: L,
 		) -> Result<Option<$change_set_type>, std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
 			let reader =
-				match KVStoreSync::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
+				match KVStore::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
+					.await
 				{
 					Ok(bytes) => bytes,
 					Err(e) => {
@@ -517,14 +518,15 @@ macro_rules! impl_read_write_change_set_type {
 			}
 		}
 
-		pub(crate) fn $write_name<L: Deref>(
+		pub(crate) async fn $write_name<L: Deref>(
 			value: &$change_set_type, kv_store: &DynStore, logger: L,
 		) -> Result<(), std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
 			let data = ChangeSetSerWrapper(value).encode();
-			KVStoreSync::write(&*kv_store, $primary_namespace, $secondary_namespace, $key, data)
+			KVStore::write(&*kv_store, $primary_namespace, $secondary_namespace, $key, data)
+				.await
 				.map_err(|e| {
 					log_error!(
 						logger,
@@ -595,36 +597,39 @@ impl_read_write_change_set_type!(
 );
 
 // Reads the full BdkWalletChangeSet or returns default fields
-pub(crate) fn read_bdk_wallet_change_set(
+pub(crate) async fn read_bdk_wallet_change_set(
 	kv_store: &DynStore, logger: &Logger,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 
 	// We require a descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(descriptor) = read_bdk_wallet_descriptor(kv_store, logger)? {
+	if let Some(descriptor) = read_bdk_wallet_descriptor(kv_store, logger).await? {
 		change_set.descriptor = Some(descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a change_descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(change_descriptor) = read_bdk_wallet_change_descriptor(kv_store, logger)? {
+	if let Some(change_descriptor) = read_bdk_wallet_change_descriptor(kv_store, logger).await? {
 		change_set.change_descriptor = Some(change_descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a network and return `None` to signal creation of a new wallet otherwise.
-	if let Some(network) = read_bdk_wallet_network(kv_store, logger)? {
+	if let Some(network) = read_bdk_wallet_network(kv_store, logger).await? {
 		change_set.network = Some(network);
 	} else {
 		return Ok(None);
 	}
 
-	read_bdk_wallet_local_chain(&*kv_store, logger)?
+	read_bdk_wallet_local_chain(&*kv_store, logger)
+		.await?
 		.map(|local_chain| change_set.local_chain = local_chain);
-	read_bdk_wallet_tx_graph(&*kv_store, logger)?.map(|tx_graph| change_set.tx_graph = tx_graph);
-	read_bdk_wallet_indexer(&*kv_store, logger)?.map(|indexer| change_set.indexer = indexer);
+	read_bdk_wallet_tx_graph(&*kv_store, logger)
+		.await?
+		.map(|tx_graph| change_set.tx_graph = tx_graph);
+	read_bdk_wallet_indexer(&*kv_store, logger).await?.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }
 
