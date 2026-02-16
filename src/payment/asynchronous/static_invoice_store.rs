@@ -15,7 +15,7 @@ use bitcoin::hashes::Hash;
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::impl_writeable_tlv_based;
 use lightning::offers::static_invoice::StaticInvoice;
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::hex_utils;
@@ -78,12 +78,13 @@ impl StaticInvoiceStore {
 
 		let (secondary_namespace, key) = Self::get_storage_location(invoice_slot, recipient_id);
 
-		KVStoreSync::read(
+		KVStore::read(
 			&*self.kv_store,
 			STATIC_INVOICE_STORE_PRIMARY_NAMESPACE,
 			&secondary_namespace,
 			&key,
 		)
+		.await
 		.and_then(|data| {
 			PersistedStaticInvoice::read(&mut &*data)
 				.map(|persisted_invoice| {
@@ -124,13 +125,14 @@ impl StaticInvoiceStore {
 		// Static invoices will be persisted at "static_invoices/<sha256(recipient_id)>/<invoice_slot>".
 		//
 		// Example: static_invoices/039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81/00001
-		KVStoreSync::write(
+		KVStore::write(
 			&*self.kv_store,
 			STATIC_INVOICE_STORE_PRIMARY_NAMESPACE,
 			&secondary_namespace,
 			&key,
 			buf,
 		)
+		.await
 	}
 
 	fn get_storage_location(invoice_slot: u16, recipient_id: &[u8]) -> (String, String) {
