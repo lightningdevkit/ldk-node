@@ -1098,8 +1098,8 @@ impl ArcedNodeBuilder {
 	///
 	/// [`build_with_tier_store`]: Self::build_with_tier_store
 	pub fn set_tier_store_backup(&self, backup_store: Arc<FfiDynStore>) {
-		let wrapper = DynStoreWrapper((*backup_store).clone());
-		let store: Arc<DynStore> = Arc::new(wrapper);
+		let store: Arc<DynStore> =
+			Arc::<DynStoreWrapper<FfiDynStore>>::new((*backup_store).clone().into());
 		self.inner.write().unwrap().set_tier_store_backup(store);
 	}
 
@@ -1113,8 +1113,8 @@ impl ArcedNodeBuilder {
 	///
 	/// [`build_with_tier_store`]: Self::build_with_tier_store
 	pub fn set_tier_store_ephemeral(&self, ephemeral_store: Arc<FfiDynStore>) {
-		let wrapper = DynStoreWrapper((*ephemeral_store).clone());
-		let store: Arc<DynStore> = Arc::new(wrapper);
+		let store: Arc<DynStore> =
+			Arc::<DynStoreWrapper<FfiDynStore>>::new((*ephemeral_store).clone().into());
 		self.inner.write().unwrap().set_tier_store_ephemeral(store);
 	}
 
@@ -1225,8 +1225,8 @@ impl ArcedNodeBuilder {
 	pub fn build_with_tier_store(
 		&self, node_entropy: Arc<NodeEntropy>, primary_store: Arc<FfiDynStore>,
 	) -> Result<Arc<Node>, BuildError> {
-		let wrapper = DynStoreWrapper((*primary_store).clone());
-		let store: Arc<DynStore> = Arc::new(wrapper);
+		let store: Arc<DynStore> =
+			Arc::<DynStoreWrapper<FfiDynStore>>::new((*primary_store).clone().into());
 		self.inner
 			.read()
 			.unwrap()

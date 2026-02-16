@@ -63,7 +63,7 @@ pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
 pub use crate::payment::UnifiedPaymentResult;
-use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
+use crate::{hex_utils, DynStoreWrapper, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
 
 #[derive(Debug)]
 pub enum IOError {
@@ -363,6 +363,12 @@ impl KVStoreSync for FfiDynStore {
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Result<Vec<String>, lightning::io::Error> {
 		self.inner.list_internal(primary_namespace.to_string(), secondary_namespace.to_string())
+	}
+}
+
+impl From<FfiDynStore> for DynStoreWrapper<FfiDynStore> {
+	fn from(ffi_store: FfiDynStore) -> Self {
+		DynStoreWrapper(ffi_store)
 	}
 }
 
