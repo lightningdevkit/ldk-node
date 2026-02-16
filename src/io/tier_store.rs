@@ -87,15 +87,7 @@ impl TierStore {
 	) {
 		while let Some(op) = receiver.recv().await {
 			match Self::apply_backup_operation(&op, &backup_store).await {
-				Ok(_) => {
-					log_trace!(
-						logger,
-						"Backup succeeded for key {}/{}/{}",
-						op.primary_namespace(),
-						op.secondary_namespace(),
-						op.key()
-					);
-				},
+				Ok(_) => {},
 				Err(e) => {
 					log_error!(
 						logger,
@@ -382,16 +374,7 @@ impl TierStoreInner {
 		)
 		.await
 		{
-			Ok(data) => {
-				log_info!(
-					self.logger,
-					"Read succeeded for key: {}/{}/{}",
-					primary_namespace,
-					secondary_namespace,
-					key
-				);
-				Ok(data)
-			},
+			Ok(data) => Ok(data),
 			Err(e) => {
 				log_error!(
 					self.logger,
@@ -414,12 +397,6 @@ impl TierStoreInner {
 			.await
 		{
 			Ok(keys) => {
-				log_info!(
-					self.logger,
-					"List succeeded for namespace: {}/{}",
-					primary_namespace,
-					secondary_namespace
-				);
 				return Ok(keys);
 			},
 			Err(e) => {
@@ -549,7 +526,6 @@ impl TierStoreInner {
 					)
 					.await
 				} else {
-					log_debug!(self.logger, "Ephemeral store not configured. Reading non-critical data from primary or backup stores.");
 					self.read_primary(&primary_namespace, &secondary_namespace, &key).await
 				}
 			},
@@ -573,8 +549,6 @@ impl TierStoreInner {
 					)
 					.await
 				} else {
-					log_debug!(self.logger, "Ephemeral store not configured. Writing non-critical data to primary and backup stores.");
-
 					self.primary_write_then_schedule_backup(
 						primary_namespace.as_str(),
 						secondary_namespace.as_str(),
@@ -612,8 +586,6 @@ impl TierStoreInner {
 					)
 					.await
 				} else {
-					log_debug!(self.logger, "Ephemeral store not configured. Removing non-critical data from primary and backup stores.");
-
 					self.primary_remove_then_schedule_backup(
 						primary_namespace.as_str(),
 						secondary_namespace.as_str(),
@@ -647,10 +619,6 @@ impl TierStoreInner {
 				if let Some(eph_store) = self.ephemeral_store.as_ref() {
 					KVStoreSync::list(eph_store.as_ref(), &primary_namespace, &secondary_namespace)
 				} else {
-					log_debug!(
-						self.logger,
-						"Ephemeral store not configured. Listing from primary and backup stores."
-					);
 					self.list_primary(&primary_namespace, &secondary_namespace).await
 				}
 			},
