@@ -253,6 +253,9 @@ impl std::fmt::Display for IOError {
 	}
 }
 
+/// FFI-safe version of [`DynStoreTrait`].
+///
+/// [`DynStoreTrait`]: crate::types::DynStoreTrait
 #[uniffi::export(with_foreign)]
 #[async_trait]
 pub trait FfiDynStoreTrait: Send + Sync {
