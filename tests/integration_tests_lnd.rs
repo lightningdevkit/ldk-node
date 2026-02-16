@@ -71,6 +71,7 @@ async fn test_lnd() {
 	let funding_amount_sat = 1_000_000;
 
 	node.open_channel(lnd_node_id, lnd_address, funding_amount_sat, Some(500_000_000), None)
+		.await
 		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, lnd_node_id);
@@ -117,7 +118,7 @@ async fn test_lnd() {
 	lnd.pay_invoice(&ldk_invoice.to_string()).await;
 	common::expect_event!(node, PaymentReceived);
 
-	node.close_channel(&user_channel_id, lnd_node_id).unwrap();
+	node.close_channel(&user_channel_id, lnd_node_id).await.unwrap();
 	common::expect_event!(node, ChannelClosed);
 	node.stop().unwrap();
 }

@@ -146,7 +146,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning_background_processor::process_events_async;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -164,7 +164,7 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -312,7 +312,10 @@ impl Node {
 									{
 										let mut locked_node_metrics = gossip_node_metrics.write().unwrap();
 										locked_node_metrics.latest_rgs_snapshot_timestamp = Some(updated_timestamp);
-										write_node_metrics(&*locked_node_metrics, &*gossip_sync_store, Arc::clone(&gossip_sync_logger))
+									}
+									{
+										let snapshot = gossip_node_metrics.read().unwrap().clone();
+										write_node_metrics(&snapshot, &*gossip_sync_store, Arc::clone(&gossip_sync_logger)).await
 											.unwrap_or_else(|e| {
 												log_error!(gossip_sync_logger, "Persistence failed: {}", e);
 											});
@@ -525,14 +528,17 @@ impl Node {
 
 								let unix_time_secs_opt =
 									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								{
-									let mut locked_node_metrics = bcast_node_metrics.write().unwrap();
-									locked_node_metrics.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt;
-									write_node_metrics(&*locked_node_metrics, &*bcast_store, Arc::clone(&bcast_logger))
-										.unwrap_or_else(|e| {
-											log_error!(bcast_logger, "Persistence failed: {}", e);
-										});
-								}
+									{
+										let mut locked_node_metrics = bcast_node_metrics.write().unwrap();
+										locked_node_metrics.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt;
+									}
+									{
+										let snapshot = bcast_node_metrics.read().unwrap().clone();
+										write_node_metrics(&snapshot, &*bcast_store, Arc::clone(&bcast_logger)).await
+											.unwrap_or_else(|e| {
+												log_error!(bcast_logger, "Persistence failed: {}", e);
+											});
+									}
 							} else {
 								debug_assert!(false, "We checked whether the node may announce, so node alias should always be set");
 								continue
@@ -852,7 +858,6 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn bolt11_payment(&self) -> Bolt11Payment {
 		Bolt11Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
@@ -870,7 +875,6 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn bolt11_payment(&self) -> Arc<Bolt11Payment> {
 		Arc::new(Bolt11Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
@@ -1040,7 +1044,7 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
-	pub fn connect(
+	pub async fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
@@ -1049,20 +1053,14 @@ impl Node {
 
 		let peer_info = PeerInfo { node_id, address };
 
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		self.connection_manager
+			.connect_peer_if_necessary(peer_info.node_id, peer_info.address.clone())
+			.await?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if persist {
-			self.peer_store.add_peer(peer_info)?;
+			self.peer_store.add_peer(peer_info).await?;
 		}
 
 		Ok(())
@@ -1072,14 +1070,14 @@ impl Node {
 	///
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
-	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
+	pub async fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
 
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
-		match self.peer_store.remove_peer(&counterparty_node_id) {
+		match self.peer_store.remove_peer(&counterparty_node_id).await {
 			Ok(()) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
@@ -1090,7 +1088,7 @@ impl Node {
 		Ok(())
 	}
 
-	fn open_channel_inner(
+	async fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool,
@@ -1101,15 +1099,9 @@ impl Node {
 
 		let peer_info = PeerInfo { node_id, address };
 
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		self.connection_manager
+			.connect_peer_if_necessary(peer_info.node_id, peer_info.address.clone())
+			.await?;
 
 		// Check funds availability after connection (includes anchor reserve calculation)
 		self.check_sufficient_funds_for_channel(channel_amount_sats, &node_id)?;
@@ -1143,7 +1135,7 @@ impl Node {
 					"Initiated channel creation with peer {}. ",
 					peer_info.node_id
 				);
-				self.peer_store.add_peer(peer_info)?;
+				self.peer_store.add_peer(peer_info).await?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
@@ -1215,7 +1207,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_channel(
+	pub async fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1227,6 +1219,7 @@ impl Node {
 			channel_config,
 			false,
 		)
+		.await
 	}
 
 	/// Connect to a node and open a new announced channel.
@@ -1250,7 +1243,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_announced_channel(
+	pub async fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1267,6 +1260,7 @@ impl Node {
 			channel_config,
 			true,
 		)
+		.await
 	}
 
 	/// Add funds from the on-chain wallet into an existing channel.
@@ -1279,7 +1273,7 @@ impl Node {
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
-	pub fn splice_in(
+	pub async fn splice_in(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
@@ -1331,9 +1325,9 @@ impl Node {
 
 			// insert channel's funding utxo into the wallet so we can later calculate fees
 			// correctly when viewing this splice-in.
-			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output)?;
+			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output).await?;
 
-			let change_address = self.wallet.get_new_internal_address()?;
+			let change_address = self.wallet.get_new_internal_address().await?;
 
 			let contribution = SpliceContribution::splice_in(
 				Amount::from_sat(splice_amount_sats),
@@ -1349,30 +1343,32 @@ impl Node {
 				},
 			};
 
-			self.channel_manager
-				.splice_channel(
-					&channel_details.channel_id,
-					&counterparty_node_id,
-					contribution,
-					funding_feerate_per_kw,
-					None,
-				)
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to splice channel: {:?}", e);
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: vec![bitcoin::TxOut {
-							value: Amount::ZERO,
-							script_pubkey: change_address.script_pubkey(),
-						}],
-					};
-					match self.wallet.cancel_tx(&tx) {
-						Ok(()) => Error::ChannelSplicingFailed,
-						Err(e) => e,
-					}
-				})
+			let splice_res = self.channel_manager.splice_channel(
+				&channel_details.channel_id,
+				&counterparty_node_id,
+				contribution,
+				funding_feerate_per_kw,
+				None,
+			);
+
+			if let Err(e) = splice_res {
+				log_error!(self.logger, "Failed to splice channel: {:?}", e);
+				let tx = bitcoin::Transaction {
+					version: bitcoin::transaction::Version::TWO,
+					lock_time: bitcoin::absolute::LockTime::ZERO,
+					input: vec![],
+					output: vec![bitcoin::TxOut {
+						value: Amount::ZERO,
+						script_pubkey: change_address.script_pubkey(),
+					}],
+				};
+				return match self.wallet.cancel_tx(&tx).await {
+					Ok(()) => Err(Error::ChannelSplicingFailed),
+					Err(e) => Err(e),
+				};
+			}
+
+			Ok(())
 		} else {
 			log_error!(
 				self.logger,
@@ -1396,7 +1392,7 @@ impl Node {
 	/// This API is experimental. Currently, a splice-out will be marked as an inbound payment if
 	/// paid to an address associated with the on-chain wallet, but this classification may change
 	/// in the future.
-	pub fn splice_out(
+	pub async fn splice_out(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
@@ -1436,7 +1432,7 @@ impl Node {
 				Error::ChannelSplicingFailed
 			})?;
 
-			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output)?;
+			self.wallet.insert_txo(funding_txo.into_bitcoin_outpoint(), funding_output).await?;
 
 			self.channel_manager
 				.splice_channel(
@@ -1508,10 +1504,10 @@ impl Node {
 	///
 	/// Will attempt to close a channel coopertively. If this fails, users might need to resort to
 	/// [`Node::force_close_channel`].
-	pub fn close_channel(
+	pub async fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None).await
 	}
 
 	/// Force-close a previously opened channel.
@@ -1527,14 +1523,14 @@ impl Node {
 	/// for more information).
 	///
 	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
-	pub fn force_close_channel(
+	pub async fn force_close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		reason: Option<String>,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason).await
 	}
 
-	fn close_channel_internal(
+	async fn close_channel_internal(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
 		force_close_reason: Option<String>,
 	) -> Result<(), Error> {
@@ -1569,7 +1565,7 @@ impl Node {
 
 			// Check if this was the last open channel, if so, forget the peer.
 			if open_channels.len() == 1 {
-				self.peer_store.remove_peer(&counterparty_node_id)?;
+				self.peer_store.remove_peer(&counterparty_node_id).await?;
 			}
 		}
 
@@ -1606,8 +1602,8 @@ impl Node {
 	}
 
 	/// Remove the payment with the given id from the store.
-	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
-		self.payment_store.remove(&payment_id)
+	pub async fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
+		self.payment_store.remove(&payment_id).await
 	}
 
 	/// Retrieves an overview of all known balances.
@@ -1764,13 +1760,14 @@ impl Node {
 
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
 	/// a limited view of the network.
-	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
-		KVStoreSync::read(
+	pub async fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
+		KVStore::read(
 			&*self.kv_store,
 			lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 			lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 			lightning::util::persist::SCORER_PERSISTENCE_KEY,
 		)
+		.await
 		.map_err(|e| {
 			log_error!(
 				self.logger,

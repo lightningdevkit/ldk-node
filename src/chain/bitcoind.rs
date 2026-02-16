@@ -206,7 +206,11 @@ impl BitcoindChainSource {
 							unix_time_secs_opt;
 						locked_node_metrics.latest_onchain_wallet_sync_timestamp =
 							unix_time_secs_opt;
-						write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)
+					}
+					{
+						let snapshot = self.node_metrics.read().unwrap().clone();
+						write_node_metrics(&snapshot, &*self.kv_store, &*self.logger)
+							.await
 							.unwrap_or_else(|e| {
 								log_error!(self.logger, "Failed to persist node metrics: {}", e);
 							});
@@ -440,11 +444,12 @@ impl BitcoindChainSource {
 					evicted_txids.len(),
 					now.elapsed().unwrap().as_millis()
 				);
-				onchain_wallet.apply_mempool_txs(unconfirmed_txs, evicted_txids).unwrap_or_else(
-					|e| {
+				onchain_wallet
+					.apply_mempool_txs(unconfirmed_txs, evicted_txids)
+					.await
+					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to apply mempool transactions: {:?}", e);
-					},
-				);
+					});
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to poll for mempool transactions: {:?}", e);
@@ -454,11 +459,15 @@ impl BitcoindChainSource {
 
 		let unix_time_secs_opt =
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-		let mut locked_node_metrics = self.node_metrics.write().unwrap();
-		locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
-		locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
-
-		write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
+		{
+			let mut locked_node_metrics = self.node_metrics.write().unwrap();
+			locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+			locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+		}
+		{
+			let snapshot = self.node_metrics.read().unwrap().clone();
+			write_node_metrics(&snapshot, &*self.kv_store, &*self.logger).await?;
+		}
 
 		Ok(())
 	}
@@ -571,7 +580,10 @@ impl BitcoindChainSource {
 		{
 			let mut locked_node_metrics = self.node_metrics.write().unwrap();
 			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
-			write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
+		}
+		{
+			let snapshot = self.node_metrics.read().unwrap().clone();
+			write_node_metrics(&snapshot, &*self.kv_store, &*self.logger).await?;
 		}
 
 		Ok(())

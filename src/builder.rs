@@ -75,9 +75,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
-	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
-	Persister, SyncAndAsyncKVStore,
+	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
+	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	PendingPaymentStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -169,17 +169,17 @@ pub enum BuildError {
 	RuntimeSetupFailed,
 	/// We failed to read data from the [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
 	StoragePathAccessFailed,
 	/// We failed to setup our [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
@@ -655,7 +655,7 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
@@ -1020,7 +1020,7 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build_with_store(*node_entropy, kv_store).map(Arc::new)
@@ -1193,12 +1193,15 @@ fn build_with_store_internal(
 	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
 	let mut wallet_persister =
 		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
-	let wallet_opt = BdkWallet::load()
-		.descriptor(KeychainKind::External, Some(descriptor.clone()))
-		.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
-		.extract_keys()
-		.check_network(config.network)
-		.load_wallet(&mut wallet_persister)
+	let wallet_opt = runtime
+		.block_on(
+			BdkWallet::load()
+				.descriptor(KeychainKind::External, Some(descriptor.clone()))
+				.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
+				.extract_keys()
+				.check_network(config.network)
+				.load_wallet_async(&mut wallet_persister),
+		)
 		.map_err(|e| match e {
 			bdk_wallet::LoadWithPersistError::InvalidChangeSet(
 				bdk_wallet::LoadError::Mismatch(bdk_wallet::LoadMismatch::Network {
@@ -1222,9 +1225,12 @@ fn build_with_store_internal(
 	let bdk_wallet = match wallet_opt {
 		Some(wallet) => wallet,
 		None => {
-			let mut wallet = BdkWallet::create(descriptor, change_descriptor)
-				.network(config.network)
-				.create_wallet(&mut wallet_persister)
+			let mut wallet = runtime
+				.block_on(
+					BdkWallet::create(descriptor, change_descriptor)
+						.network(config.network)
+						.create_wallet_async(&mut wallet_persister),
+				)
 				.map_err(|e| {
 					log_error!(logger, "Failed to set up wallet: {}", e);
 					BuildError::WalletSetupFailed
@@ -1289,8 +1295,8 @@ fn build_with_store_internal(
 	));
 
 	let peer_storage_key = keys_manager.get_peer_storage_key();
-	let monitor_reader = Arc::new(AsyncPersister::new(
-		Arc::clone(&kv_store),
+	let persister = Arc::new(AsyncPersister::new(
+		DynStoreRef(Arc::clone(&kv_store)),
 		RuntimeSpawner::new(Arc::clone(&runtime)),
 		Arc::clone(&logger),
 		PERSISTER_MAX_PENDING_UPDATES,
@@ -1303,9 +1309,9 @@ fn build_with_store_internal(
 	// Read ChannelMonitors and the NetworkGraph
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (monitor_read_res, network_graph_res) = runtime.block_on(async move {
+	let (monitor_read_res, network_graph_res) = runtime.block_on(async {
 		tokio::join!(
-			monitor_reader.read_all_channel_monitors_with_updates_parallel(),
+			persister.read_all_channel_monitors_with_updates_parallel(),
 			read_network_graph(&*kv_store_ref, logger_ref),
 		)
 	});
@@ -1323,23 +1329,16 @@ fn build_with_store_internal(
 		},
 	};
 
-	let persister = Arc::new(Persister::new(
-		Arc::clone(&kv_store),
-		Arc::clone(&logger),
-		PERSISTER_MAX_PENDING_UPDATES,
-		Arc::clone(&keys_manager),
-		Arc::clone(&keys_manager),
-		Arc::clone(&tx_broadcaster),
-		Arc::clone(&fee_estimator),
-	));
+	let persister = Arc::try_unwrap(persister)
+		.unwrap_or_else(|_| panic!("Arc<AsyncPersister> should have no other references"));
 
 	// Initialize the ChainMonitor
-	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
+	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new_async_beta(
 		Some(Arc::clone(&chain_source)),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&logger),
 		Arc::clone(&fee_estimator),
-		Arc::clone(&persister),
+		persister,
 		Arc::clone(&keys_manager),
 		peer_storage_key,
 	));
@@ -1565,12 +1564,16 @@ fn build_with_store_internal(
 			{
 				let mut locked_node_metrics = node_metrics.write().unwrap();
 				locked_node_metrics.latest_rgs_snapshot_timestamp = None;
-				write_node_metrics(&*locked_node_metrics, &*kv_store, Arc::clone(&logger))
-					.map_err(|e| {
-						log_error!(logger, "Failed writing to store: {}", e);
-						BuildError::WriteFailed
-					})?;
 			}
+			runtime
+				.block_on(async {
+					let snapshot = node_metrics.read().unwrap().clone();
+					write_node_metrics(&snapshot, &*kv_store, Arc::clone(&logger)).await
+				})
+				.map_err(|e| {
+					log_error!(logger, "Failed writing to store: {}", e);
+					BuildError::WriteFailed
+				})?;
 			p2p_source
 		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {

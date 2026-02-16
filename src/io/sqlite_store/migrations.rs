@@ -76,8 +76,9 @@ pub(super) fn migrate_schema(
 mod tests {
 	use std::fs;
 
-	use lightning::util::persist::KVStoreSync;
+	use lightning::util::persist::KVStore;
 	use rusqlite::{named_params, Connection};
+	use tokio::runtime::Runtime;
 
 	use crate::io::sqlite_store::SqliteStore;
 	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
@@ -160,7 +161,10 @@ mod tests {
 
 		// Check we migrate the db just fine without losing our written data.
 		let store = SqliteStore::new(temp_path, Some(db_file_name), Some(kv_table_name)).unwrap();
-		let res = store.read(&test_namespace, "", &test_key).unwrap();
+		let rt = Runtime::new().unwrap();
+		let res = rt
+			.block_on(async { KVStore::read(&store, &test_namespace, "", &test_key).await })
+			.unwrap();
 		assert_eq!(res, test_data);
 
 		// Check we can continue to use the store just fine.

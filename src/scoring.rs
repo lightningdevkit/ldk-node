@@ -85,12 +85,17 @@ async fn sync_external_scores(
 			let duration_since_epoch =
 				SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 			scorer.lock().unwrap().merge(liquidities, duration_since_epoch);
-			let mut locked_node_metrics = node_metrics.write().unwrap();
-			locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
-				Some(duration_since_epoch.as_secs());
-			write_node_metrics(&*locked_node_metrics, &*kv_store, logger).unwrap_or_else(|e| {
-				log_error!(logger, "Persisting node metrics failed: {}", e);
-			});
+			{
+				let mut locked_node_metrics = node_metrics.write().unwrap();
+				locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
+					Some(duration_since_epoch.as_secs());
+			}
+			{
+				let snapshot = node_metrics.read().unwrap().clone();
+				write_node_metrics(&snapshot, &*kv_store, logger).await.unwrap_or_else(|e| {
+					log_error!(logger, "Persisting node metrics failed: {}", e);
+				});
+			}
 			log_trace!(logger, "External scores merged successfully");
 		},
 		Err(e) => {

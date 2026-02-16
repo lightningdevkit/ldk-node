@@ -45,6 +45,7 @@ use logging::TestLogWriter;
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 use serde_json::{json, Value};
+use tokio::runtime::Runtime;
 
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
@@ -660,6 +661,7 @@ pub async fn open_channel_push_amt(
 				push_amount_msat,
 				None,
 			)
+			.await
 			.unwrap();
 	} else {
 		node_a
@@ -670,6 +672,7 @@ pub async fn open_channel_push_amt(
 				push_amount_msat,
 				None,
 			)
+			.await
 			.unwrap();
 	}
 	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
@@ -686,8 +689,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 	expect_anchor_channel: bool, force_close: bool,
 ) {
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = if expect_anchor_channel { 2_125_000 } else { 2_100_000 };
 
@@ -748,6 +751,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			Some(push_msat),
 			None,
 		)
+		.await
 		.unwrap();
 
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
@@ -817,11 +821,15 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let invoice = node_b
 		.bolt11_payment()
 		.receive(invoice_amount_1_msat, &invoice_description.clone().into(), 9217)
+		.await
 		.unwrap();
 
 	println!("\nA send");
-	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
-	assert_eq!(node_a.bolt11_payment().send(&invoice, None), Err(NodeError::DuplicatePayment));
+	let payment_id = node_a.bolt11_payment().send(&invoice, None).await.unwrap();
+	assert_eq!(
+		node_a.bolt11_payment().send(&invoice, None).await,
+		Err(NodeError::DuplicatePayment)
+	);
 
 	assert!(!node_a.list_payments_with_filter(|p| p.id == payment_id).is_empty());
 
@@ -857,7 +865,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
-	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None));
+	assert_eq!(
+		Err(NodeError::DuplicatePayment),
+		node_a.bolt11_payment().send(&invoice, None).await
+	);
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
@@ -870,24 +881,29 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let invoice = node_b
 		.bolt11_payment()
 		.receive(invoice_amount_2_msat, &invoice_description.clone().into(), 9217)
+		.await
 		.unwrap();
 
 	let underpaid_amount = invoice_amount_2_msat - 1;
 	assert_eq!(
 		Err(NodeError::InvalidAmount),
-		node_a.bolt11_payment().send_using_amount(&invoice, underpaid_amount, None)
+		node_a.bolt11_payment().send_using_amount(&invoice, underpaid_amount, None).await
 	);
 
 	println!("\nB overpaid receive");
 	let invoice = node_b
 		.bolt11_payment()
 		.receive(invoice_amount_2_msat, &invoice_description.clone().into(), 9217)
+		.await
 		.unwrap();
 	let overpaid_amount_msat = invoice_amount_2_msat + 100;
 
 	println!("\nA overpaid send");
-	let payment_id =
-		node_a.bolt11_payment().send_using_amount(&invoice, overpaid_amount_msat, None).unwrap();
+	let payment_id = node_a
+		.bolt11_payment()
+		.send_using_amount(&invoice, overpaid_amount_msat, None)
+		.await
+		.unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let received_amount = match node_b.next_event_async().await {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
@@ -914,16 +930,18 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let variable_amount_invoice = node_b
 		.bolt11_payment()
 		.receive_variable_amount(&invoice_description.clone().into(), 9217)
+		.await
 		.unwrap();
 	let determined_amount_msat = 2345_678;
 	assert_eq!(
 		Err(NodeError::InvalidInvoice),
-		node_a.bolt11_payment().send(&variable_amount_invoice, None)
+		node_a.bolt11_payment().send(&variable_amount_invoice, None).await
 	);
 	println!("\nA send_using_amount");
 	let payment_id = node_a
 		.bolt11_payment()
 		.send_using_amount(&variable_amount_invoice, determined_amount_msat, None)
+		.await
 		.unwrap();
 
 	expect_event!(node_a, PaymentSuccessful);
@@ -959,8 +977,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			9217,
 			manual_payment_hash,
 		)
+		.await
 		.unwrap();
-	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).unwrap();
+	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).await.unwrap();
 
 	let claimable_amount_msat = expect_payment_claimable_event!(
 		node_b,
@@ -1002,8 +1021,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			9217,
 			manual_fail_payment_hash,
 		)
+		.await
 		.unwrap();
-	let manual_fail_payment_id = node_a.bolt11_payment().send(&manual_fail_invoice, None).unwrap();
+	let manual_fail_payment_id =
+		node_a.bolt11_payment().send(&manual_fail_invoice, None).await.unwrap();
 
 	expect_payment_claimable_event!(
 		node_b,
@@ -1011,7 +1032,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		manual_fail_payment_hash,
 		invoice_amount_4_msat
 	);
-	node_b.bolt11_payment().fail_for_hash(manual_fail_payment_hash).unwrap();
+	node_b.bolt11_payment().fail_for_hash(manual_fail_payment_hash).await.unwrap();
 	expect_event!(node_a, PaymentFailed);
 	assert_eq!(node_a.payment(&manual_fail_payment_id).unwrap().status, PaymentStatus::Failed);
 	assert_eq!(
@@ -1047,6 +1068,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let keysend_payment_id = node_a
 		.spontaneous_payment()
 		.send_with_custom_tlvs(keysend_amount_msat, node_b.node_id(), None, custom_tlvs.clone())
+		.await
 		.unwrap();
 	expect_event!(node_a, PaymentSuccessful);
 	let next_event = node_b.next_event_async().await;
@@ -1101,9 +1123,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 
 	println!("\nB splices out to pay A");
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
 	let splice_out_sat = funding_amount_sat / 2;
-	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
+	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).await.unwrap();
 
 	expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
@@ -1125,7 +1147,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nA splices in the splice-out payment from B");
 	let splice_in_sat = splice_out_sat;
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).await.unwrap();
 
 	expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
@@ -1148,9 +1170,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
 		tokio::time::sleep(Duration::from_secs(1)).await;
-		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).await.unwrap();
 	} else {
-		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+		node_a.close_channel(&user_channel_id_a, node_b.node_id()).await.unwrap();
 	}
 
 	expect_event!(node_a, ChannelClosed);
@@ -1404,6 +1426,7 @@ struct TestSyncStoreInner {
 	test_store: TestStore,
 	fs_store: FilesystemStore,
 	sqlite_store: SqliteStore,
+	rt: Runtime,
 }
 
 impl TestSyncStoreInner {
@@ -1421,15 +1444,19 @@ impl TestSyncStoreInner {
 		)
 		.unwrap();
 		let test_store = TestStore::new(false);
-		Self { serializer, fs_store, sqlite_store, test_store }
+		let rt = Runtime::new().unwrap();
+		Self { serializer, fs_store, sqlite_store, test_store, rt }
 	}
 
 	fn do_list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> lightning::io::Result<Vec<String>> {
 		let fs_res = KVStoreSync::list(&self.fs_store, primary_namespace, secondary_namespace);
-		let sqlite_res =
-			KVStoreSync::list(&self.sqlite_store, primary_namespace, secondary_namespace);
+		let sqlite_res = self.rt.block_on(KVStore::list(
+			&self.sqlite_store,
+			primary_namespace,
+			secondary_namespace,
+		));
 		let test_res = KVStoreSync::list(&self.test_store, primary_namespace, secondary_namespace);
 
 		match fs_res {
@@ -1460,8 +1487,12 @@ impl TestSyncStoreInner {
 		let _guard = self.serializer.read().unwrap();
 
 		let fs_res = KVStoreSync::read(&self.fs_store, primary_namespace, secondary_namespace, key);
-		let sqlite_res =
-			KVStoreSync::read(&self.sqlite_store, primary_namespace, secondary_namespace, key);
+		let sqlite_res = self.rt.block_on(KVStore::read(
+			&self.sqlite_store,
+			primary_namespace,
+			secondary_namespace,
+			key,
+		));
 		let test_res =
 			KVStoreSync::read(&self.test_store, primary_namespace, secondary_namespace, key);
 
@@ -1492,13 +1523,13 @@ impl TestSyncStoreInner {
 			key,
 			buf.clone(),
 		);
-		let sqlite_res = KVStoreSync::write(
+		let sqlite_res = self.rt.block_on(KVStore::write(
 			&self.sqlite_store,
 			primary_namespace,
 			secondary_namespace,
 			key,
 			buf.clone(),
-		);
+		));
 		let test_res = KVStoreSync::write(
 			&self.test_store,
 			primary_namespace,
@@ -1532,13 +1563,13 @@ impl TestSyncStoreInner {
 		let _guard = self.serializer.write().unwrap();
 		let fs_res =
 			KVStoreSync::remove(&self.fs_store, primary_namespace, secondary_namespace, key, lazy);
-		let sqlite_res = KVStoreSync::remove(
+		let sqlite_res = self.rt.block_on(KVStore::remove(
 			&self.sqlite_store,
 			primary_namespace,
 			secondary_namespace,
 			key,
 			lazy,
-		);
+		));
 		let test_res = KVStoreSync::remove(
 			&self.test_store,
 			primary_namespace,

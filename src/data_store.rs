@@ -9,7 +9,7 @@ use std::collections::{hash_map, HashMap};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::logger::{log_error, LdkLogger};
@@ -64,47 +64,54 @@ where
 		Self { objects, primary_namespace, secondary_namespace, kv_store, logger }
 	}
 
-	pub(crate) fn insert(&self, object: SO) -> Result<bool, Error> {
-		let mut locked_objects = self.objects.lock().unwrap();
-
-		self.persist(&object)?;
-		let updated = locked_objects.insert(object.id(), object).is_some();
+	pub(crate) async fn insert(&self, object: SO) -> Result<bool, Error> {
+		let updated = {
+			let mut locked_objects = self.objects.lock().unwrap();
+			locked_objects.insert(object.id(), object.clone()).is_some()
+		};
+		self.persist(&object).await?;
 		Ok(updated)
 	}
 
-	pub(crate) fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
-		let mut locked_objects = self.objects.lock().unwrap();
+	pub(crate) async fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
+		let (updated, to_persist) = {
+			let mut locked_objects = self.objects.lock().unwrap();
+			match locked_objects.entry(object.id()) {
+				hash_map::Entry::Occupied(mut e) => {
+					let update = object.to_update();
+					let updated = e.get_mut().update(update);
+					if updated {
+						(true, Some(e.get().clone()))
+					} else {
+						(false, None)
+					}
+				},
+				hash_map::Entry::Vacant(e) => {
+					e.insert(object.clone());
+					(true, Some(object))
+				},
+			}
+		};
 
-		let updated;
-		match locked_objects.entry(object.id()) {
-			hash_map::Entry::Occupied(mut e) => {
-				let update = object.to_update();
-				updated = e.get_mut().update(update);
-				if updated {
-					self.persist(&e.get())?;
-				}
-			},
-			hash_map::Entry::Vacant(e) => {
-				e.insert(object.clone());
-				self.persist(&object)?;
-				updated = true;
-			},
+		if let Some(obj) = to_persist {
+			self.persist(&obj).await?;
 		}
 
 		Ok(updated)
 	}
 
-	pub(crate) fn remove(&self, id: &SO::Id) -> Result<(), Error> {
+	pub(crate) async fn remove(&self, id: &SO::Id) -> Result<(), Error> {
 		let removed = self.objects.lock().unwrap().remove(id).is_some();
 		if removed {
 			let store_key = id.encode_to_hex_str();
-			KVStoreSync::remove(
+			KVStore::remove(
 				&*self.kv_store,
 				&self.primary_namespace,
 				&self.secondary_namespace,
 				&store_key,
 				false,
 			)
+			.await
 			.map_err(|e| {
 				log_error!(
 					self.logger,
@@ -124,36 +131,43 @@ where
 		self.objects.lock().unwrap().get(id).cloned()
 	}
 
-	pub(crate) fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
-		let mut locked_objects = self.objects.lock().unwrap();
-
-		if let Some(object) = locked_objects.get_mut(&update.id()) {
-			let updated = object.update(update);
-			if updated {
-				self.persist(&object)?;
-				Ok(DataStoreUpdateResult::Updated)
+	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
+		let (result, to_persist) = {
+			let mut locked_objects = self.objects.lock().unwrap();
+			if let Some(object) = locked_objects.get_mut(&update.id()) {
+				let updated = object.update(update);
+				if updated {
+					(DataStoreUpdateResult::Updated, Some(object.clone()))
+				} else {
+					(DataStoreUpdateResult::Unchanged, None)
+				}
 			} else {
-				Ok(DataStoreUpdateResult::Unchanged)
+				(DataStoreUpdateResult::NotFound, None)
 			}
-		} else {
-			Ok(DataStoreUpdateResult::NotFound)
+		};
+
+		if let Some(obj) = to_persist {
+			self.persist(&obj).await?;
 		}
+
+		Ok(result)
 	}
 
 	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
 		self.objects.lock().unwrap().values().filter(f).cloned().collect::<Vec<SO>>()
 	}
 
-	fn persist(&self, object: &SO) -> Result<(), Error> {
+	async fn persist(&self, object: &SO) -> Result<(), Error> {
 		let store_key = object.id().encode_to_hex_str();
 		let data = object.encode();
-		KVStoreSync::write(
+		KVStore::write(
 			&*self.kv_store,
 			&self.primary_namespace,
 			&self.secondary_namespace,
 			&store_key,
 			data,
 		)
+		.await
 		.map_err(|e| {
 			log_error!(
 				self.logger,
@@ -238,8 +252,8 @@ mod tests {
 		(2, data, required),
 	});
 
-	#[test]
-	fn data_is_persisted() {
+	#[tokio::test]
+	async fn data_is_persisted() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let primary_namespace = "datastore_test_primary".to_string();
@@ -258,47 +272,49 @@ mod tests {
 		let store_key = id.encode_to_hex_str();
 
 		// Check we start empty.
-		assert!(KVStoreSync::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+		assert!(KVStore::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+			.await
 			.is_err());
 
 		// Check we successfully store an object and return `false`
 		let object = TestObject { id, data: [23u8; 3] };
-		assert_eq!(Ok(false), data_store.insert(object.clone()));
+		assert_eq!(Ok(false), data_store.insert(object.clone()).await);
 		assert_eq!(Some(object), data_store.get(&id));
-		assert!(KVStoreSync::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+		assert!(KVStore::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+			.await
 			.is_ok());
 
 		// Test re-insertion returns `true`
 		let mut override_object = object.clone();
 		override_object.data = [24u8; 3];
-		assert_eq!(Ok(true), data_store.insert(override_object));
+		assert_eq!(Ok(true), data_store.insert(override_object).await);
 		assert_eq!(Some(override_object), data_store.get(&id));
 
 		// Check update returns `Updated`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };
-		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(update));
+		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(update).await);
 		assert_eq!(data_store.get(&id).unwrap().data, [25u8; 3]);
 
 		// Check no-op update yields `Unchanged`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };
-		assert_eq!(Ok(DataStoreUpdateResult::Unchanged), data_store.update(update));
+		assert_eq!(Ok(DataStoreUpdateResult::Unchanged), data_store.update(update).await);
 
 		// Check bogus update yields `NotFound`
 		let bogus_id = TestObjectId { id: [84u8; 4] };
 		let update = TestObjectUpdate { id: bogus_id, data: [12u8; 3] };
-		assert_eq!(Ok(DataStoreUpdateResult::NotFound), data_store.update(update));
+		assert_eq!(Ok(DataStoreUpdateResult::NotFound), data_store.update(update).await);
 
 		// Check `insert_or_update` inserts unknown objects
 		let iou_id = TestObjectId { id: [55u8; 4] };
 		let iou_object = TestObject { id: iou_id, data: [34u8; 3] };
-		assert_eq!(Ok(true), data_store.insert_or_update(iou_object.clone()));
+		assert_eq!(Ok(true), data_store.insert_or_update(iou_object.clone()).await);
 
 		// Check `insert_or_update` doesn't update the same object
-		assert_eq!(Ok(false), data_store.insert_or_update(iou_object.clone()));
+		assert_eq!(Ok(false), data_store.insert_or_update(iou_object.clone()).await);
 
 		// Check `insert_or_update` updates if object changed
 		let mut new_iou_object = iou_object;
 		new_iou_object.data[0] += 1;
-		assert_eq!(Ok(true), data_store.insert_or_update(new_iou_object));
+		assert_eq!(Ok(true), data_store.insert_or_update(new_iou_object).await);
 	}
 }
