@@ -11,13 +11,13 @@ use crate::logger::{LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::DynStore;
 
+use lightning::io;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
-use lightning::{io, log_trace};
-use lightning::{log_debug, log_error, log_info, log_warn};
+use lightning::{log_error, log_warn};
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 
@@ -86,15 +86,7 @@ impl TierStore {
 	) {
 		while let Some(op) = receiver.recv().await {
 			match Self::apply_backup_operation(&op, &backup_store).await {
-				Ok(_) => {
-					log_trace!(
-						logger,
-						"Backup succeeded for key {}/{}/{}",
-						op.primary_namespace(),
-						op.secondary_namespace(),
-						op.key()
-					);
-				},
+				Ok(_) => {},
 				Err(e) => {
 					log_error!(
 						logger,
@@ -381,16 +373,7 @@ impl TierStoreInner {
 		)
 		.await
 		{
-			Ok(data) => {
-				log_info!(
-					self.logger,
-					"Read succeeded for key: {}/{}/{}",
-					primary_namespace,
-					secondary_namespace,
-					key
-				);
-				Ok(data)
-			},
+			Ok(data) => Ok(data),
 			Err(e) => {
 				log_error!(
 					self.logger,
@@ -413,12 +396,6 @@ impl TierStoreInner {
 			.await
 		{
 			Ok(keys) => {
-				log_info!(
-					self.logger,
-					"List succeeded for namespace: {}/{}",
-					primary_namespace,
-					secondary_namespace
-				);
 				return Ok(keys);
 			},
 			Err(e) => {
@@ -464,7 +441,7 @@ impl TierStoreInner {
 				Ok(())
 			},
 			Err(e) => {
-				log_debug!(
+				log_error!(
 					self.logger,
 					"Skipping backup write due to primary write failure for key: {}/{}/{}.",
 					primary_namespace,
@@ -506,7 +483,7 @@ impl TierStoreInner {
 				Ok(())
 			},
 			Err(e) => {
-				log_debug!(
+				log_error!(
 					self.logger,
 					"Skipping backup removal due to primary removal failure for key: {}/{}/{}.",
 					primary_namespace,
@@ -548,7 +525,6 @@ impl TierStoreInner {
 					)
 					.await
 				} else {
-					log_debug!(self.logger, "Ephemeral store not configured. Reading non-critical data from primary or backup stores.");
 					self.read_primary(&primary_namespace, &secondary_namespace, &key).await
 				}
 			},
@@ -572,8 +548,6 @@ impl TierStoreInner {
 					)
 					.await
 				} else {
-					log_debug!(self.logger, "Ephemeral store not configured. Writing non-critical data to primary and backup stores.");
-
 					self.primary_write_then_schedule_backup(
 						primary_namespace.as_str(),
 						secondary_namespace.as_str(),
@@ -611,8 +585,6 @@ impl TierStoreInner {
 					)
 					.await
 				} else {
-					log_debug!(self.logger, "Ephemeral store not configured. Removing non-critical data from primary and backup stores.");
-
 					self.primary_remove_then_schedule_backup(
 						primary_namespace.as_str(),
 						secondary_namespace.as_str(),
@@ -646,10 +618,6 @@ impl TierStoreInner {
 				if let Some(eph_store) = self.ephemeral_store.as_ref() {
 					KVStoreSync::list(eph_store.as_ref(), &primary_namespace, &secondary_namespace)
 				} else {
-					log_debug!(
-						self.logger,
-						"Ephemeral store not configured. Listing from primary and backup stores."
-					);
 					self.list_primary(&primary_namespace, &secondary_namespace).await
 				}
 			},
