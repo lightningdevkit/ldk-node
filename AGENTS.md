@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI agents like Cursor/Claude Code/Codex/WARP when working with code in this repository.
 
 ## Overview
 
@@ -191,6 +191,8 @@ If anything is missing or cannot be verified, you must fix it before declaring s
 
 ---
 ## RULES
+- ALWAYS edit AGENTS.md directly — CLAUDE.md, GEMINI.md, and WARP.md are symlinks and must not be edited or replaced with regular files
+- NEVER delete or recreate symlinks (CLAUDE.md, GEMINI.md, WARP.md) — they are committed to git as mode 120000
 - NEVER suggest manually adding @Serializable annotations to generated Kotlin bindings
 - ALWAYS run `cargo fmt` before committing to ensure consistent code formatting
 - ALWAYS move imports to the top of the file when applicable (no inline imports in functions)
