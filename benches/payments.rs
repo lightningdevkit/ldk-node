@@ -35,12 +35,10 @@ fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, amount_msat: u64) {
 				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 			}
 
-			let payment_id = node_a.spontaneous_payment().send_with_preimage(
-				amount_msat,
-				node_b.node_id(),
-				preimage,
-				None,
-			);
+			let payment_id = node_a
+				.spontaneous_payment()
+				.send_with_preimage(amount_msat, node_b.node_id(), preimage, None)
+				.await;
 
 			match payment_id {
 				Ok(payment_id) => {
@@ -110,6 +108,7 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 			PaymentPreimage(preimage_bytes),
 			None,
 		)
+		.await
 		.ok()
 		.unwrap();
 

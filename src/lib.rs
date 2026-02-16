@@ -858,7 +858,6 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn bolt11_payment(&self) -> Bolt11Payment {
 		Bolt11Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
@@ -876,7 +875,6 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn bolt11_payment(&self) -> Arc<Bolt11Payment> {
 		Arc::new(Bolt11Payment::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
@@ -1612,8 +1610,8 @@ impl Node {
 	}
 
 	/// Remove the payment with the given id from the store.
-	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
-		self.payment_store.remove(&payment_id)
+	pub async fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
+		self.payment_store.remove(&payment_id).await
 	}
 
 	/// Retrieves an overview of all known balances.

@@ -108,7 +108,7 @@ impl EsploraChainSource {
 				let now = Instant::now();
 				match $sync_future.await {
 					Ok(res) => match res {
-						Ok(update) => match onchain_wallet.apply_update(update) {
+						Ok(update) => match onchain_wallet.apply_update(update).await {
 							Ok(()) => {
 								log_debug!(
 									self.logger,

@@ -35,7 +35,6 @@ use crate::payment::store::{
 	PaymentStatus,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
-use crate::runtime::Runtime;
 use crate::types::{ChannelManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
@@ -55,7 +54,6 @@ type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [`Node::bolt11_payment`]: crate::Node::bolt11_payment
 pub struct Bolt11Payment {
-	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
@@ -68,14 +66,13 @@ pub struct Bolt11Payment {
 
 impl Bolt11Payment {
 	pub(crate) fn new(
-		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
+		channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
 		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
-			runtime,
 			channel_manager,
 			connection_manager,
 			liquidity_source,
@@ -91,7 +88,7 @@ impl Bolt11Payment {
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send(
+	pub async fn send(
 		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
@@ -145,7 +142,7 @@ impl Bolt11Payment {
 					PaymentStatus::Pending,
 				);
 
-				self.payment_store.insert(payment)?;
+				self.payment_store.insert(payment).await?;
 
 				Ok(payment_id)
 			},
@@ -174,7 +171,7 @@ impl Bolt11Payment {
 							PaymentStatus::Failed,
 						);
 
-						self.payment_store.insert(payment)?;
+						self.payment_store.insert(payment).await?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -191,7 +188,7 @@ impl Bolt11Payment {
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send_using_amount(
+	pub async fn send_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
@@ -259,7 +256,7 @@ impl Bolt11Payment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.payment_store.insert(payment)?;
+				self.payment_store.insert(payment).await?;
 
 				Ok(payment_id)
 			},
@@ -289,7 +286,7 @@ impl Bolt11Payment {
 							PaymentStatus::Failed,
 						);
 
-						self.payment_store.insert(payment)?;
+						self.payment_store.insert(payment).await?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -375,7 +372,7 @@ impl Bolt11Payment {
 	/// [`receive_for_hash`]: Self::receive_for_hash
 	/// [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
-	pub fn fail_for_hash(&self, payment_hash: PaymentHash) -> Result<(), Error> {
+	pub async fn fail_for_hash(&self, payment_hash: PaymentHash) -> Result<(), Error> {
 		let payment_id = PaymentId(payment_hash.0);
 
 		let update = PaymentDetailsUpdate {
@@ -383,7 +380,7 @@ impl Bolt11Payment {
 			..PaymentDetailsUpdate::new(payment_id)
 		};
 
-		match self.payment_store.update(update) {
+		match self.payment_store.update(update).await {
 			Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (),
 			Ok(DataStoreUpdateResult::NotFound) => {
 				log_error!(
@@ -412,11 +409,12 @@ impl Bolt11Payment {
 	/// given.
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
-	pub fn receive(
+	pub async fn receive(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(Some(amount_msat), &description, expiry_secs, None)?;
+		let invoice =
+			self.receive_inner(Some(amount_msat), &description, expiry_secs, None).await?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -434,13 +432,14 @@ impl Bolt11Payment {
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
-	pub fn receive_for_hash(
+	pub async fn receive_for_hash(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice =
-			self.receive_inner(Some(amount_msat), &description, expiry_secs, Some(payment_hash))?;
+		let invoice = self
+			.receive_inner(Some(amount_msat), &description, expiry_secs, Some(payment_hash))
+			.await?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -448,11 +447,11 @@ impl Bolt11Payment {
 	/// amount is to be determined by the user, also known as a "zero-amount" invoice.
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
-	pub fn receive_variable_amount(
+	pub async fn receive_variable_amount(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, None)?;
+		let invoice = self.receive_inner(None, &description, expiry_secs, None).await?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -470,15 +469,16 @@ impl Bolt11Payment {
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
-	pub fn receive_variable_amount_for_hash(
+	pub async fn receive_variable_amount_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, Some(payment_hash))?;
+		let invoice =
+			self.receive_inner(None, &description, expiry_secs, Some(payment_hash)).await?;
 		Ok(maybe_wrap(invoice))
 	}
 
-	pub(crate) fn receive_inner(
+	pub(crate) async fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
 	) -> Result<LdkBolt11Invoice, Error> {
@@ -531,7 +531,7 @@ impl Bolt11Payment {
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
-		self.payment_store.insert(payment)?;
+		self.payment_store.insert(payment).await?;
 
 		Ok(invoice)
 	}
@@ -546,19 +546,21 @@ impl Bolt11Payment {
 	/// channel to us. We'll use its cheapest offer otherwise.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn receive_via_jit_channel(
+	pub async fn receive_via_jit_channel(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
-			Some(amount_msat),
-			&description,
-			expiry_secs,
-			max_total_lsp_fee_limit_msat,
-			None,
-			None,
-		)?;
+		let invoice = self
+			.receive_via_jit_channel_inner(
+				Some(amount_msat),
+				&description,
+				expiry_secs,
+				max_total_lsp_fee_limit_msat,
+				None,
+				None,
+			)
+			.await?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -585,19 +587,21 @@ impl Bolt11Payment {
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
 	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
-	pub fn receive_via_jit_channel_for_hash(
+	pub async fn receive_via_jit_channel_for_hash(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
-			Some(amount_msat),
-			&description,
-			expiry_secs,
-			max_total_lsp_fee_limit_msat,
-			None,
-			Some(payment_hash),
-		)?;
+		let invoice = self
+			.receive_via_jit_channel_inner(
+				Some(amount_msat),
+				&description,
+				expiry_secs,
+				max_total_lsp_fee_limit_msat,
+				None,
+				Some(payment_hash),
+			)
+			.await?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -612,19 +616,21 @@ impl Bolt11Payment {
 	/// We'll use its cheapest offer otherwise.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn receive_variable_amount_via_jit_channel(
+	pub async fn receive_variable_amount_via_jit_channel(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
-			None,
-			&description,
-			expiry_secs,
-			None,
-			max_proportional_lsp_fee_limit_ppm_msat,
-			None,
-		)?;
+		let invoice = self
+			.receive_via_jit_channel_inner(
+				None,
+				&description,
+				expiry_secs,
+				None,
+				max_proportional_lsp_fee_limit_ppm_msat,
+				None,
+			)
+			.await?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -652,23 +658,25 @@ impl Bolt11Payment {
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
 	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
-	pub fn receive_variable_amount_via_jit_channel_for_hash(
+	pub async fn receive_variable_amount_via_jit_channel_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
-			None,
-			&description,
-			expiry_secs,
-			None,
-			max_proportional_lsp_fee_limit_ppm_msat,
-			Some(payment_hash),
-		)?;
+		let invoice = self
+			.receive_via_jit_channel_inner(
+				None,
+				&description,
+				expiry_secs,
+				None,
+				max_proportional_lsp_fee_limit_ppm_msat,
+				Some(payment_hash),
+			)
+			.await?;
 		Ok(maybe_wrap(invoice))
 	}
 
-	fn receive_via_jit_channel_inner(
+	async fn receive_via_jit_channel_inner(
 		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
@@ -681,44 +689,35 @@ impl Bolt11Payment {
 
 		let peer_info = PeerInfo { node_id, address };
 
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		self.connection_manager
+			.connect_peer_if_necessary(peer_info.node_id, peer_info.address.clone())
+			.await?;
 
 		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
 
-		let liquidity_source = Arc::clone(&liquidity_source);
 		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
-			self.runtime.block_on(async move {
-				if let Some(amount_msat) = amount_msat {
-					liquidity_source
-						.lsps2_receive_to_jit_channel(
-							amount_msat,
-							description,
-							expiry_secs,
-							max_total_lsp_fee_limit_msat,
-							payment_hash,
-						)
-						.await
-						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
-				} else {
-					liquidity_source
-						.lsps2_receive_variable_amount_to_jit_channel(
-							description,
-							expiry_secs,
-							max_proportional_lsp_fee_limit_ppm_msat,
-							payment_hash,
-						)
-						.await
-						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
-				}
-			})?;
+			if let Some(amount_msat) = amount_msat {
+				liquidity_source
+					.lsps2_receive_to_jit_channel(
+						amount_msat,
+						description,
+						expiry_secs,
+						max_total_lsp_fee_limit_msat,
+						payment_hash,
+					)
+					.await
+					.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
+			} else {
+				liquidity_source
+					.lsps2_receive_variable_amount_to_jit_channel(
+						description,
+						expiry_secs,
+						max_proportional_lsp_fee_limit_ppm_msat,
+						payment_hash,
+					)
+					.await
+					.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
+			}?;
 
 		// Register payment in payment store.
 		let payment_hash = invoice.payment_hash();
@@ -745,7 +744,7 @@ impl Bolt11Payment {
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
-		self.payment_store.insert(payment)?;
+		self.payment_store.insert(payment).await?;
 
 		// Persist LSP peer to make sure we reconnect on restart.
 		self.peer_store.add_peer(peer_info)?;

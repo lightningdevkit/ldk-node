@@ -125,28 +125,31 @@ impl Wallet {
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
 	}
 
-	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		match locked_wallet.apply_update_events(update) {
-			Ok(events) => {
-				let mut locked_persister = self.persister.lock().unwrap();
-				locked_wallet.persist(&mut locked_persister).map_err(|e| {
-					log_error!(self.logger, "Failed to persist wallet: {}", e);
-					Error::PersistenceFailed
-				})?;
+	pub(crate) async fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
+		let events = {
+			let mut locked_wallet = self.inner.lock().unwrap();
+			match locked_wallet.apply_update_events(update) {
+				Ok(events) => {
+					let mut locked_persister = self.persister.lock().unwrap();
+					locked_wallet.persist(&mut locked_persister).map_err(|e| {
+						log_error!(self.logger, "Failed to persist wallet: {}", e);
+						Error::PersistenceFailed
+					})?;
+					events
+				},
+				Err(e) => {
+					log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
+					return Err(Error::WalletOperationFailed);
+				},
+			}
+		};
 
-				self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
-					log_error!(self.logger, "Failed to update payment store: {}", e);
-					Error::PersistenceFailed
-				})?;
+		self.update_payment_store(events).await.map_err(|e| {
+			log_error!(self.logger, "Failed to update payment store: {}", e);
+			Error::PersistenceFailed
+		})?;
 
-				Ok(())
-			},
-			Err(e) => {
-				log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
-				Err(Error::WalletOperationFailed)
-			},
-		}
+		Ok(())
 	}
 
 	pub(crate) fn apply_mempool_txs(
@@ -178,10 +181,7 @@ impl Wallet {
 		Ok(())
 	}
 
-	fn update_payment_store<'a>(
-		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
-		mut events: Vec<WalletEvent>,
-	) -> Result<(), Error> {
+	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
 		if events.is_empty() {
 			return Ok(());
 		}
@@ -206,133 +206,161 @@ impl Wallet {
 			});
 		}
 
-		for event in events {
-			match event {
-				WalletEvent::TxConfirmed { txid, tx, block_time, .. } => {
-					let cur_height = locked_wallet.latest_checkpoint().height();
-					let confirmation_height = block_time.block_id.height;
-					let payment_status = if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1
-					{
-						PaymentStatus::Succeeded
-					} else {
-						PaymentStatus::Pending
-					};
+		// Collect all payment persistence operations while holding the wallet lock,
+		// then persist them after releasing the lock.
+		enum PersistOp {
+			InsertOrUpdatePayment(PaymentDetails),
+			InsertOrUpdatePending(PendingPaymentDetails),
+			RemovePending(PaymentId),
+		}
 
-					let confirmation_status = ConfirmationStatus::Confirmed {
-						block_hash: block_time.block_id.hash,
-						height: confirmation_height,
-						timestamp: block_time.confirmation_time,
-					};
+		let ops = {
+			let locked_wallet = self.inner.lock().unwrap();
+			let mut ops = Vec::new();
 
-					let payment_id = self
-						.find_payment_by_txid(txid)
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+			for event in events {
+				match event {
+					WalletEvent::TxConfirmed { txid, tx, block_time, .. } => {
+						let cur_height = locked_wallet.latest_checkpoint().height();
+						let confirmation_height = block_time.block_id.height;
+						let payment_status =
+							if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1 {
+								PaymentStatus::Succeeded
+							} else {
+								PaymentStatus::Pending
+							};
 
-					let payment = self.create_payment_from_tx(
-						locked_wallet,
-						txid,
-						payment_id,
-						&tx,
-						payment_status,
-						confirmation_status,
-					);
+						let confirmation_status = ConfirmationStatus::Confirmed {
+							block_hash: block_time.block_id.hash,
+							height: confirmation_height,
+							timestamp: block_time.confirmation_time,
+						};
 
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+						let payment_id = self
+							.find_payment_by_txid(txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					self.payment_store.insert_or_update(payment)?;
-					self.pending_payment_store.insert_or_update(pending_payment)?;
-				},
-				WalletEvent::ChainTipChanged { new_tip, .. } => {
-					// Get all payments that are Pending with Confirmed status
-					let pending_payments: Vec<PendingPaymentDetails> =
-						self.pending_payment_store.list_filter(|p| {
-							p.details.status == PaymentStatus::Pending
-								&& matches!(
-									p.details.kind,
-									PaymentKind::Onchain {
-										status: ConfirmationStatus::Confirmed { .. },
-										..
-									}
-								)
-						});
+						let payment = self.create_payment_from_tx(
+							&locked_wallet,
+							txid,
+							payment_id,
+							&tx,
+							payment_status,
+							confirmation_status,
+						);
 
-					for mut payment in pending_payments {
-						if let PaymentKind::Onchain {
-							status: ConfirmationStatus::Confirmed { height, .. },
-							..
-						} = payment.details.kind
-						{
-							let payment_id = payment.details.id;
-							if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-								payment.details.status = PaymentStatus::Succeeded;
-								self.payment_store.insert_or_update(payment.details)?;
-								self.pending_payment_store.remove(&payment_id)?;
+						let pending_payment =
+							self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+
+						ops.push(PersistOp::InsertOrUpdatePayment(payment));
+						ops.push(PersistOp::InsertOrUpdatePending(pending_payment));
+					},
+					WalletEvent::ChainTipChanged { new_tip, .. } => {
+						let pending_payments: Vec<PendingPaymentDetails> =
+							self.pending_payment_store.list_filter(|p| {
+								p.details.status == PaymentStatus::Pending
+									&& matches!(
+										p.details.kind,
+										PaymentKind::Onchain {
+											status: ConfirmationStatus::Confirmed { .. },
+											..
+										}
+									)
+							});
+
+						for mut payment in pending_payments {
+							if let PaymentKind::Onchain {
+								status: ConfirmationStatus::Confirmed { height, .. },
+								..
+							} = payment.details.kind
+							{
+								let payment_id = payment.details.id;
+								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
+									payment.details.status = PaymentStatus::Succeeded;
+									ops.push(PersistOp::InsertOrUpdatePayment(payment.details));
+									ops.push(PersistOp::RemovePending(payment_id));
+								}
 							}
 						}
-					}
-				},
-				WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
-					let payment_id = self
-						.find_payment_by_txid(txid)
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+					},
+					WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
+						let payment_id = self
+							.find_payment_by_txid(txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					let payment = self.create_payment_from_tx(
-						locked_wallet,
-						txid,
-						payment_id,
-						&tx,
-						PaymentStatus::Pending,
-						ConfirmationStatus::Unconfirmed,
-					);
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.payment_store.insert_or_update(payment)?;
-					self.pending_payment_store.insert_or_update(pending_payment)?;
-				},
-				WalletEvent::TxReplaced { txid, conflicts, tx, .. } => {
-					let payment_id = self
-						.find_payment_by_txid(txid)
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+						let payment = self.create_payment_from_tx(
+							&locked_wallet,
+							txid,
+							payment_id,
+							&tx,
+							PaymentStatus::Pending,
+							ConfirmationStatus::Unconfirmed,
+						);
+						let pending_payment =
+							self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+						ops.push(PersistOp::InsertOrUpdatePayment(payment));
+						ops.push(PersistOp::InsertOrUpdatePending(pending_payment));
+					},
+					WalletEvent::TxReplaced { txid, conflicts, tx, .. } => {
+						let payment_id = self
+							.find_payment_by_txid(txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					// Collect all conflict txids
-					let conflict_txids: Vec<Txid> =
-						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
+						let conflict_txids: Vec<Txid> =
+							conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
 
-					let payment = self.create_payment_from_tx(
-						locked_wallet,
-						txid,
-						payment_id,
-						&tx,
-						PaymentStatus::Pending,
-						ConfirmationStatus::Unconfirmed,
-					);
-					let pending_payment_details = self
-						.create_pending_payment_from_tx(payment.clone(), conflict_txids.clone());
+						let payment = self.create_payment_from_tx(
+							&locked_wallet,
+							txid,
+							payment_id,
+							&tx,
+							PaymentStatus::Pending,
+							ConfirmationStatus::Unconfirmed,
+						);
+						let pending_payment_details = self.create_pending_payment_from_tx(
+							payment.clone(),
+							conflict_txids.clone(),
+						);
 
-					self.pending_payment_store.insert_or_update(pending_payment_details)?;
+						ops.push(PersistOp::InsertOrUpdatePending(pending_payment_details));
+					},
+					WalletEvent::TxDropped { txid, tx } => {
+						let payment_id = self
+							.find_payment_by_txid(txid)
+							.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+						let payment = self.create_payment_from_tx(
+							&locked_wallet,
+							txid,
+							payment_id,
+							&tx,
+							PaymentStatus::Pending,
+							ConfirmationStatus::Unconfirmed,
+						);
+						let pending_payment =
+							self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+						ops.push(PersistOp::InsertOrUpdatePayment(payment));
+						ops.push(PersistOp::InsertOrUpdatePending(pending_payment));
+					},
+					_ => {
+						continue;
+					},
+				};
+			}
+			ops
+		};
+
+		for op in ops {
+			match op {
+				PersistOp::InsertOrUpdatePayment(payment) => {
+					self.payment_store.insert_or_update(payment).await?;
 				},
-				WalletEvent::TxDropped { txid, tx } => {
-					let payment_id = self
-						.find_payment_by_txid(txid)
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-					let payment = self.create_payment_from_tx(
-						locked_wallet,
-						txid,
-						payment_id,
-						&tx,
-						PaymentStatus::Pending,
-						ConfirmationStatus::Unconfirmed,
-					);
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.payment_store.insert_or_update(payment)?;
-					self.pending_payment_store.insert_or_update(pending_payment)?;
+				PersistOp::InsertOrUpdatePending(pending) => {
+					self.pending_payment_store.insert_or_update(pending).await?;
 				},
-				_ => {
-					continue;
+				PersistOp::RemovePending(id) => {
+					self.pending_payment_store.remove(&id).await?;
 				},
-			};
+			}
 		}
 
 		Ok(())
@@ -995,45 +1023,51 @@ impl Listen for Wallet {
 	}
 
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let events = {
+			let mut locked_wallet = self.inner.lock().unwrap();
 
-		let pre_checkpoint = locked_wallet.latest_checkpoint();
-		if pre_checkpoint.height() != height - 1
-			|| pre_checkpoint.hash() != block.header.prev_blockhash
-		{
-			log_debug!(
-				self.logger,
-				"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
-				block.header.block_hash(),
-				height
-			);
-		}
-
-		match locked_wallet.apply_block_events(block, height) {
-			Ok(events) => {
-				if let Err(e) = self.update_payment_store(&mut *locked_wallet, events) {
-					log_error!(self.logger, "Failed to update payment store: {}", e);
-					return;
-				}
-			},
-			Err(e) => {
-				log_error!(
+			let pre_checkpoint = locked_wallet.latest_checkpoint();
+			if pre_checkpoint.height() != height - 1
+				|| pre_checkpoint.hash() != block.header.prev_blockhash
+			{
+				log_debug!(
 					self.logger,
-					"Failed to apply connected block to on-chain wallet: {}",
-					e
+					"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
+					block.header.block_hash(),
+					height
 				);
-				return;
-			},
+			}
+
+			let events = match locked_wallet.apply_block_events(block, height) {
+				Ok(events) => events,
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to apply connected block to on-chain wallet: {}",
+						e
+					);
+					return;
+				},
+			};
+
+			let mut locked_persister = self.persister.lock().unwrap();
+			match locked_wallet.persist(&mut locked_persister) {
+				Ok(_) => (),
+				Err(e) => {
+					log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
+					return;
+				},
+			};
+
+			events
 		};
 
-		let mut locked_persister = self.persister.lock().unwrap();
-		match locked_wallet.persist(&mut locked_persister) {
-			Ok(_) => (),
-			Err(e) => {
-				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
-				return;
-			},
-		};
+		let rt_handle = tokio::runtime::Handle::current();
+		tokio::task::block_in_place(|| {
+			if let Err(e) = rt_handle.block_on(self.update_payment_store(events)) {
+				log_error!(self.logger, "Failed to update payment store: {}", e);
+			}
+		});
 	}
 
 	fn blocks_disconnected(&self, _fork_point_block: BestBlock) {

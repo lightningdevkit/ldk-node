@@ -54,38 +54,39 @@ impl SpontaneousPayment {
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send(
+	pub async fn send(
 		&self, amount_msat: u64, node_id: PublicKey,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, None, None)
+		self.send_inner(amount_msat, node_id, route_parameters, None, None).await
 	}
 
 	/// Send a spontaneous payment including a list of custom TLVs.
-	pub fn send_with_custom_tlvs(
+	pub async fn send_with_custom_tlvs(
 		&self, amount_msat: u64, node_id: PublicKey,
 		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Vec<CustomTlvRecord>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), None)
+		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), None).await
 	}
 
 	/// Send a spontaneous payment with custom preimage
-	pub fn send_with_preimage(
+	pub async fn send_with_preimage(
 		&self, amount_msat: u64, node_id: PublicKey, preimage: PaymentPreimage,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, None, Some(preimage))
+		self.send_inner(amount_msat, node_id, route_parameters, None, Some(preimage)).await
 	}
 
 	/// Send a spontaneous payment with custom preimage including a list of custom TLVs.
-	pub fn send_with_preimage_and_custom_tlvs(
+	pub async fn send_with_preimage_and_custom_tlvs(
 		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<CustomTlvRecord>,
 		preimage: PaymentPreimage, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
 		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), Some(preimage))
+			.await
 	}
 
-	fn send_inner(
+	async fn send_inner(
 		&self, amount_msat: u64, node_id: PublicKey,
 		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Option<Vec<CustomTlvRecord>>,
 		preimage: Option<PaymentPreimage>,
@@ -164,7 +165,7 @@ impl SpontaneousPayment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.payment_store.insert(payment)?;
+				self.payment_store.insert(payment).await?;
 
 				Ok(payment_id)
 			},
@@ -187,7 +188,7 @@ impl SpontaneousPayment {
 							PaymentStatus::Failed,
 						);
 
-						self.payment_store.insert(payment)?;
+						self.payment_store.insert(payment).await?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}

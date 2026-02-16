@@ -146,7 +146,7 @@ impl ElectrumChainSource {
 		};
 
 		let res = match update_res {
-			Ok((update, now)) => match onchain_wallet.apply_update(update) {
+			Ok((update, now)) => match onchain_wallet.apply_update(update).await {
 				Ok(()) => {
 					log_debug!(
 						self.logger,

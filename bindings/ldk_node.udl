@@ -185,7 +185,7 @@ interface Node {
 	[Throws=NodeError]
 	void sync_wallets();
 	PaymentDetails? payment([ByRef]PaymentId payment_id);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	void remove_payment([ByRef]PaymentId payment_id);
 	BalanceDetails list_balances();
 	sequence<PaymentDetails> list_payments();
@@ -205,9 +205,9 @@ interface Bolt11InvoiceDescription {
 };
 
 interface Bolt11Payment {
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	void send_probes([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
@@ -215,38 +215,38 @@ interface Bolt11Payment {
 	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	void fail_for_hash(PaymentHash payment_hash);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive_for_hash(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive_variable_amount([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive_variable_amount_for_hash([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive_via_jit_channel_for_hash(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_lsp_fee_limit_msat, PaymentHash payment_hash);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt11Invoice receive_variable_amount_via_jit_channel_for_hash([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat, PaymentHash payment_hash);
 };
 
 interface Bolt12Payment {
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
 	Offer receive_variable_amount([ByRef]string description, u32? expiry_secs);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	Offer receive_async();
@@ -257,13 +257,13 @@ interface Bolt12Payment {
 };
 
 interface SpontaneousPayment {
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters, sequence<CustomTlvRecord> custom_tlvs);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send_with_preimage(u64 amount_msat, PublicKey node_id, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	PaymentId send_with_preimage_and_custom_tlvs(u64 amount_msat, PublicKey node_id, sequence<CustomTlvRecord> custom_tlvs, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
@@ -289,7 +289,7 @@ interface FeeRate {
 };
 
 interface UnifiedPayment {
-	[Throws=NodeError]
+	[Throws=NodeError, Async]
 	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
 	[Throws=NodeError, Async]
 	UnifiedPaymentResult send([ByRef]string uri_str, u64? amount_msat, RouteParametersConfig? route_parameters);
