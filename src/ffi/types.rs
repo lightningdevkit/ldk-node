@@ -162,6 +162,9 @@ impl std::fmt::Display for IOError {
 	}
 }
 
+/// FFI-safe version of [`DynStoreTrait`].
+///
+/// [`DynStoreTrait`]: crate::types::DynStoreTrait
 #[async_trait]
 pub trait ForeignDynStoreTrait: Send + Sync {
 	async fn read_async(
