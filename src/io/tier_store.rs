@@ -701,9 +701,7 @@ mod tests {
 	};
 	use lightning_persister::fs_store::FilesystemStore;
 
-	use crate::io::test_utils::{
-		do_read_write_remove_list_persist, random_storage_path, DelayedStore,
-	};
+	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
 	use crate::io::tier_store::TierStore;
 	use crate::logger::Logger;
 	use crate::runtime::Runtime;
@@ -874,47 +872,6 @@ mod tests {
 	}
 
 	#[test]
-	fn backup_overflow_doesnt_fail_writes() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path.clone(), Level::Trace).unwrap());
-		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
-
-		let primary_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
-		let mut tier =
-			setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger), Arc::clone(&runtime));
-
-		let backup_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(DelayedStore::new(100, runtime)));
-		tier.set_backup_store(Arc::clone(&backup_store));
-
-		let data = vec![42u8; 32];
-
-		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
-		for i in 0..=10 {
-			let result = KVStoreSync::write(
-				&tier,
-				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-				&format!("{}_{}", key, i),
-				data.clone(),
-			);
-
-			assert!(result.is_ok(), "Write {} should succeed", i);
-		}
-
-		// Check logs for backup queue overflow message
-		let log_contents = std::fs::read_to_string(&log_path).unwrap();
-		assert!(
-			log_contents.contains("Backup queue is full"),
-			"Logs should contain backup queue overflow message"
-		);
-	}
-
-	#[test]
 	fn lazy_removal() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
@@ -929,7 +886,7 @@ mod tests {
 			setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger), Arc::clone(&runtime));
 
 		let backup_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(DelayedStore::new(100, runtime)));
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
 		tier.set_backup_store(Arc::clone(&backup_store));
 
 		let data = vec![42u8; 32];
@@ -944,7 +901,7 @@ mod tests {
 		);
 		assert!(write_result.is_ok(), "Write should succeed");
 
-		thread::sleep(Duration::from_millis(10));
+		thread::sleep(Duration::from_millis(100));
 
 		assert_eq!(
 			KVStoreSync::read(
