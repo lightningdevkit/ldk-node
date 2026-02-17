@@ -66,7 +66,8 @@ use crate::io::{
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::{
-	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
+	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LSPS5ClientConfig,
+	LiquiditySourceBuilder,
 };
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
@@ -76,8 +77,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
-	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
-	Persister, SyncAndAsyncKVStore,
+	KeysManager, LSPS5ServiceConfig, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	PendingPaymentStore, Persister, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -125,6 +126,10 @@ struct LiquiditySourceConfig {
 	lsps2_client: Option<LSPS2ClientConfig>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
+	// Act as an LSPS5 client connecting to the given service.
+	lsps5_client: Option<LSPS5ClientConfig>,
+	// Act as an LSPS5 service.
+	lsps5_service: Option<LSPS5ServiceConfig>,
 }
 
 #[derive(Clone)]
@@ -450,6 +455,36 @@ impl NodeBuilder {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
 		liquidity_source_config.lsps2_service = Some(service_config);
+		self
+	}
+
+	/// Configures the [`Node`] instance to source webhook notifications from the given
+	/// [bLIP-55 / LSPS5] service.
+	///
+	/// This allows the client to register webhook endpoints with the LSP to receive
+	/// push notifications for Lightning events when the client is offline.
+	///
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	pub fn set_liquidity_source_lsps5(
+		&mut self, node_id: PublicKey, address: SocketAddress,
+	) -> &mut Self {
+		let liquidity_source_config =
+			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
+		let lsps5_client_config = LSPS5ClientConfig { node_id, address };
+		liquidity_source_config.lsps5_client = Some(lsps5_client_config);
+		self
+	}
+
+	/// Configures the [`Node`] instance to provide an [LSPS5] service, enabling clients
+	/// to register webhooks for push notifications.
+	///
+	/// [LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	pub fn set_liquidity_provider_lsps5(
+		&mut self, service_config: LSPS5ServiceConfig,
+	) -> &mut Self {
+		let liquidity_source_config =
+			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
+		liquidity_source_config.lsps5_service = Some(service_config);
 		self
 	}
 
@@ -863,6 +898,25 @@ impl ArcedNodeBuilder {
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn set_liquidity_provider_lsps2(&self, service_config: LSPS2ServiceConfig) {
 		self.inner.write().unwrap().set_liquidity_provider_lsps2(service_config);
+	}
+
+	/// Configures the [`Node`] instance to source webhook notifications from the given
+	/// [bLIP-55 / LSPS5] service.
+	///
+	/// This allows the client to register webhook endpoints with the LSP to receive
+	/// push notifications for Lightning events when the client is offline.
+	///
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	pub fn set_liquidity_source_lsps5(&self, node_id: PublicKey, address: SocketAddress) {
+		self.inner.write().unwrap().set_liquidity_source_lsps5(node_id, address);
+	}
+
+	/// Configures the [`Node`] instance to provide an [LSPS5] service, enabling clients
+	/// to register webhooks for push notifications.
+	///
+	/// [LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	pub fn set_liquidity_provider_lsps5(&self, service_config: LSPS5ServiceConfig) {
+		self.inner.write().unwrap().set_liquidity_provider_lsps5(service_config);
 	}
 
 	/// Sets the used storage directory path.
@@ -1654,6 +1708,14 @@ fn build_with_store_internal(
 			lsc.lsps2_service.as_ref().map(|config| {
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
+
+			lsc.lsps5_client.as_ref().map(|config| {
+				liquidity_source_builder.lsps5_client(config.node_id, config.address.clone())
+			});
+
+			lsc.lsps5_service
+				.as_ref()
+				.map(|config| liquidity_source_builder.lsps5_service(config.clone()));
 
 			let liquidity_source = runtime
 				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
