@@ -662,6 +662,36 @@ impl Wallet {
 		Ok(max_amount)
 	}
 
+	/// Returns the maximum amount available for splicing into an existing channel, accounting for
+	/// on-chain fees and anchor reserves, along with the wallet UTXOs to use as inputs.
+	pub(crate) fn get_max_splice_in_amount(
+		&self, shared_input: Input, shared_output_script: ScriptBuf, cur_anchor_reserve_sats: u64,
+		fee_rate: FeeRate,
+	) -> Result<u64, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::External),
+			ExtendedDescriptor::Wpkh(_)
+		));
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::Internal),
+			ExtendedDescriptor::Wpkh(_)
+		));
+
+		let (splice_amount, tmp_psbt) = self.get_max_drain_amount(
+			&mut locked_wallet,
+			shared_output_script,
+			cur_anchor_reserve_sats,
+			fee_rate,
+			Some(&shared_input),
+		)?;
+
+		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+
+		Ok(splice_amount)
+	}
+
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?
