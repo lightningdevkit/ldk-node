@@ -1091,7 +1091,7 @@ impl Node {
 	}
 
 	fn open_channel_inner(
-		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: Option<u64>,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool,
 	) -> Result<UserChannelId, Error> {
@@ -1111,8 +1111,38 @@ impl Node {
 			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
-		// Check funds availability after connection (includes anchor reserve calculation)
-		self.check_sufficient_funds_for_channel(channel_amount_sats, &node_id)?;
+		let channel_amount_sats = match channel_amount_sats {
+			Some(amount) => {
+				// Check funds availability after connection (includes anchor reserve
+				// calculation).
+				self.check_sufficient_funds_for_channel(amount, &peer_info.node_id)?;
+				amount
+			},
+			None => {
+				// Determine max funding amount from all available on-chain funds.
+				let cur_anchor_reserve_sats =
+					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+				let new_channel_reserve =
+					self.new_channel_anchor_reserve_sats(&peer_info.node_id)?;
+				let total_anchor_reserve_sats = cur_anchor_reserve_sats + new_channel_reserve;
+
+				let fee_rate =
+					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+
+				let amount =
+					self.wallet.get_max_funding_amount(total_anchor_reserve_sats, fee_rate)?;
+
+				log_info!(
+					self.logger,
+					"Opening channel with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+					amount,
+					fee_rate.to_sat_per_kwu(),
+					total_anchor_reserve_sats,
+				);
+
+				amount
+			},
+		};
 
 		let mut user_config = default_user_config(&self.config);
 		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
@@ -1153,6 +1183,25 @@ impl Node {
 		}
 	}
 
+	fn new_channel_anchor_reserve_sats(&self, peer_node_id: &PublicKey) -> Result<u64, Error> {
+		let init_features = self
+			.peer_manager
+			.peer_by_node_id(peer_node_id)
+			.ok_or(Error::ConnectionFailed)?
+			.init_features;
+		let sats = self.config.anchor_channels_config.as_ref().map_or(0, |c| {
+			if init_features.requires_anchors_zero_fee_htlc_tx()
+				&& !c.trusted_peers_no_reserve.contains(peer_node_id)
+			{
+				c.per_channel_reserve_sats
+			} else {
+				0
+			}
+		});
+
+		Ok(sats)
+	}
+
 	fn check_sufficient_funds_for_channel(
 		&self, amount_sats: u64, peer_node_id: &PublicKey,
 	) -> Result<(), Error> {
@@ -1171,21 +1220,8 @@ impl Node {
 		}
 
 		// Fail if we have less than the channel value + anchor reserve available (if applicable).
-		let init_features = self
-			.peer_manager
-			.peer_by_node_id(peer_node_id)
-			.ok_or(Error::ConnectionFailed)?
-			.init_features;
-		let required_funds_sats = amount_sats
-			+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-				if init_features.requires_anchors_zero_fee_htlc_tx()
-					&& !c.trusted_peers_no_reserve.contains(peer_node_id)
-				{
-					c.per_channel_reserve_sats
-				} else {
-					0
-				}
-			});
+		let required_funds_sats =
+			amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
 
 		if spendable_amount_sats < required_funds_sats {
 			log_error!(self.logger,
@@ -1222,7 +1258,7 @@ impl Node {
 		self.open_channel_inner(
 			node_id,
 			address,
-			channel_amount_sats,
+			Some(channel_amount_sats),
 			push_to_counterparty_msat,
 			channel_config,
 			false,
@@ -1262,7 +1298,72 @@ impl Node {
 		self.open_channel_inner(
 			node_id,
 			address,
-			channel_amount_sats,
+			Some(channel_amount_sats),
+			push_to_counterparty_msat,
+			channel_config,
+			true,
+		)
+	}
+
+	/// Connect to a node and open a new unannounced channel, using all available on-chain funds
+	/// minus fees and anchor reserves.
+	///
+	/// To open an announced channel, see [`Node::open_announced_channel_with_all`].
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_channel_with_all(
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			None,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+		)
+	}
+
+	/// Connect to a node and open a new announced channel, using all available on-chain funds
+	/// minus fees and anchor reserves.
+	///
+	/// This will return an error if the node has not been sufficiently configured to operate as a
+	/// forwarding node that can properly announce its existence to the public network graph, i.e.,
+	/// [`Config::listening_addresses`] and [`Config::node_alias`] are unset.
+	///
+	/// To open an unannounced channel, see [`Node::open_channel_with_all`].
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_announced_channel_with_all(
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		if let Err(err) = may_announce_channel(&self.config) {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {err}");
+			return Err(Error::ChannelCreationFailed);
+		}
+
+		self.open_channel_inner(
+			node_id,
+			address,
+			None,
 			push_to_counterparty_msat,
 			channel_config,
 			true,

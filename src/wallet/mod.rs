@@ -581,6 +581,29 @@ impl Wallet {
 		Ok((max_amount, tmp_psbt))
 	}
 
+	/// Returns the maximum amount available for funding a channel, accounting for on-chain fees
+	/// and anchor reserves.
+	pub(crate) fn get_max_funding_amount(
+		&self, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
+	) -> Result<u64, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		// Use a dummy P2WSH script (34 bytes) to match the size of a real funding output.
+		let dummy_p2wsh_script = ScriptBuf::new().to_p2wsh();
+
+		let (max_amount, tmp_psbt) = self.get_max_drain_amount(
+			&mut locked_wallet,
+			dummy_p2wsh_script,
+			cur_anchor_reserve_sats,
+			fee_rate,
+			None,
+		)?;
+
+		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+
+		Ok(max_amount)
+	}
+
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?
