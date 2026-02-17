@@ -9,6 +9,7 @@ use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
@@ -1001,6 +1002,131 @@ impl Wallet {
 		}
 
 		None
+	}
+
+	#[allow(deprecated)]
+	pub(crate) fn bump_fee_cpfp(&self, payment_id: PaymentId) -> Result<Txid, Error> {
+		let txid = Txid::from_slice(&payment_id.0).expect("32 bytes");
+
+		let payment = self.pending_payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
+
+		if let PaymentKind::Onchain { status, .. } = &payment.details.kind {
+			match status {
+				ConfirmationStatus::Confirmed { .. } => {
+					log_error!(self.logger, "Transaction {} is already confirmed", txid);
+					return Err(Error::InvalidPaymentId);
+				},
+				ConfirmationStatus::Unconfirmed => {},
+			}
+		}
+
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		let wallet_tx = locked_wallet.get_tx(txid).ok_or(Error::InvalidPaymentId)?;
+		let transaction = &wallet_tx.tx_node.tx;
+
+		// Create the CPFP transaction using a high fee rate to get it confirmed quickly.
+		let mut our_vout: Option<u32> = None;
+		let mut our_value: Amount = Amount::ZERO;
+
+		for (vout_index, output) in transaction.output.iter().enumerate() {
+			let script = output.script_pubkey.clone();
+
+			if locked_wallet.is_mine(script) {
+				our_vout = Some(vout_index as u32);
+				our_value = output.value.into();
+				break;
+			}
+		}
+
+		let our_vout = our_vout.ok_or_else(|| {
+			log_error!(
+				self.logger,
+				"Could not find an output owned by this wallet in transaction {}",
+				txid
+			);
+			Error::InvalidPaymentId
+		})?;
+
+		let cpfp_outpoint = OutPoint::new(txid, our_vout);
+
+		let confirmation_target = ConfirmationTarget::OnchainPayment;
+		let estimated_fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
+
+		const CPFP_MULTIPLIER: f64 = 1.5;
+		let boosted_fee_rate = FeeRate::from_sat_per_kwu(
+			((estimated_fee_rate.to_sat_per_kwu() as f64) * CPFP_MULTIPLIER) as u64,
+		);
+
+		let mut psbt = {
+			let mut tx_builder = locked_wallet.build_tx();
+			tx_builder
+				.add_utxo(cpfp_outpoint)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to add CPFP UTXO {}: {}", cpfp_outpoint, e);
+					Error::InvalidPaymentId
+				})?
+				.drain_to(transaction.output[our_vout as usize].script_pubkey.clone())
+				.fee_rate(boosted_fee_rate);
+
+			match tx_builder.finish() {
+				Ok(psbt) => {
+					log_trace!(self.logger, "Created CPFP PSBT: {:?}", psbt);
+					psbt
+				},
+				Err(err) => {
+					log_error!(self.logger, "Failed to create CPFP transaction: {}", err);
+					return Err(err.into());
+				},
+			}
+		};
+
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					return Err(Error::OnchainTxCreationFailed);
+				}
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create transaction: {}", err);
+				return Err(err.into());
+			},
+		}
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		let cpfp_tx = psbt.extract_tx().map_err(|e| {
+			log_error!(self.logger, "Failed to extract CPFP transaction: {}", e);
+			e
+		})?;
+
+		let cpfp_txid = cpfp_tx.compute_txid();
+
+		self.broadcaster.broadcast_transactions(&[&cpfp_tx]);
+
+		let new_fee = locked_wallet.calculate_fee(&cpfp_tx).unwrap_or(Amount::ZERO);
+		let new_fee_sats = new_fee.to_sat();
+
+		let payment_details = PaymentDetails {
+			id: PaymentId(cpfp_txid.to_byte_array()),
+			kind: PaymentKind::Onchain { txid: cpfp_txid, status: ConfirmationStatus::Unconfirmed },
+			amount_msat: Some(our_value.to_sat() * 1000),
+			fee_paid_msat: Some(new_fee_sats * 1000),
+			direction: PaymentDirection::Outbound,
+			status: PaymentStatus::Pending,
+			latest_update_timestamp: SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs(),
+		};
+		self.payment_store.insert_or_update(payment_details)?;
+
+		log_info!(self.logger, "Created CPFP transaction {} to bump fee of {}", cpfp_txid, txid);
+		Ok(cpfp_txid)
 	}
 }
 
