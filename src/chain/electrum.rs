@@ -27,8 +27,9 @@ use lightning_transaction_sync::ElectrumSyncClient;
 
 use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
-	Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
+	AddressTypeRuntimeConfig, Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP,
+	BDK_WALLET_SYNC_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS,
+	TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::error::Error;
 use crate::fee_estimator::{
@@ -54,6 +55,7 @@ pub(super) struct ElectrumChainSource {
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	pub(super) kv_store: Arc<DynStore>,
 	pub(super) config: Arc<Config>,
+	address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>,
 	logger: Arc<Logger>,
 	pub(super) node_metrics: Arc<RwLock<NodeMetrics>>,
 }
@@ -62,7 +64,8 @@ impl ElectrumChainSource {
 	pub(super) fn new(
 		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let electrum_runtime_status = RwLock::new(ElectrumRuntimeStatus::new());
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
@@ -76,6 +79,7 @@ impl ElectrumChainSource {
 			fee_estimator,
 			kv_store,
 			config,
+			address_type_runtime_config,
 			logger: Arc::clone(&logger),
 			node_metrics,
 		}
@@ -195,12 +199,15 @@ impl ElectrumChainSource {
 			Err(e) => (Vec::new(), Some(e)),
 		};
 
-		let sync_requests = super::collect_additional_sync_requests(
-			&self.config,
-			&onchain_wallet,
-			&self.node_metrics,
-			&self.logger,
-		);
+		let sync_requests = {
+			let runtime_config = self.address_type_runtime_config.read().unwrap();
+			super::collect_additional_sync_requests(
+				&runtime_config,
+				&onchain_wallet,
+				&self.node_metrics,
+				&self.logger,
+			)
+		};
 
 		let mut join_set = tokio::task::JoinSet::new();
 		for (address_type, full_scan_req, incremental_req, do_incremental) in sync_requests {

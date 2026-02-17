@@ -26,8 +26,8 @@ use crate::chain::bitcoind::BitcoindChainSource;
 use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
 use crate::config::{
-	AddressType, BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig,
-	EsploraSyncConfig, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL,
+	AddressType, AddressTypeRuntimeConfig, BackgroundSyncConfig, BitcoindRestClientConfig, Config,
+	ElectrumSyncConfig, EsploraSyncConfig, RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::event::{Event, EventQueue, SyncType, TransactionDetails};
@@ -167,10 +167,10 @@ fn get_transaction_details(
 }
 
 pub(super) fn collect_additional_sync_requests(
-	config: &Config, onchain_wallet: &Wallet, node_metrics: &Arc<RwLock<NodeMetrics>>,
-	logger: &Arc<Logger>,
+	address_type_runtime_config: &AddressTypeRuntimeConfig, onchain_wallet: &Wallet,
+	node_metrics: &Arc<RwLock<NodeMetrics>>, logger: &Arc<Logger>,
 ) -> Vec<(AddressType, FullScanRequest<KeychainKind>, SyncRequest<(KeychainKind, u32)>, bool)> {
-	config
+	address_type_runtime_config
 		.additional_address_types()
 		.into_iter()
 		.filter_map(|address_type| {
@@ -347,7 +347,8 @@ impl ChainSource {
 	pub(crate) fn new_esplora(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		kv_store: Arc<DynStore>, config: Arc<Config>,
+		address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> (Self, Option<BestBlock>) {
 		// Create watch channel for runtime sync config updates if background sync is enabled
@@ -363,6 +364,7 @@ impl ChainSource {
 			fee_estimator,
 			kv_store,
 			config,
+			address_type_runtime_config,
 			Arc::clone(&logger),
 			node_metrics,
 		);
@@ -383,7 +385,8 @@ impl ChainSource {
 	pub(crate) fn new_electrum(
 		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		kv_store: Arc<DynStore>, config: Arc<Config>,
+		address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> (Self, Option<BestBlock>) {
 		// Create watch channel for runtime sync config updates if background sync is enabled
@@ -398,6 +401,7 @@ impl ChainSource {
 			fee_estimator,
 			kv_store,
 			config,
+			address_type_runtime_config,
 			Arc::clone(&logger),
 			node_metrics,
 		);

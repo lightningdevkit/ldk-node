@@ -1765,6 +1765,110 @@ impl Node {
 		self.wallet.get_loaded_address_types()
 	}
 
+	/// Adds an address type to the monitored set.
+	///
+	/// The wallet is created from `seed_bytes` (or loaded from the kv-store if previously
+	/// monitored) and included in subsequent sync cycles. The seed must be the same 64-byte
+	/// entropy used to build this node.
+	///
+	/// Not persisted across restarts; re-apply on each start or update [`Config`].
+	#[cfg(not(feature = "uniffi"))]
+	pub fn add_address_type_to_monitor(
+		&self, address_type: config::AddressType, seed_bytes: [u8; config::WALLET_KEYS_SEED_LEN],
+	) -> Result<(), Error> {
+		self.wallet.add_monitored_address_type(address_type, &seed_bytes)
+	}
+
+	/// Adds an address type to the monitored set.
+	///
+	/// The wallet is created from `seed_bytes` (or loaded from the kv-store if previously
+	/// monitored) and included in subsequent sync cycles. The seed must be the same 64-byte
+	/// entropy used to build this node.
+	///
+	/// Returns [`Error::InvalidSeedBytes`] if `seed_bytes` length differs from
+	/// [`config::WALLET_KEYS_SEED_LEN`].
+	///
+	/// Not persisted across restarts; re-apply on each start or update [`Config`].
+	#[cfg(feature = "uniffi")]
+	pub fn add_address_type_to_monitor(
+		&self, address_type: config::AddressType, seed_bytes: Vec<u8>,
+	) -> Result<(), Error> {
+		let seed = validate_seed_bytes(seed_bytes)?;
+		self.wallet.add_monitored_address_type(address_type, &seed)
+	}
+
+	/// Removes an address type from the monitored set and unloads its wallet.
+	///
+	/// Persisted state is retained in the kv-store; re-adding the type via
+	/// [`Node::add_address_type_to_monitor`] recovers all funds on the next sync.
+	///
+	/// Not persisted across restarts; re-apply on each start or update [`Config`].
+	pub fn remove_address_type_from_monitor(
+		&self, address_type: config::AddressType,
+	) -> Result<(), Error> {
+		self.wallet.remove_monitored_address_type(address_type)
+	}
+
+	/// Changes the primary address type used for new addresses and change outputs.
+	///
+	/// Creates the wallet from `seed_bytes` if not already loaded. The previous primary is
+	/// demoted to the monitored set. If the new primary has never been synced, a full scan
+	/// is triggered on the next sync cycle.
+	///
+	/// Not persisted across restarts; re-apply on each start or update [`Config`].
+	#[cfg(not(feature = "uniffi"))]
+	pub fn set_primary_address_type(
+		&self, address_type: config::AddressType, seed_bytes: [u8; config::WALLET_KEYS_SEED_LEN],
+	) -> Result<(), Error> {
+		self.wallet.set_primary_address_type(address_type, &seed_bytes)
+	}
+
+	/// Changes the primary address type used for new addresses and change outputs.
+	///
+	/// Creates the wallet from `seed_bytes` if not already loaded. The previous primary is
+	/// demoted to the monitored set. If the new primary has never been synced, a full scan
+	/// is triggered on the next sync cycle.
+	///
+	/// Returns [`Error::InvalidSeedBytes`] if `seed_bytes` length differs from
+	/// [`config::WALLET_KEYS_SEED_LEN`].
+	///
+	/// Not persisted across restarts; re-apply on each start or update [`Config`].
+	#[cfg(feature = "uniffi")]
+	pub fn set_primary_address_type(
+		&self, address_type: config::AddressType, seed_bytes: Vec<u8>,
+	) -> Result<(), Error> {
+		let seed = validate_seed_bytes(seed_bytes)?;
+		self.wallet.set_primary_address_type(address_type, &seed)
+	}
+
+	/// Adds an address type to the monitored set, deriving the wallet from a BIP39 mnemonic.
+	///
+	/// Convenience wrapper around [`Node::add_address_type_to_monitor`]. The `mnemonic` and
+	/// `passphrase` must match the values used at build time.
+	///
+	/// Not persisted across restarts.
+	pub fn add_address_type_to_monitor_with_mnemonic(
+		&self, address_type: config::AddressType, mnemonic: bip39::Mnemonic,
+		passphrase: Option<String>,
+	) -> Result<(), Error> {
+		let seed = mnemonic.to_seed(passphrase.as_deref().unwrap_or(""));
+		self.wallet.add_monitored_address_type(address_type, &seed)
+	}
+
+	/// Changes the primary address type, deriving the wallet from a BIP39 mnemonic.
+	///
+	/// Convenience wrapper around [`Node::set_primary_address_type`]. The `mnemonic` and
+	/// `passphrase` must match the values used at build time.
+	///
+	/// Not persisted across restarts.
+	pub fn set_primary_address_type_with_mnemonic(
+		&self, address_type: config::AddressType, mnemonic: bip39::Mnemonic,
+		passphrase: Option<String>,
+	) -> Result<(), Error> {
+		let seed = mnemonic.to_seed(passphrase.as_deref().unwrap_or(""));
+		self.wallet.set_primary_address_type(address_type, &seed)
+	}
+
 	/// Retrieves all payments that match the given predicate.
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
@@ -1885,6 +1989,16 @@ impl Drop for Node {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}
+}
+
+#[cfg(feature = "uniffi")]
+fn validate_seed_bytes(seed_bytes: Vec<u8>) -> Result<[u8; config::WALLET_KEYS_SEED_LEN], Error> {
+	if seed_bytes.len() != config::WALLET_KEYS_SEED_LEN {
+		return Err(Error::InvalidSeedBytes);
+	}
+	let mut bytes = [0u8; config::WALLET_KEYS_SEED_LEN];
+	bytes.copy_from_slice(&seed_bytes);
+	Ok(bytes)
 }
 
 /// Represents the status of the [`Node`].

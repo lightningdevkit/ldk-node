@@ -198,6 +198,16 @@ interface Node {
 	[Throws=NodeError]
 	AddressTypeBalance get_balance_for_address_type(AddressType address_type);
 	sequence<AddressType> list_monitored_address_types();
+	[Throws=NodeError]
+	void add_address_type_to_monitor(AddressType address_type, sequence<u8> seed_bytes);
+	[Throws=NodeError]
+	void add_address_type_to_monitor_with_mnemonic(AddressType address_type, Mnemonic mnemonic, string? passphrase);
+	[Throws=NodeError]
+	void remove_address_type_from_monitor(AddressType address_type);
+	[Throws=NodeError]
+	void set_primary_address_type(AddressType address_type, sequence<u8> seed_bytes);
+	[Throws=NodeError]
+	void set_primary_address_type_with_mnemonic(AddressType address_type, Mnemonic mnemonic, string? passphrase);
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
@@ -410,6 +420,10 @@ enum NodeError {
     "CoinSelectionFailed",
     "InvalidMnemonic",
     "BackgroundSyncNotEnabled",
+    "AddressTypeAlreadyMonitored",
+    "AddressTypeIsPrimary",
+    "AddressTypeNotMonitored",
+    "InvalidSeedBytes",
 };
 
 dictionary NodeStatus {

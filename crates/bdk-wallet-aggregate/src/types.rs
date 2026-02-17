@@ -40,6 +40,10 @@ pub enum Error {
 	TransactionNotFound,
 	/// Cannot replace a transaction that is already confirmed.
 	TransactionAlreadyConfirmed,
+	/// A wallet for the given key already exists.
+	WalletAlreadyExists,
+	/// Cannot remove the primary wallet.
+	CannotRemovePrimary,
 }
 
 impl fmt::Display for Error {
@@ -62,6 +66,8 @@ impl fmt::Display for Error {
 			Error::TransactionAlreadyConfirmed => {
 				write!(f, "Cannot replace an already-confirmed transaction")
 			},
+			Error::WalletAlreadyExists => write!(f, "Wallet for this key already exists"),
+			Error::CannotRemovePrimary => write!(f, "Cannot remove the primary wallet"),
 		}
 	}
 }

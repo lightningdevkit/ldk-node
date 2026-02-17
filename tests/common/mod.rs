@@ -299,8 +299,11 @@ pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
 
 	for _ in 0..num_addresses {
 		let mut rand_port = random_port();
+		let mut attempts = 0u32;
 		while used_ports.contains(&rand_port) {
 			rand_port = random_port();
+			attempts += 1;
+			assert!(attempts < 1000, "Failed to find a unique random port after 1000 attempts");
 		}
 		used_ports.insert(rand_port);
 		let address: SocketAddress = format!("127.0.0.1:{}", rand_port).parse().unwrap();

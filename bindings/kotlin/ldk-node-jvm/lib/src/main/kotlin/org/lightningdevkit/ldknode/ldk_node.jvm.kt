@@ -1506,6 +1506,16 @@ internal typealias UniffiVTableCallbackInterfaceVssHeaderProviderUniffiByValue =
 
 
 
+
+
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -2190,6 +2200,19 @@ internal interface UniffiLib : Library {
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Unit
+    fun uniffi_ldk_node_fn_method_node_add_address_type_to_monitor(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
+        `seedBytes`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    fun uniffi_ldk_node_fn_method_node_add_address_type_to_monitor_with_mnemonic(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
+        `mnemonic`: RustBufferByValue,
+        `passphrase`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
     fun uniffi_ldk_node_fn_method_node_announcement_addresses(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -2332,9 +2355,27 @@ internal interface UniffiLib : Library {
         `paymentId`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
+    fun uniffi_ldk_node_fn_method_node_remove_address_type_from_monitor(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
     fun uniffi_ldk_node_fn_method_node_remove_payment(
         `ptr`: Pointer?,
         `paymentId`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    fun uniffi_ldk_node_fn_method_node_set_primary_address_type(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
+        `seedBytes`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    fun uniffi_ldk_node_fn_method_node_set_primary_address_type_with_mnemonic(
+        `ptr`: Pointer?,
+        `addressType`: RustBufferByValue,
+        `mnemonic`: RustBufferByValue,
+        `passphrase`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Unit
     fun uniffi_ldk_node_fn_method_node_sign_message(
@@ -3139,6 +3180,10 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_ldk_node_checksum_method_networkgraph_node(
     ): Short
+    fun uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor(
+    ): Short
+    fun uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor_with_mnemonic(
+    ): Short
     fun uniffi_ldk_node_checksum_method_node_announcement_addresses(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_bolt11_payment(
@@ -3199,7 +3244,13 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_ldk_node_checksum_method_node_payment(
     ): Short
+    fun uniffi_ldk_node_checksum_method_node_remove_address_type_from_monitor(
+    ): Short
     fun uniffi_ldk_node_checksum_method_node_remove_payment(
+    ): Short
+    fun uniffi_ldk_node_checksum_method_node_set_primary_address_type(
+    ): Short
+    fun uniffi_ldk_node_checksum_method_node_set_primary_address_type_with_mnemonic(
     ): Short
     fun uniffi_ldk_node_checksum_method_node_sign_message(
     ): Short
@@ -3652,6 +3703,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_ldk_node_checksum_method_networkgraph_node() != 48925.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor() != 14706.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor_with_mnemonic() != 4517.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_ldk_node_checksum_method_node_announcement_addresses() != 61426.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3742,7 +3799,16 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_ldk_node_checksum_method_node_payment() != 60296.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_ldk_node_checksum_method_node_remove_address_type_from_monitor() != 37081.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_ldk_node_checksum_method_node_remove_payment() != 47952.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_node_set_primary_address_type() != 11005.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ldk_node_checksum_method_node_set_primary_address_type_with_mnemonic() != 50783.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ldk_node_checksum_method_node_sign_message() != 49319.toShort()) {
@@ -6876,6 +6942,35 @@ open class Node: Disposable, NodeInterface {
     }
 
     
+    @Throws(NodeException::class)
+    override fun `addAddressTypeToMonitor`(`addressType`: AddressType, `seedBytes`: List<kotlin.UByte>) {
+        callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
+                    FfiConverterSequenceUByte.lower(`seedBytes`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
+    @Throws(NodeException::class)
+    override fun `addAddressTypeToMonitorWithMnemonic`(`addressType`: AddressType, `mnemonic`: Mnemonic, `passphrase`: kotlin.String?) {
+        callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor_with_mnemonic(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
+                    FfiConverterTypeMnemonic.lower(`mnemonic`),
+                    FfiConverterOptionalString.lower(`passphrase`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
     override fun `announcementAddresses`(): List<SocketAddress>? {
         return FfiConverterOptionalSequenceTypeSocketAddress.lift(callWithPointer {
             uniffiRustCall { uniffiRustCallStatus ->
@@ -7247,12 +7342,54 @@ open class Node: Disposable, NodeInterface {
     }
 
     @Throws(NodeException::class)
+    override fun `removeAddressTypeFromMonitor`(`addressType`: AddressType) {
+        callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_remove_address_type_from_monitor(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
+    @Throws(NodeException::class)
     override fun `removePayment`(`paymentId`: PaymentId) {
         callWithPointer {
             uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
                 UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_remove_payment(
                     it,
                     FfiConverterTypePaymentId.lower(`paymentId`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
+    @Throws(NodeException::class)
+    override fun `setPrimaryAddressType`(`addressType`: AddressType, `seedBytes`: List<kotlin.UByte>) {
+        callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_set_primary_address_type(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
+                    FfiConverterSequenceUByte.lower(`seedBytes`),
+                    uniffiRustCallStatus,
+                )
+            }
+        }
+    }
+
+    @Throws(NodeException::class)
+    override fun `setPrimaryAddressTypeWithMnemonic`(`addressType`: AddressType, `mnemonic`: Mnemonic, `passphrase`: kotlin.String?) {
+        callWithPointer {
+            uniffiRustCallWithError(NodeExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.INSTANCE.uniffi_ldk_node_fn_method_node_set_primary_address_type_with_mnemonic(
+                    it,
+                    FfiConverterTypeAddressType.lower(`addressType`),
+                    FfiConverterTypeMnemonic.lower(`mnemonic`),
+                    FfiConverterOptionalString.lower(`passphrase`),
                     uniffiRustCallStatus,
                 )
             }
@@ -11308,6 +11445,10 @@ object FfiConverterTypeNodeError : FfiConverterRustBuffer<NodeException> {
             61 -> NodeException.CoinSelectionFailed(FfiConverterString.read(buf))
             62 -> NodeException.InvalidMnemonic(FfiConverterString.read(buf))
             63 -> NodeException.BackgroundSyncNotEnabled(FfiConverterString.read(buf))
+            64 -> NodeException.AddressTypeAlreadyMonitored(FfiConverterString.read(buf))
+            65 -> NodeException.AddressTypeIsPrimary(FfiConverterString.read(buf))
+            66 -> NodeException.AddressTypeNotMonitored(FfiConverterString.read(buf))
+            67 -> NodeException.InvalidSeedBytes(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -11568,6 +11709,22 @@ object FfiConverterTypeNodeError : FfiConverterRustBuffer<NodeException> {
             }
             is NodeException.BackgroundSyncNotEnabled -> {
                 buf.putInt(63)
+                Unit
+            }
+            is NodeException.AddressTypeAlreadyMonitored -> {
+                buf.putInt(64)
+                Unit
+            }
+            is NodeException.AddressTypeIsPrimary -> {
+                buf.putInt(65)
+                Unit
+            }
+            is NodeException.AddressTypeNotMonitored -> {
+                buf.putInt(66)
+                Unit
+            }
+            is NodeException.InvalidSeedBytes -> {
+                buf.putInt(67)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

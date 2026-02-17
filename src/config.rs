@@ -176,6 +176,27 @@ impl Config {
 	}
 }
 
+/// Runtime address-type configuration, initialized from [`Config`] and updated at runtime.
+#[derive(Debug, Clone)]
+pub(crate) struct AddressTypeRuntimeConfig {
+	/// The primary address type for new addresses and change outputs.
+	pub(crate) primary: AddressType,
+	/// Additional address types to monitor for existing funds.
+	pub(crate) monitored: Vec<AddressType>,
+}
+
+impl AddressTypeRuntimeConfig {
+	pub(crate) fn from_config(config: &Config) -> Self {
+		Self { primary: config.address_type, monitored: config.address_types_to_monitor.clone() }
+	}
+
+	/// Returns the additional address types to monitor, excluding the primary and deduplicating.
+	pub(crate) fn additional_address_types(&self) -> Vec<AddressType> {
+		let mut seen = std::collections::HashSet::new();
+		self.monitored.iter().copied().filter(|&at| at != self.primary && seen.insert(at)).collect()
+	}
+}
+
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
 ///
