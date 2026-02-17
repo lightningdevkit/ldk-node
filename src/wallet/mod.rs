@@ -604,6 +604,53 @@ impl Wallet {
 		Ok(max_amount)
 	}
 
+	/// Returns the maximum amount available for splicing into an existing channel, accounting for
+	/// on-chain fees and anchor reserves, along with the wallet UTXOs to use as inputs.
+	pub(crate) fn get_max_splice_in_amount(
+		&self, shared_input: Input, shared_output_script: ScriptBuf, cur_anchor_reserve_sats: u64,
+		fee_rate: FeeRate,
+	) -> Result<(u64, Vec<FundingTxInput>), Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::External),
+			ExtendedDescriptor::Wpkh(_)
+		));
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::Internal),
+			ExtendedDescriptor::Wpkh(_)
+		));
+
+		let (splice_amount, tmp_psbt) = self.get_max_drain_amount(
+			&mut locked_wallet,
+			shared_output_script,
+			cur_anchor_reserve_sats,
+			fee_rate,
+			Some(&shared_input),
+		)?;
+
+		let inputs = tmp_psbt
+			.unsigned_tx
+			.input
+			.iter()
+			.filter(|txin| txin.previous_output != shared_input.outpoint)
+			.filter_map(|txin| {
+				locked_wallet
+					.tx_details(txin.previous_output.txid)
+					.map(|tx_details| tx_details.tx.deref().clone())
+					.map(|prevtx| FundingTxInput::new_p2wpkh(prevtx, txin.previous_output.vout))
+			})
+			.collect::<Result<Vec<_>, ()>>()
+			.map_err(|_| {
+				log_error!(self.logger, "Failed to collect wallet UTXOs for splice");
+				Error::ChannelSplicingFailed
+			})?;
+
+		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+
+		Ok((splice_amount, inputs))
+	}
+
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?

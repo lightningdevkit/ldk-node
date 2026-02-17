@@ -32,6 +32,7 @@ use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+	UserChannelId,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -749,6 +750,16 @@ pub async fn open_channel_with_all(
 	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
 
 	funding_txo_a
+}
+
+pub async fn splice_in_with_all(
+	node_a: &TestNode, node_b: &TestNode, user_channel_id: &UserChannelId, electrsd: &ElectrsD,
+) {
+	node_a.splice_in_with_all(user_channel_id, node_b.node_id()).unwrap();
+
+	let splice_txo = expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 }
 
 pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(

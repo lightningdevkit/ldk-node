@@ -1380,17 +1380,15 @@ impl Node {
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
-	pub fn splice_in(
+	fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		splice_amount_sats: u64,
+		splice_amount_sats: Option<u64>,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
-
 			const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
 				1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
 
@@ -1410,25 +1408,63 @@ impl Node {
 				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT + FUNDING_TRANSACTION_WITNESS_WEIGHT,
 			};
 
-			let shared_output = bitcoin::TxOut {
-				value: shared_input.previous_utxo.value + Amount::from_sat(splice_amount_sats),
-				// will not actually be the exact same script pubkey after splice
-				// but it is the same size and good enough for coin selection purposes
-				script_pubkey: funding_output.script_pubkey.clone(),
-			};
-
 			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
 
-			let inputs = self
-				.wallet
-				.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
-				.map_err(|()| {
-					log_error!(
+			let (splice_amount_sats, inputs) = match splice_amount_sats {
+				Some(amount) => {
+					self.check_sufficient_funds_for_channel(amount, &counterparty_node_id)?;
+
+					let shared_output = bitcoin::TxOut {
+						value: shared_input.previous_utxo.value + Amount::from_sat(amount),
+						// will not actually be the exact same script pubkey after splice
+						// but it is the same size and good enough for coin selection purposes
+						script_pubkey: funding_output.script_pubkey.clone(),
+					};
+
+					let inputs = self
+						.wallet
+						.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
+						.map_err(|()| {
+							log_error!(
+								self.logger,
+								"Failed to splice channel: insufficient confirmed UTXOs",
+							);
+							Error::ChannelSplicingFailed
+						})?;
+
+					(amount, inputs)
+				},
+				None => {
+					let cur_anchor_reserve_sats =
+						total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+
+					let (amount, inputs) = self
+						.wallet
+						.get_max_splice_in_amount(
+							shared_input,
+							funding_output.script_pubkey.clone(),
+							cur_anchor_reserve_sats,
+							fee_rate,
+						)
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to determine max splice-in amount: {e:?}"
+							);
+							e
+						})?;
+
+					log_info!(
 						self.logger,
-						"Failed to splice channel: insufficient confirmed UTXOs",
+						"Splicing in with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+						amount,
+						fee_rate.to_sat_per_kwu(),
+						cur_anchor_reserve_sats,
 					);
-					Error::ChannelSplicingFailed
-				})?;
+
+					(amount, inputs)
+				},
+			};
 
 			let change_address = self.wallet.get_new_internal_address()?;
 
@@ -1480,6 +1516,42 @@ impl Node {
 
 			Err(Error::ChannelSplicingFailed)
 		}
+	}
+
+	/// Add funds to an existing channel from a transaction output you control.
+	///
+	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
+	/// this classification may change in the future.
+	pub fn splice_in(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		splice_amount_sats: u64,
+	) -> Result<(), Error> {
+		self.splice_in_inner(user_channel_id, counterparty_node_id, Some(splice_amount_sats))
+	}
+
+	/// Add all available on-chain funds into an existing channel.
+	///
+	/// This is similar to [`Node::splice_in`] but uses all available confirmed on-chain funds
+	/// instead of requiring a specific amount.
+	///
+	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
+	/// this classification may change in the future.
+	pub fn splice_in_with_all(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		self.splice_in_inner(user_channel_id, counterparty_node_id, None)
 	}
 
 	/// Remove funds from an existing channel, sending them to an on-chain address.
