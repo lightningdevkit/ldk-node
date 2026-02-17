@@ -32,6 +32,7 @@ use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+	UserChannelId,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -717,6 +718,48 @@ pub async fn open_channel_push_amt(
 	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
 
 	funding_txo_a
+}
+
+pub async fn open_channel_with_all(
+	node_a: &TestNode, node_b: &TestNode, should_announce: bool, electrsd: &ElectrsD,
+) -> OutPoint {
+	if should_announce {
+		node_a
+			.open_announced_channel_with_all(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				None,
+				None,
+			)
+			.unwrap();
+	} else {
+		node_a
+			.open_channel_with_all(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				None,
+				None,
+			)
+			.unwrap();
+	}
+	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
+
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(funding_txo_a, funding_txo_b);
+	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
+
+	funding_txo_a
+}
+
+pub async fn splice_in_with_all(
+	node_a: &TestNode, node_b: &TestNode, user_channel_id: &UserChannelId, electrsd: &ElectrsD,
+) {
+	node_a.splice_in_with_all(user_channel_id, node_b.node_id()).unwrap();
+
+	let splice_txo = expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 }
 
 pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(

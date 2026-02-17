@@ -1091,7 +1091,7 @@ impl Node {
 	}
 
 	fn open_channel_inner(
-		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: Option<u64>,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool,
 	) -> Result<UserChannelId, Error> {
@@ -1111,8 +1111,38 @@ impl Node {
 			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
-		// Check funds availability after connection (includes anchor reserve calculation)
-		self.check_sufficient_funds_for_channel(channel_amount_sats, &node_id)?;
+		let channel_amount_sats = match channel_amount_sats {
+			Some(amount) => {
+				// Check funds availability after connection (includes anchor reserve
+				// calculation).
+				self.check_sufficient_funds_for_channel(amount, &peer_info.node_id)?;
+				amount
+			},
+			None => {
+				// Determine max funding amount from all available on-chain funds.
+				let cur_anchor_reserve_sats =
+					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+				let new_channel_reserve =
+					self.new_channel_anchor_reserve_sats(&peer_info.node_id)?;
+				let total_anchor_reserve_sats = cur_anchor_reserve_sats + new_channel_reserve;
+
+				let fee_rate =
+					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+
+				let amount =
+					self.wallet.get_max_funding_amount(total_anchor_reserve_sats, fee_rate)?;
+
+				log_info!(
+					self.logger,
+					"Opening channel with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+					amount,
+					fee_rate.to_sat_per_kwu(),
+					total_anchor_reserve_sats,
+				);
+
+				amount
+			},
+		};
 
 		let mut user_config = default_user_config(&self.config);
 		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
@@ -1153,6 +1183,25 @@ impl Node {
 		}
 	}
 
+	fn new_channel_anchor_reserve_sats(&self, peer_node_id: &PublicKey) -> Result<u64, Error> {
+		let init_features = self
+			.peer_manager
+			.peer_by_node_id(peer_node_id)
+			.ok_or(Error::ConnectionFailed)?
+			.init_features;
+		let sats = self.config.anchor_channels_config.as_ref().map_or(0, |c| {
+			if init_features.requires_anchors_zero_fee_htlc_tx()
+				&& !c.trusted_peers_no_reserve.contains(peer_node_id)
+			{
+				c.per_channel_reserve_sats
+			} else {
+				0
+			}
+		});
+
+		Ok(sats)
+	}
+
 	fn check_sufficient_funds_for_channel(
 		&self, amount_sats: u64, peer_node_id: &PublicKey,
 	) -> Result<(), Error> {
@@ -1171,21 +1220,8 @@ impl Node {
 		}
 
 		// Fail if we have less than the channel value + anchor reserve available (if applicable).
-		let init_features = self
-			.peer_manager
-			.peer_by_node_id(peer_node_id)
-			.ok_or(Error::ConnectionFailed)?
-			.init_features;
-		let required_funds_sats = amount_sats
-			+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-				if init_features.requires_anchors_zero_fee_htlc_tx()
-					&& !c.trusted_peers_no_reserve.contains(peer_node_id)
-				{
-					c.per_channel_reserve_sats
-				} else {
-					0
-				}
-			});
+		let required_funds_sats =
+			amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
 
 		if spendable_amount_sats < required_funds_sats {
 			log_error!(self.logger,
@@ -1222,7 +1258,7 @@ impl Node {
 		self.open_channel_inner(
 			node_id,
 			address,
-			channel_amount_sats,
+			Some(channel_amount_sats),
 			push_to_counterparty_msat,
 			channel_config,
 			false,
@@ -1262,7 +1298,72 @@ impl Node {
 		self.open_channel_inner(
 			node_id,
 			address,
-			channel_amount_sats,
+			Some(channel_amount_sats),
+			push_to_counterparty_msat,
+			channel_config,
+			true,
+		)
+	}
+
+	/// Connect to a node and open a new unannounced channel, using all available on-chain funds
+	/// minus fees and anchor reserves.
+	///
+	/// To open an announced channel, see [`Node::open_announced_channel_with_all`].
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_channel_with_all(
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			None,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+		)
+	}
+
+	/// Connect to a node and open a new announced channel, using all available on-chain funds
+	/// minus fees and anchor reserves.
+	///
+	/// This will return an error if the node has not been sufficiently configured to operate as a
+	/// forwarding node that can properly announce its existence to the public network graph, i.e.,
+	/// [`Config::listening_addresses`] and [`Config::node_alias`] are unset.
+	///
+	/// To open an unannounced channel, see [`Node::open_channel_with_all`].
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_announced_channel_with_all(
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		if let Err(err) = may_announce_channel(&self.config) {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {err}");
+			return Err(Error::ChannelCreationFailed);
+		}
+
+		self.open_channel_inner(
+			node_id,
+			address,
+			None,
 			push_to_counterparty_msat,
 			channel_config,
 			true,
@@ -1279,17 +1380,15 @@ impl Node {
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
-	pub fn splice_in(
+	fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		splice_amount_sats: u64,
+		splice_amount_sats: Option<u64>,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
-
 			const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
 				1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
 
@@ -1309,25 +1408,63 @@ impl Node {
 				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT + FUNDING_TRANSACTION_WITNESS_WEIGHT,
 			};
 
-			let shared_output = bitcoin::TxOut {
-				value: shared_input.previous_utxo.value + Amount::from_sat(splice_amount_sats),
-				// will not actually be the exact same script pubkey after splice
-				// but it is the same size and good enough for coin selection purposes
-				script_pubkey: funding_output.script_pubkey.clone(),
-			};
-
 			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
 
-			let inputs = self
-				.wallet
-				.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
-				.map_err(|()| {
-					log_error!(
+			let (splice_amount_sats, inputs) = match splice_amount_sats {
+				Some(amount) => {
+					self.check_sufficient_funds_for_channel(amount, &counterparty_node_id)?;
+
+					let shared_output = bitcoin::TxOut {
+						value: shared_input.previous_utxo.value + Amount::from_sat(amount),
+						// will not actually be the exact same script pubkey after splice
+						// but it is the same size and good enough for coin selection purposes
+						script_pubkey: funding_output.script_pubkey.clone(),
+					};
+
+					let inputs = self
+						.wallet
+						.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
+						.map_err(|()| {
+							log_error!(
+								self.logger,
+								"Failed to splice channel: insufficient confirmed UTXOs",
+							);
+							Error::ChannelSplicingFailed
+						})?;
+
+					(amount, inputs)
+				},
+				None => {
+					let cur_anchor_reserve_sats =
+						total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+
+					let (amount, inputs) = self
+						.wallet
+						.get_max_splice_in_amount(
+							shared_input,
+							funding_output.script_pubkey.clone(),
+							cur_anchor_reserve_sats,
+							fee_rate,
+						)
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to determine max splice-in amount: {e:?}"
+							);
+							e
+						})?;
+
+					log_info!(
 						self.logger,
-						"Failed to splice channel: insufficient confirmed UTXOs",
+						"Splicing in with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+						amount,
+						fee_rate.to_sat_per_kwu(),
+						cur_anchor_reserve_sats,
 					);
-					Error::ChannelSplicingFailed
-				})?;
+
+					(amount, inputs)
+				},
+			};
 
 			let change_address = self.wallet.get_new_internal_address()?;
 
@@ -1379,6 +1516,42 @@ impl Node {
 
 			Err(Error::ChannelSplicingFailed)
 		}
+	}
+
+	/// Add funds to an existing channel from a transaction output you control.
+	///
+	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
+	/// this classification may change in the future.
+	pub fn splice_in(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		splice_amount_sats: u64,
+	) -> Result<(), Error> {
+		self.splice_in_inner(user_channel_id, counterparty_node_id, Some(splice_amount_sats))
+	}
+
+	/// Add all available on-chain funds into an existing channel.
+	///
+	/// This is similar to [`Node::splice_in`] but uses all available confirmed on-chain funds
+	/// instead of requiring a specific amount.
+	///
+	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
+	/// it. Once negotiation with the counterparty is complete, the channel remains operational
+	/// while waiting for a new funding transaction to confirm.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
+	/// this classification may change in the future.
+	pub fn splice_in_with_all(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		self.splice_in_inner(user_channel_id, counterparty_node_id, None)
 	}
 
 	/// Remove funds from an existing channel, sending them to an on-chain address.

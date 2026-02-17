@@ -65,6 +65,8 @@ pub(crate) enum OnchainSendAmount {
 pub(crate) mod persist;
 pub(crate) mod ser;
 
+const DUST_LIMIT_SATS: u64 = 546;
+
 pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
@@ -480,6 +482,175 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
+	fn build_drain_psbt(
+		&self, locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>,
+		drain_script: ScriptBuf, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
+		shared_input: Option<&Input>,
+	) -> Result<Psbt, Error> {
+		let anchor_address = if cur_anchor_reserve_sats > DUST_LIMIT_SATS {
+			Some(locked_wallet.peek_address(KeychainKind::Internal, 0))
+		} else {
+			None
+		};
+
+		let mut tx_builder = locked_wallet.build_tx();
+		tx_builder.drain_wallet().drain_to(drain_script).fee_rate(fee_rate);
+
+		if let Some(address_info) = anchor_address {
+			tx_builder.add_recipient(
+				address_info.address.script_pubkey(),
+				Amount::from_sat(cur_anchor_reserve_sats),
+			);
+		}
+
+		if let Some(input) = shared_input {
+			let psbt_input = psbt::Input {
+				witness_utxo: Some(input.previous_utxo.clone()),
+				..Default::default()
+			};
+			let weight = Weight::from_wu(input.satisfaction_weight);
+			tx_builder.only_witness_utxo().exclude_unconfirmed();
+			tx_builder.add_foreign_utxo(input.outpoint, psbt_input, weight).map_err(|e| {
+				log_error!(self.logger, "Failed to add shared input for fee estimation: {e}");
+				Error::ChannelSplicingFailed
+			})?;
+		}
+
+		let psbt = tx_builder.finish().map_err(|err| {
+			log_error!(self.logger, "Failed to create temporary drain transaction: {err}");
+			err
+		})?;
+
+		Ok(psbt)
+	}
+
+	/// Builds a temporary drain transaction and returns the maximum amount that would be sent to
+	/// the drain output, along with the PSBT for further inspection.
+	///
+	/// The caller is responsible for cancelling the PSBT via `locked_wallet.cancel_tx()`.
+	fn get_max_drain_amount(
+		&self, locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>,
+		drain_script: ScriptBuf, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
+		shared_input: Option<&Input>,
+	) -> Result<(u64, Psbt), Error> {
+		let balance = locked_wallet.balance();
+		let spendable_amount_sats =
+			self.get_balances_inner(balance, cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+
+		if spendable_amount_sats == 0 {
+			log_error!(
+				self.logger,
+				"Unable to determine max amount: no spendable funds available."
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		let tmp_psbt = self.build_drain_psbt(
+			locked_wallet,
+			drain_script.clone(),
+			cur_anchor_reserve_sats,
+			fee_rate,
+			shared_input,
+		)?;
+
+		let drain_output_value = tmp_psbt
+			.unsigned_tx
+			.output
+			.iter()
+			.find(|o| o.script_pubkey == drain_script)
+			.map(|o| o.value)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to find drain output in temporary transaction");
+				Error::InsufficientFunds
+			})?;
+
+		let shared_input_value = shared_input.map(|i| i.previous_utxo.value.to_sat()).unwrap_or(0);
+
+		let max_amount = drain_output_value.to_sat().saturating_sub(shared_input_value);
+
+		if max_amount < DUST_LIMIT_SATS {
+			log_error!(
+				self.logger,
+				"Unable to proceed: available funds would be consumed entirely by fees. \
+				Available: {spendable_amount_sats}sats, drain output: {}sats.",
+				drain_output_value.to_sat(),
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		Ok((max_amount, tmp_psbt))
+	}
+
+	/// Returns the maximum amount available for funding a channel, accounting for on-chain fees
+	/// and anchor reserves.
+	pub(crate) fn get_max_funding_amount(
+		&self, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
+	) -> Result<u64, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		// Use a dummy P2WSH script (34 bytes) to match the size of a real funding output.
+		let dummy_p2wsh_script = ScriptBuf::new().to_p2wsh();
+
+		let (max_amount, tmp_psbt) = self.get_max_drain_amount(
+			&mut locked_wallet,
+			dummy_p2wsh_script,
+			cur_anchor_reserve_sats,
+			fee_rate,
+			None,
+		)?;
+
+		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+
+		Ok(max_amount)
+	}
+
+	/// Returns the maximum amount available for splicing into an existing channel, accounting for
+	/// on-chain fees and anchor reserves, along with the wallet UTXOs to use as inputs.
+	pub(crate) fn get_max_splice_in_amount(
+		&self, shared_input: Input, shared_output_script: ScriptBuf, cur_anchor_reserve_sats: u64,
+		fee_rate: FeeRate,
+	) -> Result<(u64, Vec<FundingTxInput>), Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::External),
+			ExtendedDescriptor::Wpkh(_)
+		));
+		debug_assert!(matches!(
+			locked_wallet.public_descriptor(KeychainKind::Internal),
+			ExtendedDescriptor::Wpkh(_)
+		));
+
+		let (splice_amount, tmp_psbt) = self.get_max_drain_amount(
+			&mut locked_wallet,
+			shared_output_script,
+			cur_anchor_reserve_sats,
+			fee_rate,
+			Some(&shared_input),
+		)?;
+
+		let inputs = tmp_psbt
+			.unsigned_tx
+			.input
+			.iter()
+			.filter(|txin| txin.previous_output != shared_input.outpoint)
+			.filter_map(|txin| {
+				locked_wallet
+					.tx_details(txin.previous_output.txid)
+					.map(|tx_details| tx_details.tx.deref().clone())
+					.map(|prevtx| FundingTxInput::new_p2wpkh(prevtx, txin.previous_output.vout))
+			})
+			.collect::<Result<Vec<_>, ()>>()
+			.map_err(|_| {
+				log_error!(self.logger, "Failed to collect wallet UTXOs for splice");
+				Error::ChannelSplicingFailed
+			})?;
+
+		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+
+		Ok((splice_amount, inputs))
+	}
+
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?
@@ -503,7 +674,6 @@ impl Wallet {
 			let mut locked_wallet = self.inner.lock().unwrap();
 
 			// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
-			const DUST_LIMIT_SATS: u64 = 546;
 			let tx_builder = match send_amount {
 				OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
 					let mut tx_builder = locked_wallet.build_tx();
@@ -514,63 +684,29 @@ impl Wallet {
 				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats }
 					if cur_anchor_reserve_sats > DUST_LIMIT_SATS =>
 				{
-					let change_address_info = locked_wallet.peek_address(KeychainKind::Internal, 0);
-					let balance = locked_wallet.balance();
-					let spendable_amount_sats = self
-						.get_balances_inner(balance, cur_anchor_reserve_sats)
-						.map(|(_, s)| s)
-						.unwrap_or(0);
-					let tmp_tx = {
-						let mut tmp_tx_builder = locked_wallet.build_tx();
-						tmp_tx_builder
-							.drain_wallet()
-							.drain_to(address.script_pubkey())
-							.add_recipient(
-								change_address_info.address.script_pubkey(),
-								Amount::from_sat(cur_anchor_reserve_sats),
-							)
-							.fee_rate(fee_rate);
-						match tmp_tx_builder.finish() {
-							Ok(psbt) => psbt.unsigned_tx,
-							Err(err) => {
-								log_error!(
-									self.logger,
-									"Failed to create temporary transaction: {}",
-									err
-								);
-								return Err(err.into());
-							},
-						}
-					};
+					let (max_amount, tmp_psbt) = self.get_max_drain_amount(
+						&mut locked_wallet,
+						address.script_pubkey(),
+						cur_anchor_reserve_sats,
+						fee_rate,
+						None,
+					)?;
 
-					let estimated_tx_fee = locked_wallet.calculate_fee(&tmp_tx).map_err(|e| {
-						log_error!(
-							self.logger,
-							"Failed to calculate fee of temporary transaction: {}",
+					let estimated_tx_fee =
+						locked_wallet.calculate_fee(&tmp_psbt.unsigned_tx).map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to calculate fee of temporary transaction: {}",
+								e
+							);
 							e
-						);
-						e
-					})?;
+						})?;
 
-					// 'cancel' the transaction to free up any used change addresses
-					locked_wallet.cancel_tx(&tmp_tx);
-
-					let estimated_spendable_amount = Amount::from_sat(
-						spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
-					);
-
-					if estimated_spendable_amount == Amount::ZERO {
-						log_error!(self.logger,
-							"Unable to send payment without infringing on Anchor reserves. Available: {}sats, estimated fee required: {}sats.",
-							spendable_amount_sats,
-							estimated_tx_fee,
-						);
-						return Err(Error::InsufficientFunds);
-					}
+					locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
 
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
-						.add_recipient(address.script_pubkey(), estimated_spendable_amount)
+						.add_recipient(address.script_pubkey(), Amount::from_sat(max_amount))
 						.fee_absolute(estimated_tx_fee);
 					tx_builder
 				},
