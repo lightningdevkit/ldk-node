@@ -30,7 +30,7 @@ use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
-	UnifiedPaymentResult,
+	TransactionType, UnifiedPaymentResult,
 };
 use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
@@ -390,17 +390,19 @@ async fn onchain_send_receive() {
 	let payment_a = node_a.payment(&payment_id).unwrap();
 	assert_eq!(payment_a.status, PaymentStatus::Pending);
 	match payment_a.kind {
-		PaymentKind::Onchain { status, .. } => {
+		PaymentKind::Onchain { status, ref tx_type, .. } => {
 			assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+			assert_eq!(*tx_type, None);
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
 	assert!(payment_a.fee_paid_msat > Some(0));
 	let payment_b = node_b.payment(&payment_id).unwrap();
 	assert_eq!(payment_b.status, PaymentStatus::Pending);
-	match payment_a.kind {
-		PaymentKind::Onchain { status, .. } => {
+	match payment_b.kind {
+		PaymentKind::Onchain { status, ref tx_type, .. } => {
 			assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+			assert_eq!(*tx_type, Some(TransactionType::OnchainSend));
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
@@ -429,18 +431,20 @@ async fn onchain_send_receive() {
 
 	let payment_a = node_a.payment(&payment_id).unwrap();
 	match payment_a.kind {
-		PaymentKind::Onchain { txid: _txid, status } => {
+		PaymentKind::Onchain { txid: _txid, status, ref tx_type, .. } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			assert_eq!(*tx_type, None);
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
 
-	let payment_b = node_a.payment(&payment_id).unwrap();
+	let payment_b = node_b.payment(&payment_id).unwrap();
 	match payment_b.kind {
-		PaymentKind::Onchain { txid: _txid, status } => {
+		PaymentKind::Onchain { txid: _txid, status, ref tx_type, .. } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			assert_eq!(*tx_type, Some(TransactionType::OnchainSend));
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
@@ -989,6 +993,16 @@ async fn splice_channel() {
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_in_fee_sat * 1_000));
+	match payment.kind {
+		PaymentKind::Onchain { ref tx_type, .. } => {
+			assert!(
+				matches!(tx_type, Some(TransactionType::Splice { .. })),
+				"Expected Splice transaction type, got {:?}",
+				tx_type
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 
 	assert_eq!(
 		node_b.list_balances().total_onchain_balance_sats,
@@ -1032,6 +1046,16 @@ async fn splice_channel() {
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_out_fee_sat * 1_000));
+	match payment.kind {
+		PaymentKind::Onchain { ref tx_type, .. } => {
+			assert!(
+				matches!(tx_type, Some(TransactionType::Splice { .. })),
+				"Expected Splice transaction type, got {:?}",
+				tx_type
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 
 	assert_eq!(
 		node_a.list_balances().total_onchain_balance_sats,
