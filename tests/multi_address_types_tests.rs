@@ -110,6 +110,25 @@ mod helpers {
 		config.node_config.address_types_to_monitor = monitored;
 		config
 	}
+
+	/// Read the seed bytes from the node's storage directory (created by the default entropy
+	/// source during build). Used to pass seed bytes to the dynamic address type APIs in tests.
+	pub fn read_node_seed(node: &Node) -> [u8; 64] {
+		let config = node.config();
+		let seed_path = format!("{}/keys_seed", config.storage_dir_path);
+		let seed = std::fs::read(&seed_path)
+			.unwrap_or_else(|e| panic!("Failed to read seed file at {}: {}", seed_path, e));
+		assert_eq!(
+			seed.len(),
+			64,
+			"keys_seed at {} must be 64 bytes (got {})",
+			seed_path,
+			seed.len()
+		);
+		let mut bytes = [0u8; 64];
+		bytes.copy_from_slice(&seed);
+		bytes
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -583,11 +602,9 @@ mod balance {
 		let utxo_sum: u64 = utxos.iter().map(|u| u.value_sats).sum();
 
 		assert_eq!(
-			balances.spendable_onchain_balance_sats,
-			utxo_sum,
+			balances.spendable_onchain_balance_sats, utxo_sum,
 			"listBalances spendable should equal UTXO sum (spendable={} utxo_sum={})",
-			balances.spendable_onchain_balance_sats,
-			utxo_sum
+			balances.spendable_onchain_balance_sats, utxo_sum
 		);
 
 		node.stop().unwrap();
@@ -599,10 +616,8 @@ mod balance {
 		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 		let chain_source = TestChainSource::Esplora(&electrsd);
 
-		let config = node_config(
-			AddressType::NativeSegwit,
-			vec![AddressType::Legacy, AddressType::Taproot],
-		);
+		let config =
+			node_config(AddressType::NativeSegwit, vec![AddressType::Legacy, AddressType::Taproot]);
 		let node = setup_node(&chain_source, config, None);
 
 		let native_addr = node.onchain_payment().new_address().unwrap();
@@ -614,11 +629,7 @@ mod balance {
 			&bitcoind,
 			&electrsd,
 			&node,
-			vec![
-				(native_addr, 80_000),
-				(legacy_addr, 70_000),
-				(taproot_addr, 90_000),
-			],
+			vec![(native_addr, 80_000), (legacy_addr, 70_000), (taproot_addr, 90_000)],
 		)
 		.await;
 
@@ -631,11 +642,9 @@ mod balance {
 			.sum();
 
 		assert_eq!(
-			per_type_sum,
-			aggregate_spendable,
+			per_type_sum, aggregate_spendable,
 			"Sum of per-type spendable should equal aggregate (per_type_sum={} aggregate={})",
-			per_type_sum,
-			aggregate_spendable
+			per_type_sum, aggregate_spendable
 		);
 
 		node.stop().unwrap();
@@ -675,18 +684,13 @@ mod balance {
 			let utxos = node.onchain_payment().list_spendable_outputs().unwrap();
 			let balances = node.list_balances();
 
-			assert!(
-				utxos.is_empty(),
-				"listSpendableOutputs should be empty after spend-all"
-			);
+			assert!(utxos.is_empty(), "listSpendableOutputs should be empty after spend-all");
 			assert_eq!(
-				balances.total_onchain_balance_sats,
-				0,
+				balances.total_onchain_balance_sats, 0,
 				"total_onchain_balance_sats should be 0"
 			);
 			assert_eq!(
-				balances.spendable_onchain_balance_sats,
-				0,
+				balances.spendable_onchain_balance_sats, 0,
 				"spendable_onchain_balance_sats should be 0"
 			);
 
@@ -713,8 +717,7 @@ mod balance {
 		let utxo_sum: u64 = utxos.iter().map(|u| u.value_sats).sum();
 
 		assert_eq!(
-			balances.spendable_onchain_balance_sats,
-			utxo_sum,
+			balances.spendable_onchain_balance_sats, utxo_sum,
 			"Single-type: spendable should equal UTXO sum"
 		);
 
@@ -2819,6 +2822,337 @@ mod coin_selection {
 
 		let tx = electrsd.client.transaction_get(&txid).unwrap();
 		assert!(tx.input.len() <= 3, "Should pick optimal UTXOs, got {}", tx.input.len());
+
+		node.stop().unwrap();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Address Types Changes
+// ---------------------------------------------------------------------------
+mod dynamic_address_type_changes {
+	use ldk_node::config::AddressType;
+
+	use crate::common::{setup_bitcoind_and_electrsd, setup_node, wait_for_tx, TestChainSource};
+	use crate::helpers::{
+		confirm_and_sync, fund_and_sync, node_config, read_node_seed, test_recipient,
+	};
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_add_address_type_to_monitor() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		let monitored = node.list_monitored_address_types();
+		assert_eq!(monitored.len(), 1);
+		assert!(monitored.contains(&AddressType::NativeSegwit));
+
+		node.add_address_type_to_monitor(AddressType::Legacy, read_node_seed(&node)).unwrap();
+
+		let monitored = node.list_monitored_address_types();
+		assert!(monitored.contains(&AddressType::Legacy));
+		assert!(monitored.contains(&AddressType::NativeSegwit));
+
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		assert!(legacy_addr.script_pubkey().is_p2pkh());
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_add_address_type_taproot() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		node.add_address_type_to_monitor(AddressType::Taproot, read_node_seed(&node)).unwrap();
+		let taproot_addr =
+			node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+		assert!(taproot_addr.script_pubkey().is_p2tr());
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_add_address_type_then_fund_and_sync() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		node.add_address_type_to_monitor(AddressType::Legacy, read_node_seed(&node)).unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+
+		fund_and_sync(&bitcoind, &electrsd, &node, legacy_addr, 100_000).await;
+
+		let legacy_balance = node.get_balance_for_address_type(AddressType::Legacy).unwrap();
+		assert!(legacy_balance.total_sats >= 99_000);
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_add_address_type_already_primary_returns_error() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		let result =
+			node.add_address_type_to_monitor(AddressType::NativeSegwit, read_node_seed(&node));
+		assert_eq!(result, Err(ldk_node::NodeError::AddressTypeIsPrimary));
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_add_address_type_nested_segwit() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		node.add_address_type_to_monitor(AddressType::NestedSegwit, read_node_seed(&node)).unwrap();
+		let nested_addr =
+			node.onchain_payment().new_address_for_type(AddressType::NestedSegwit).unwrap();
+		assert!(nested_addr.script_pubkey().is_p2sh());
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_add_address_type_already_monitored_returns_error() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let result = node.add_address_type_to_monitor(AddressType::Legacy, read_node_seed(&node));
+		assert_eq!(result, Err(ldk_node::NodeError::AddressTypeAlreadyMonitored));
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_remove_address_type_from_monitor() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		assert!(node.list_monitored_address_types().contains(&AddressType::Legacy));
+
+		node.remove_address_type_from_monitor(AddressType::Legacy).unwrap();
+
+		assert!(!node.list_monitored_address_types().contains(&AddressType::Legacy));
+		assert!(node.onchain_payment().new_address_for_type(AddressType::Legacy).is_err());
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_remove_then_add_preserves_funds() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		fund_and_sync(&bitcoind, &electrsd, &node, legacy_addr, 50_000).await;
+
+		let balance_before = node.get_balance_for_address_type(AddressType::Legacy).unwrap();
+		assert!(balance_before.total_sats >= 49_000);
+
+		node.remove_address_type_from_monitor(AddressType::Legacy).unwrap();
+		assert!(node.get_balance_for_address_type(AddressType::Legacy).is_err());
+
+		node.add_address_type_to_monitor(AddressType::Legacy, read_node_seed(&node)).unwrap();
+		node.sync_wallets().unwrap();
+		let balance_after = node.get_balance_for_address_type(AddressType::Legacy).unwrap();
+		assert!(balance_after.total_sats >= 49_000);
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_remove_primary_returns_error() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let result = node.remove_address_type_from_monitor(AddressType::NativeSegwit);
+		assert_eq!(result, Err(ldk_node::NodeError::AddressTypeIsPrimary));
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_remove_unmonitored_type_returns_error() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let result = node.remove_address_type_from_monitor(AddressType::Taproot);
+		assert_eq!(result, Err(ldk_node::NodeError::AddressTypeNotMonitored));
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_set_primary_address_type() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let addr_before = node.onchain_payment().new_address().unwrap();
+		assert!(addr_before.script_pubkey().is_p2wpkh());
+
+		node.set_primary_address_type(AddressType::Legacy, read_node_seed(&node)).unwrap();
+
+		let addr_after = node.onchain_payment().new_address().unwrap();
+		assert!(addr_after.script_pubkey().is_p2pkh());
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_set_primary_auto_loads_unloaded_type() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		// Taproot not loaded; set_primary should auto-load it
+		node.set_primary_address_type(AddressType::Taproot, read_node_seed(&node)).unwrap();
+
+		let addr = node.onchain_payment().new_address().unwrap();
+		assert!(addr.script_pubkey().is_p2tr());
+
+		// Old primary should be demoted to the monitored set
+		let monitored = node.list_monitored_address_types();
+		assert!(monitored.contains(&AddressType::NativeSegwit));
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_set_primary_same_primary_no_op() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		// Setting to current primary should succeed (no-op)
+		node.set_primary_address_type(AddressType::NativeSegwit, read_node_seed(&node)).unwrap();
+
+		let addr = node.onchain_payment().new_address().unwrap();
+		assert!(addr.script_pubkey().is_p2wpkh());
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_set_primary_round_trip_preserves_monitored() {
+		let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		// NativeSegwit primary, Legacy monitored
+		assert!(node.list_monitored_address_types().contains(&AddressType::Legacy));
+		assert!(node.list_monitored_address_types().contains(&AddressType::NativeSegwit));
+
+		// Swap to Legacy
+		node.set_primary_address_type(AddressType::Legacy, read_node_seed(&node)).unwrap();
+		assert!(node.onchain_payment().new_address().unwrap().script_pubkey().is_p2pkh());
+
+		// Swap back to NativeSegwit
+		node.set_primary_address_type(AddressType::NativeSegwit, read_node_seed(&node)).unwrap();
+		assert!(node.onchain_payment().new_address().unwrap().script_pubkey().is_p2wpkh());
+
+		// Both types should still be loaded; Legacy should be in monitored again
+		let monitored = node.list_monitored_address_types();
+		assert!(monitored.contains(&AddressType::Legacy));
+		assert!(monitored.contains(&AddressType::NativeSegwit));
+		assert!(node.onchain_payment().new_address_for_type(AddressType::Legacy).is_ok());
+
+		node.stop().unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_add_then_set_primary_then_send() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		// set_primary auto-loads Taproot
+		node.set_primary_address_type(AddressType::Taproot, read_node_seed(&node)).unwrap();
+		let taproot_addr = node.onchain_payment().new_address().unwrap();
+		fund_and_sync(&bitcoind, &electrsd, &node, taproot_addr, 100_000).await;
+
+		let txid =
+			node.onchain_payment().send_to_address(&test_recipient(), 10_000, None, None).unwrap();
+		wait_for_tx(&electrsd.client, txid).await;
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node]).await;
+
+		let balance = node.list_balances().total_onchain_balance_sats;
+		assert!(balance < 100_000);
+
+		node.stop().unwrap();
+	}
+
+	/// set_primary on a never-synced type triggers a full scan, discovering pre-existing UTXOs.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_set_primary_triggers_full_scan_for_never_synced_type() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![]);
+		let node = setup_node(&chain_source, config, None);
+
+		// Fund NativeSegwit so the node has a non-null primary sync timestamp.
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		fund_and_sync(&bitcoind, &electrsd, &node, native_addr, 50_000).await;
+
+		// Briefly load Taproot to obtain an address, then remove it so no sync timestamp is
+		// recorded for it.
+		node.add_address_type_to_monitor(AddressType::Taproot, read_node_seed(&node)).unwrap();
+		let taproot_addr =
+			node.onchain_payment().new_address_for_type(AddressType::Taproot).unwrap();
+		node.remove_address_type_from_monitor(AddressType::Taproot).unwrap();
+
+		// Fund Taproot while unmonitored; balance is not visible yet.
+		fund_and_sync(&bitcoind, &electrsd, &node, taproot_addr, 80_000).await;
+		assert!(node.get_balance_for_address_type(AddressType::Taproot).is_err());
+
+		// Switching primary to an unsynced type clears the primary sync timestamp, forcing a
+		// full scan on the next cycle.
+		node.set_primary_address_type(AddressType::Taproot, read_node_seed(&node)).unwrap();
+		node.sync_wallets().unwrap();
+
+		let taproot_balance = node.get_balance_for_address_type(AddressType::Taproot).unwrap();
+		assert!(taproot_balance.total_sats >= 79_000, "got {} sats", taproot_balance.total_sats);
 
 		node.stop().unwrap();
 	}

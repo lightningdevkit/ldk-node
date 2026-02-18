@@ -2475,6 +2475,10 @@ public func FfiConverterTypeNetworkGraph_lower(_ value: NetworkGraph) -> UnsafeM
 }
 
 public protocol NodeProtocol: AnyObject {
+    func addAddressTypeToMonitor(addressType: AddressType, seedBytes: [UInt8]) throws
+
+    func addAddressTypeToMonitorWithMnemonic(addressType: AddressType, mnemonic: Mnemonic, passphrase: String?) throws
+
     func announcementAddresses() -> [SocketAddress]?
 
     func bolt11Payment() -> Bolt11Payment
@@ -2535,7 +2539,13 @@ public protocol NodeProtocol: AnyObject {
 
     func payment(paymentId: PaymentId) -> PaymentDetails?
 
+    func removeAddressTypeFromMonitor(addressType: AddressType) throws
+
     func removePayment(paymentId: PaymentId) throws
+
+    func setPrimaryAddressType(addressType: AddressType, seedBytes: [UInt8]) throws
+
+    func setPrimaryAddressTypeWithMnemonic(addressType: AddressType, mnemonic: Mnemonic, passphrase: String?) throws
 
     func signMessage(msg: [UInt8]) -> String
 
@@ -2611,6 +2621,21 @@ open class Node:
         }
 
         try! rustCall { uniffi_ldk_node_fn_free_node(pointer, $0) }
+    }
+
+    open func addAddressTypeToMonitor(addressType: AddressType, seedBytes: [UInt8]) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
+        uniffi_ldk_node_fn_method_node_add_address_type_to_monitor(self.uniffiClonePointer(),
+                                                                   FfiConverterTypeAddressType.lower(addressType),
+                                                                   FfiConverterSequenceUInt8.lower(seedBytes), $0)
+    }
+    }
+
+    open func addAddressTypeToMonitorWithMnemonic(addressType: AddressType, mnemonic: Mnemonic, passphrase: String?) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
+        uniffi_ldk_node_fn_method_node_add_address_type_to_monitor_with_mnemonic(self.uniffiClonePointer(),
+                                                                                 FfiConverterTypeAddressType.lower(addressType),
+                                                                                 FfiConverterTypeMnemonic.lower(mnemonic),
+                                                                                 FfiConverterOptionString.lower(passphrase), $0)
+    }
     }
 
     open func announcementAddresses() -> [SocketAddress]? {
@@ -2821,9 +2846,30 @@ open class Node:
         })
     }
 
+    open func removeAddressTypeFromMonitor(addressType: AddressType) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
+        uniffi_ldk_node_fn_method_node_remove_address_type_from_monitor(self.uniffiClonePointer(),
+                                                                        FfiConverterTypeAddressType.lower(addressType), $0)
+    }
+    }
+
     open func removePayment(paymentId: PaymentId) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
         uniffi_ldk_node_fn_method_node_remove_payment(self.uniffiClonePointer(),
                                                       FfiConverterTypePaymentId.lower(paymentId), $0)
+    }
+    }
+
+    open func setPrimaryAddressType(addressType: AddressType, seedBytes: [UInt8]) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
+        uniffi_ldk_node_fn_method_node_set_primary_address_type(self.uniffiClonePointer(),
+                                                                FfiConverterTypeAddressType.lower(addressType),
+                                                                FfiConverterSequenceUInt8.lower(seedBytes), $0)
+    }
+    }
+
+    open func setPrimaryAddressTypeWithMnemonic(addressType: AddressType, mnemonic: Mnemonic, passphrase: String?) throws { try rustCallWithError(FfiConverterTypeNodeError.lift) {
+        uniffi_ldk_node_fn_method_node_set_primary_address_type_with_mnemonic(self.uniffiClonePointer(),
+                                                                              FfiConverterTypeAddressType.lower(addressType),
+                                                                              FfiConverterTypeMnemonic.lower(mnemonic),
+                                                                              FfiConverterOptionString.lower(passphrase), $0)
     }
     }
 
@@ -8470,6 +8516,14 @@ public enum NodeError {
     case InvalidMnemonic(message: String)
 
     case BackgroundSyncNotEnabled(message: String)
+
+    case AddressTypeAlreadyMonitored(message: String)
+
+    case AddressTypeIsPrimary(message: String)
+
+    case AddressTypeNotMonitored(message: String)
+
+    case InvalidSeedBytes(message: String)
 }
 
 #if swift(>=5.8)
@@ -8733,6 +8787,22 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
+        case 64: return try .AddressTypeAlreadyMonitored(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 65: return try .AddressTypeIsPrimary(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 66: return try .AddressTypeNotMonitored(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 67: return try .InvalidSeedBytes(
+                message: FfiConverterString.read(from: &buf)
+            )
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -8865,6 +8935,14 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(62))
         case .BackgroundSyncNotEnabled(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(63))
+        case .AddressTypeAlreadyMonitored(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(64))
+        case .AddressTypeIsPrimary(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(65))
+        case .AddressTypeNotMonitored(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(66))
+        case .InvalidSeedBytes(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(67))
         }
     }
 }
@@ -12348,6 +12426,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_ldk_node_checksum_method_networkgraph_node() != 48925 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor() != 14706 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor_with_mnemonic() != 4517 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_ldk_node_checksum_method_node_announcement_addresses() != 61426 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12438,7 +12522,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_ldk_node_checksum_method_node_payment() != 60296 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_ldk_node_checksum_method_node_remove_address_type_from_monitor() != 37081 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_ldk_node_checksum_method_node_remove_payment() != 47952 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_node_set_primary_address_type() != 11005 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_ldk_node_checksum_method_node_set_primary_address_type_with_mnemonic() != 50783 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_ldk_node_checksum_method_node_sign_message() != 49319 {

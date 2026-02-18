@@ -49,9 +49,10 @@ use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvide
 
 use crate::chain::ChainSource;
 use crate::config::{
-	default_user_config, may_announce_channel, AddressType, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, RuntimeSyncIntervals,
-	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
+	default_user_config, may_announce_channel, AddressType, AddressTypeRuntimeConfig,
+	AnnounceError, AsyncPaymentsRole, BitcoindRestClientConfig, Config, ElectrumSyncConfig,
+	EsploraSyncConfig, RuntimeSyncIntervals, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME,
+	DEFAULT_LOG_LEVEL, WALLET_KEYS_SEED_LEN,
 };
 use crate::connection::ConnectionManager;
 use crate::event::EventQueue;
@@ -1220,7 +1221,7 @@ impl ArcedNodeBuilder {
 	}
 }
 
-fn get_or_create_wallet_for_address_type(
+pub(crate) fn get_or_create_wallet_for_address_type(
 	address_type: AddressType, xprv: Xpriv, network: Network,
 	persister: &mut KVStoreWalletPersister,
 ) -> Result<PersistedWallet<KVStoreWalletPersister>, BuildError> {
@@ -1449,6 +1450,9 @@ fn build_with_store_internal(
 	};
 	let bdk_wallet_loaded = wallet_load_result?;
 
+	let address_type_runtime_config =
+		Arc::new(RwLock::new(AddressTypeRuntimeConfig::from_config(&config)));
+
 	// Chain source setup
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
@@ -1461,6 +1465,7 @@ fn build_with_store_internal(
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&kv_store),
 				Arc::clone(&config),
+				Arc::clone(&address_type_runtime_config),
 				Arc::clone(&logger),
 				Arc::clone(&node_metrics),
 			)
@@ -1474,6 +1479,7 @@ fn build_with_store_internal(
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&kv_store),
 				Arc::clone(&config),
+				Arc::clone(&address_type_runtime_config),
 				Arc::clone(&logger),
 				Arc::clone(&node_metrics),
 			)
@@ -1530,6 +1536,7 @@ fn build_with_store_internal(
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&kv_store),
 				Arc::clone(&config),
+				Arc::clone(&address_type_runtime_config),
 				Arc::clone(&logger),
 				Arc::clone(&node_metrics),
 			)
@@ -1566,6 +1573,9 @@ fn build_with_store_internal(
 		Arc::clone(&fee_estimator),
 		Arc::clone(&payment_store),
 		Arc::clone(&config),
+		Arc::clone(&kv_store),
+		Arc::clone(&address_type_runtime_config),
+		Arc::clone(&node_metrics),
 		Arc::clone(&logger),
 	));
 

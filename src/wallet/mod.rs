@@ -9,14 +9,14 @@ use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
-pub use bdk_wallet::coin_selection::CoinSelectionAlgorithm as BdkCoinSelectionAlgorithm;
 use bdk_wallet::event::WalletEvent;
 use bdk_wallet::{Balance, KeychainKind, LocalOutput, PersistedWallet, Update};
 use bdk_wallet_aggregate::AggregateWallet;
 use bitcoin::address::NetworkUnchecked;
+use bitcoin::bip32::Xpriv;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::hashes::Hash;
@@ -26,8 +26,8 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::{
-	Address, Amount, FeeRate, OutPoint, PubkeyHash, Script, ScriptBuf, Transaction, TxOut, Txid,
-	WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
+	Address, Amount, FeeRate, Network, OutPoint, PubkeyHash, Script, ScriptBuf, Transaction, TxOut,
+	Txid, WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
@@ -46,14 +46,14 @@ use lightning::util::message_signing;
 use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
-use crate::config::{AddressType, Config};
+use crate::config::{AddressType, AddressTypeRuntimeConfig, Config, WALLET_KEYS_SEED_LEN};
 use crate::event::{TxInput, TxOutput};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
 use crate::payment::{PaymentDetails, PaymentDirection, PaymentStatus};
-use crate::types::{Broadcaster, ChannelManager, PaymentStore};
-use crate::Error;
+use crate::types::{Broadcaster, ChannelManager, DynStore, PaymentStore};
+use crate::{Error, NodeMetrics};
 
 // Minimum economical output value (dust limit)
 const DUST_LIMIT_SATS: u64 = 546;
@@ -83,10 +83,15 @@ pub(crate) mod ser;
 
 pub(crate) struct Wallet {
 	inner: Mutex<AggregateWallet<AddressType, KVStoreWalletPersister>>,
+	// Serializes add/remove/set_primary to keep aggregate and runtime config in sync.
+	operation_lock: Mutex<()>,
 	broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
+	kv_store: Arc<DynStore>,
+	address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>,
+	node_metrics: Arc<RwLock<NodeMetrics>>,
 	logger: Arc<Logger>,
 }
 
@@ -100,12 +105,26 @@ impl Wallet {
 			KVStoreWalletPersister,
 		)>,
 		broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
-		payment_store: Arc<PaymentStore>, config: Arc<Config>, logger: Arc<Logger>,
+		payment_store: Arc<PaymentStore>, config: Arc<Config>, kv_store: Arc<DynStore>,
+		address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>,
+		node_metrics: Arc<RwLock<NodeMetrics>>, logger: Arc<Logger>,
 	) -> Self {
 		let aggregate =
 			AggregateWallet::new(wallet, wallet_persister, config.address_type, additional_wallets);
 		let inner = Mutex::new(aggregate);
-		Self { inner, broadcaster, fee_estimator, payment_store, config, logger }
+		let operation_lock = Mutex::new(());
+		Self {
+			inner,
+			operation_lock,
+			broadcaster,
+			fee_estimator,
+			payment_store,
+			config,
+			kv_store,
+			address_type_runtime_config,
+			node_metrics,
+			logger,
+		}
 	}
 
 	pub(crate) fn is_funding_transaction(
@@ -176,6 +195,157 @@ impl Wallet {
 	/// Returns the list of all loaded address types (primary + monitored).
 	pub(crate) fn get_loaded_address_types(&self) -> Vec<AddressType> {
 		self.inner.lock().unwrap().loaded_keys()
+	}
+
+	/// Adds an address type to the monitored set, creating its wallet if not already loaded.
+	pub(crate) fn add_monitored_address_type(
+		&self, address_type: AddressType, seed_bytes: &[u8; WALLET_KEYS_SEED_LEN],
+	) -> Result<(), Error> {
+		let _op = self.operation_lock.lock().unwrap();
+
+		{
+			let runtime_config = self.address_type_runtime_config.read().unwrap();
+			if runtime_config.primary == address_type {
+				return Err(Error::AddressTypeIsPrimary);
+			}
+			if runtime_config.monitored.contains(&address_type) {
+				return Err(Error::AddressTypeAlreadyMonitored);
+			}
+		}
+
+		let (wallet, persister) = create_wallet_for_address_type(
+			seed_bytes,
+			self.config.network,
+			address_type,
+			self.current_best_block(),
+			Arc::clone(&self.kv_store),
+			Arc::clone(&self.logger),
+		)?;
+
+		{
+			let mut aggregate = self.inner.lock().unwrap();
+			aggregate.add_wallet(address_type, wallet, persister).map_err(|e| {
+				log_error!(self.logger, "Failed to add wallet for {:?}: {}", address_type, e);
+				Error::WalletOperationFailed
+			})?;
+			self.address_type_runtime_config.write().unwrap().monitored.push(address_type);
+		}
+
+		log_info!(self.logger, "Added address type {:?} to monitor", address_type);
+		Ok(())
+	}
+
+	/// Removes an address type from monitoring and unloads its wallet.
+	/// Persisted state is retained so re-adding recovers funds on the next sync.
+	pub(crate) fn remove_monitored_address_type(
+		&self, address_type: AddressType,
+	) -> Result<(), Error> {
+		let _op = self.operation_lock.lock().unwrap();
+
+		{
+			let runtime_config = self.address_type_runtime_config.read().unwrap();
+			if runtime_config.primary == address_type {
+				return Err(Error::AddressTypeIsPrimary);
+			}
+			if !runtime_config.monitored.contains(&address_type) {
+				return Err(Error::AddressTypeNotMonitored);
+			}
+		}
+
+		{
+			let mut aggregate = self.inner.lock().unwrap();
+			match aggregate.remove_wallet(address_type) {
+				Ok(()) => {},
+				Err(bdk_wallet_aggregate::Error::CannotRemovePrimary) => {
+					return Err(Error::AddressTypeIsPrimary);
+				},
+				Err(bdk_wallet_aggregate::Error::WalletNotFound) => {
+					log_debug!(
+						self.logger,
+						"Wallet for {:?} was not in aggregate (already unloaded)",
+						address_type
+					);
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to remove wallet {:?}: {}", address_type, e);
+					return Err(Error::WalletOperationFailed);
+				},
+			}
+			self.address_type_runtime_config
+				.write()
+				.unwrap()
+				.monitored
+				.retain(|&at| at != address_type);
+		}
+
+		log_info!(self.logger, "Removed address type {:?} from monitor", address_type);
+		Ok(())
+	}
+
+	/// Sets the primary address type, creating its wallet if not already loaded.
+	/// The previous primary is demoted to the monitored set.
+	pub(crate) fn set_primary_address_type(
+		&self, address_type: AddressType, seed_bytes: &[u8; WALLET_KEYS_SEED_LEN],
+	) -> Result<(), Error> {
+		let _op = self.operation_lock.lock().unwrap();
+
+		let old_primary = self.address_type_runtime_config.read().unwrap().primary;
+		if address_type == old_primary {
+			return Ok(());
+		}
+
+		let already_loaded = self.inner.lock().unwrap().loaded_keys().contains(&address_type);
+
+		let new_wallet = if !already_loaded {
+			Some(create_wallet_for_address_type(
+				seed_bytes,
+				self.config.network,
+				address_type,
+				self.current_best_block(),
+				Arc::clone(&self.kv_store),
+				Arc::clone(&self.logger),
+			)?)
+		} else {
+			None
+		};
+
+		{
+			let mut aggregate = self.inner.lock().unwrap();
+			if let Some((wallet, persister)) = new_wallet {
+				aggregate.add_wallet(address_type, wallet, persister).map_err(|e| {
+					log_error!(self.logger, "Failed to add wallet for {:?}: {}", address_type, e);
+					Error::WalletOperationFailed
+				})?;
+			}
+
+			aggregate.set_primary(address_type).map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to set primary address type to {:?}: {}",
+					address_type,
+					e
+				);
+				Error::WalletOperationFailed
+			})?;
+
+			let mut runtime_config = self.address_type_runtime_config.write().unwrap();
+			runtime_config.primary = address_type;
+			runtime_config.monitored.retain(|&at| at != address_type);
+			if !runtime_config.monitored.contains(&old_primary) {
+				runtime_config.monitored.push(old_primary);
+			}
+		}
+
+		// Clear primary sync timestamp for never-synced types so the next cycle does a full
+		// scan. Additional wallets have independent per-type timestamps in node_metrics.
+		let needs_full_scan =
+			self.node_metrics.read().unwrap().get_wallet_sync_timestamp(address_type).is_none();
+		if needs_full_scan {
+			self.node_metrics.write().unwrap().latest_onchain_wallet_sync_timestamp = None;
+		}
+
+		log_info!(self.logger, "Set primary address type to {:?}", address_type);
+		Ok(())
 	}
 
 	pub(crate) fn apply_update(
@@ -1418,6 +1588,41 @@ impl Listen for Wallet {
 		// team, it's sufficient in case of a reorg to always connect blocks starting from the last
 		// point of disagreement.
 	}
+}
+
+fn create_wallet_for_address_type(
+	seed_bytes: &[u8; WALLET_KEYS_SEED_LEN], network: Network, address_type: AddressType,
+	chain_tip: BestBlock, kv_store: Arc<DynStore>, logger: Arc<Logger>,
+) -> Result<(PersistedWallet<KVStoreWalletPersister>, KVStoreWalletPersister), Error> {
+	let xprv = Xpriv::new_master(network, seed_bytes).map_err(|e| {
+		log_error!(logger, "Failed to derive master secret: {}", e);
+		Error::WalletOperationFailed
+	})?;
+
+	let mut persister =
+		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger), address_type);
+
+	let mut wallet = crate::builder::get_or_create_wallet_for_address_type(
+		address_type,
+		xprv,
+		network,
+		&mut persister,
+	)
+	.map_err(|e| {
+		log_error!(logger, "Failed to setup wallet for {:?}: {}", address_type, e);
+		Error::WalletOperationFailed
+	})?;
+
+	let block_id = bdk_chain::BlockId { height: chain_tip.height, hash: chain_tip.block_hash };
+	let mut cp = wallet.latest_checkpoint();
+	cp = cp.insert(block_id);
+	let update = bdk_wallet::Update { chain: Some(cp), ..Default::default() };
+	wallet.apply_update(update).map_err(|e| {
+		log_error!(logger, "Failed to apply checkpoint for {:?}: {}", address_type, e);
+		Error::WalletOperationFailed
+	})?;
+
+	Ok((wallet, persister))
 }
 
 impl WalletSource for Wallet {

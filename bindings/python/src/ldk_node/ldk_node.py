@@ -669,6 +669,10 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_networkgraph_node() != 48925:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor() != 14706:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor_with_mnemonic() != 4517:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_announcement_addresses() != 61426:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_bolt11_payment() != 41402:
@@ -729,7 +733,13 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_payment() != 60296:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_remove_address_type_from_monitor() != 37081:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_remove_payment() != 47952:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_set_primary_address_type() != 11005:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_ldk_node_checksum_method_node_set_primary_address_type_with_mnemonic() != 50783:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_ldk_node_checksum_method_node_sign_message() != 49319:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1754,6 +1764,21 @@ _UniffiLib.uniffi_ldk_node_fn_free_node.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_free_node.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor_with_mnemonic.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor_with_mnemonic.restype = None
 _UniffiLib.uniffi_ldk_node_fn_method_node_announcement_addresses.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1926,12 +1951,33 @@ _UniffiLib.uniffi_ldk_node_fn_method_node_payment.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_node_payment.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_ldk_node_fn_method_node_remove_address_type_from_monitor.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_remove_address_type_from_monitor.restype = None
 _UniffiLib.uniffi_ldk_node_fn_method_node_remove_payment.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_ldk_node_fn_method_node_remove_payment.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_node_set_primary_address_type.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_set_primary_address_type.restype = None
+_UniffiLib.uniffi_ldk_node_fn_method_node_set_primary_address_type_with_mnemonic.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_ldk_node_fn_method_node_set_primary_address_type_with_mnemonic.restype = None
 _UniffiLib.uniffi_ldk_node_fn_method_node_sign_message.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
@@ -2973,6 +3019,12 @@ _UniffiLib.uniffi_ldk_node_checksum_method_networkgraph_list_nodes.restype = cty
 _UniffiLib.uniffi_ldk_node_checksum_method_networkgraph_node.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_networkgraph_node.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor_with_mnemonic.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_add_address_type_to_monitor_with_mnemonic.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_announcement_addresses.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_announcement_addresses.restype = ctypes.c_uint16
@@ -3063,9 +3115,18 @@ _UniffiLib.uniffi_ldk_node_checksum_method_node_open_channel.restype = ctypes.c_
 _UniffiLib.uniffi_ldk_node_checksum_method_node_payment.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_payment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_remove_address_type_from_monitor.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_remove_address_type_from_monitor.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_remove_payment.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_remove_payment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_set_primary_address_type.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_set_primary_address_type.restype = ctypes.c_uint16
+_UniffiLib.uniffi_ldk_node_checksum_method_node_set_primary_address_type_with_mnemonic.argtypes = (
+)
+_UniffiLib.uniffi_ldk_node_checksum_method_node_set_primary_address_type_with_mnemonic.restype = ctypes.c_uint16
 _UniffiLib.uniffi_ldk_node_checksum_method_node_sign_message.argtypes = (
 )
 _UniffiLib.uniffi_ldk_node_checksum_method_node_sign_message.restype = ctypes.c_uint16
@@ -5519,6 +5580,10 @@ class _UniffiConverterTypeNetworkGraph:
 
 
 class NodeProtocol(typing.Protocol):
+    def add_address_type_to_monitor(self, address_type: "AddressType",seed_bytes: "typing.List[int]"):
+        raise NotImplementedError
+    def add_address_type_to_monitor_with_mnemonic(self, address_type: "AddressType",mnemonic: "Mnemonic",passphrase: "typing.Optional[str]"):
+        raise NotImplementedError
     def announcement_addresses(self, ):
         raise NotImplementedError
     def bolt11_payment(self, ):
@@ -5579,7 +5644,13 @@ class NodeProtocol(typing.Protocol):
         raise NotImplementedError
     def payment(self, payment_id: "PaymentId"):
         raise NotImplementedError
+    def remove_address_type_from_monitor(self, address_type: "AddressType"):
+        raise NotImplementedError
     def remove_payment(self, payment_id: "PaymentId"):
+        raise NotImplementedError
+    def set_primary_address_type(self, address_type: "AddressType",seed_bytes: "typing.List[int]"):
+        raise NotImplementedError
+    def set_primary_address_type_with_mnemonic(self, address_type: "AddressType",mnemonic: "Mnemonic",passphrase: "typing.Optional[str]"):
         raise NotImplementedError
     def sign_message(self, msg: "typing.List[int]"):
         raise NotImplementedError
@@ -5632,6 +5703,37 @@ class Node:
         inst = cls.__new__(cls)
         inst._pointer = pointer
         return inst
+
+
+    def add_address_type_to_monitor(self, address_type: "AddressType",seed_bytes: "typing.List[int]") -> None:
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        _UniffiConverterSequenceUInt8.check_lower(seed_bytes)
+        
+        _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type),
+        _UniffiConverterSequenceUInt8.lower(seed_bytes))
+
+
+
+
+
+
+    def add_address_type_to_monitor_with_mnemonic(self, address_type: "AddressType",mnemonic: "Mnemonic",passphrase: "typing.Optional[str]") -> None:
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        _UniffiConverterTypeMnemonic.check_lower(mnemonic)
+        
+        _UniffiConverterOptionalString.check_lower(passphrase)
+        
+        _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_add_address_type_to_monitor_with_mnemonic,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type),
+        _UniffiConverterTypeMnemonic.lower(mnemonic),
+        _UniffiConverterOptionalString.lower(passphrase))
+
+
+
+
 
 
     def announcement_addresses(self, ) -> "typing.Optional[typing.List[SocketAddress]]":
@@ -5978,11 +6080,53 @@ class Node:
 
 
 
+    def remove_address_type_from_monitor(self, address_type: "AddressType") -> None:
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_remove_address_type_from_monitor,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type))
+
+
+
+
+
+
     def remove_payment(self, payment_id: "PaymentId") -> None:
         _UniffiConverterTypePaymentId.check_lower(payment_id)
         
         _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_remove_payment,self._uniffi_clone_pointer(),
         _UniffiConverterTypePaymentId.lower(payment_id))
+
+
+
+
+
+
+    def set_primary_address_type(self, address_type: "AddressType",seed_bytes: "typing.List[int]") -> None:
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        _UniffiConverterSequenceUInt8.check_lower(seed_bytes)
+        
+        _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_set_primary_address_type,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type),
+        _UniffiConverterSequenceUInt8.lower(seed_bytes))
+
+
+
+
+
+
+    def set_primary_address_type_with_mnemonic(self, address_type: "AddressType",mnemonic: "Mnemonic",passphrase: "typing.Optional[str]") -> None:
+        _UniffiConverterTypeAddressType.check_lower(address_type)
+        
+        _UniffiConverterTypeMnemonic.check_lower(mnemonic)
+        
+        _UniffiConverterOptionalString.check_lower(passphrase)
+        
+        _uniffi_rust_call_with_error(_UniffiConverterTypeNodeError,_UniffiLib.uniffi_ldk_node_fn_method_node_set_primary_address_type_with_mnemonic,self._uniffi_clone_pointer(),
+        _UniffiConverterTypeAddressType.lower(address_type),
+        _UniffiConverterTypeMnemonic.lower(mnemonic),
+        _UniffiConverterOptionalString.lower(passphrase))
 
 
 
@@ -12344,6 +12488,26 @@ class NodeError:  # type: ignore
         def __repr__(self):
             return "NodeError.BackgroundSyncNotEnabled({})".format(repr(str(self)))
     _UniffiTempNodeError.BackgroundSyncNotEnabled = BackgroundSyncNotEnabled # type: ignore
+    class AddressTypeAlreadyMonitored(_UniffiTempNodeError):
+
+        def __repr__(self):
+            return "NodeError.AddressTypeAlreadyMonitored({})".format(repr(str(self)))
+    _UniffiTempNodeError.AddressTypeAlreadyMonitored = AddressTypeAlreadyMonitored # type: ignore
+    class AddressTypeIsPrimary(_UniffiTempNodeError):
+
+        def __repr__(self):
+            return "NodeError.AddressTypeIsPrimary({})".format(repr(str(self)))
+    _UniffiTempNodeError.AddressTypeIsPrimary = AddressTypeIsPrimary # type: ignore
+    class AddressTypeNotMonitored(_UniffiTempNodeError):
+
+        def __repr__(self):
+            return "NodeError.AddressTypeNotMonitored({})".format(repr(str(self)))
+    _UniffiTempNodeError.AddressTypeNotMonitored = AddressTypeNotMonitored # type: ignore
+    class InvalidSeedBytes(_UniffiTempNodeError):
+
+        def __repr__(self):
+            return "NodeError.InvalidSeedBytes({})".format(repr(str(self)))
+    _UniffiTempNodeError.InvalidSeedBytes = InvalidSeedBytes # type: ignore
 
 NodeError = _UniffiTempNodeError # type: ignore
 del _UniffiTempNodeError
@@ -12605,6 +12769,22 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             return NodeError.BackgroundSyncNotEnabled(
                 _UniffiConverterString.read(buf),
             )
+        if variant == 64:
+            return NodeError.AddressTypeAlreadyMonitored(
+                _UniffiConverterString.read(buf),
+            )
+        if variant == 65:
+            return NodeError.AddressTypeIsPrimary(
+                _UniffiConverterString.read(buf),
+            )
+        if variant == 66:
+            return NodeError.AddressTypeNotMonitored(
+                _UniffiConverterString.read(buf),
+            )
+        if variant == 67:
+            return NodeError.InvalidSeedBytes(
+                _UniffiConverterString.read(buf),
+            )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
@@ -12735,6 +12915,14 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             return
         if isinstance(value, NodeError.BackgroundSyncNotEnabled):
             return
+        if isinstance(value, NodeError.AddressTypeAlreadyMonitored):
+            return
+        if isinstance(value, NodeError.AddressTypeIsPrimary):
+            return
+        if isinstance(value, NodeError.AddressTypeNotMonitored):
+            return
+        if isinstance(value, NodeError.InvalidSeedBytes):
+            return
 
     @staticmethod
     def write(value, buf):
@@ -12864,6 +13052,14 @@ class _UniffiConverterTypeNodeError(_UniffiConverterRustBuffer):
             buf.write_i32(62)
         if isinstance(value, NodeError.BackgroundSyncNotEnabled):
             buf.write_i32(63)
+        if isinstance(value, NodeError.AddressTypeAlreadyMonitored):
+            buf.write_i32(64)
+        if isinstance(value, NodeError.AddressTypeIsPrimary):
+            buf.write_i32(65)
+        if isinstance(value, NodeError.AddressTypeNotMonitored):
+            buf.write_i32(66)
+        if isinstance(value, NodeError.InvalidSeedBytes):
+            buf.write_i32(67)
 
 
 

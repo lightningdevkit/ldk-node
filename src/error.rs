@@ -146,6 +146,14 @@ pub enum Error {
 	/// This error is returned when attempting to update sync intervals but background
 	/// syncing was disabled at build time by setting `background_sync_config` to `None`.
 	BackgroundSyncNotEnabled,
+	/// The address type is already being monitored.
+	AddressTypeAlreadyMonitored,
+	/// The address type is the current primary and cannot be added as a monitored type or removed.
+	AddressTypeIsPrimary,
+	/// The address type is not currently being monitored.
+	AddressTypeNotMonitored,
+	/// The given seed bytes have an invalid length.
+	InvalidSeedBytes,
 }
 
 impl fmt::Display for Error {
@@ -236,6 +244,21 @@ impl fmt::Display for Error {
 			Self::CoinSelectionFailed => write!(f, "Coin selection failed to find suitable UTXOs."),
 			Self::InvalidMnemonic => write!(f, "The given mnemonic is invalid."),
 			Self::BackgroundSyncNotEnabled => write!(f, "Background syncing is not enabled."),
+			Self::AddressTypeAlreadyMonitored => {
+				write!(f, "The address type is already being monitored.")
+			},
+			Self::AddressTypeIsPrimary => {
+				write!(
+					f,
+					"The address type is the current primary and cannot be added as monitored or removed."
+				)
+			},
+			Self::AddressTypeNotMonitored => {
+				write!(f, "The address type is not currently being monitored.")
+			},
+			Self::InvalidSeedBytes => {
+				write!(f, "The given seed bytes have an invalid length.")
+			},
 		}
 	}
 }

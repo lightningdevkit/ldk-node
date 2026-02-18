@@ -103,6 +103,10 @@ where
 		persisters.insert(primary_key, primary_persister);
 
 		for (key, wallet, persister) in additional_wallets {
+			debug_assert!(
+				!wallets.contains_key(&key),
+				"duplicate wallet key in AggregateWallet::new"
+			);
 			wallets.insert(key, wallet);
 			persisters.insert(key, persister);
 		}
@@ -165,6 +169,39 @@ where
 	/// Get a mutable reference to the primary persister.
 	pub fn primary_persister_mut(&mut self) -> &mut P {
 		self.persisters.get_mut(&self.primary).expect("Primary persister must always exist")
+	}
+
+	/// Add a secondary wallet. Returns `Err(WalletAlreadyExists)` if key exists.
+	pub fn add_wallet(
+		&mut self, key: K, wallet: PersistedWallet<P>, persister: P,
+	) -> Result<(), Error> {
+		if self.wallets.contains_key(&key) {
+			return Err(Error::WalletAlreadyExists);
+		}
+		self.wallets.insert(key, wallet);
+		self.persisters.insert(key, persister);
+		Ok(())
+	}
+
+	/// Change the primary wallet. New primary must already be in the aggregate.
+	pub fn set_primary(&mut self, new_primary: K) -> Result<(), Error> {
+		if !self.wallets.contains_key(&new_primary) {
+			return Err(Error::WalletNotFound);
+		}
+		self.primary = new_primary;
+		Ok(())
+	}
+
+	/// Remove a secondary wallet. Returns `Err` if key is primary or not found.
+	pub fn remove_wallet(&mut self, key: K) -> Result<(), Error> {
+		if key == self.primary {
+			return Err(Error::CannotRemovePrimary);
+		}
+		if self.wallets.remove(&key).is_none() {
+			return Err(Error::WalletNotFound);
+		}
+		self.persisters.remove(&key).expect("persister must exist if wallet existed");
+		Ok(())
 	}
 
 	// ─── Balance ────────────────────────────────────────────────────────

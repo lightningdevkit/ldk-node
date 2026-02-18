@@ -20,8 +20,8 @@ use lightning_transaction_sync::EsploraSyncClient;
 
 use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
-	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
-	BDK_WALLET_SYNC_TIMEOUT_SECS, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS,
+	AddressTypeRuntimeConfig, Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY,
+	BDK_CLIENT_STOP_GAP, BDK_WALLET_SYNC_TIMEOUT_SECS, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS,
 	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::fee_estimator::{
@@ -42,6 +42,7 @@ pub(super) struct EsploraChainSource {
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	pub(super) kv_store: Arc<DynStore>,
 	pub(super) config: Arc<Config>,
+	address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>,
 	logger: Arc<Logger>,
 	pub(super) node_metrics: Arc<RwLock<NodeMetrics>>,
 }
@@ -50,7 +51,8 @@ impl EsploraChainSource {
 	pub(crate) fn new(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		address_type_runtime_config: Arc<RwLock<AddressTypeRuntimeConfig>>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder = client_builder.timeout(DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS);
@@ -74,6 +76,7 @@ impl EsploraChainSource {
 			fee_estimator,
 			kv_store,
 			config,
+			address_type_runtime_config,
 			logger,
 			node_metrics,
 		}
@@ -216,8 +219,10 @@ impl EsploraChainSource {
 			Err(e) => (Vec::new(), Some(e)),
 		};
 
+		let additional_types =
+			self.address_type_runtime_config.read().unwrap().additional_address_types();
 		let sync_requests = super::collect_additional_sync_requests(
-			&self.config,
+			&additional_types,
 			&onchain_wallet,
 			&self.node_metrics,
 			&self.logger,

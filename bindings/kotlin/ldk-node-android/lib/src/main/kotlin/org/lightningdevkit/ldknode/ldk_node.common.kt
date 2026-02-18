@@ -414,6 +414,12 @@ interface NetworkGraphInterface {
 
 interface NodeInterface {
     
+    @Throws(NodeException::class)
+    fun `addAddressTypeToMonitor`(`addressType`: AddressType, `seedBytes`: List<kotlin.UByte>)
+    
+    @Throws(NodeException::class)
+    fun `addAddressTypeToMonitorWithMnemonic`(`addressType`: AddressType, `mnemonic`: Mnemonic, `passphrase`: kotlin.String?)
+    
     fun `announcementAddresses`(): List<SocketAddress>?
     
     fun `bolt11Payment`(): Bolt11Payment
@@ -485,7 +491,16 @@ interface NodeInterface {
     fun `payment`(`paymentId`: PaymentId): PaymentDetails?
     
     @Throws(NodeException::class)
+    fun `removeAddressTypeFromMonitor`(`addressType`: AddressType)
+    
+    @Throws(NodeException::class)
     fun `removePayment`(`paymentId`: PaymentId)
+    
+    @Throws(NodeException::class)
+    fun `setPrimaryAddressType`(`addressType`: AddressType, `seedBytes`: List<kotlin.UByte>)
+    
+    @Throws(NodeException::class)
+    fun `setPrimaryAddressTypeWithMnemonic`(`addressType`: AddressType, `mnemonic`: Mnemonic, `passphrase`: kotlin.String?)
     
     fun `signMessage`(`msg`: List<kotlin.UByte>): kotlin.String
     
@@ -1841,6 +1856,14 @@ sealed class NodeException(message: String): kotlin.Exception(message) {
     class InvalidMnemonic(message: String) : NodeException(message)
     
     class BackgroundSyncNotEnabled(message: String) : NodeException(message)
+    
+    class AddressTypeAlreadyMonitored(message: String) : NodeException(message)
+    
+    class AddressTypeIsPrimary(message: String) : NodeException(message)
+    
+    class AddressTypeNotMonitored(message: String) : NodeException(message)
+    
+    class InvalidSeedBytes(message: String) : NodeException(message)
     
 }
 
