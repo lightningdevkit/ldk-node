@@ -187,13 +187,19 @@ pub(crate) struct AddressTypeRuntimeConfig {
 
 impl AddressTypeRuntimeConfig {
 	pub(crate) fn from_config(config: &Config) -> Self {
-		Self { primary: config.address_type, monitored: config.address_types_to_monitor.clone() }
+		let monitored = config
+			.address_types_to_monitor
+			.iter()
+			.copied()
+			.filter(|&at| at != config.address_type)
+			.collect();
+		Self { primary: config.address_type, monitored }
 	}
 
-	/// Returns the additional address types to monitor, excluding the primary and deduplicating.
+	/// Returns the additional address types to monitor, deduplicating.
 	pub(crate) fn additional_address_types(&self) -> Vec<AddressType> {
 		let mut seen = std::collections::HashSet::new();
-		self.monitored.iter().copied().filter(|&at| at != self.primary && seen.insert(at)).collect()
+		self.monitored.iter().copied().filter(|&at| seen.insert(at)).collect()
 	}
 }
 

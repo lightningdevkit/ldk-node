@@ -103,6 +103,10 @@ where
 		persisters.insert(primary_key, primary_persister);
 
 		for (key, wallet, persister) in additional_wallets {
+			debug_assert!(
+				!wallets.contains_key(&key),
+				"duplicate wallet key in AggregateWallet::new"
+			);
 			wallets.insert(key, wallet);
 			persisters.insert(key, persister);
 		}

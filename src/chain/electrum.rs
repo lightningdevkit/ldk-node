@@ -199,15 +199,14 @@ impl ElectrumChainSource {
 			Err(e) => (Vec::new(), Some(e)),
 		};
 
-		let sync_requests = {
-			let runtime_config = self.address_type_runtime_config.read().unwrap();
-			super::collect_additional_sync_requests(
-				&runtime_config,
-				&onchain_wallet,
-				&self.node_metrics,
-				&self.logger,
-			)
-		};
+		let additional_types =
+			self.address_type_runtime_config.read().unwrap().additional_address_types();
+		let sync_requests = super::collect_additional_sync_requests(
+			&additional_types,
+			&onchain_wallet,
+			&self.node_metrics,
+			&self.logger,
+		);
 
 		let mut join_set = tokio::task::JoinSet::new();
 		for (address_type, full_scan_req, incremental_req, do_incremental) in sync_requests {

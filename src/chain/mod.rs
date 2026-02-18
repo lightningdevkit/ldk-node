@@ -167,12 +167,12 @@ fn get_transaction_details(
 }
 
 pub(super) fn collect_additional_sync_requests(
-	address_type_runtime_config: &AddressTypeRuntimeConfig, onchain_wallet: &Wallet,
+	additional_types: &[AddressType], onchain_wallet: &Wallet,
 	node_metrics: &Arc<RwLock<NodeMetrics>>, logger: &Arc<Logger>,
 ) -> Vec<(AddressType, FullScanRequest<KeychainKind>, SyncRequest<(KeychainKind, u32)>, bool)> {
-	address_type_runtime_config
-		.additional_address_types()
-		.into_iter()
+	additional_types
+		.iter()
+		.copied()
 		.filter_map(|address_type| {
 			let do_incremental =
 				node_metrics.read().unwrap().get_wallet_sync_timestamp(address_type).is_some();
