@@ -619,6 +619,57 @@ impl BitcoindChainSource {
 			}
 		}
 	}
+
+	pub(crate) async fn can_broadcast_transaction(&self, tx: &Transaction) -> Result<bool, Error> {
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
+			self.api_client.test_mempool_accept(tx),
+		);
+
+		match timeout_fut.await {
+			Ok(res) => res.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to test mempool accept for transaction {}: {}",
+					tx.compute_txid(),
+					e
+				);
+				Error::TxBroadcastFailed
+			}),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to test mempool accept for transaction {} due to timeout: {}",
+					tx.compute_txid(),
+					e
+				);
+				log_trace!(
+					self.logger,
+					"Failed test mempool accept transaction bytes: {}",
+					log_bytes!(tx.encode())
+				);
+				Err(Error::TxBroadcastFailed)
+			},
+		}
+	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
+			self.api_client.get_raw_transaction(txid),
+		);
+
+		match timeout_fut.await {
+			Ok(res) => res.map_err(|e| {
+				log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+				Error::TxSyncFailed
+			}),
+			Err(e) => {
+				log_error!(self.logger, "Failed to get transaction {} due to timeout: {}", txid, e);
+				Err(Error::TxSyncTimeout)
+			},
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -1228,6 +1279,46 @@ impl BitcoindClient {
 			.map(|txid| (txid, latest_mempool_timestamp))
 			.collect();
 		Ok(evicted_txids)
+	}
+
+	/// Tests whether the provided transaction would be accepted by the mempool.
+	pub(crate) async fn test_mempool_accept(&self, tx: &Transaction) -> std::io::Result<bool> {
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::test_mempool_accept_inner(Arc::clone(rpc_client), tx).await
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				// We rely on the internal RPC client to make this call, as this
+				// operation is not supported by Bitcoin Core's REST interface.
+				Self::test_mempool_accept_inner(Arc::clone(rpc_client), tx).await
+			},
+		}
+	}
+
+	async fn test_mempool_accept_inner(
+		rpc_client: Arc<RpcClient>, tx: &Transaction,
+	) -> std::io::Result<bool> {
+		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
+		let tx_array = serde_json::json!([tx_serialized]);
+
+		let resp =
+			rpc_client.call_method::<serde_json::Value>("testmempoolaccept", &[tx_array]).await?;
+
+		if let Some(array) = resp.as_array() {
+			if let Some(first_result) = array.first() {
+				Ok(first_result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(false))
+			} else {
+				Err(std::io::Error::new(
+					std::io::ErrorKind::Other,
+					"Empty array response from testmempoolaccept",
+				))
+			}
+		} else {
+			Err(std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"testmempoolaccept did not return an array",
+			))
+		}
 	}
 }
 

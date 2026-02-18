@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use bitreq::URL;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::RouteParametersConfig;
@@ -107,6 +108,15 @@ pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort a parsing/looking up an HRN resolution.
 pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 
+// The time interval at which we resume persisted payjoin sessions.
+pub(crate) const PAYJOIN_RESUME_INTERVAL: Duration = Duration::from_secs(15);
+
+// The duration after which completed or failed payjoin sessions are cleaned up (24 hours).
+pub(crate) const PAYJOIN_SESSION_CLEANUP_AGE_SECS: u64 = 24 * 60 * 60;
+
+// The interval at which we check for old payjoin sessions to clean up (1 hour).
+pub(crate) const PAYJOIN_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
 #[derive(Debug, Clone)]
 /// Represents the configuration of an [`Node`] instance.
 ///
@@ -127,7 +137,8 @@ pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
-/// | `route_parameters`                   | None               |
+/// | `route_parameters`                     | None               |
+/// | `payjoin_config`                     | None               |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -192,6 +203,8 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// Configuration options for PayJoin payments.
+	pub payjoin_config: Option<PayjoinConfig>,
 }
 
 impl Default for Config {
@@ -206,6 +219,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			payjoin_config: None,
 		}
 	}
 }
@@ -605,6 +619,15 @@ pub enum AsyncPaymentsRole {
 	/// Node acts as a server in an async payments context. This means that it will hold async payments HTLCs and onion
 	/// messages for its peers.
 	Server,
+}
+
+/// Configuration options for PayJoin payments.
+#[derive(Debug, Clone)]
+pub struct PayjoinConfig {
+	/// The URL of the PayJoin directory to use for discovering PayJoin receivers.
+	pub payjoin_directory: URL,
+	/// The URL of the OHTTP relay to use for sending OHTTP requests to PayJoin receivers.
+	pub ohttp_relay: URL,
 }
 
 #[cfg(test)]
