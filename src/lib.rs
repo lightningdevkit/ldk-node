@@ -138,12 +138,10 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
 use lightning::chain::BestBlock;
-use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
+use lightning::events::bump_transaction::Wallet as LdkWallet;
 use lightning::impl_writeable_tlv_based;
-use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
@@ -1290,84 +1288,37 @@ impl Node {
 		{
 			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
 
-			const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
-				1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
-
-			let funding_txo = channel_details.funding_txo.ok_or_else(|| {
-				log_error!(self.logger, "Failed to splice channel: channel not yet ready",);
-				Error::ChannelSplicingFailed
-			})?;
-
-			let funding_output = channel_details.get_funding_output().ok_or_else(|| {
-				log_error!(self.logger, "Failed to splice channel: channel not yet ready");
-				Error::ChannelSplicingFailed
-			})?;
-
-			let shared_input = Input {
-				outpoint: funding_txo.into_bitcoin_outpoint(),
-				previous_utxo: funding_output.clone(),
-				satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT + FUNDING_TRANSACTION_WITNESS_WEIGHT,
-			};
-
-			let shared_output = bitcoin::TxOut {
-				value: shared_input.previous_utxo.value + Amount::from_sat(splice_amount_sats),
-				// will not actually be the exact same script pubkey after splice
-				// but it is the same size and good enough for coin selection purposes
-				script_pubkey: funding_output.script_pubkey.clone(),
-			};
-
 			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
 
-			let inputs = self
-				.wallet
-				.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
-				.map_err(|()| {
-					log_error!(
-						self.logger,
-						"Failed to splice channel: insufficient confirmed UTXOs",
-					);
+			let funding_template = self
+				.channel_manager
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id, fee_rate)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
 				})?;
 
-			let change_address = self.wallet.get_new_internal_address()?;
-
-			let contribution = SpliceContribution::splice_in(
-				Amount::from_sat(splice_amount_sats),
-				inputs,
-				Some(change_address.script_pubkey()),
-			);
-
-			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
-				Ok(fee_rate) => fee_rate,
-				Err(_) => {
-					debug_assert!(false);
-					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
-				},
-			};
+			let contribution = self
+				.runtime
+				.block_on(
+					funding_template
+						.splice_in(Amount::from_sat(splice_amount_sats), Arc::clone(&self.wallet)),
+				)
+				.map_err(|()| {
+					log_error!(self.logger, "Failed to splice channel: coin selection failed");
+					Error::ChannelSplicingFailed
+				})?;
 
 			self.channel_manager
-				.splice_channel(
+				.funding_contributed(
 					&channel_details.channel_id,
 					&counterparty_node_id,
 					contribution,
-					funding_feerate_per_kw,
 					None,
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: vec![bitcoin::TxOut {
-							value: Amount::ZERO,
-							script_pubkey: change_address.script_pubkey(),
-						}],
-					};
-					match self.wallet.cancel_tx(&tx) {
-						Ok(()) => Error::ChannelSplicingFailed,
-						Err(e) => e,
-					}
+					Error::ChannelSplicingFailed
 				})
 		} else {
 			log_error!(
@@ -1376,7 +1327,6 @@ impl Node {
 				user_channel_id,
 				counterparty_node_id
 			);
-
 			Err(Error::ChannelSplicingFailed)
 		}
 	}
@@ -1407,27 +1357,33 @@ impl Node {
 
 			self.wallet.parse_and_validate_address(address)?;
 
-			let contribution = SpliceContribution::splice_out(vec![bitcoin::TxOut {
+			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+
+			let funding_template = self
+				.channel_manager
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id, fee_rate)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
-			}]);
-
-			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
-			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
-				Ok(fee_rate) => fee_rate,
-				Err(_) => {
-					debug_assert!(false, "FeeRate should always fit within u32");
-					log_error!(self.logger, "FeeRate should always fit within u32");
-					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
-				},
-			};
+			}];
+			let contribution = self
+				.runtime
+				.block_on(funding_template.splice_out(outputs, Arc::clone(&self.wallet)))
+				.map_err(|()| {
+					log_error!(self.logger, "Failed to splice channel: coin selection failed");
+					Error::ChannelSplicingFailed
+				})?;
 
 			self.channel_manager
-				.splice_channel(
+				.funding_contributed(
 					&channel_details.channel_id,
 					&counterparty_node_id,
 					contribution,
-					funding_feerate_per_kw,
 					None,
 				)
 				.map_err(|e| {

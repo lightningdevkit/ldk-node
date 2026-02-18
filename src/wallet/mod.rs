@@ -25,14 +25,17 @@ use bitcoin::psbt::{self, Psbt};
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
+use bitcoin::transaction::Sequence;
 use bitcoin::{
 	Address, Amount, FeeRate, OutPoint, ScriptBuf, Transaction, TxOut, Txid, WPubkeyHash, Weight,
 	WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
-use lightning::chain::{BestBlock, Listen};
-use lightning::events::bump_transaction::{Input, Utxo, WalletSource};
+use lightning::chain::{BestBlock, ClaimId, Listen};
+use lightning::events::bump_transaction::{
+	CoinSelection, CoinSelectionSource, Input, Utxo, WalletSource,
+};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
@@ -710,8 +713,10 @@ impl Wallet {
 
 	pub(crate) fn select_confirmed_utxos(
 		&self, must_spend: Vec<Input>, must_pay_to: &[TxOut], fee_rate: FeeRate,
-	) -> Result<Vec<FundingTxInput>, ()> {
+	) -> Result<CoinSelection, ()> {
 		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_persister = self.persister.lock().unwrap();
+
 		debug_assert!(matches!(
 			locked_wallet.public_descriptor(KeychainKind::External),
 			ExtendedDescriptor::Wpkh(_)
@@ -740,12 +745,14 @@ impl Wallet {
 		tx_builder.fee_rate(fee_rate);
 		tx_builder.exclude_unconfirmed();
 
-		tx_builder
+		let unsigned_tx = tx_builder
 			.finish()
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to select confirmed UTXOs: {}", e);
 			})?
-			.unsigned_tx
+			.unsigned_tx;
+
+		let confirmed_utxos = unsigned_tx
 			.input
 			.iter()
 			.filter(|txin| must_spend.iter().all(|input| input.outpoint != txin.previous_output))
@@ -755,7 +762,29 @@ impl Wallet {
 					.map(|tx_details| tx_details.tx.deref().clone())
 					.map(|prevtx| FundingTxInput::new_p2wpkh(prevtx, txin.previous_output.vout))
 			})
-			.collect::<Result<Vec<_>, ()>>()
+			.collect::<Result<Vec<_>, ()>>()?;
+
+		if unsigned_tx.output.len() > must_pay_to.len() + 1 {
+			log_error!(
+				self.logger,
+				"Unexpected number of change outputs during coin selection: {}",
+				unsigned_tx.output.len() - must_pay_to.len(),
+			);
+			return Err(());
+		}
+
+		let change_output = unsigned_tx
+			.output
+			.into_iter()
+			.filter(|txout| must_pay_to.iter().all(|output| output != txout))
+			.next();
+
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			()
+		})?;
+
+		Ok(CoinSelection { confirmed_utxos, change_output })
 	}
 
 	fn list_confirmed_utxos_inner(&self) -> Result<Vec<Utxo>, ()> {
@@ -831,6 +860,7 @@ impl Wallet {
 						},
 						satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
 							1 /* witness items */ + 1 /* schnorr sig len */ + 64, // schnorr sig
+						sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
 					};
 					utxos.push(utxo);
 				},
@@ -1094,9 +1124,47 @@ impl WalletSource for Wallet {
 		async move { self.get_change_script_inner() }
 	}
 
+	fn get_prevtx<'a>(
+		&'a self, outpoint: OutPoint,
+	) -> impl Future<Output = Result<Transaction, ()>> + Send + 'a {
+		async move {
+			let locked_wallet = self.inner.lock().unwrap();
+			locked_wallet
+				.tx_details(outpoint.txid)
+				.map(|tx_details| tx_details.tx.deref().clone())
+				.ok_or_else(|| {
+					log_error!(
+						self.logger,
+						"Failed to get previous transaction for {}",
+						outpoint.txid
+					);
+				})
+		}
+	}
+
 	fn sign_psbt<'a>(
 		&'a self, psbt: Psbt,
 	) -> impl Future<Output = Result<Transaction, ()>> + Send + 'a {
+		async move { self.sign_psbt_inner(psbt) }
+	}
+}
+
+// Anchor bumping uses LdkWallet for coin selection, which wraps a WalletSource to implement
+// CoinSelectionSource. Splicing uses this implementation of coin selection instead.
+impl CoinSelectionSource for Wallet {
+	fn select_confirmed_utxos<'a>(
+		&'a self, claim_id: Option<ClaimId>, must_spend: Vec<Input>, must_pay_to: &'a [TxOut],
+		target_feerate_sat_per_1000_weight: u32, _max_tx_weight: u64,
+	) -> impl Future<Output = Result<CoinSelection, ()>> + Send + 'a {
+		debug_assert!(claim_id.is_none());
+		let fee_rate = FeeRate::from_sat_per_kwu(target_feerate_sat_per_1000_weight as u64);
+		async move { self.select_confirmed_utxos(must_spend, must_pay_to, fee_rate) }
+	}
+
+	fn sign_psbt<'a>(
+		&'a self, psbt: Psbt,
+	) -> impl Future<Output = Result<Transaction, ()>> + Send + 'a {
+		debug_assert!(false);
 		async move { self.sign_psbt_inner(psbt) }
 	}
 }
