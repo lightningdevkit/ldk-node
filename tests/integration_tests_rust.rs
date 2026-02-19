@@ -235,8 +235,7 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+	let node = build_node_with_store(&builder, config.node_entropy, test_sync_store.clone());
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -275,7 +274,7 @@ async fn start_stop_reinit() {
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let reinitialized_node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+		build_node_with_store(&builder, config.node_entropy, test_sync_store.clone());
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 

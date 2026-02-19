@@ -32,6 +32,7 @@ use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+	SyncAndAsyncKVStore,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -485,7 +486,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
-			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
+			build_node_with_store(&builder, config.node_entropy, kv_store)
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
 	};
@@ -1636,5 +1637,21 @@ impl TestSyncStoreInner {
 	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().unwrap();
 		self.do_list(primary_namespace, secondary_namespace)
+	}
+}
+
+pub(crate) fn build_node_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	builder: &Builder, entropy: NodeEntropy, store: S,
+) -> TestNode {
+	#[cfg(feature = "uniffi")]
+	{
+		use ldk_node::FfiDynStore;
+		builder
+			.build_with_store(entropy.into(), Arc::new(FfiDynStore::from_kv_store(store)))
+			.unwrap()
+	}
+	#[cfg(not(feature = "uniffi"))]
+	{
+		builder.build_with_store(entropy, store).unwrap()
 	}
 }
