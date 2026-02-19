@@ -11,15 +11,15 @@ use crate::logger::{LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::DynStore;
 
+use lightning::io;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
-use lightning::{io, log_trace};
-use lightning::{log_debug, log_error, log_info, log_warn};
-
-use tokio::sync::mpsc::{self, error::TrySendError};
+use lightning::{log_debug, log_error, log_info, log_trace, log_warn};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -700,6 +700,7 @@ mod tests {
 	};
 	use lightning_persister::fs_store::v1::FilesystemStore;
 
+	use super::*;
 	use crate::io::test_utils::{
 		do_read_write_remove_list_persist, random_storage_path, DelayedStore,
 	};
@@ -709,8 +710,6 @@ mod tests {
 	#[cfg(not(feature = "uniffi"))]
 	use crate::types::DynStore;
 	use crate::types::DynStoreWrapper;
-
-	use super::*;
 
 	impl RefUnwindSafe for TierStore {}
 
