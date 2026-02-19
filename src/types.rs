@@ -51,7 +51,7 @@ where
 {
 }
 
-pub(crate) trait DynStoreTrait: Send + Sync {
+pub trait DynStoreTrait: Send + Sync {
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>>;
@@ -131,7 +131,8 @@ impl<'a> KVStoreSync for dyn DynStoreTrait + 'a {
 	}
 }
 
-pub(crate) type DynStore = dyn DynStoreTrait;
+/// Type alias for any store that implements DynStoreTrait.
+pub type DynStore = dyn DynStoreTrait;
 
 // Newtype wrapper that implements `KVStore` for `Arc<DynStore>`. This is needed because `KVStore`
 // methods return `impl Future`, which is not object-safe. `DynStoreTrait` works around this by
@@ -163,6 +164,32 @@ impl KVStore for DynStoreRef {
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> impl Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static {
 		DynStoreTrait::list_async(&*self.0, primary_namespace, secondary_namespace)
+	}
+}
+
+impl KVStoreSync for DynStoreRef {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, bitcoin::io::Error> {
+		DynStoreTrait::read(&*self.0, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), bitcoin::io::Error> {
+		DynStoreTrait::write(&*self.0, primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), bitcoin::io::Error> {
+		DynStoreTrait::remove(&*self.0, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, bitcoin::io::Error> {
+		DynStoreTrait::list(&*self.0, primary_namespace, secondary_namespace)
 	}
 }
 

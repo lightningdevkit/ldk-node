@@ -12,11 +12,14 @@
 
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 pub use bip39::Mnemonic;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -49,6 +52,15 @@ use vss_client::headers::{
 	VssHeaderProvider as VssClientHeaderProvider,
 	VssHeaderProviderError as VssClientHeaderProviderError,
 };
+
+use crate::builder::sanitize_alias;
+pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig};
+pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
+use crate::error::Error;
+pub use crate::liquidity::LSPS1OrderStatus;
+pub use crate::logger::{LogLevel, LogRecord, LogWriter};
+use crate::types::{DynStoreTrait, DynStoreWrapper};
+use crate::{hex_utils, SocketAddress, SyncAndAsyncKVStore, UserChannelId};
 
 /// Errors around providing headers for each VSS request.
 #[derive(Debug, uniffi::Error)]
@@ -141,13 +153,321 @@ impl VssClientHeaderProvider for VssHeaderProviderAdapter {
 	}
 }
 
-use crate::builder::sanitize_alias;
-pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig};
-pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
-use crate::error::Error;
-pub use crate::liquidity::LSPS1OrderStatus;
-pub use crate::logger::{LogLevel, LogRecord, LogWriter};
-use crate::{hex_utils, SocketAddress, UserChannelId};
+#[derive(Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+pub enum IOError {
+	NotFound,
+	PermissionDenied,
+	ConnectionRefused,
+	ConnectionReset,
+	ConnectionAborted,
+	NotConnected,
+	AddrInUse,
+	AddrNotAvailable,
+	BrokenPipe,
+	AlreadyExists,
+	WouldBlock,
+	InvalidInput,
+	InvalidData,
+	TimedOut,
+	WriteZero,
+	Interrupted,
+	UnexpectedEof,
+	Other,
+}
+
+impl From<bitcoin::io::Error> for IOError {
+	fn from(error: bitcoin::io::Error) -> Self {
+		match error.kind() {
+			bitcoin::io::ErrorKind::NotFound => IOError::NotFound,
+			bitcoin::io::ErrorKind::PermissionDenied => IOError::PermissionDenied,
+			bitcoin::io::ErrorKind::ConnectionRefused => IOError::ConnectionRefused,
+			bitcoin::io::ErrorKind::ConnectionReset => IOError::ConnectionReset,
+			bitcoin::io::ErrorKind::ConnectionAborted => IOError::ConnectionAborted,
+			bitcoin::io::ErrorKind::NotConnected => IOError::NotConnected,
+			bitcoin::io::ErrorKind::AddrInUse => IOError::AddrInUse,
+			bitcoin::io::ErrorKind::AddrNotAvailable => IOError::AddrNotAvailable,
+			bitcoin::io::ErrorKind::BrokenPipe => IOError::BrokenPipe,
+			bitcoin::io::ErrorKind::AlreadyExists => IOError::AlreadyExists,
+			bitcoin::io::ErrorKind::WouldBlock => IOError::WouldBlock,
+			bitcoin::io::ErrorKind::InvalidInput => IOError::InvalidInput,
+			bitcoin::io::ErrorKind::InvalidData => IOError::InvalidData,
+			bitcoin::io::ErrorKind::TimedOut => IOError::TimedOut,
+			bitcoin::io::ErrorKind::WriteZero => IOError::WriteZero,
+			bitcoin::io::ErrorKind::Interrupted => IOError::Interrupted,
+			bitcoin::io::ErrorKind::UnexpectedEof => IOError::UnexpectedEof,
+			bitcoin::io::ErrorKind::Other => IOError::Other,
+		}
+	}
+}
+
+impl From<IOError> for bitcoin::io::Error {
+	fn from(error: IOError) -> Self {
+		match error {
+			IOError::NotFound => bitcoin::io::ErrorKind::NotFound.into(),
+			IOError::PermissionDenied => bitcoin::io::ErrorKind::PermissionDenied.into(),
+			IOError::ConnectionRefused => bitcoin::io::ErrorKind::ConnectionRefused.into(),
+			IOError::ConnectionReset => bitcoin::io::ErrorKind::ConnectionReset.into(),
+			IOError::ConnectionAborted => bitcoin::io::ErrorKind::ConnectionAborted.into(),
+			IOError::NotConnected => bitcoin::io::ErrorKind::NotConnected.into(),
+			IOError::AddrInUse => bitcoin::io::ErrorKind::AddrInUse.into(),
+			IOError::AddrNotAvailable => bitcoin::io::ErrorKind::AddrNotAvailable.into(),
+			IOError::BrokenPipe => bitcoin::io::ErrorKind::BrokenPipe.into(),
+			IOError::AlreadyExists => bitcoin::io::ErrorKind::AlreadyExists.into(),
+			IOError::WouldBlock => bitcoin::io::ErrorKind::WouldBlock.into(),
+			IOError::InvalidInput => bitcoin::io::ErrorKind::InvalidInput.into(),
+			IOError::InvalidData => bitcoin::io::ErrorKind::InvalidData.into(),
+			IOError::TimedOut => bitcoin::io::ErrorKind::TimedOut.into(),
+			IOError::WriteZero => bitcoin::io::ErrorKind::WriteZero.into(),
+			IOError::Interrupted => bitcoin::io::ErrorKind::Interrupted.into(),
+			IOError::UnexpectedEof => bitcoin::io::ErrorKind::UnexpectedEof.into(),
+			IOError::Other => bitcoin::io::ErrorKind::Other.into(),
+		}
+	}
+}
+
+impl std::fmt::Display for IOError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			IOError::NotFound => write!(f, "NotFound"),
+			IOError::PermissionDenied => write!(f, "PermissionDenied"),
+			IOError::ConnectionRefused => write!(f, "ConnectionRefused"),
+			IOError::ConnectionReset => write!(f, "ConnectionReset"),
+			IOError::ConnectionAborted => write!(f, "ConnectionAborted"),
+			IOError::NotConnected => write!(f, "NotConnected"),
+			IOError::AddrInUse => write!(f, "AddrInUse"),
+			IOError::AddrNotAvailable => write!(f, "AddrNotAvailable"),
+			IOError::BrokenPipe => write!(f, "BrokenPipe"),
+			IOError::AlreadyExists => write!(f, "AlreadyExists"),
+			IOError::WouldBlock => write!(f, "WouldBlock"),
+			IOError::InvalidInput => write!(f, "InvalidInput"),
+			IOError::InvalidData => write!(f, "InvalidData"),
+			IOError::TimedOut => write!(f, "TimedOut"),
+			IOError::WriteZero => write!(f, "WriteZero"),
+			IOError::Interrupted => write!(f, "Interrupted"),
+			IOError::UnexpectedEof => write!(f, "UnexpectedEof"),
+			IOError::Other => write!(f, "Other"),
+		}
+	}
+}
+
+/// FFI-safe version of [`DynStoreTrait`].
+///
+/// [`DynStoreTrait`]: crate::types::DynStoreTrait
+#[uniffi::export(with_foreign)]
+#[async_trait]
+pub trait FfiDynStoreTrait: Send + Sync {
+	async fn read_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError>;
+	async fn write_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError>;
+	async fn remove_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError>;
+	async fn list_async(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError>;
+
+	fn read(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError>;
+	fn write(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError>;
+	fn remove(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError>;
+	fn list(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError>;
+}
+
+#[derive(Clone, uniffi::Object)]
+pub struct FfiDynStore {
+	pub(crate) inner: Arc<dyn FfiDynStoreTrait>,
+}
+
+#[uniffi::export]
+impl FfiDynStore {
+	#[uniffi::constructor]
+	pub fn from_store(store: Arc<dyn FfiDynStoreTrait>) -> Self {
+		Self { inner: store }
+	}
+}
+
+impl FfiDynStore {
+	pub fn from_kv_store<T: SyncAndAsyncKVStore + Send + Sync + 'static>(store: T) -> Self {
+		Self { inner: Arc::new(DynStoreWrapper(store)) }
+	}
+}
+
+#[async_trait]
+impl<T: SyncAndAsyncKVStore + Send + Sync + 'static> FfiDynStoreTrait for DynStoreWrapper<T> {
+	async fn read_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError> {
+		DynStoreTrait::read_async(self, &primary_namespace, &secondary_namespace, &key)
+			.await
+			.map_err(IOError::from)
+	}
+
+	async fn write_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError> {
+		DynStoreTrait::write_async(self, &primary_namespace, &secondary_namespace, &key, buf)
+			.await
+			.map_err(IOError::from)
+	}
+
+	async fn remove_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError> {
+		DynStoreTrait::remove_async(self, &primary_namespace, &secondary_namespace, &key, lazy)
+			.await
+			.map_err(IOError::from)
+	}
+
+	async fn list_async(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError> {
+		DynStoreTrait::list_async(self, &primary_namespace, &secondary_namespace)
+			.await
+			.map_err(IOError::from)
+	}
+
+	fn read(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> Result<Vec<u8>, IOError> {
+		DynStoreTrait::read(self, &primary_namespace, &secondary_namespace, &key)
+			.map_err(IOError::from)
+	}
+
+	fn write(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> Result<(), IOError> {
+		DynStoreTrait::write(self, &primary_namespace, &secondary_namespace, &key, buf)
+			.map_err(IOError::from)
+	}
+
+	fn remove(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> Result<(), IOError> {
+		DynStoreTrait::remove(self, &primary_namespace, &secondary_namespace, &key, lazy)
+			.map_err(IOError::from)
+	}
+
+	fn list(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> Result<Vec<String>, IOError> {
+		DynStoreTrait::list(self, &primary_namespace, &secondary_namespace).map_err(IOError::from)
+	}
+}
+
+impl DynStoreTrait for FfiDynStore {
+	fn read_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>> {
+		let store = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move {
+			store
+				.read_async(primary_namespace, secondary_namespace, key)
+				.await
+				.map_err(|e| e.into())
+		})
+	}
+
+	fn write_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>> {
+		let store = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move {
+			store
+				.write_async(primary_namespace, secondary_namespace, key, buf)
+				.await
+				.map_err(|e| e.into())
+		})
+	}
+
+	fn remove_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>> {
+		let store = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		Box::pin(async move {
+			store
+				.remove_async(primary_namespace, secondary_namespace, key, lazy)
+				.await
+				.map_err(|e| e.into())
+		})
+	}
+
+	fn list_async(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>> {
+		let store = Arc::clone(&self.inner);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+
+		Box::pin(async move {
+			store.list_async(primary_namespace, secondary_namespace).await.map_err(|e| e.into())
+		})
+	}
+
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, bitcoin::io::Error> {
+		self.inner
+			.read(primary_namespace.to_string(), secondary_namespace.to_string(), key.to_string())
+			.map_err(|e| e.into())
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), bitcoin::io::Error> {
+		self.inner
+			.write(
+				primary_namespace.to_string(),
+				secondary_namespace.to_string(),
+				key.to_string(),
+				buf,
+			)
+			.map_err(|e| e.into())
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), bitcoin::io::Error> {
+		self.inner
+			.remove(
+				primary_namespace.to_string(),
+				secondary_namespace.to_string(),
+				key.to_string(),
+				lazy,
+			)
+			.map_err(|e| e.into())
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, bitcoin::io::Error> {
+		self.inner
+			.list(primary_namespace.to_string(), secondary_namespace.to_string())
+			.map_err(|e| e.into())
+	}
+}
 
 uniffi::custom_type!(PublicKey, String, {
 	remote,

@@ -17,14 +17,15 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf, Txid};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
-	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
-	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
-	expect_event, expect_payment_claimable_event, expect_payment_received_event,
-	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
-	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
-	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	build_node_with_store, bump_fee_and_broadcast, distribute_funds_unconfirmed,
+	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event,
+	expect_channel_ready_events, expect_event, expect_payment_claimable_event,
+	expect_payment_received_event, expect_payment_successful_event, expect_splice_pending_event,
+	generate_blocks_and_wait, generate_listening_addresses, open_channel, open_channel_push_amt,
+	open_channel_with_all, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder, setup_node,
+	setup_two_nodes, splice_in_with_all, wait_for_tx, TestChainSource, TestStoreType,
+	TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
@@ -237,8 +238,7 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+	let node = build_node_with_store(&builder, config.node_entropy, test_sync_store.clone());
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -277,7 +277,7 @@ async fn start_stop_reinit() {
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let reinitialized_node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+		build_node_with_store(&builder, config.node_entropy, test_sync_store.clone());
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
