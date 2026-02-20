@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::Builder;
-use rand::{rng, RngCore};
+use rand::RngCore;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_with_vss_store() {

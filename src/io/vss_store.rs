@@ -1002,7 +1002,6 @@ mod tests {
 
 	use rand::distr::Alphanumeric;
 	use rand::{rng, Rng, RngCore};
-	use vss_client::headers::FixedHeaders;
 
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
@@ -1012,11 +1011,13 @@ mod tests {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let mut vss_seed = [0u8; 32];
+		let mut vss_seed = [0u8; 64];
 		rng.fill_bytes(&mut vss_seed);
-		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let entropy = NodeEntropy::from_seed_bytes(vss_seed);
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
+			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
+				.build_with_sigs_auth(HashMap::new())
+				.unwrap();
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
@@ -1025,11 +1026,13 @@ mod tests {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let mut vss_seed = [0u8; 32];
+		let mut vss_seed = [0u8; 64];
 		rng.fill_bytes(&mut vss_seed);
-		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let entropy = NodeEntropy::from_seed_bytes(vss_seed);
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
+			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
+				.build_with_sigs_auth(HashMap::new())
+				.unwrap();
 
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
