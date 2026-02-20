@@ -3157,3 +3157,290 @@ mod dynamic_address_type_changes {
 		node.stop().unwrap();
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Event deduplication and payment direction regression tests
+// ---------------------------------------------------------------------------
+mod events {
+	use bitcoin::Txid;
+	use ldk_node::config::AddressType;
+	use ldk_node::payment::{PaymentDirection, PaymentKind};
+	use ldk_node::{Event, Node};
+
+	use crate::common::{
+		drain_all_events, generate_blocks_and_wait, invalidate_blocks, setup_bitcoind_and_electrsd,
+		setup_node, wait_for_tx, TestChainSource,
+	};
+	use crate::helpers::{confirm_and_sync, fund_multiple_and_sync, node_config, test_recipient};
+
+	/// Drain all pending events from `node` and return a count of those matching `filter`.
+	fn count_events<F: Fn(&Event) -> bool>(node: &Node, filter: F) -> usize {
+		let mut count = 0;
+		while let Some(event) = node.next_event() {
+			if filter(&event) {
+				count += 1;
+			}
+			node.event_handled().unwrap();
+		}
+		count
+	}
+
+	/// Returns the count of `OnchainTransactionReceived` events matching `expected`.
+	fn count_received(node: &Node, expected: Txid) -> usize {
+		count_events(
+			node,
+			|e| matches!(e, Event::OnchainTransactionReceived { txid, .. } if *txid == expected),
+		)
+	}
+
+	/// Returns the count of `OnchainTransactionConfirmed` events matching `expected`.
+	fn count_confirmed(node: &Node, expected: Txid) -> usize {
+		count_events(
+			node,
+			|e| matches!(e, Event::OnchainTransactionConfirmed { txid, .. } if *txid == expected),
+		)
+	}
+
+	/// Returns the count of `OnchainTransactionReorged` events matching `expected`.
+	fn count_reorged(node: &Node, expected: Txid) -> usize {
+		count_events(
+			node,
+			|e| matches!(e, Event::OnchainTransactionReorged { txid, .. } if *txid == expected),
+		)
+	}
+
+	/// Cross-wallet send must emit exactly one `OnchainTransactionReceived`, not one per wallet.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_cross_wallet_send_emits_single_received_event() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		// NativeSegwit primary sees only the change output; Legacy secondary has the inputs.
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 100_000), (legacy_addr, 100_000)],
+		)
+		.await;
+
+		drain_all_events(&node);
+
+		// 150 000 sats exceeds either wallet alone, so coin selection must span both.
+		let txid = node
+			.onchain_payment()
+			.send_to_address(&test_recipient(), 150_000, None, None)
+			.expect("cross-wallet send should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		node.sync_wallets().unwrap();
+
+		let n = count_received(&node, txid);
+		assert_eq!(n, 1, "expected exactly 1 OnchainTransactionReceived for txid {txid}, got {n}");
+
+		node.stop().unwrap();
+	}
+
+	/// Cross-wallet send must emit exactly one `OnchainTransactionConfirmed` when mined.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_cross_wallet_send_emits_single_confirmed_event() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 100_000), (legacy_addr, 100_000)],
+		)
+		.await;
+		drain_all_events(&node);
+
+		let txid = node
+			.onchain_payment()
+			.send_to_address(&test_recipient(), 150_000, None, None)
+			.expect("cross-wallet send should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		node.sync_wallets().unwrap();
+		drain_all_events(&node);
+
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node]).await;
+
+		let n = count_confirmed(&node, txid);
+		assert_eq!(n, 1, "expected exactly 1 OnchainTransactionConfirmed for txid {txid}, got {n}");
+
+		node.stop().unwrap();
+	}
+
+	/// After a cross-wallet send, `list_payments` must show the tx as Outbound.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_cross_wallet_send_payment_direction_is_outbound() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		// Fund only the Legacy secondary wallet so the primary sees only the change output
+		// on first sync; the secondary must correct the direction to Outbound.
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		fund_multiple_and_sync(&bitcoind, &electrsd, &node, vec![(legacy_addr, 200_000)]).await;
+
+		let txid = node
+			.onchain_payment()
+			.send_to_address(&test_recipient(), 50_000, None, None)
+			.expect("send from secondary wallet should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		node.sync_wallets().unwrap();
+
+		let outbound_onchain = node.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+		});
+		assert!(
+			outbound_onchain.iter().any(|p| {
+				if let PaymentKind::Onchain { txid: t, .. } = p.kind {
+					t == txid
+				} else {
+					false
+				}
+			}),
+			"sent payment {txid} should be Outbound in list_payments, \
+			 but outbound onchain payments are: {outbound_onchain:?}"
+		);
+
+		node.stop().unwrap();
+	}
+
+	/// After a reorg, neither reorg nor re-confirm events must be duplicated across wallets.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_cross_wallet_reorg_deduplicates_events() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let native_addr = node.onchain_payment().new_address().unwrap();
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+
+		fund_multiple_and_sync(
+			&bitcoind,
+			&electrsd,
+			&node,
+			vec![(native_addr, 100_000), (legacy_addr, 100_000)],
+		)
+		.await;
+		drain_all_events(&node);
+
+		let txid = node
+			.onchain_payment()
+			.send_to_address(&test_recipient(), 150_000, None, None)
+			.expect("cross-wallet send should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		node.sync_wallets().unwrap();
+		drain_all_events(&node);
+
+		confirm_and_sync(&bitcoind, &electrsd, 1, &[&node]).await;
+		let n_confirmed_first = count_confirmed(&node, txid);
+		assert_eq!(n_confirmed_first, 1, "expected 1 confirmed event before reorg");
+
+		// Reorg the block away; the tx re-confirms in the replacement block.
+		invalidate_blocks(&bitcoind.client, 1);
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+		node.sync_wallets().unwrap();
+
+		let n_reorged = count_reorged(&node, txid);
+		let n_confirmed_2 = count_confirmed(&node, txid);
+		assert!(
+			n_reorged <= 1,
+			"OnchainTransactionReorged must not be duplicated, got {n_reorged}"
+		);
+		assert!(
+			n_confirmed_2 <= 1,
+			"OnchainTransactionConfirmed must not be duplicated after reorg, got {n_confirmed_2}"
+		);
+
+		node.stop().unwrap();
+	}
+
+	/// `send_all_to_address` from a secondary-only wallet must show the tx as Outbound.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_send_all_payment_direction_is_outbound() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		// Fund only the Legacy secondary wallet; primary has no balance.
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		fund_multiple_and_sync(&bitcoind, &electrsd, &node, vec![(legacy_addr, 200_000)]).await;
+
+		let txid = node
+			.onchain_payment()
+			.send_all_to_address(&test_recipient(), true, None)
+			.expect("send_all from secondary wallet should succeed");
+
+		wait_for_tx(&electrsd.client, txid).await;
+		node.sync_wallets().unwrap();
+
+		let outbound_onchain = node.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+		});
+		assert!(
+			outbound_onchain.iter().any(|p| {
+				if let PaymentKind::Onchain { txid: t, .. } = p.kind {
+					t == txid
+				} else {
+					false
+				}
+			}),
+			"send_all payment {txid} should be Outbound, got: {outbound_onchain:?}"
+		);
+
+		node.stop().unwrap();
+	}
+
+	/// A receive to a secondary wallet must remain Inbound; the never-downgrade guard
+	/// must not affect payments that are legitimately Inbound.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn test_receive_to_secondary_wallet_direction_is_inbound() {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = TestChainSource::Esplora(&electrsd);
+
+		let config = node_config(AddressType::NativeSegwit, vec![AddressType::Legacy]);
+		let node = setup_node(&chain_source, config, None);
+
+		// Receive to the Legacy secondary wallet only (primary has no UTXOs).
+		let legacy_addr = node.onchain_payment().new_address_for_type(AddressType::Legacy).unwrap();
+		fund_multiple_and_sync(&bitcoind, &electrsd, &node, vec![(legacy_addr, 100_000)]).await;
+
+		let inbound_onchain = node.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+		});
+		assert!(
+			!inbound_onchain.is_empty(),
+			"funding tx to secondary wallet should appear as Inbound, got: {inbound_onchain:?}"
+		);
+
+		node.stop().unwrap();
+	}
+}

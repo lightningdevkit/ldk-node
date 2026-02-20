@@ -227,6 +227,8 @@ pub(super) fn apply_additional_sync_results(
 }
 
 // Process BDK wallet events and emit corresponding ldk-node events via the event queue.
+// When a transaction touches multiple address-type wallets, each wallet emits its own
+// BdkWalletEvent, so we deduplicate by txid before forwarding to the event queue.
 async fn process_wallet_events<L2: Deref>(
 	wallet_events: Vec<BdkWalletEvent>, wallet: &crate::wallet::Wallet,
 	event_queue: &EventQueue<L2>, logger: &Arc<Logger>,
@@ -235,9 +237,19 @@ async fn process_wallet_events<L2: Deref>(
 where
 	L2::Target: LdkLogger,
 {
+	// Use per-type sets so that two wallets with different prior state can each contribute
+	// their event type for the same txid without suppressing the other.
+	let mut seen_received_txids = std::collections::HashSet::new();
+	let mut seen_confirmed_txids = std::collections::HashSet::new();
+	let mut seen_reorged_txids = std::collections::HashSet::new();
+	let mut seen_replaced_txids = std::collections::HashSet::new();
+
 	for wallet_event in wallet_events {
 		match wallet_event {
 			BdkWalletEvent::TxConfirmed { txid, block_time, .. } => {
+				if !seen_confirmed_txids.insert(txid) {
+					continue;
+				}
 				let details = get_transaction_details(&txid, wallet, channel_manager)
 					.unwrap_or_else(|| {
 						log_error!(logger, "Transaction {} not found in wallet", txid);
@@ -270,6 +282,9 @@ where
 			BdkWalletEvent::TxUnconfirmed { txid, old_block_time, .. } => {
 				match old_block_time {
 					Some(_) => {
+						if !seen_reorged_txids.insert(txid) {
+							continue;
+						}
 						// Transaction was previously confirmed but is now unconfirmed (reorg)
 						log_info!(
 							logger,
@@ -283,6 +298,9 @@ where
 						})?;
 					},
 					None => {
+						if !seen_received_txids.insert(txid) {
+							continue;
+						}
 						// New unconfirmed transaction detected in mempool
 						let details = get_transaction_details(&txid, wallet, channel_manager)
 							.unwrap_or_else(|| {
@@ -321,6 +339,9 @@ where
 				// We don't emit an event for chain tip changes as this is too noisy
 			},
 			BdkWalletEvent::TxReplaced { txid, conflicts, .. } => {
+				if !seen_replaced_txids.insert(txid) {
+					continue;
+				}
 				let conflict_txids: Vec<Txid> =
 					conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
 				log_info!(
@@ -336,7 +357,7 @@ where
 				})?;
 			},
 			_ => {
-				// Ignore other event types
+				// TxDropped is handled via check_and_emit_evicted_transactions; skip here.
 			},
 		}
 	}

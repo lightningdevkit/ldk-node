@@ -293,6 +293,16 @@ impl StorableObject for PaymentDetails {
 			}
 		}
 
+		// Direction can change for onchain payments as wallets sync; never downgrade from
+		// Outbound since a pure receive always has sent=0 and can never compute as Outbound.
+		if let Some(direction) = update.direction {
+			let downgrade = self.direction == PaymentDirection::Outbound
+				&& direction == PaymentDirection::Inbound;
+			if !downgrade {
+				update_if_necessary!(self.direction, direction);
+			}
+		}
+
 		if updated {
 			self.latest_update_timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -619,6 +629,7 @@ impl StorableObjectUpdate<PaymentDetails> for PaymentDetailsUpdate {
 
 #[cfg(test)]
 mod tests {
+	use bitcoin::hashes::Hash;
 	use bitcoin::io::Cursor;
 	use lightning::util::ser::Readable;
 
@@ -789,5 +800,66 @@ mod tests {
 				},
 			}
 		}
+	}
+
+	#[test]
+	fn onchain_direction_never_downgrades_from_outbound() {
+		// A change-only wallet syncing before an input-holding wallet can temporarily
+		// make received > partial-sent, producing a spurious Inbound update. The guard
+		// must reject it and leave direction as Outbound throughout.
+		let txid = Txid::from_slice(&[1u8; 32]).unwrap();
+		let id = PaymentId(txid.to_byte_array());
+		let kind = PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed };
+
+		// Primary wallet has inputs, so initial direction is Outbound.
+		let mut payment = PaymentDetails::new(
+			id,
+			kind.clone(),
+			Some(5_000 * 1000),
+			Some(100 * 1000),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		assert_eq!(payment.direction, PaymentDirection::Outbound);
+
+		// Change-only secondary syncs: partial view would produce Inbound; guard blocks it.
+		let mut update = PaymentDetailsUpdate::new(id);
+		update.direction = Some(PaymentDirection::Inbound);
+		update.amount_msat = Some(Some(8_000 * 1000));
+		payment.update(&update);
+		assert_eq!(payment.direction, PaymentDirection::Outbound);
+
+		// Input secondary syncs: full picture, Outbound is confirmed.
+		let mut update = PaymentDetailsUpdate::new(id);
+		update.direction = Some(PaymentDirection::Outbound);
+		update.amount_msat = Some(Some(1_000 * 1000));
+		payment.update(&update);
+		assert_eq!(payment.direction, PaymentDirection::Outbound);
+	}
+
+	#[test]
+	fn onchain_direction_corrects_inbound_to_outbound() {
+		// Primary wallet sees only the change output initially (Inbound); once a
+		// secondary wallet syncs and reveals the spent inputs, direction must update.
+		let txid = Txid::from_slice(&[2u8; 32]).unwrap();
+		let id = PaymentId(txid.to_byte_array());
+		let kind = PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed };
+
+		let mut payment = PaymentDetails::new(
+			id,
+			kind.clone(),
+			Some(9_000 * 1000),
+			Some(0),
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		assert_eq!(payment.direction, PaymentDirection::Inbound);
+
+		// Secondary wallet syncs with full view; direction must be corrected.
+		let mut update = PaymentDetailsUpdate::new(id);
+		update.direction = Some(PaymentDirection::Outbound);
+		update.amount_msat = Some(Some(1_000 * 1000));
+		payment.update(&update);
+		assert_eq!(payment.direction, PaymentDirection::Outbound);
 	}
 }
