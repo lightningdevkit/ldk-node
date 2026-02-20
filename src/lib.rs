@@ -226,7 +226,7 @@ pub struct Node {
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
-	hrn_resolver: Arc<HRNResolver>,
+	hrn_resolver: Arc<Option<Arc<HRNResolver>>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
