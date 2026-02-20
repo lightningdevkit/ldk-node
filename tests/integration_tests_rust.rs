@@ -18,12 +18,13 @@ use bitcoin::{Address, Amount, ScriptBuf, Txid};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
-	expect_channel_pending_event, expect_channel_ready_event, expect_event,
-	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
-	expect_splice_pending_event, generate_blocks_and_wait, open_channel, open_channel_push_amt,
-	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
+	expect_event, expect_payment_claimable_event, expect_payment_received_event,
+	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
+	open_channel, open_channel_push_amt, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	random_chain_source, random_config, random_listening_addresses, setup_bitcoind_and_electrsd,
+	setup_builder, setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType,
+	TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
@@ -1343,10 +1344,16 @@ async fn async_payment() {
 	node_receiver.sync_wallets().unwrap();
 
 	expect_channel_ready_event!(node_sender, node_sender_lsp.node_id());
-	expect_channel_ready_event!(node_sender_lsp, node_sender.node_id());
-	expect_channel_ready_event!(node_sender_lsp, node_receiver_lsp.node_id());
-	expect_channel_ready_event!(node_receiver_lsp, node_sender_lsp.node_id());
-	expect_channel_ready_event!(node_receiver_lsp, node_receiver.node_id());
+	expect_channel_ready_events!(
+		node_sender_lsp,
+		node_sender.node_id(),
+		node_receiver_lsp.node_id()
+	);
+	expect_channel_ready_events!(
+		node_receiver_lsp,
+		node_sender_lsp.node_id(),
+		node_receiver.node_id()
+	);
 	expect_channel_ready_event!(node_receiver, node_receiver_lsp.node_id());
 
 	let has_node_announcements = |node: &ldk_node::Node| {
