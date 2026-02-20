@@ -1,0 +1,31 @@
+name: CI Checks - Eclair Integration Tests
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-eclair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start bitcoind, electrs, and Eclair
+        run: docker compose -f docker-compose-eclair.yml up -d
+
+      - name: Wait for Eclair to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s -u :eclairpw -X POST http://127.0.0.1:8080/getinfo > /dev/null 2>&1; then
+              echo "Eclair is ready"
+              break
+            fi
+            echo "Waiting for Eclair... ($i)"
+            sleep 5
+          done
+
+      - name: Run Eclair integration tests
+        run: RUSTFLAGS="--cfg eclair_test" cargo test --test integration_tests_eclair -- --exact --show-output
