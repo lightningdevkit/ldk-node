@@ -37,9 +37,16 @@ use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::{
+	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
+
+use crate::common::{create_tier_stores, random_storage_path, setup_two_nodes_with_store};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
@@ -48,6 +55,85 @@ async fn channel_full_cycle() {
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_full_cycle_tier_store() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (primary_a, backup_a, ephemeral_a) = create_tier_stores(random_storage_path());
+	let (primary_b, backup_b, ephemeral_b) = create_tier_stores(random_storage_path());
+
+	let (node_a, node_b) = setup_two_nodes_with_store(
+		&chain_source,
+		false,
+		true,
+		false,
+		TestStoreType::TierStore {
+			primary: Arc::clone(&primary_a),
+			backup: Some(Arc::clone(&backup_a)),
+			ephemeral: Some(Arc::clone(&ephemeral_a)),
+		},
+		TestStoreType::TierStore {
+			primary: Arc::clone(&primary_b),
+			backup: Some(Arc::clone(&backup_b)),
+			ephemeral: Some(Arc::clone(&ephemeral_b)),
+		},
+	);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
+		.await;
+
+	// Verify Primary store contains channel manager data
+	let primary_channel_manager = KVStoreSync::read(
+		primary_a.as_ref(),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(primary_channel_manager.is_ok(), "Primary should have channel manager data");
+
+	// Verify Primary store contains payment info
+	let primary_payments = KVStoreSync::list(primary_a.as_ref(), "payments", "");
+	assert!(primary_payments.is_ok(), "Primary should have payment data");
+	assert!(!primary_payments.unwrap().is_empty(), "Primary should have payment entries");
+
+	// Verify Backup store synced critical data
+	let backup_channel_manager = KVStoreSync::read(
+		backup_a.as_ref(),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(backup_channel_manager.is_ok(), "Backup should have synced channel manager");
+
+	// Verify backup is not empty
+	let backup_all_keys = KVStoreSync::list(backup_a.as_ref(), "", "").unwrap();
+	assert!(!backup_all_keys.is_empty(), "Backup store should not be empty");
+
+	// Verify Ephemeral does NOT have channel manager
+	let ephemeral_channel_manager = KVStoreSync::read(
+		ephemeral_a.as_ref(),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(ephemeral_channel_manager.is_err(), "Ephemeral should NOT have channel manager");
+
+	// Verify Ephemeral does NOT have payment info
+	let ephemeral_payments = KVStoreSync::list(ephemeral_a.as_ref(), "payments", "");
+	assert!(
+		ephemeral_payments.is_err() || ephemeral_payments.unwrap().is_empty(),
+		"Ephemeral should NOT have payment data"
+	);
+
+	//Verify Ephemeral does have network graph
+	let ephemeral_network_graph = KVStoreSync::read(
+		ephemeral_a.as_ref(),
+		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_KEY,
+	);
+	assert!(ephemeral_network_graph.is_ok(), "Ephemeral should have network graph");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

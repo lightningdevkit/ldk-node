@@ -52,8 +52,11 @@ use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
+#[cfg(feature = "uniffi")]
+use crate::ffi::FfiDynStore;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
+use crate::io::tier_store::TierStore;
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
 	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
@@ -150,6 +153,21 @@ impl std::fmt::Debug for LogWriterConfig {
 	}
 }
 
+#[derive(Default)]
+struct TierStoreConfig {
+	ephemeral: Option<Arc<DynStore>>,
+	backup: Option<Arc<DynStore>>,
+}
+
+impl std::fmt::Debug for TierStoreConfig {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("TierStoreConfig")
+			.field("ephemeral", &self.ephemeral.as_ref().map(|_| "Arc<DynStore>"))
+			.field("backup", &self.backup.as_ref().map(|_| "Arc<DynStore>"))
+			.finish()
+	}
+}
+
 /// An error encountered during building a [`Node`].
 ///
 /// [`Node`]: crate::Node
@@ -242,6 +260,7 @@ pub struct NodeBuilder {
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	tier_store_config: Option<TierStoreConfig>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	recovery_mode: bool,
@@ -260,6 +279,7 @@ impl NodeBuilder {
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
+		let tier_store_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
 		let recovery_mode = false;
@@ -269,6 +289,7 @@ impl NodeBuilder {
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
+			tier_store_config,
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
@@ -557,6 +578,36 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Configures the backup store for local disaster recovery.
+	///
+	/// When building with [`build_with_tier_store`], this store receives asynchronous copies
+	/// of all critical data written to the primary store. If the primary store becomes
+	/// unavailable, reads will fall back to this backup store.
+	///
+	/// Backup writes are non-blocking and do not affect primary store operation performance.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_backup(&mut self, backup_store: Arc<DynStore>) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.backup = Some(backup_store);
+		self
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with [`build_with_tier_store`], this store is used for data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_ephemeral(&mut self, ephemeral_store: Arc<DynStore>) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.ephemeral = Some(ephemeral_store);
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -569,6 +620,7 @@ impl NodeBuilder {
 			Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
 		)
 		.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
 		self.build_with_store(node_entropy, kv_store)
 	}
 
@@ -581,6 +633,7 @@ impl NodeBuilder {
 		fs::create_dir_all(storage_dir_path.clone())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
 		let kv_store = FilesystemStore::new(storage_dir_path);
+
 		self.build_with_store(node_entropy, kv_store)
 	}
 
@@ -665,6 +718,100 @@ impl NodeBuilder {
 		})?;
 
 		self.build_with_store(node_entropy, vss_store)
+	}
+
+	/// Builds a [`Node`] instance with tiered storage for managing data across multiple storage layers.
+	///
+	/// This build method enables a three-tier storage architecture optimized for different data types
+	/// and access patterns:
+	///
+	/// ### Storage Tiers
+	///
+	/// - **Primary Store** (required): The authoritative store for critical channel state and payment data.
+	///   Typically a remote/cloud storage service for durability and accessibility across devices.
+	///
+	/// - **Ephemeral Store** (optional): Local storage for non-critical, frequently-accessed data like
+	///   the network graph and scorer. Improves performance by reducing latency for data that can be
+	///   rebuilt if lost. Configure with [`set_tier_store_ephemeral`].
+	///
+	/// - **Backup Store** (optional): Local backup of critical data for disaster recovery scenarios.
+	///   Provides a safety net if the primary store becomes temporarily unavailable. Writes are
+	///   asynchronous to avoid blocking primary operations. Configure with [`set_tier_store_backup`].
+	///
+	/// ## Configuration
+	///
+	/// Use the setter methods to configure optional stores:
+	/// - [`set_tier_store_ephemeral`] - Set local store for network graph and scorer
+	/// - [`set_tier_store_backup`] - Set local backup store for disaster recovery
+	///
+	/// ## Example
+	///
+	/// ```ignore
+	/// # use ldk_node::{Builder, Config};
+	/// # use std::sync::Arc;
+	/// let config = Config::default();
+	/// let mut builder = NodeBuilder::from_config(config);
+	///
+	/// let primary = Arc::new(VssStore::new(...));
+	/// let ephemeral = Arc::new(FilesystemStore::new(...));
+	/// let backup = Arc::new(SqliteStore::new(...));
+	///
+	/// builder
+	///     .set_tier_store_ephemeral(ephemeral)
+	///     .set_tier_store_backup(backup);
+	///
+	/// let node = builder.build_with_tier_store(primary)?;
+	/// # Ok::<(), ldk_node::BuildError>(())
+	/// ```
+	///
+	/// [`set_tier_store_ephemeral`]: Self::set_tier_store_ephemeral
+	/// [`set_tier_store_backup`]: Self::set_tier_store_backup
+	#[cfg(not(feature = "uniffi"))]
+	pub fn build_with_tier_store(
+		&self, node_entropy: NodeEntropy, primary_store: Arc<DynStore>,
+	) -> Result<Node, BuildError> {
+		self.build_with_tier_store_internal(node_entropy, primary_store)
+	}
+
+	fn build_with_tier_store_internal(
+		&self, node_entropy: NodeEntropy, primary_store: Arc<DynStore>,
+	) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
+			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(&logger)))
+		} else {
+			Arc::new(Runtime::new(Arc::clone(&logger)).map_err(|e| {
+				log_error!(logger, "Failed to setup tokio runtime: {}", e);
+				BuildError::RuntimeSetupFailed
+			})?)
+		};
+
+		let ts_config = self.tier_store_config.as_ref();
+
+		let mut tier_store =
+			TierStore::new(primary_store, Arc::clone(&runtime), Arc::clone(&logger));
+
+		if let Some(config) = ts_config {
+			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
+			config.backup.as_ref().map(|s| tier_store.set_backup_store(Arc::clone(s)));
+		}
+
+		let seed_bytes = node_entropy.to_seed_bytes();
+		let config = Arc::new(self.config.clone());
+
+		build_with_store_internal(
+			config,
+			self.chain_data_source_config.as_ref(),
+			self.gossip_source_config.as_ref(),
+			self.liquidity_source_config.as_ref(),
+			self.pathfinding_scores_sync_config.as_ref(),
+			self.async_payments_role,
+			self.recovery_mode,
+			seed_bytes,
+			runtime,
+			logger,
+			Arc::new(DynStoreWrapper(tier_store)),
+		)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
@@ -942,6 +1089,36 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_wallet_recovery_mode();
 	}
 
+	/// Configures the backup store for local disaster recovery.
+	///
+	/// When building with [`build_with_tier_store`], this store receives asynchronous copies
+	/// of all critical data written to the primary store. If the primary store becomes
+	/// unavailable, reads will fall back to this backup store.
+	///
+	/// Backup writes are non-blocking and do not affect primary store operation performance.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_backup(&self, backup_store: Arc<FfiDynStore>) {
+		let store: Arc<DynStore> =
+			Arc::<DynStoreWrapper<FfiDynStore>>::new((*backup_store).clone().into());
+		self.inner.write().unwrap().set_tier_store_backup(store);
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with [`build_with_tier_store`], this store is used for data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	///
+	/// [`build_with_tier_store`]: Self::build_with_tier_store
+	pub fn set_tier_store_ephemeral(&self, ephemeral_store: Arc<FfiDynStore>) {
+		let store: Arc<DynStore> =
+			Arc::<DynStoreWrapper<FfiDynStore>>::new((*ephemeral_store).clone().into());
+		self.inner.write().unwrap().set_tier_store_ephemeral(store);
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
@@ -1037,6 +1214,24 @@ impl ArcedNodeBuilder {
 				store_id,
 				header_provider,
 			)
+			.map(Arc::new)
+	}
+
+	// pub fn build_with_tier_store(
+	// 	&self, node_entropy: Arc<NodeEntropy>, primary_store: Arc<DynStore>,
+	// ) -> Result<Arc<Node>, BuildError> {
+	// 	self.inner.read().unwrap().build_with_tier_store(*node_entropy, primary_store).map(Arc::new)
+	// }
+
+	pub fn build_with_tier_store(
+		&self, node_entropy: Arc<NodeEntropy>, primary_store: Arc<FfiDynStore>,
+	) -> Result<Arc<Node>, BuildError> {
+		let store: Arc<DynStore> =
+			Arc::<DynStoreWrapper<FfiDynStore>>::new((*primary_store).clone().into());
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_tier_store_internal(*node_entropy, store)
 			.map(Arc::new)
 	}
 

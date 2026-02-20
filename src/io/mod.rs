@@ -10,6 +10,7 @@
 pub mod sqlite_store;
 #[cfg(test)]
 pub(crate) mod test_utils;
+pub(crate) mod tier_store;
 pub(crate) mod utils;
 pub mod vss_store;
 

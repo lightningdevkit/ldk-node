@@ -53,7 +53,7 @@ where
 {
 }
 
-pub(crate) trait DynStoreTrait: Send + Sync {
+pub trait DynStoreTrait: Send + Sync {
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>>;
@@ -133,9 +133,11 @@ impl<'a> KVStoreSync for dyn DynStoreTrait + 'a {
 	}
 }
 
-pub(crate) type DynStore = dyn DynStoreTrait;
+/// Type alias for any store that implements DynStoreTrait.
+pub type DynStore = dyn DynStoreTrait;
 
-pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub(crate) T);
+/// A wrapper that allows using any [`SyncAndAsyncKVStore`] implementor as a trait object.
+pub struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub T);
 
 impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 	fn read_async(
