@@ -1,3 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+	"ldk-server/ldk-server",
+	"ldk-server/ldk-server-cli",
+	"ldk-server/ldk-server-client",
+	"ldk-server/ldk-server-protos",
+]
+
 [package]
 name = "ldk-node"
 version = "0.8.0+git"
@@ -109,6 +118,18 @@ uniffi = { version = "0.28.3", features = ["build"], optional = true }
 
 [profile.release]
 panic = "abort"
+
+[profile.release.package.ldk-server]
+opt-level = 3
+
+[profile.release.package.ldk-server-cli]
+opt-level = 3
+
+[profile.release.package.ldk-server-client]
+opt-level = 3
+
+[profile.release.package.ldk-server-protos]
+opt-level = 3
 
 [profile.dev]
 panic = "abort"

@@ -1,0 +1,43 @@
+name: CI Checks - LDK Server
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        platform: [
+          ubuntu-latest,
+          macos-latest,
+        ]
+        toolchain: [
+          stable,
+          beta,
+          1.85.0, # MSRV, same as ldk-node
+        ]
+        include:
+          - toolchain: 1.85.0
+            msrv: true
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+      - name: Install Rust ${{ matrix.toolchain }} toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
+          if [ "${{ matrix.msrv }}" = "true" ]; then rustup component add clippy; fi
+      - name: Build ldk-server crates on Rust ${{ matrix.toolchain }}
+        run: cargo build -p ldk-server -p ldk-server-cli -p ldk-server-client -p ldk-server-protos --verbose --color always
+      - name: Check clippy on ldk-server if on msrv
+        if: matrix.msrv
+        run: cargo clippy -p ldk-server --all-features -- -D warnings
+      - name: Test ldk-server crates on Rust ${{ matrix.toolchain }}
+        run: cargo test -p ldk-server -p ldk-server-cli -p ldk-server-client -p ldk-server-protos
+      - name: Cargo check release on Rust ${{ matrix.toolchain }}
+        run: cargo check --release -p ldk-server -p ldk-server-cli -p ldk-server-client -p ldk-server-protos
+      - name: Cargo check doc on Rust ${{ matrix.toolchain }}
+        run: cargo doc --release -p ldk-server -p ldk-server-cli -p ldk-server-client -p ldk-server-protos
