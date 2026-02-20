@@ -146,6 +146,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
+use lightning::sign::EntropySource;
 use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
@@ -157,7 +158,6 @@ use payment::{
 	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
-use rand::Rng;
 use runtime::Runtime;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
@@ -574,6 +574,7 @@ impl Node {
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
+			Arc::clone(&self.keys_manager),
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
@@ -889,6 +890,7 @@ impl Node {
 	pub fn bolt12_payment(&self) -> Bolt12Payment {
 		Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
@@ -904,6 +906,7 @@ impl Node {
 	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
 		Arc::new(Bolt12Payment::new(
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
@@ -1127,7 +1130,9 @@ impl Node {
 		}
 
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
-		let user_channel_id: u128 = rand::rng().random();
+		let user_channel_id: u128 = u128::from_ne_bytes(
+			self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
+		);
 
 		match self.channel_manager.create_channel(
 			peer_info.node_id,
