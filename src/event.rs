@@ -22,6 +22,7 @@ use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
+use lightning::sign::EntropySource;
 use lightning::util::config::{
 	ChannelConfigOverrides, ChannelConfigUpdate, ChannelHandshakeConfigUpdate,
 };
@@ -30,7 +31,6 @@ use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
-use rand::{rng, Rng};
 
 use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
@@ -48,6 +48,7 @@ use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::runtime::Runtime;
+use crate::types::KeysManager;
 use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -488,6 +489,7 @@ where
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
+	keys_manager: Arc<KeysManager>,
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
@@ -507,9 +509,9 @@ where
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
-		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
-		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
-		config: Arc<Config>,
+		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
+		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
+		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -522,6 +524,7 @@ where
 			liquidity_source,
 			payment_store,
 			peer_store,
+			keys_manager,
 			logger,
 			runtime,
 			config,
@@ -1218,7 +1221,9 @@ where
 					}
 				}
 
-				let user_channel_id: u128 = rng().random();
+				let user_channel_id: u128 = u128::from_ne_bytes(
+					self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
+				);
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
 				if let Some((lsp_node_id, _)) = self
