@@ -33,9 +33,6 @@ use bitcoin::{
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BestBlock, ClaimId, Listen};
-use lightning::events::bump_transaction::{
-	CoinSelection, CoinSelectionSource, Input, Utxo, WalletSource,
-};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
@@ -46,6 +43,9 @@ use lightning::sign::{
 	PeerStorageKey, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 use lightning::util::message_signing;
+use lightning::util::wallet_utils::{
+	CoinSelection, CoinSelectionSource, Input, Utxo, WalletSource,
+};
 use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
