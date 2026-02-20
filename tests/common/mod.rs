@@ -98,6 +98,34 @@ macro_rules! expect_channel_ready_event {
 
 pub(crate) use expect_channel_ready_event;
 
+macro_rules! expect_channel_ready_events {
+	($node:expr, $counterparty_node_id_a:expr, $counterparty_node_id_b:expr) => {{
+		let mut ids = Vec::new();
+		for _ in 0..2 {
+			match $node.next_event_async().await {
+				ref e @ Event::ChannelReady { counterparty_node_id, .. } => {
+					println!("{} got event {:?}", $node.node_id(), e);
+					ids.push(counterparty_node_id);
+					$node.event_handled().unwrap();
+				},
+				ref e => {
+					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
+				},
+			}
+		}
+		assert!(
+			ids.contains(&Some($counterparty_node_id_a))
+				&& ids.contains(&Some($counterparty_node_id_b)),
+			"Expected ChannelReady events from {:?} and {:?}, but got {:?}",
+			$counterparty_node_id_a,
+			$counterparty_node_id_b,
+			ids
+		);
+	}};
+}
+
+pub(crate) use expect_channel_ready_events;
+
 macro_rules! expect_splice_pending_event {
 	($node:expr, $counterparty_node_id:expr) => {{
 		match $node.next_event_async().await {
