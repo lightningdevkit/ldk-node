@@ -13,6 +13,7 @@ dictionary Config {
 	u64 probing_liquidity_limit_multiplier;
 	AnchorChannelsConfig? anchor_channels_config;
 	RouteParametersConfig? route_parameters;
+	ForwardedPaymentTrackingMode forwarded_payment_tracking_mode;
 };
 
 dictionary AnchorChannelsConfig {
@@ -190,6 +191,12 @@ interface Node {
 	void remove_payment([ByRef]PaymentId payment_id);
 	BalanceDetails list_balances();
 	sequence<PaymentDetails> list_payments();
+	ForwardedPaymentDetails? forwarded_payment([ByRef]ForwardedPaymentId forwarded_payment_id);
+	sequence<ForwardedPaymentDetails> list_forwarded_payments();
+	ForwardedPaymentTrackingMode forwarded_payment_tracking_mode();
+	ChannelForwardingStats? channel_forwarding_stats([ByRef]ChannelId channel_id);
+	sequence<ChannelForwardingStats> list_channel_forwarding_stats();
+	sequence<ChannelPairForwardingStats> list_channel_pair_forwarding_stats();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
 	NetworkGraph network_graph();
@@ -489,6 +496,12 @@ enum PaymentStatus {
 	"Failed",
 };
 
+[Enum]
+interface ForwardedPaymentTrackingMode {
+	Detailed(u64 retention_minutes);
+	Stats();
+};
+
 dictionary LSPFeeLimits {
 	u64? max_total_opening_fee_msat;
 	u64? max_proportional_opening_fee_ppm_msat;
@@ -508,6 +521,55 @@ dictionary PaymentDetails {
 	PaymentDirection direction;
 	PaymentStatus status;
 	u64 latest_update_timestamp;
+};
+
+dictionary ForwardedPaymentDetails {
+	ForwardedPaymentId id;
+	ChannelId prev_channel_id;
+	ChannelId next_channel_id;
+	UserChannelId? prev_user_channel_id;
+	UserChannelId? next_user_channel_id;
+	PublicKey? prev_node_id;
+	PublicKey? next_node_id;
+	u64? total_fee_earned_msat;
+	u64? skimmed_fee_msat;
+	boolean claim_from_onchain_tx;
+	u64? outbound_amount_forwarded_msat;
+	u64 forwarded_at_timestamp;
+};
+
+dictionary ChannelForwardingStats {
+	ChannelId channel_id;
+	PublicKey? counterparty_node_id;
+	u64 inbound_payments_forwarded;
+	u64 outbound_payments_forwarded;
+	u64 total_inbound_amount_msat;
+	u64 total_outbound_amount_msat;
+	u64 total_fee_earned_msat;
+	u64 total_skimmed_fee_msat;
+	u64 onchain_claims_count;
+	u64 first_forwarded_at_timestamp;
+	u64 last_forwarded_at_timestamp;
+};
+
+dictionary ChannelPairForwardingStats {
+	ChannelPairStatsId id;
+	ChannelId prev_channel_id;
+	ChannelId next_channel_id;
+	u64 bucket_start_timestamp;
+	PublicKey? prev_node_id;
+	PublicKey? next_node_id;
+	u64 payment_count;
+	u64 total_inbound_amount_msat;
+	u64 total_outbound_amount_msat;
+	u64 total_fee_earned_msat;
+	u64 total_skimmed_fee_msat;
+	u64 onchain_claims_count;
+	u64 avg_fee_msat;
+	u64 avg_inbound_amount_msat;
+	u64 first_forwarded_at_timestamp;
+	u64 last_forwarded_at_timestamp;
+	u64 aggregated_at_timestamp;
 };
 
 dictionary RouteParametersConfig {
@@ -898,6 +960,9 @@ typedef string OfferId;
 typedef string PaymentId;
 
 [Custom]
+typedef string ForwardedPaymentId;
+
+[Custom]
 typedef string PaymentHash;
 
 [Custom]
@@ -908,6 +973,9 @@ typedef string PaymentSecret;
 
 [Custom]
 typedef string ChannelId;
+
+[Custom]
+typedef string ChannelPairStatsId;
 
 [Custom]
 typedef string UserChannelId;

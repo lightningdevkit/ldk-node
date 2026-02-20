@@ -124,7 +124,8 @@ pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	ForwardedPaymentTrackingMode, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 pub use error::Error as NodeError;
@@ -145,6 +146,7 @@ use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelS
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
@@ -152,15 +154,18 @@ use liquidity::{LSPS1Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use payment::store::{aggregate_expired_forwarded_payments, ChannelPairStatsId};
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedPayment,
+	Bolt11Payment, Bolt12Payment, ChannelForwardingStats, ChannelPairForwardingStats,
+	ForwardedPaymentDetails, ForwardedPaymentId, OnchainPayment, PaymentDetails,
+	SpontaneousPayment, UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
 use runtime::Runtime;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelForwardingStatsStore,
+	ChannelManager, ChannelPairForwardingStatsStore, DynStore, ForwardedPaymentStore, Graph,
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
@@ -222,6 +227,9 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	forwarded_payment_store: Arc<ForwardedPaymentStore>,
+	channel_forwarding_stats_store: Arc<ChannelForwardingStatsStore>,
+	channel_pair_forwarding_stats_store: Arc<ChannelPairForwardingStatsStore>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -263,6 +271,33 @@ impl Node {
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
 		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
+
+		// Check for expired forwarded payments and aggregate them on startup
+		if let ForwardedPaymentTrackingMode::Detailed { retention_minutes } =
+			self.config.forwarded_payment_tracking_mode
+		{
+			if retention_minutes > 0 {
+				log_info!(self.logger, "Checking for expired forwarded payments...");
+				match aggregate_expired_forwarded_payments(
+					&self.forwarded_payment_store,
+					&self.channel_pair_forwarding_stats_store,
+					retention_minutes,
+					&self.logger,
+				) {
+					Ok((pair_count, payment_count)) => {
+						if pair_count > 0 {
+							log_info!(
+								self.logger,
+								"Aggregated {payment_count} payments into {pair_count} channel pairs"
+							);
+						} else {
+							log_info!(self.logger, "No expired forwarded payments to aggregate");
+						}
+					},
+					Err(e) => log_error!(self.logger, "Startup aggregation failed: {e}"),
+				}
+			}
+		}
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -549,6 +584,54 @@ impl Node {
 			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
 		});
 
+		// Spawn background task for periodic forwarded payment aggregation
+		if let ForwardedPaymentTrackingMode::Detailed { retention_minutes } =
+			self.config.forwarded_payment_tracking_mode
+		{
+			if retention_minutes > 0 {
+				let stop_aggregation = self.stop_sender.subscribe();
+				let forwarded_payment_store = Arc::clone(&self.forwarded_payment_store);
+				let channel_pair_stats_store =
+					Arc::clone(&self.channel_pair_forwarding_stats_store);
+				let logger = Arc::clone(&self.logger);
+
+				self.runtime.spawn_cancellable_background_task(async move {
+					let mut interval_ticker =
+						tokio::time::interval(Duration::from_secs(retention_minutes * 60));
+					interval_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+					let mut stop_aggregation = stop_aggregation;
+					loop {
+						tokio::select! {
+							_ = stop_aggregation.changed() => {
+								log_trace!(logger, "Stopping forwarded payment aggregation task");
+								break;
+							}
+							_ = interval_ticker.tick() => {
+								log_trace!(logger, "Running periodic forwarded payment aggregation");
+								match aggregate_expired_forwarded_payments(
+									&forwarded_payment_store,
+									&channel_pair_stats_store,
+									retention_minutes,
+									&logger,
+								) {
+									Ok((pair_count, payment_count)) if pair_count > 0 => {
+										log_debug!(
+											logger,
+											"Aggregated {} payments into {} channel pairs",
+											payment_count,
+											pair_count
+										);
+									},
+									Err(e) => log_error!(logger, "Periodic aggregation failed: {}", e),
+									_ => {},
+								}
+							}
+						}
+					}
+				});
+			}
+		}
+
 		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 			Arc::clone(&self.tx_broadcaster),
 			Arc::new(LdkWallet::new(Arc::clone(&self.wallet), Arc::clone(&self.logger))),
@@ -573,6 +656,8 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.forwarded_payment_store),
+			Arc::clone(&self.channel_forwarding_stats_store),
 			Arc::clone(&self.peer_store),
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
@@ -1214,7 +1299,7 @@ impl Node {
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1249,7 +1334,7 @@ impl Node {
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
-	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
@@ -1454,7 +1539,7 @@ impl Node {
 	/// However, if background syncing is disabled (i.e., `background_sync_config` is set to `None`),
 	/// this method must be called manually to keep wallets in sync with the chain state.
 	///
-	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
+	/// [`EsploraSyncConfig::background_sync_config`]: config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -1510,7 +1595,7 @@ impl Node {
 	/// counterparty to broadcast for us (see [`AnchorChannelsConfig::trusted_peers_no_reserve`]
 	/// for more information).
 	///
-	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
+	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`]: config::AnchorChannelsConfig::trusted_peers_no_reserve
 	pub fn force_close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		reason: Option<String>,
@@ -1674,6 +1759,171 @@ impl Node {
 	/// Retrieves all payments.
 	pub fn list_payments(&self) -> Vec<PaymentDetails> {
 		self.payment_store.list_filter(|_| true)
+	}
+
+	/// Retrieve the details of a specific forwarded payment with the given id.
+	///
+	/// **Note:** the identifier is a randomly generated id and not the payment hash or any other
+	/// identifier tied to the payment itself.
+	///
+	/// **Note:** Individual forwarded payment records are only stored in
+	/// [`ForwardedPaymentTrackingMode::Detailed`] mode. In [`ForwardedPaymentTrackingMode::Stats`]
+	/// mode, this will return an empty vector since individual payment records are not stored.
+	/// In `Detailed` mode, payments are only stored until they are aggregated into statistics
+	/// based on the configured retention period.
+	///
+	/// Returns `Some` if the forwarded payment was known and `None` otherwise.
+	pub fn forwarded_payment(
+		&self, forwarded_payment_id: &ForwardedPaymentId,
+	) -> Option<ForwardedPaymentDetails> {
+		self.forwarded_payment_store.get(forwarded_payment_id)
+	}
+
+	/// Retrieves all forwarded payments that match the given predicate.
+	///
+	/// **Note:** Individual forwarded payment records are only stored in
+	/// [`ForwardedPaymentTrackingMode::Detailed`] mode. In [`ForwardedPaymentTrackingMode::Stats`]
+	/// mode, this will return an empty vector. In `Detailed` mode, payments are only stored until
+	/// they are aggregated into statistics based on the configured retention period.
+	///
+	/// For example, to list all forwarded payments that earned at least 1000 msat in fees:
+	/// ```ignore
+	/// node.list_forwarded_payments_with_filter(|p| {
+	///     p.total_fee_earned_msat.unwrap_or(0) >= 1000
+	/// });
+	/// ```
+	///
+	/// [`ForwardedPaymentTrackingMode::Detailed`]: ForwardedPaymentTrackingMode::Detailed
+	/// [`ForwardedPaymentTrackingMode::Stats`]: ForwardedPaymentTrackingMode::Stats
+	pub fn list_forwarded_payments_with_filter<F: FnMut(&&ForwardedPaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<ForwardedPaymentDetails> {
+		self.forwarded_payment_store.list_filter(f)
+	}
+
+	/// Retrieves all forwarded payments.
+	///
+	/// **Note:** Individual forwarded payment records are only stored in
+	/// [`ForwardedPaymentTrackingMode::Detailed`] mode. In [`ForwardedPaymentTrackingMode::Stats`]
+	/// mode, this will return an empty vector since individual payment records are not stored.
+	/// In `Detailed` mode, payments are only stored until they are aggregated into statistics
+	/// based on the configured retention period.
+	///
+	/// [`ForwardedPaymentTrackingMode::Detailed`]: ForwardedPaymentTrackingMode::Detailed
+	/// [`ForwardedPaymentTrackingMode::Stats`]: ForwardedPaymentTrackingMode::Stats
+	pub fn list_forwarded_payments(&self) -> Vec<ForwardedPaymentDetails> {
+		self.forwarded_payment_store.list_filter(|_| true)
+	}
+
+	/// Returns the configured forwarded payment tracking mode.
+	pub fn forwarded_payment_tracking_mode(&self) -> ForwardedPaymentTrackingMode {
+		self.config.forwarded_payment_tracking_mode
+	}
+
+	/// Retrieve the forwarding statistics for a specific channel.
+	///
+	/// Returns `Some` if statistics exist for the given channel and `None` otherwise.
+	pub fn channel_forwarding_stats(
+		&self, channel_id: &ChannelId,
+	) -> Option<ChannelForwardingStats> {
+		self.channel_forwarding_stats_store.get(channel_id)
+	}
+
+	/// Retrieves all channel forwarding statistics.
+	pub fn list_channel_forwarding_stats(&self) -> Vec<ChannelForwardingStats> {
+		self.channel_forwarding_stats_store.list_filter(|_| true)
+	}
+
+	/// Retrieves all channel forwarding statistics that match the given predicate.
+	///
+	/// For example, to list stats for all channels that have earned at least 10000 msat in fees:
+	/// ```ignore
+	/// node.list_channel_forwarding_stats_with_filter(|s| {
+	///     s.total_fee_earned_msat >= 10000
+	/// });
+	/// ```
+	pub fn list_channel_forwarding_stats_with_filter<F: FnMut(&&ChannelForwardingStats) -> bool>(
+		&self, f: F,
+	) -> Vec<ChannelForwardingStats> {
+		self.channel_forwarding_stats_store.list_filter(f)
+	}
+
+	/// Retrieves all aggregated channel pair forwarding statistics.
+	///
+	/// Returns statistics for forwarded payments that have been aggregated by channel pair.
+	/// These are created when individual forwarded payments expire based on the retention
+	/// period configured in [`ForwardedPaymentTrackingMode::Detailed`].
+	///
+	/// **Note:** Channel pair statistics are only created in `Detailed` mode. In
+	/// [`ForwardedPaymentTrackingMode::Stats`] mode, this will return an empty vector since
+	/// individual payments are not tracked or aggregated by channel pair in that mode.
+	///
+	/// [`ForwardedPaymentTrackingMode::Detailed`]: ForwardedPaymentTrackingMode::Detailed
+	/// [`ForwardedPaymentTrackingMode::Stats`]: ForwardedPaymentTrackingMode::Stats
+	pub fn list_channel_pair_forwarding_stats(&self) -> Vec<ChannelPairForwardingStats> {
+		self.channel_pair_forwarding_stats_store.list_filter(|_| true)
+	}
+
+	/// Retrieves all channel pair forwarding statistics that match the given predicate.
+	///
+	/// **Note:** Channel pair statistics are only created in [`ForwardedPaymentTrackingMode::Detailed`]
+	/// mode when individual payments are aggregated based on the retention period. In
+	/// [`ForwardedPaymentTrackingMode::Stats`] mode, this will return an empty vector since
+	/// individual payments are not tracked or aggregated by channel pair in that mode.
+	///
+	/// For example, to list stats for all channel pairs that have earned at least 50000 msat in fees:
+	/// ```ignore
+	/// node.list_channel_pair_forwarding_stats_with_filter(|s| {
+	///     s.total_fee_earned_msat >= 50000
+	/// });
+	/// ```
+	///
+	/// [`ForwardedPaymentTrackingMode::Detailed`]: ForwardedPaymentTrackingMode::Detailed
+	/// [`ForwardedPaymentTrackingMode::Stats`]: ForwardedPaymentTrackingMode::Stats
+	pub fn list_channel_pair_forwarding_stats_with_filter<
+		F: FnMut(&&ChannelPairForwardingStats) -> bool,
+	>(
+		&self, f: F,
+	) -> Vec<ChannelPairForwardingStats> {
+		self.channel_pair_forwarding_stats_store.list_filter(f)
+	}
+
+	/// Retrieves channel pair forwarding statistics within a specific time range.
+	///
+	/// Returns all bucket entries where `bucket_start_timestamp` falls within `[start_timestamp, end_timestamp)`.
+	///
+	/// Will only be available if [`Node::forwarded_payment_tracking_mode`] returns
+	/// [`ForwardedPaymentTrackingMode::Detailed`], otherwise an empty [`Vec`] will be returned.
+	///
+	/// [`ForwardedPaymentTrackingMode::Detailed`]: ForwardedPaymentTrackingMode::Detailed
+	pub fn list_channel_pair_forwarding_stats_in_range(
+		&self, start_timestamp: u64, end_timestamp: u64,
+	) -> Vec<ChannelPairForwardingStats> {
+		self.channel_pair_forwarding_stats_store.list_filter(|stats| {
+			stats.bucket_start_timestamp >= start_timestamp
+				&& stats.bucket_start_timestamp < end_timestamp
+		})
+	}
+
+	/// Retrieves all forwarding statistics buckets for a specific channel pair.
+	///
+	/// Returns all time buckets for the given inbound→outbound channel pair,
+	/// ordered by bucket timestamp.
+	///
+	/// Will only be available if [`Node::forwarded_payment_tracking_mode`] returns
+	/// [`ForwardedPaymentTrackingMode::Detailed`], otherwise an empty [`Vec`] will be returned.
+	///
+	/// [`ForwardedPaymentTrackingMode::Detailed`]: ForwardedPaymentTrackingMode::Detailed
+	pub fn list_channel_pair_forwarding_stats_for_pair(
+		&self, prev_channel_id: ChannelId, next_channel_id: ChannelId,
+	) -> Vec<ChannelPairForwardingStats> {
+		let mut results = self.channel_pair_forwarding_stats_store.list_filter(|stats| {
+			stats.prev_channel_id == prev_channel_id && stats.next_channel_id == next_channel_id
+		});
+
+		// Sort by bucket timestamp for chronological ordering
+		results.sort_by_key(|stats| stats.bucket_start_timestamp);
+		results
 	}
 
 	/// Retrieves a list of known peers.
@@ -1861,4 +2111,272 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
+}
+
+/// Aggregates multiple channel pair statistics buckets into cumulative totals.
+///
+/// This is useful for calculating cumulative statistics across multiple time buckets.
+/// All buckets must be for the same channel pair (prev_channel_id, next_channel_id).
+///
+/// # Arguments
+/// * `buckets` - Slice of statistics buckets to aggregate (must all be for same channel pair)
+///
+/// # Returns
+/// A single [`ChannelPairForwardingStats`] with:
+/// - Summed payment counts, amounts, and fees
+/// - Earliest `first_forwarded_at_timestamp` and latest `last_forwarded_at_timestamp`
+/// - Recalculated averages based on total payment count
+/// - `bucket_start_timestamp` set to the earliest bucket's timestamp
+/// - `aggregated_at_timestamp` set to current time
+///
+/// # Panics
+/// Panics if buckets is empty or if buckets contain different channel pairs.
+pub fn aggregate_channel_pair_stats(
+	buckets: &[ChannelPairForwardingStats],
+) -> ChannelPairForwardingStats {
+	assert!(!buckets.is_empty(), "Cannot aggregate empty bucket list");
+
+	// Verify all buckets are for the same channel pair
+	let first = &buckets[0];
+	for bucket in &buckets[1..] {
+		assert_eq!(
+			bucket.prev_channel_id, first.prev_channel_id,
+			"All buckets must have the same prev_channel_id"
+		);
+		assert_eq!(
+			bucket.next_channel_id, first.next_channel_id,
+			"All buckets must have the same next_channel_id"
+		);
+	}
+
+	// Aggregate values
+	let mut payment_count = 0u64;
+	let mut total_inbound_amount_msat = 0u64;
+	let mut total_outbound_amount_msat = 0u64;
+	let mut total_fee_earned_msat = 0u64;
+	let mut total_skimmed_fee_msat = 0u64;
+	let mut onchain_claims_count = 0u64;
+	let mut first_forwarded_at_timestamp = u64::MAX;
+	let mut last_forwarded_at_timestamp = 0u64;
+	let mut earliest_bucket_start = u64::MAX;
+
+	for bucket in buckets {
+		payment_count += bucket.payment_count;
+		total_inbound_amount_msat += bucket.total_inbound_amount_msat;
+		total_outbound_amount_msat += bucket.total_outbound_amount_msat;
+		total_fee_earned_msat += bucket.total_fee_earned_msat;
+		total_skimmed_fee_msat += bucket.total_skimmed_fee_msat;
+		onchain_claims_count += bucket.onchain_claims_count;
+		first_forwarded_at_timestamp =
+			first_forwarded_at_timestamp.min(bucket.first_forwarded_at_timestamp);
+		last_forwarded_at_timestamp =
+			last_forwarded_at_timestamp.max(bucket.last_forwarded_at_timestamp);
+		earliest_bucket_start = earliest_bucket_start.min(bucket.bucket_start_timestamp);
+	}
+
+	// Calculate averages
+	let avg_fee_msat = if payment_count > 0 { total_fee_earned_msat / payment_count } else { 0 };
+	let avg_inbound_amount_msat =
+		if payment_count > 0 { total_inbound_amount_msat / payment_count } else { 0 };
+
+	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+	// Create aggregated ID using earliest bucket timestamp
+	let aggregated_id = ChannelPairStatsId::from_channel_pair_and_bucket(
+		&first.prev_channel_id,
+		&first.next_channel_id,
+		earliest_bucket_start,
+	);
+
+	ChannelPairForwardingStats {
+		id: aggregated_id,
+		prev_channel_id: first.prev_channel_id,
+		next_channel_id: first.next_channel_id,
+		bucket_start_timestamp: earliest_bucket_start,
+		prev_node_id: first.prev_node_id,
+		next_node_id: first.next_node_id,
+		payment_count,
+		total_inbound_amount_msat,
+		total_outbound_amount_msat,
+		total_fee_earned_msat,
+		total_skimmed_fee_msat,
+		onchain_claims_count,
+		avg_fee_msat,
+		avg_inbound_amount_msat,
+		first_forwarded_at_timestamp,
+		last_forwarded_at_timestamp,
+		aggregated_at_timestamp: now,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use lightning::ln::types::ChannelId;
+
+	#[test]
+	fn test_aggregate_channel_pair_stats() {
+		let prev_channel = ChannelId([1u8; 32]);
+		let next_channel = ChannelId([2u8; 32]);
+
+		// Create 3 buckets with different statistics
+		let bucket1 = ChannelPairForwardingStats {
+			id: ChannelPairStatsId::from_channel_pair_and_bucket(
+				&prev_channel,
+				&next_channel,
+				1738800000,
+			),
+			prev_channel_id: prev_channel,
+			next_channel_id: next_channel,
+			bucket_start_timestamp: 1738800000,
+			prev_node_id: None,
+			next_node_id: None,
+			payment_count: 10,
+			total_inbound_amount_msat: 110000,
+			total_outbound_amount_msat: 100000,
+			total_fee_earned_msat: 10000,
+			total_skimmed_fee_msat: 1000,
+			onchain_claims_count: 2,
+			avg_fee_msat: 1000,
+			avg_inbound_amount_msat: 11000,
+			first_forwarded_at_timestamp: 1738800000,
+			last_forwarded_at_timestamp: 1738801000,
+			aggregated_at_timestamp: 1738802000,
+		};
+
+		let bucket2 = ChannelPairForwardingStats {
+			id: ChannelPairStatsId::from_channel_pair_and_bucket(
+				&prev_channel,
+				&next_channel,
+				1738803600,
+			),
+			prev_channel_id: prev_channel,
+			next_channel_id: next_channel,
+			bucket_start_timestamp: 1738803600,
+			prev_node_id: None,
+			next_node_id: None,
+			payment_count: 5,
+			total_inbound_amount_msat: 55000,
+			total_outbound_amount_msat: 50000,
+			total_fee_earned_msat: 5000,
+			total_skimmed_fee_msat: 500,
+			onchain_claims_count: 1,
+			avg_fee_msat: 1000,
+			avg_inbound_amount_msat: 11000,
+			first_forwarded_at_timestamp: 1738803600,
+			last_forwarded_at_timestamp: 1738804000,
+			aggregated_at_timestamp: 1738805000,
+		};
+
+		let bucket3 = ChannelPairForwardingStats {
+			id: ChannelPairStatsId::from_channel_pair_and_bucket(
+				&prev_channel,
+				&next_channel,
+				1738807200,
+			),
+			prev_channel_id: prev_channel,
+			next_channel_id: next_channel,
+			bucket_start_timestamp: 1738807200,
+			prev_node_id: None,
+			next_node_id: None,
+			payment_count: 15,
+			total_inbound_amount_msat: 165000,
+			total_outbound_amount_msat: 150000,
+			total_fee_earned_msat: 15000,
+			total_skimmed_fee_msat: 1500,
+			onchain_claims_count: 3,
+			avg_fee_msat: 1000,
+			avg_inbound_amount_msat: 11000,
+			first_forwarded_at_timestamp: 1738807200,
+			last_forwarded_at_timestamp: 1738808000,
+			aggregated_at_timestamp: 1738809000,
+		};
+
+		// Aggregate the buckets
+		let buckets = vec![bucket1, bucket2, bucket3];
+		let aggregated = aggregate_channel_pair_stats(&buckets);
+
+		// Verify aggregated results
+		assert_eq!(aggregated.payment_count, 30); // 10 + 5 + 15
+		assert_eq!(aggregated.total_inbound_amount_msat, 330000); // 110000 + 55000 + 165000
+		assert_eq!(aggregated.total_outbound_amount_msat, 300000); // 100000 + 50000 + 150000
+		assert_eq!(aggregated.total_fee_earned_msat, 30000); // 10000 + 5000 + 15000
+		assert_eq!(aggregated.total_skimmed_fee_msat, 3000); // 1000 + 500 + 1500
+		assert_eq!(aggregated.onchain_claims_count, 6); // 2 + 1 + 3
+
+		// Verify averages are recalculated
+		assert_eq!(aggregated.avg_fee_msat, 1000); // 30000 / 30
+		assert_eq!(aggregated.avg_inbound_amount_msat, 11000); // 330000 / 30
+
+		// Verify timestamps
+		assert_eq!(aggregated.first_forwarded_at_timestamp, 1738800000); // Earliest
+		assert_eq!(aggregated.last_forwarded_at_timestamp, 1738808000); // Latest
+		assert_eq!(aggregated.bucket_start_timestamp, 1738800000); // Earliest bucket
+
+		// Verify channel pair is preserved
+		assert_eq!(aggregated.prev_channel_id, prev_channel);
+		assert_eq!(aggregated.next_channel_id, next_channel);
+	}
+
+	#[test]
+	#[should_panic(expected = "Cannot aggregate empty bucket list")]
+	fn test_aggregate_channel_pair_stats_empty() {
+		let buckets: Vec<ChannelPairForwardingStats> = vec![];
+		let _ = aggregate_channel_pair_stats(&buckets);
+	}
+
+	#[test]
+	#[should_panic(expected = "All buckets must have the same prev_channel_id")]
+	fn test_aggregate_channel_pair_stats_different_channels() {
+		let bucket1 = ChannelPairForwardingStats {
+			id: ChannelPairStatsId::from_channel_pair_and_bucket(
+				&ChannelId([1u8; 32]),
+				&ChannelId([2u8; 32]),
+				1738800000,
+			),
+			prev_channel_id: ChannelId([1u8; 32]),
+			next_channel_id: ChannelId([2u8; 32]),
+			bucket_start_timestamp: 1738800000,
+			prev_node_id: None,
+			next_node_id: None,
+			payment_count: 10,
+			total_inbound_amount_msat: 110000,
+			total_outbound_amount_msat: 100000,
+			total_fee_earned_msat: 10000,
+			total_skimmed_fee_msat: 1000,
+			onchain_claims_count: 2,
+			avg_fee_msat: 1000,
+			avg_inbound_amount_msat: 11000,
+			first_forwarded_at_timestamp: 1738800000,
+			last_forwarded_at_timestamp: 1738801000,
+			aggregated_at_timestamp: 1738802000,
+		};
+
+		let bucket2 = ChannelPairForwardingStats {
+			id: ChannelPairStatsId::from_channel_pair_and_bucket(
+				&ChannelId([99u8; 32]), // Different channel!
+				&ChannelId([2u8; 32]),
+				1738803600,
+			),
+			prev_channel_id: ChannelId([99u8; 32]), // Different channel!
+			next_channel_id: ChannelId([2u8; 32]),
+			bucket_start_timestamp: 1738803600,
+			prev_node_id: None,
+			next_node_id: None,
+			payment_count: 5,
+			total_inbound_amount_msat: 55000,
+			total_outbound_amount_msat: 50000,
+			total_fee_earned_msat: 5000,
+			total_skimmed_fee_msat: 500,
+			onchain_claims_count: 1,
+			avg_fee_msat: 1000,
+			avg_inbound_amount_msat: 11000,
+			first_forwarded_at_timestamp: 1738803600,
+			last_forwarded_at_timestamp: 1738804000,
+			aggregated_at_timestamp: 1738805000,
+		};
+
+		let buckets = vec![bucket1, bucket2];
+		let _ = aggregate_channel_pair_stats(&buckets);
+	}
 }
