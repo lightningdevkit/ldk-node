@@ -18,11 +18,11 @@ use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarge
 use lightning::chain::{BestBlock, Listen};
 use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
-use lightning_block_sync::http::{HttpEndpoint, JsonResponse};
+use lightning_block_sync::http::{HttpClientError, JsonResponse};
 use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
 use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 use lightning_block_sync::rest::RestClient;
-use lightning_block_sync::rpc::{RpcClient, RpcError};
+use lightning_block_sync::rpc::{RpcClient, RpcClientError};
 use lightning_block_sync::{
 	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind, Cache,
 	SpvClient,
@@ -705,10 +705,10 @@ pub enum BitcoindClient {
 impl BitcoindClient {
 	/// Creates a new RPC API client for the chain interactions with Bitcoin Core.
 	pub(crate) fn new_rpc(host: String, port: u16, rpc_user: String, rpc_password: String) -> Self {
-		let http_endpoint = endpoint(host, port);
+		let url = base_url(host, port);
 		let rpc_credentials = rpc_credentials(rpc_user, rpc_password);
 
-		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, http_endpoint));
+		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, url));
 
 		let latest_mempool_timestamp = AtomicU64::new(0);
 
@@ -726,12 +726,12 @@ impl BitcoindClient {
 		rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16, rpc_user: String,
 		rpc_password: String,
 	) -> Self {
-		let rest_endpoint = endpoint(rest_host, rest_port).with_path("/rest".to_string());
-		let rest_client = Arc::new(RestClient::new(rest_endpoint));
+		let rest_url = format!("{}/rest", base_url(rest_host, rest_port));
+		let rest_client = Arc::new(RestClient::new(rest_url));
 
-		let rpc_endpoint = endpoint(rpc_host, rpc_port);
+		let rpc_url = base_url(rpc_host, rpc_port);
 		let rpc_credentials = rpc_credentials(rpc_user, rpc_password);
-		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, rpc_endpoint));
+		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, rpc_url));
 
 		let latest_mempool_timestamp = AtomicU64::new(0);
 
@@ -773,7 +773,10 @@ impl BitcoindClient {
 	) -> std::io::Result<Txid> {
 		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
 		let tx_json = serde_json::json!(tx_serialized);
-		rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
+		rpc_client
+			.call_method::<Txid>("sendrawtransaction", &[tx_json])
+			.await
+			.map_err(rpc_client_error_to_io)
 	}
 
 	/// Retrieve the fee estimate needed for a transaction to begin
@@ -815,6 +818,7 @@ impl BitcoindClient {
 				&[num_blocks_json, estimation_mode_json],
 			)
 			.await
+			.map_err(rpc_client_error_to_io)
 			.map(|resp| resp.0)
 	}
 
@@ -837,6 +841,7 @@ impl BitcoindClient {
 		rpc_client
 			.call_method::<MempoolMinFeeResponse>("getmempoolinfo", &[])
 			.await
+			.map_err(rpc_client_error_to_io)
 			.map(|resp| resp.0)
 	}
 
@@ -847,6 +852,7 @@ impl BitcoindClient {
 		rest_client
 			.request_resource::<JsonResponse, MempoolMinFeeResponse>("mempool/info.json")
 			.await
+			.map_err(http_client_error_to_io)
 			.map(|resp| resp.0)
 	}
 
@@ -875,30 +881,15 @@ impl BitcoindClient {
 			.await
 		{
 			Ok(resp) => Ok(Some(resp.0)),
-			Err(e) => match e.into_inner() {
-				Some(inner) => {
-					let rpc_error_res: Result<Box<RpcError>, _> = inner.downcast();
-
-					match rpc_error_res {
-						Ok(rpc_error) => {
-							// Check if it's the 'not found' error code.
-							if rpc_error.code == -5 {
-								Ok(None)
-							} else {
-								Err(std::io::Error::new(std::io::ErrorKind::Other, rpc_error))
-							}
-						},
-						Err(_) => Err(std::io::Error::new(
-							std::io::ErrorKind::Other,
-							"Failed to process getrawtransaction response",
-						)),
-					}
-				},
-				None => Err(std::io::Error::new(
-					std::io::ErrorKind::Other,
-					"Failed to process getrawtransaction response",
-				)),
+			Err(RpcClientError::Rpc(rpc_error)) => {
+				// Check if it's the 'not found' error code.
+				if rpc_error.code == -5 {
+					Ok(None)
+				} else {
+					Err(std::io::Error::new(std::io::ErrorKind::Other, rpc_error))
+				}
 			},
+			Err(e) => Err(rpc_client_error_to_io(e)),
 		}
 	}
 
@@ -913,44 +904,15 @@ impl BitcoindClient {
 			.await
 		{
 			Ok(resp) => Ok(Some(resp.0)),
-			Err(e) => match e.kind() {
-				std::io::ErrorKind::Other => {
-					match e.into_inner() {
-						Some(inner) => {
-							let http_error_res: Result<Box<HttpError>, _> = inner.downcast();
-							match http_error_res {
-								Ok(http_error) => {
-									// Check if it's the HTTP NOT_FOUND error code.
-									if &http_error.status_code == "404" {
-										Ok(None)
-									} else {
-										Err(std::io::Error::new(
-											std::io::ErrorKind::Other,
-											http_error,
-										))
-									}
-								},
-								Err(_) => {
-									let error_msg =
-										format!("Failed to process {} response.", tx_path);
-									Err(std::io::Error::new(
-										std::io::ErrorKind::Other,
-										error_msg.as_str(),
-									))
-								},
-							}
-						},
-						None => {
-							let error_msg = format!("Failed to process {} response.", tx_path);
-							Err(std::io::Error::new(std::io::ErrorKind::Other, error_msg.as_str()))
-						},
-					}
-				},
-				_ => {
-					let error_msg = format!("Failed to process {} response.", tx_path);
-					Err(std::io::Error::new(std::io::ErrorKind::Other, error_msg.as_str()))
-				},
+			Err(HttpClientError::Http(http_error)) => {
+				// Check if it's the HTTP NOT_FOUND error code.
+				if http_error.status_code == 404 {
+					Ok(None)
+				} else {
+					Err(std::io::Error::new(std::io::ErrorKind::Other, http_error))
+				}
 			},
+			Err(e) => Err(http_client_error_to_io(e)),
 		}
 	}
 
@@ -972,6 +934,7 @@ impl BitcoindClient {
 		rpc_client
 			.call_method::<GetRawMempoolResponse>("getrawmempool", &[verbose_flag_json])
 			.await
+			.map_err(rpc_client_error_to_io)
 			.map(|resp| resp.0)
 	}
 
@@ -982,6 +945,7 @@ impl BitcoindClient {
 				"mempool/contents.json?verbose=false",
 			)
 			.await
+			.map_err(http_client_error_to_io)
 			.map(|resp| resp.0)
 	}
 
@@ -1008,30 +972,15 @@ impl BitcoindClient {
 
 		match client.call_method::<GetMempoolEntryResponse>("getmempoolentry", &[txid_json]).await {
 			Ok(resp) => Ok(Some(MempoolEntry { txid, time: resp.time, height: resp.height })),
-			Err(e) => match e.into_inner() {
-				Some(inner) => {
-					let rpc_error_res: Result<Box<RpcError>, _> = inner.downcast();
-
-					match rpc_error_res {
-						Ok(rpc_error) => {
-							// Check if it's the 'not found' error code.
-							if rpc_error.code == -5 {
-								Ok(None)
-							} else {
-								Err(std::io::Error::new(std::io::ErrorKind::Other, rpc_error))
-							}
-						},
-						Err(_) => Err(std::io::Error::new(
-							std::io::ErrorKind::Other,
-							"Failed to process getmempoolentry response",
-						)),
-					}
-				},
-				None => Err(std::io::Error::new(
-					std::io::ErrorKind::Other,
-					"Failed to process getmempoolentry response",
-				)),
+			Err(RpcClientError::Rpc(rpc_error)) => {
+				// Check if it's the 'not found' error code.
+				if rpc_error.code == -5 {
+					Ok(None)
+				} else {
+					Err(std::io::Error::new(std::io::ErrorKind::Other, rpc_error))
+				}
 			},
+			Err(e) => Err(rpc_client_error_to_io(e)),
 		}
 	}
 
@@ -1275,17 +1224,13 @@ impl BlockSource for BitcoindClient {
 pub(crate) struct FeeResponse(pub FeeRate);
 
 impl TryInto<FeeResponse> for JsonResponse {
-	type Error = std::io::Error;
-	fn try_into(self) -> std::io::Result<FeeResponse> {
+	type Error = String;
+	fn try_into(self) -> Result<FeeResponse, String> {
 		if !self.0["errors"].is_null() {
-			return Err(std::io::Error::new(
-				std::io::ErrorKind::Other,
-				self.0["errors"].to_string(),
-			));
+			return Err(self.0["errors"].to_string());
 		}
-		let fee_rate_btc_per_kvbyte = self.0["feerate"]
-			.as_f64()
-			.ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Failed to parse fee rate"))?;
+		let fee_rate_btc_per_kvbyte =
+			self.0["feerate"].as_f64().ok_or("Failed to parse fee rate".to_string())?;
 		// Bitcoin Core gives us a feerate in BTC/KvB.
 		// Thus, we multiply by 25_000_000 (10^8 / 4) to get satoshis/kwu.
 		let fee_rate = {
@@ -1299,11 +1244,10 @@ impl TryInto<FeeResponse> for JsonResponse {
 pub(crate) struct MempoolMinFeeResponse(pub FeeRate);
 
 impl TryInto<MempoolMinFeeResponse> for JsonResponse {
-	type Error = std::io::Error;
-	fn try_into(self) -> std::io::Result<MempoolMinFeeResponse> {
-		let fee_rate_btc_per_kvbyte = self.0["mempoolminfee"]
-			.as_f64()
-			.ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Failed to parse fee rate"))?;
+	type Error = String;
+	fn try_into(self) -> Result<MempoolMinFeeResponse, String> {
+		let fee_rate_btc_per_kvbyte =
+			self.0["mempoolminfee"].as_f64().ok_or("Failed to parse fee rate".to_string())?;
 		// Bitcoin Core gives us a feerate in BTC/KvB.
 		// Thus, we multiply by 25_000_000 (10^8 / 4) to get satoshis/kwu.
 		let fee_rate = {
@@ -1317,22 +1261,15 @@ impl TryInto<MempoolMinFeeResponse> for JsonResponse {
 pub(crate) struct GetRawTransactionResponse(pub Transaction);
 
 impl TryInto<GetRawTransactionResponse> for JsonResponse {
-	type Error = std::io::Error;
-	fn try_into(self) -> std::io::Result<GetRawTransactionResponse> {
+	type Error = String;
+	fn try_into(self) -> Result<GetRawTransactionResponse, String> {
 		let tx = self
 			.0
 			.as_str()
-			.ok_or(std::io::Error::new(
-				std::io::ErrorKind::Other,
-				"Failed to parse getrawtransaction response",
-			))
+			.ok_or("Failed to parse getrawtransaction response".to_string())
 			.and_then(|s| {
-				bitcoin::consensus::encode::deserialize_hex(s).map_err(|_| {
-					std::io::Error::new(
-						std::io::ErrorKind::Other,
-						"Failed to parse getrawtransaction response",
-					)
-				})
+				bitcoin::consensus::encode::deserialize_hex(s)
+					.map_err(|_| "Failed to parse getrawtransaction response".to_string())
 			})?;
 
 		Ok(GetRawTransactionResponse(tx))
@@ -1342,12 +1279,9 @@ impl TryInto<GetRawTransactionResponse> for JsonResponse {
 pub struct GetRawMempoolResponse(Vec<Txid>);
 
 impl TryInto<GetRawMempoolResponse> for JsonResponse {
-	type Error = std::io::Error;
-	fn try_into(self) -> std::io::Result<GetRawMempoolResponse> {
-		let res = self.0.as_array().ok_or(std::io::Error::new(
-			std::io::ErrorKind::Other,
-			"Failed to parse getrawmempool response",
-		))?;
+	type Error = String;
+	fn try_into(self) -> Result<GetRawMempoolResponse, String> {
+		let res = self.0.as_array().ok_or("Failed to parse getrawmempool response".to_string())?;
 
 		let mut mempool_transactions = Vec::with_capacity(res.len());
 
@@ -1356,17 +1290,11 @@ impl TryInto<GetRawMempoolResponse> for JsonResponse {
 				match hex_str.parse::<Txid>() {
 					Ok(txid) => txid,
 					Err(_) => {
-						return Err(std::io::Error::new(
-							std::io::ErrorKind::Other,
-							"Failed to parse getrawmempool response",
-						));
+						return Err("Failed to parse getrawmempool response".to_string());
 					},
 				}
 			} else {
-				return Err(std::io::Error::new(
-					std::io::ErrorKind::Other,
-					"Failed to parse getrawmempool response",
-				));
+				return Err("Failed to parse getrawmempool response".to_string());
 			};
 
 			mempool_transactions.push(txid);
@@ -1382,30 +1310,22 @@ pub struct GetMempoolEntryResponse {
 }
 
 impl TryInto<GetMempoolEntryResponse> for JsonResponse {
-	type Error = std::io::Error;
-	fn try_into(self) -> std::io::Result<GetMempoolEntryResponse> {
-		let res = self.0.as_object().ok_or(std::io::Error::new(
-			std::io::ErrorKind::Other,
-			"Failed to parse getmempoolentry response",
-		))?;
+	type Error = String;
+	fn try_into(self) -> Result<GetMempoolEntryResponse, String> {
+		let res =
+			self.0.as_object().ok_or("Failed to parse getmempoolentry response".to_string())?;
 
 		let time = match res["time"].as_u64() {
 			Some(time) => time,
 			None => {
-				return Err(std::io::Error::new(
-					std::io::ErrorKind::Other,
-					"Failed to parse getmempoolentry response",
-				));
+				return Err("Failed to parse getmempoolentry response".to_string());
 			},
 		};
 
 		let height = match res["height"].as_u64().and_then(|h| h.try_into().ok()) {
 			Some(height) => height,
 			None => {
-				return Err(std::io::Error::new(
-					std::io::ErrorKind::Other,
-					"Failed to parse getmempoolentry response",
-				));
+				return Err("Failed to parse getmempoolentry response".to_string());
 			},
 		};
 
@@ -1506,22 +1426,27 @@ pub(crate) fn rpc_credentials(rpc_user: String, rpc_password: String) -> String 
 	BASE64_STANDARD.encode(format!("{}:{}", rpc_user, rpc_password))
 }
 
-pub(crate) fn endpoint(host: String, port: u16) -> HttpEndpoint {
-	HttpEndpoint::for_host(host).with_port(port)
+pub(crate) fn base_url(host: String, port: u16) -> String {
+	format!("http://{}:{}", host, port)
 }
 
-#[derive(Debug)]
-pub struct HttpError {
-	pub(crate) status_code: String,
-	pub(crate) contents: Vec<u8>,
+fn rpc_client_error_to_io(e: RpcClientError) -> std::io::Error {
+	match e {
+		RpcClientError::Rpc(rpc_error) => std::io::Error::new(std::io::ErrorKind::Other, rpc_error),
+		RpcClientError::Http(http_err) => http_client_error_to_io(http_err),
+		RpcClientError::InvalidData(msg) => {
+			std::io::Error::new(std::io::ErrorKind::InvalidData, msg)
+		},
+	}
 }
 
-impl std::error::Error for HttpError {}
-
-impl std::fmt::Display for HttpError {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		let contents = String::from_utf8_lossy(&self.contents);
-		write!(f, "status_code: {}, contents: {}", self.status_code, contents)
+fn http_client_error_to_io(e: HttpClientError) -> std::io::Error {
+	match e {
+		HttpClientError::Transport(err) => {
+			std::io::Error::new(std::io::ErrorKind::ConnectionRefused, err.to_string())
+		},
+		HttpClientError::Http(http_err) => std::io::Error::new(std::io::ErrorKind::Other, http_err),
+		HttpClientError::Parse(msg) => std::io::Error::new(std::io::ErrorKind::InvalidData, msg),
 	}
 }
 

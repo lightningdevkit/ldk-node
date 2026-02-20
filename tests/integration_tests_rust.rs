@@ -984,7 +984,7 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	let expected_splice_in_fee_sat = 252;
+	let expected_splice_in_fee_sat = 255;
 
 	let payments = node_b.list_payments();
 	let payment =
