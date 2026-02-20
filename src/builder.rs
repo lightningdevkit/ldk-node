@@ -68,6 +68,7 @@ use crate::io::{
 use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
 };
+use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
@@ -1765,6 +1766,8 @@ fn build_with_store_internal(
 		None
 	};
 
+	let lnurl_auth = Arc::new(LnurlAuth::new(&keys_manager, Arc::clone(&logger)));
+
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (background_processor_stop_sender, _) = tokio::sync::watch::channel(());
 	let is_running = Arc::new(RwLock::new(false));
@@ -1810,6 +1813,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		lnurl_auth,
 		is_running,
 		node_metrics,
 		om_mailbox,
