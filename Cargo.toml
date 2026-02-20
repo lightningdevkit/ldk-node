@@ -75,7 +75,7 @@ serde = { version = "1.0.210", default-features = false, features = ["std", "der
 serde_json = { version = "1.0.128", default-features = false, features = ["std"] }
 log = { version = "0.4.22", default-features = false, features = ["std"]}
 
-vss-client = { package = "vss-client-ng", version = "0.4" }
+vss-client = { package = "vss-client-ng", version = "0.5" }
 prost = { version = "0.11.6", default-features = false}
 #bitcoin-payment-instructions = { version = "0.6" }
 bitcoin-payment-instructions = { git = "https://github.com/tnull/bitcoin-payment-instructions", rev = "ea50a9d2a8da524b69a2af43233706666cf2ffa5" }

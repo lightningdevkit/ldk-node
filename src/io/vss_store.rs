@@ -822,8 +822,6 @@ impl RefUnwindSafe for VssStore {}
 pub enum VssStoreBuildError {
 	/// Key derivation failed
 	KeyDerivationFailed,
-	/// Authentication provider setup failed
-	AuthProviderSetupFailed,
 	/// Store setup failed
 	StoreSetupFailed,
 }
@@ -832,7 +830,6 @@ impl fmt::Display for VssStoreBuildError {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match *self {
 			Self::KeyDerivationFailed => write!(f, "Key derivation failed"),
-			Self::AuthProviderSetupFailed => write!(f, "Authentication provider setup failed"),
 			Self::StoreSetupFailed => write!(f, "Store setup failed"),
 		}
 	}
@@ -896,8 +893,7 @@ impl VssStoreBuilder {
 			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)?;
 
 		let lnurl_auth_jwt_provider =
-			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers)
-				.map_err(|_| VssStoreBuildError::AuthProviderSetupFailed)?;
+			LnurlAuthToJwtProvider::new(lnurl_auth_xprv, lnurl_auth_server_url, fixed_headers);
 
 		let header_provider = Arc::new(lnurl_auth_jwt_provider);
 
