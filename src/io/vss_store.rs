@@ -29,6 +29,7 @@ use prost::Message;
 use rand::RngCore;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
+use vss_client::headers::sigs_auth::SigsAuthProvider;
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
 use vss_client::types::{
 	DeleteObjectRequest, GetObjectRequest, KeyValue, ListKeyVersionsRequest, PutObjectRequest,
@@ -69,6 +70,7 @@ impl_writeable_tlv_based_enum!(VssSchemaVersion,
 
 const VSS_HARDENED_CHILD_INDEX: u32 = 877;
 const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
+const VSS_SIGS_AUTH_HARDENED_CHILD_INDEX: u32 = 139;
 const VSS_SCHEMA_VERSION_KEY: &str = "vss_schema_version";
 
 // We set this to a small number of threads that would still allow to make some progress if one
@@ -853,6 +855,44 @@ impl VssStoreBuilder {
 		Self { node_entropy, vss_url, store_id, network }
 	}
 
+	/// Builds a [`VssStore`] with the simple signature-based authentication scheme.
+	///
+	/// `fixed_headers` are included as it is in all the requests made to VSS and LNURL auth
+	/// server.
+	///
+	/// **Caution**: VSS support is in **alpha** and is considered experimental. Using VSS (or any
+	/// remote persistence) may cause LDK to panic if persistence failures are unrecoverable, i.e.,
+	/// if they remain unresolved after internal retries are exhausted.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	pub fn build_with_sigs_auth(
+		&self, fixed_headers: HashMap<String, String>,
+	) -> Result<VssStore, VssStoreBuildError> {
+		let secp_ctx = Secp256k1::new();
+		let seed_bytes = self.node_entropy.to_seed_bytes();
+		let vss_xprv = Xpriv::new_master(self.network, &seed_bytes)
+			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
+			.and_then(|master| {
+				master
+					.derive_priv(
+						&secp_ctx,
+						&[ChildNumber::Hardened { index: VSS_HARDENED_CHILD_INDEX }],
+					)
+					.map_err(|_| VssStoreBuildError::KeyDerivationFailed)
+			})?;
+
+		let sigs_auth_xprv = vss_xprv
+			.derive_priv(
+				&secp_ctx,
+				&[ChildNumber::Hardened { index: VSS_SIGS_AUTH_HARDENED_CHILD_INDEX }],
+			)
+			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)?;
+
+		let auth_provider = SigsAuthProvider::new(sigs_auth_xprv.private_key, fixed_headers);
+		self.build_with_header_provider(Arc::new(auth_provider))
+	}
+
 	/// Builds a [`VssStore`] with [LNURL-auth] based authentication scheme as default method for
 	/// authentication/authorization.
 	///
@@ -869,7 +909,7 @@ impl VssStoreBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
-	pub fn build(
+	pub fn build_with_lnurl(
 		&self, lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<VssStore, VssStoreBuildError> {
 		let secp_ctx = Secp256k1::new();
@@ -962,7 +1002,6 @@ mod tests {
 
 	use rand::distr::Alphanumeric;
 	use rand::{rng, Rng, RngCore};
-	use vss_client::headers::FixedHeaders;
 
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
@@ -972,11 +1011,13 @@ mod tests {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let mut vss_seed = [0u8; 32];
+		let mut vss_seed = [0u8; 64];
 		rng.fill_bytes(&mut vss_seed);
-		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let entropy = NodeEntropy::from_seed_bytes(vss_seed);
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
+			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
+				.build_with_sigs_auth(HashMap::new())
+				.unwrap();
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
@@ -985,11 +1026,13 @@ mod tests {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let mut vss_seed = [0u8; 32];
+		let mut vss_seed = [0u8; 64];
 		rng.fill_bytes(&mut vss_seed);
-		let header_provider = Arc::new(FixedHeaders::new(HashMap::new()));
+		let entropy = NodeEntropy::from_seed_bytes(vss_seed);
 		let vss_store =
-			VssStore::new(vss_base_url, rand_store_id, vss_seed, header_provider).unwrap();
+			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
+				.build_with_sigs_auth(HashMap::new())
+				.unwrap();
 
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
