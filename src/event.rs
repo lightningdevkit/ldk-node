@@ -1221,12 +1221,8 @@ where
 				let user_channel_id: u128 = rng().random();
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
-				if let Some((lsp_node_id, _)) = self
-					.liquidity_source
-					.as_ref()
-					.and_then(|ls| ls.as_ref().get_lsps2_lsp_details())
-				{
-					if lsp_node_id == counterparty_node_id {
+				if let Some(ls) = self.liquidity_source.as_ref() {
+					if ls.as_ref().is_lsps_node(&counterparty_node_id) {
 						// When we're an LSPS2 client, allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 						// check that they don't take too much before claiming.
 						//
