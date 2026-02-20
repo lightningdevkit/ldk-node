@@ -14,7 +14,7 @@ use std::sync::Arc;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, ScriptBuf};
+use bitcoin::{Address, Amount, ScriptBuf, Txid};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
@@ -2461,4 +2461,162 @@ async fn persistence_backwards_compatibility() {
 	assert_eq!(old_balance, new_balance);
 
 	node_new.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_fee_bump_rbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	// Fund both nodes
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 500_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b.clone()],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Send a transaction from node_b to node_a that we'll later bump
+	let amount_to_send_sats = 100_000;
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(txid.to_byte_array());
+	let original_payment = node_b.payment(&payment_id).unwrap();
+	let original_fee = original_payment.fee_paid_msat.unwrap();
+
+	// Non-existent payment id
+	let fake_txid =
+		Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
+	let invalid_payment_id = PaymentId(fake_txid.to_byte_array());
+	assert_eq!(
+		Err(NodeError::InvalidPaymentId),
+		node_b.onchain_payment().bump_fee_rbf(invalid_payment_id, None)
+	);
+
+	// Bump an inbound payment
+	assert_eq!(
+		Err(NodeError::InvalidPaymentId),
+		node_a.onchain_payment().bump_fee_rbf(payment_id, None)
+	);
+
+	// Successful fee bump
+	let new_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	wait_for_tx(&electrsd.client, new_txid).await;
+
+	// Sleep to allow for transaction propagation
+	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Verify fee increased and txid updated for node_b
+	let new_payment = node_b.payment(&payment_id).unwrap();
+	assert!(
+		new_payment.fee_paid_msat > Some(original_fee),
+		"Fee should increase after RBF bump. Original: {}, New: {}",
+		original_fee,
+		new_payment.fee_paid_msat.unwrap()
+	);
+	match &new_payment.kind {
+		PaymentKind::Onchain { txid, .. } => {
+			assert_eq!(
+				*txid, new_txid,
+				"node_b payment txid should be updated to the replacement txid"
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	// Verify node_a has the inbound payment txid updated to the replacement txid
+	let node_a_inbound_payment = node_a.payment(&payment_id).unwrap();
+	assert_eq!(node_a_inbound_payment.direction, PaymentDirection::Inbound);
+	match &node_a_inbound_payment.kind {
+		PaymentKind::Onchain { txid: inbound_txid, .. } => {
+			assert_eq!(
+				*inbound_txid, new_txid,
+				"node_a inbound payment txid should be updated to the replacement txid"
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	// Multiple consecutive bumps
+	let second_bump_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	wait_for_tx(&electrsd.client, second_bump_txid).await;
+
+	// Sleep to allow for transaction propagation
+	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Verify second bump payment exists and txid updated for node_b
+	let second_payment = node_b.payment(&payment_id).unwrap();
+	assert!(
+		second_payment.fee_paid_msat > new_payment.fee_paid_msat,
+		"Second bump should have higher fee than first bump"
+	);
+	match &second_payment.kind {
+		PaymentKind::Onchain { txid, .. } => {
+			assert_eq!(
+				*txid, second_bump_txid,
+				"node_b payment txid should be updated to the second replacement txid"
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	// Verify node_a has the inbound payment txid updated to the second replacement txid
+	let node_a_second_inbound_payment = node_a.payment(&payment_id).unwrap();
+	assert_eq!(node_a_second_inbound_payment.direction, PaymentDirection::Inbound);
+	match &node_a_second_inbound_payment.kind {
+		PaymentKind::Onchain { txid: inbound_txid, .. } => {
+			assert_eq!(
+				*inbound_txid, second_bump_txid,
+				"node_a inbound payment txid should be updated to the second replacement txid"
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	// Confirm the transaction and try to bump again (should fail)
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	assert_eq!(
+		Err(NodeError::InvalidPaymentId),
+		node_b.onchain_payment().bump_fee_rbf(payment_id, None)
+	);
+
+	// Verify final payment is confirmed
+	let final_payment = node_b.payment(&payment_id).unwrap();
+	assert_eq!(final_payment.status, PaymentStatus::Succeeded);
+	match final_payment.kind {
+		PaymentKind::Onchain { status, .. } => {
+			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	// Verify node A received the funds correctly
+	let node_a_received_payment = node_a.list_payments_with_filter(
+		|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == second_bump_txid),
+	);
+	assert_eq!(node_a_received_payment.len(), 1);
+	assert_eq!(node_a_received_payment[0].amount_msat, Some(amount_to_send_sats * 1000));
+	assert_eq!(node_a_received_payment[0].status, PaymentStatus::Succeeded);
 }
