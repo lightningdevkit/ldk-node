@@ -1106,6 +1106,10 @@ impl Node {
 
 		let peer_info = PeerInfo { node_id, address };
 
+		if persist {
+			self.peer_store.add_peer(peer_info.clone())?;
+		}
+
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
@@ -1117,10 +1121,6 @@ impl Node {
 		})?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
-
-		if persist {
-			self.peer_store.add_peer(peer_info)?;
-		}
 
 		Ok(())
 	}

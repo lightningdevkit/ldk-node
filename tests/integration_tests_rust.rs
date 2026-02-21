@@ -912,6 +912,66 @@ async fn do_connection_restart_behavior(persist: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn peer_address_persisted_on_connect_failure() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+
+	let node_id_b = node_b.node_id();
+	let real_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Stop node_b so all connection attempts to it will fail.
+	node_b.stop().unwrap();
+
+	let fake_addr: lightning::ln::msgs::SocketAddress = "127.0.0.1:19999".parse().unwrap();
+
+	// Attempt to connect with persist=true to an unreachable address. The connection
+	// will fail, but the peer address must still be persisted. This is a regression test
+	// for a bug where add_peer was called AFTER the connection attempt, meaning a failed
+	// connect would skip persistence entirely.
+	let res = node_a.connect(node_id_b, fake_addr.clone(), true);
+	assert!(res.is_err());
+
+	let peers_a = node_a.list_peers();
+	let peer = peers_a
+		.iter()
+		.find(|p| p.node_id == node_id_b)
+		.expect("Peer must be in store even after failed connection when persist=true");
+	assert!(peer.is_persisted);
+	assert!(!peer.is_connected);
+	assert_eq!(peer.address, fake_addr);
+
+	// Now "update" to the real address (still unreachable since node_b is stopped).
+	// This verifies the upsert: even though connect fails again, the stored address
+	// should be updated to the new one.
+	let res = node_a.connect(node_id_b, real_addr_b.clone(), true);
+	assert!(res.is_err());
+
+	let peers_a = node_a.list_peers();
+	let peer = peers_a
+		.iter()
+		.find(|p| p.node_id == node_id_b)
+		.expect("Peer must still be in store after second failed connection");
+	assert_eq!(peer.address, real_addr_b, "Stored address must be updated to the new one");
+
+	// Restart node_b and node_a to verify the persisted address survives restart
+	// and the reconnection loop uses the correct (updated) address.
+	node_b.start().unwrap();
+	node_a.stop().unwrap();
+	node_a.start().unwrap();
+
+	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+	let peers_a = node_a.list_peers();
+	let peer = peers_a
+		.iter()
+		.find(|p| p.node_id == node_id_b)
+		.expect("Peer must reconnect after restart using persisted address");
+	assert!(peer.is_connected);
+	assert!(peer.is_persisted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn concurrent_connections_succeed() {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);

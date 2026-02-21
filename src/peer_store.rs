@@ -18,7 +18,7 @@ use crate::io::{
 	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, LdkLogger};
+use crate::logger::{log_error, log_info, LdkLogger};
 use crate::types::DynStore;
 use crate::{Error, SocketAddress};
 
@@ -43,8 +43,17 @@ where
 	pub(crate) fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let mut locked_peers = self.peers.write().unwrap();
 
-		if locked_peers.contains_key(&peer_info.node_id) {
-			return Ok(());
+		if let Some(existing) = locked_peers.get(&peer_info.node_id) {
+			if existing.address == peer_info.address {
+				return Ok(());
+			}
+			log_info!(
+				self.logger,
+				"Updating socket address for peer {}: {} -> {}",
+				peer_info.node_id,
+				existing.address,
+				peer_info.address
+			);
 		}
 
 		locked_peers.insert(peer_info.node_id, peer_info);
@@ -193,5 +202,56 @@ mod tests {
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
 		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
+	}
+
+	#[test]
+	fn peer_address_updated_on_readd() {
+		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let old_address = SocketAddress::from_str("34.65.186.40:9735").unwrap();
+		let new_address = SocketAddress::from_str("34.65.153.174:9735").unwrap();
+
+		peer_store.add_peer(PeerInfo { node_id, address: old_address.clone() }).unwrap();
+		assert_eq!(peer_store.get_peer(&node_id).unwrap().address, old_address);
+
+		peer_store.add_peer(PeerInfo { node_id, address: new_address.clone() }).unwrap();
+		assert_eq!(peer_store.get_peer(&node_id).unwrap().address, new_address);
+
+		assert_eq!(peer_store.list_peers().len(), 1);
+
+		let persisted_bytes = KVStoreSync::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.unwrap();
+		let deser_peer_store =
+			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(deser_peer_store.get_peer(&node_id).unwrap().address, new_address);
+	}
+
+	#[test]
+	fn peer_same_address_skips_persist() {
+		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
+
+		peer_store.add_peer(PeerInfo { node_id, address: address.clone() }).unwrap();
+
+		peer_store.add_peer(PeerInfo { node_id, address }).unwrap();
+		assert_eq!(peer_store.list_peers().len(), 1);
 	}
 }
