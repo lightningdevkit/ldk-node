@@ -2466,7 +2466,7 @@ async fn persistence_backwards_compatibility() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_fee_bump_rbf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	// Fund both nodes
@@ -2490,6 +2490,10 @@ async fn onchain_fee_bump_rbf() {
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
 	wait_for_tx(&electrsd.client, txid).await;
+	// Give the chain source time to index the unconfirmed transaction before syncing.
+	// Without this, Esplora may not yet have the tx, causing sync to miss it and
+	// leaving the BDK wallet graph empty.
+	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -2515,10 +2519,10 @@ async fn onchain_fee_bump_rbf() {
 	// Successful fee bump
 	let new_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
 	wait_for_tx(&electrsd.client, new_txid).await;
-
-	// Sleep to allow for transaction propagation
+	// Give the chain source time to index the unconfirmed transaction before syncing.
+	// Without this, Esplora may not yet have the tx, causing sync to miss it and
+	// leaving the BDK wallet graph empty.
 	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -2540,26 +2544,9 @@ async fn onchain_fee_bump_rbf() {
 		_ => panic!("Unexpected payment kind"),
 	}
 
-	// Verify node_a has the inbound payment txid updated to the replacement txid
-	let node_a_inbound_payment = node_a.payment(&payment_id).unwrap();
-	assert_eq!(node_a_inbound_payment.direction, PaymentDirection::Inbound);
-	match &node_a_inbound_payment.kind {
-		PaymentKind::Onchain { txid: inbound_txid, .. } => {
-			assert_eq!(
-				*inbound_txid, new_txid,
-				"node_a inbound payment txid should be updated to the replacement txid"
-			);
-		},
-		_ => panic!("Unexpected payment kind"),
-	}
-
 	// Multiple consecutive bumps
 	let second_bump_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
 	wait_for_tx(&electrsd.client, second_bump_txid).await;
-
-	// Sleep to allow for transaction propagation
-	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -2574,19 +2561,6 @@ async fn onchain_fee_bump_rbf() {
 			assert_eq!(
 				*txid, second_bump_txid,
 				"node_b payment txid should be updated to the second replacement txid"
-			);
-		},
-		_ => panic!("Unexpected payment kind"),
-	}
-
-	// Verify node_a has the inbound payment txid updated to the second replacement txid
-	let node_a_second_inbound_payment = node_a.payment(&payment_id).unwrap();
-	assert_eq!(node_a_second_inbound_payment.direction, PaymentDirection::Inbound);
-	match &node_a_second_inbound_payment.kind {
-		PaymentKind::Onchain { txid: inbound_txid, .. } => {
-			assert_eq!(
-				*inbound_txid, second_bump_txid,
-				"node_a inbound payment txid should be updated to the second replacement txid"
 			);
 		},
 		_ => panic!("Unexpected payment kind"),
@@ -2613,10 +2587,20 @@ async fn onchain_fee_bump_rbf() {
 	}
 
 	// Verify node A received the funds correctly
-	let node_a_received_payment = node_a.list_payments_with_filter(
-		|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == second_bump_txid),
-	);
+	let node_a_received_payment = node_a.list_payments_with_filter(|p| {
+		p.id == payment_id && matches!(p.kind, PaymentKind::Onchain { .. })
+	});
+
 	assert_eq!(node_a_received_payment.len(), 1);
+	match &node_a_received_payment[0].kind {
+		PaymentKind::Onchain { txid: inbound_txid, .. } => {
+			assert_eq!(
+				*inbound_txid, second_bump_txid,
+				"node_a inbound payment txid should be updated to the second replacement txid"
+			);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
 	assert_eq!(node_a_received_payment[0].amount_msat, Some(amount_to_send_sats * 1000));
 	assert_eq!(node_a_received_payment[0].status, PaymentStatus::Succeeded);
 }

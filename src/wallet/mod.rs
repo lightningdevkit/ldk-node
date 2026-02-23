@@ -378,8 +378,8 @@ impl Wallet {
 					);
 					let payment =
 						self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
-					let pending_payment_details = self
-						.create_pending_payment_from_tx(payment.clone(), conflict_txids.clone());
+					let pending_payment_details =
+						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
 
 					self.pending_payment_store.insert_or_update(pending_payment_details)?;
 				},
@@ -1044,7 +1044,10 @@ impl Wallet {
 
 		if let Some(replaced_details) = self
 			.pending_payment_store
-			.list_filter(|p| p.conflicting_txids.contains(&target_txid))
+			.list_filter(|p| {
+				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
+					|| p.conflicting_txids.contains(&target_txid)
+			})
 			.first()
 		{
 			return Some(replaced_details.details.id);
@@ -1125,13 +1128,13 @@ impl Wallet {
 			old_fee_rate.to_sat_per_kwu() + INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT as u64;
 
 		let confirmation_target = ConfirmationTarget::OnchainPayment;
-		let estimated_fee_rate =
-			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
+		let estimated_fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
 		// Use the higher of minimum RBF requirement or current network estimate
 		let final_fee_rate_sat_per_kwu =
 			min_required_fee_rate_sat_per_kwu.max(estimated_fee_rate.to_sat_per_kwu());
-		let final_fee_rate = FeeRate::from_sat_per_kwu(final_fee_rate_sat_per_kwu);
+		let final_fee_rate =
+			fee_rate.unwrap_or_else(|| FeeRate::from_sat_per_kwu(final_fee_rate_sat_per_kwu));
 
 		let mut psbt = {
 			let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
@@ -1156,6 +1159,17 @@ impl Wallet {
 			match builder.finish() {
 				Ok(psbt) => Ok(psbt),
 				Err(CreateTxError::FeeRateTooLow { required: required_fee_rate }) => {
+					if fee_rate.is_some() {
+						log_error!(
+							self.logger,
+							"Provided fee rate {} is too low for RBF fee bump of txid {}, required minimum fee rate: {}",
+							fee_rate.unwrap(),
+							txid,
+							required_fee_rate
+						);
+						return Err(Error::InvalidFeeRate);
+					}
+
 					log_info!(self.logger, "BDK requires higher fee rate: {}", required_fee_rate);
 
 					// BDK may require a higher fee rate than our estimate due to
