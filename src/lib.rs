@@ -178,7 +178,8 @@ use types::{
 	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
-	ChannelDetails, CustomTlvRecord, DynStore, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
+	ChannelDetails, CustomTlvRecord, DynStore, DynStoreRef, DynStoreTrait, DynStoreWrapper,
+	PeerDetails, SyncAndAsyncKVStore, UserChannelId,
 };
 pub use vss_client;
 

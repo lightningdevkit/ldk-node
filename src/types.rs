@@ -51,29 +51,38 @@ where
 {
 }
 
+/// Object-safe key-value store trait that supports both async and sync operations.
 pub trait DynStoreTrait: Send + Sync {
+	/// Asynchronously reads a value identified by the given namespace and key.
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>>;
+	/// Asynchronously writes a value to the given namespace and key.
 	fn write_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>>;
+	/// Asynchronously removes a value at the given namespace and key.
 	fn remove_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> Pin<Box<dyn Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static>>;
+	/// Asynchronously lists all keys under the given namespace.
 	fn list_async(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>>;
 
+	/// Synchronously reads a value identified by the given namespace and key.
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Result<Vec<u8>, bitcoin::io::Error>;
+	/// Synchronously writes a value to the given namespace and key.
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> Result<(), bitcoin::io::Error>;
+	/// Synchronously removes a value at the given namespace and key.
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> Result<(), bitcoin::io::Error>;
+	/// Synchronously lists all keys under the given namespace.
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Result<Vec<String>, bitcoin::io::Error>;
@@ -134,12 +143,12 @@ impl<'a> KVStoreSync for dyn DynStoreTrait + 'a {
 /// Type alias for any store that implements DynStoreTrait.
 pub type DynStore = dyn DynStoreTrait;
 
-// Newtype wrapper that implements `KVStore` for `Arc<DynStore>`. This is needed because `KVStore`
-// methods return `impl Future`, which is not object-safe. `DynStoreTrait` works around this by
-// returning `Pin<Box<dyn Future>>` instead, and this wrapper bridges the two by delegating
-// `KVStore` methods to the corresponding `DynStoreTrait::*_async` methods.
+/// Newtype wrapper that implements `KVStore` for `Arc<DynStore>`. This is needed because `KVStore`
+/// methods return `impl Future`, which is not object-safe. `DynStoreTrait` works around this by
+/// returning `Pin<Box<dyn Future>>` instead, and this wrapper bridges the two by delegating
+/// `KVStore` methods to the corresponding `DynStoreTrait::*_async` methods.
 #[derive(Clone)]
-pub(crate) struct DynStoreRef(pub(crate) Arc<DynStore>);
+pub struct DynStoreRef(pub Arc<DynStore>);
 
 impl KVStore for DynStoreRef {
 	fn read(
@@ -167,33 +176,8 @@ impl KVStore for DynStoreRef {
 	}
 }
 
-impl KVStoreSync for DynStoreRef {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> Result<Vec<u8>, bitcoin::io::Error> {
-		DynStoreTrait::read(&*self.0, primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> Result<(), bitcoin::io::Error> {
-		DynStoreTrait::write(&*self.0, primary_namespace, secondary_namespace, key, buf)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> Result<(), bitcoin::io::Error> {
-		DynStoreTrait::remove(&*self.0, primary_namespace, secondary_namespace, key, lazy)
-	}
-
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> Result<Vec<String>, bitcoin::io::Error> {
-		DynStoreTrait::list(&*self.0, primary_namespace, secondary_namespace)
-	}
-}
-
-pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub(crate) T);
+/// Wrapper over KVStore and KVStoreSync
+pub struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub T);
 
 impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 	fn read_async(

@@ -819,6 +819,13 @@ impl NodeBuilder {
 	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
+		self.build_with_dynstore(node_entropy, primary_store)
+	}
+
+	fn build_with_dynstore(
+		&self, node_entropy: NodeEntropy, primary_store: Arc<DynStore>,
+	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
 		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
@@ -831,7 +838,6 @@ impl NodeBuilder {
 		};
 
 		let ts_config = self.tier_store_config.as_ref();
-		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
 		let mut tier_store =
 			TierStore::new(primary_store, Arc::clone(&runtime), Arc::clone(&logger));
 		if let Some(config) = ts_config {
@@ -1306,8 +1312,8 @@ impl ArcedNodeBuilder {
 	pub fn build_with_store(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: Arc<FfiDynStore>,
 	) -> Result<Arc<Node>, BuildError> {
-		let store = DynStoreRef(kv_store as Arc<DynStore>);
-		self.inner.read().unwrap().build_with_store(*node_entropy, store).map(Arc::new)
+		let store = kv_store as Arc<DynStore>;
+		self.inner.read().unwrap().build_with_dynstore(*node_entropy, store).map(Arc::new)
 	}
 }
 
