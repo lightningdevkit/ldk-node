@@ -39,7 +39,7 @@ use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning::util::test_utils::TestStore;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
-use lightning_persister::fs_store::FilesystemStore;
+use lightning_persister::fs_store::v1::FilesystemStore;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use logging::TestLogWriter;
 use rand::distr::Alphanumeric;

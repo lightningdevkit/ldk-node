@@ -39,7 +39,7 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
-use lightning_persister::fs_store::FilesystemStore;
+use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
