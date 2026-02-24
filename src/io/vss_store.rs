@@ -23,10 +23,10 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Network;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
+use lightning::sign::{EntropySource as LdkEntropySource, RandomBytes};
 use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning::util::ser::{Readable, Writeable};
 use prost::Message;
-use rand::RngCore;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;
 use vss_client::headers::{FixedHeaders, LnurlAuthToJwtProvider, VssHeaderProvider};
@@ -114,6 +114,10 @@ impl VssStore {
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
 
+		let mut entropy_seed = [0u8; 32];
+		getrandom::fill(&mut entropy_seed).expect("Failed to generate random bytes");
+		let entropy_source = RandomBytes::new(entropy_seed);
+
 		let sync_retry_policy = retry_policy();
 		let blocking_client = VssClient::new_with_headers(
 			base_url.clone(),
@@ -129,6 +133,7 @@ impl VssStore {
 					&store_id,
 					data_encryption_key,
 					&key_obfuscator,
+					&entropy_source,
 				)
 				.await
 			})
@@ -145,6 +150,7 @@ impl VssStore {
 			store_id,
 			data_encryption_key,
 			key_obfuscator,
+			entropy_source,
 		));
 
 		Ok(Self { inner, next_version, internal_runtime: Some(internal_runtime) })
@@ -385,6 +391,7 @@ struct VssStoreInner {
 	store_id: String,
 	data_encryption_key: [u8; 32],
 	key_obfuscator: KeyObfuscator,
+	entropy_source: RandomBytes,
 	// Per-key locks that ensures that we don't have concurrent writes to the same namespace/key.
 	// The lock also encapsulates the latest written version per key.
 	locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
@@ -394,7 +401,7 @@ impl VssStoreInner {
 	pub(crate) fn new(
 		schema_version: VssSchemaVersion, blocking_client: VssClient<CustomRetryPolicy>,
 		async_client: VssClient<CustomRetryPolicy>, store_id: String,
-		data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator,
+		data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator, entropy_source: RandomBytes,
 	) -> Self {
 		let locks = Mutex::new(HashMap::new());
 		Self {
@@ -404,6 +411,7 @@ impl VssStoreInner {
 			store_id,
 			data_encryption_key,
 			key_obfuscator,
+			entropy_source,
 			locks,
 		}
 	}
@@ -524,7 +532,7 @@ impl VssStoreInner {
 			Error::new(ErrorKind::Other, msg)
 		})?;
 
-		let storable_builder = StorableBuilder::new(RandEntropySource);
+		let storable_builder = StorableBuilder::new(VssEntropySource(&self.entropy_source));
 		let aad =
 			if self.schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
 		let decrypted = storable_builder.deconstruct(storable, &self.data_encryption_key, aad)?.0;
@@ -545,7 +553,7 @@ impl VssStoreInner {
 
 		let store_key = self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
 		let vss_version = -1;
-		let storable_builder = StorableBuilder::new(RandEntropySource);
+		let storable_builder = StorableBuilder::new(VssEntropySource(&self.entropy_source));
 		let aad =
 			if self.schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
 		let storable =
@@ -703,7 +711,7 @@ fn retry_policy() -> CustomRetryPolicy {
 
 async fn determine_and_write_schema_version(
 	client: &VssClient<CustomRetryPolicy>, store_id: &String, data_encryption_key: [u8; 32],
-	key_obfuscator: &KeyObfuscator,
+	key_obfuscator: &KeyObfuscator, entropy_source: &RandomBytes,
 ) -> io::Result<VssSchemaVersion> {
 	// Build the obfuscated `vss_schema_version` key.
 	let obfuscated_prefix = key_obfuscator.obfuscate(&format! {"{}#{}", "", ""});
@@ -734,7 +742,7 @@ async fn determine_and_write_schema_version(
 			Error::new(ErrorKind::Other, msg)
 		})?;
 
-		let storable_builder = StorableBuilder::new(RandEntropySource);
+		let storable_builder = StorableBuilder::new(VssEntropySource(entropy_source));
 		// Schema version was added starting with V1, so if set at all, we use the key as `aad`
 		let aad = store_key.as_bytes();
 		let decrypted = storable_builder
@@ -778,7 +786,7 @@ async fn determine_and_write_schema_version(
 			let schema_version = VssSchemaVersion::V1;
 			let encoded_version = schema_version.encode();
 
-			let storable_builder = StorableBuilder::new(RandEntropySource);
+			let storable_builder = StorableBuilder::new(VssEntropySource(entropy_source));
 			let vss_version = -1;
 			let aad = store_key.as_bytes();
 			let storable =
@@ -805,12 +813,18 @@ async fn determine_and_write_schema_version(
 	}
 }
 
-/// A source for generating entropy/randomness using [`rand`].
-pub(crate) struct RandEntropySource;
+/// A thin wrapper bridging LDK's [`RandomBytes`] to the vss-client [`EntropySource`] trait.
+struct VssEntropySource<'a>(&'a RandomBytes);
 
-impl EntropySource for RandEntropySource {
+impl EntropySource for VssEntropySource<'_> {
 	fn fill_bytes(&self, buffer: &mut [u8]) {
-		rand::rng().fill_bytes(buffer);
+		let mut offset = 0;
+		while offset < buffer.len() {
+			let random = self.0.get_secure_random_bytes();
+			let to_copy = (buffer.len() - offset).min(32);
+			buffer[offset..offset + to_copy].copy_from_slice(&random[..to_copy]);
+			offset += to_copy;
+		}
 	}
 }
 

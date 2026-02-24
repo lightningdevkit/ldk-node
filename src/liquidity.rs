@@ -20,6 +20,7 @@ use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::routing::router::{RouteHint, RouteHintHop};
+use lightning::sign::EntropySource;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::ser::{LSPSDateTime, LSPSRequestId};
@@ -35,7 +36,6 @@ use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceCo
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
 use lightning_types::payment::PaymentHash;
-use rand::Rng;
 use tokio::sync::oneshot;
 
 use crate::builder::BuildError;
@@ -641,7 +641,9 @@ where
 						return;
 					};
 
-					let user_channel_id: u128 = rand::rng().random();
+					let user_channel_id: u128 = u128::from_ne_bytes(
+						self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
+					);
 					let intercept_scid = self.channel_manager.get_intercept_scid();
 
 					if let Some(payment_size_msat) = payment_size_msat {

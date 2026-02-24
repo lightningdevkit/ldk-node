@@ -35,8 +35,6 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning_types::string::PrintableString;
-use rand::rngs::OsRng;
-use rand::TryRngCore;
 
 use super::*;
 use crate::chain::ChainSource;
@@ -72,7 +70,7 @@ pub(crate) fn read_or_generate_seed_file(
 		Ok(key)
 	} else {
 		let mut key = [0; WALLET_KEYS_SEED_LEN];
-		OsRng.try_fill_bytes(&mut key).map_err(|_| {
+		getrandom::fill(&mut key).map_err(|_| {
 			std::io::Error::new(std::io::ErrorKind::Other, "Failed to generate seed bytes")
 		})?;
 

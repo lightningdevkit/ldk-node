@@ -19,17 +19,17 @@ use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
+use lightning::sign::EntropySource;
 #[cfg(feature = "uniffi")]
 use lightning::util::ser::{Readable, Writeable};
 use lightning_types::string::UntrustedString;
-use rand::RngCore;
 
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use crate::types::{ChannelManager, PaymentStore};
+use crate::types::{ChannelManager, KeysManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt12Invoice = lightning::offers::invoice::Bolt12Invoice;
@@ -59,6 +59,7 @@ type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 /// [`Node::bolt12_payment`]: crate::Node::bolt12_payment
 pub struct Bolt12Payment {
 	channel_manager: Arc<ChannelManager>,
+	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
 	is_running: Arc<RwLock<bool>>,
@@ -68,11 +69,19 @@ pub struct Bolt12Payment {
 
 impl Bolt12Payment {
 	pub(crate) fn new(
-		channel_manager: Arc<ChannelManager>, payment_store: Arc<PaymentStore>,
-		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
-		async_payments_role: Option<AsyncPaymentsRole>,
+		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
+		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
+		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
-		Self { channel_manager, payment_store, config, is_running, logger, async_payments_role }
+		Self {
+			channel_manager,
+			keys_manager,
+			payment_store,
+			config,
+			is_running,
+			logger,
+			async_payments_role,
+		}
 	}
 
 	/// Send a payment given an offer.
@@ -94,9 +103,7 @@ impl Bolt12Payment {
 
 		let offer = maybe_deref(offer);
 
-		let mut random_bytes = [0u8; 32];
-		rand::rng().fill_bytes(&mut random_bytes);
-		let payment_id = PaymentId(random_bytes);
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
@@ -237,9 +244,7 @@ impl Bolt12Payment {
 
 		let offer = maybe_deref(offer);
 
-		let mut random_bytes = [0u8; 32];
-		rand::rng().fill_bytes(&mut random_bytes);
-		let payment_id = PaymentId(random_bytes);
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
@@ -462,9 +467,7 @@ impl Bolt12Payment {
 		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
 		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<Refund, Error> {
-		let mut random_bytes = [0u8; 32];
-		rand::rng().fill_bytes(&mut random_bytes);
-		let payment_id = PaymentId(random_bytes);
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
 
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 			.duration_since(UNIX_EPOCH)
