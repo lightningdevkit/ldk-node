@@ -30,12 +30,13 @@ use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyn
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
-	SyncAndAsyncKVStore,
-};
 #[cfg(feature = "uniffi")]
 use ldk_node::FfiDynStore;
+#[cfg(not(feature = "uniffi"))]
+use ldk_node::SyncAndAsyncKVStore;
+use ldk_node::{
+	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
+};
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
@@ -333,7 +334,7 @@ pub(crate) enum TestChainSource<'a> {
 #[cfg(feature = "uniffi")]
 type TestDynStore = Arc<FfiDynStore>;
 #[cfg(not(feature = "uniffi"))]
-type TestDynStore = Arc<DynStore>;
+type TestDynStore = Arc<TestSyncStore>;
 
 #[derive(Clone)]
 pub(crate) enum TestStoreType {
@@ -395,14 +396,9 @@ macro_rules! setup_builder {
 pub(crate) use setup_builder;
 
 pub(crate) fn create_tier_stores(base_path: PathBuf) -> (TestDynStore, TestDynStore, TestDynStore) {
-	let primary = SqliteStore::new(
-		base_path.join("primary"),
-		Some("primary_db".to_string()),
-		Some("primary_kv".to_string()),
-	)
-	.unwrap();
-	let backup = FilesystemStore::new(base_path.join("backup"));
-	let ephemeral = TestStore::new(false);
+	let primary = TestSyncStore::new(base_path.join("primary"));
+	let backup = TestSyncStore::new(base_path.join("backup"));
+	let ephemeral = TestSyncStore::new(base_path.join("ephemeral"));
 
 	#[cfg(feature = "uniffi")]
 	{
@@ -414,7 +410,7 @@ pub(crate) fn create_tier_stores(base_path: PathBuf) -> (TestDynStore, TestDynSt
 	}
 	#[cfg(not(feature = "uniffi"))]
 	{
-		(primary, backup, ephemeral)
+		(Arc::new(primary), Arc::new(backup), Arc::new(ephemeral))
 	}
 }
 
@@ -523,17 +519,52 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
-			build_node_with_store(&builder, config.node_entropy, kv_store)
+			#[cfg(feature = "uniffi")]
+			{
+				let kv_store = Arc::new(FfiDynStore::from_kv_store(kv_store));
+				build_node_with_store(&builder, config.node_entropy, kv_store)
+			}
+			#[cfg(not(feature = "uniffi"))]
+			{
+				build_node_with_store(&builder, config.node_entropy, kv_store)
+			}
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
 		TestStoreType::TierStore { primary, backup, ephemeral } => {
 			if let Some(backup) = backup {
-				builder.set_backup_store(backup);
+				#[cfg(feature = "uniffi")]
+				{
+					builder.set_backup_store(backup);
+				}
+				#[cfg(not(feature = "uniffi"))]
+				{
+					use ldk_node::{DynStore, DynStoreWrapper};
+					builder.set_backup_store(
+						Arc::new(DynStoreWrapper((*backup).clone())) as Arc<DynStore>
+					);
+				}
 			}
 			if let Some(ephemeral) = ephemeral {
-				builder.set_ephemeral_store(ephemeral);
+				#[cfg(feature = "uniffi")]
+				{
+					builder.set_ephemeral_store(ephemeral);
+				}
+				#[cfg(not(feature = "uniffi"))]
+				{
+					use ldk_node::{DynStore, DynStoreWrapper};
+					builder.set_ephemeral_store(
+						Arc::new(DynStoreWrapper((*ephemeral).clone())) as Arc<DynStore>
+					);
+				}
 			}
-			builder.build_with_store(config.node_entropy.into(), primary).unwrap()
+			#[cfg(feature = "uniffi")]
+			{
+				build_node_with_store(&builder, config.node_entropy, primary)
+			}
+			#[cfg(not(feature = "uniffi"))]
+			{
+				build_node_with_store(&builder, config.node_entropy, (*primary).clone())
+			}
 		},
 	};
 
@@ -1686,18 +1717,20 @@ impl TestSyncStoreInner {
 	}
 }
 
+#[cfg(not(feature = "uniffi"))]
 pub(crate) fn build_node_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
 	builder: &Builder, entropy: NodeEntropy, store: S,
 ) -> TestNode {
-	#[cfg(feature = "uniffi")]
-	{
-		use ldk_node::FfiDynStore;
-		builder
-			.build_with_store(entropy.into(), Arc::new(FfiDynStore::from_kv_store(store)))
-			.unwrap()
-	}
-	#[cfg(not(feature = "uniffi"))]
 	{
 		builder.build_with_store(entropy, store).unwrap()
+	}
+}
+
+#[cfg(feature = "uniffi")]
+pub(crate) fn build_node_with_store(
+	builder: &Builder, entropy: NodeEntropy, store: Arc<FfiDynStore>,
+) -> TestNode {
+	{
+		builder.build_with_store(entropy.into(), store).unwrap()
 	}
 }

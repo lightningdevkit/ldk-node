@@ -10,11 +10,13 @@
 //
 // Make sure to add any re-exported items that need to be used in uniffi below.
 
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -54,6 +56,7 @@ pub use crate::config::{
 pub use crate::entropy::{generate_entropy_mnemonic, EntropyError, NodeEntropy, WordCount};
 use crate::error::Error;
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
+use crate::io::utils::check_namespace_key_validity;
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
@@ -194,16 +197,42 @@ pub trait FfiDynStoreTrait: Send + Sync {
 
 #[derive(Clone)]
 pub struct FfiDynStore {
-	pub(crate) inner: Arc<dyn FfiDynStoreTrait>,
+	inner: Arc<FfiDynStoreInner>,
+	next_write_version: Arc<AtomicU64>,
 }
 
 impl FfiDynStore {
 	pub fn from_store(store: Arc<dyn FfiDynStoreTrait>) -> Self {
-		Self { inner: store }
+		let inner = Arc::new(FfiDynStoreInner::new(store));
+		Self { inner, next_write_version: Arc::new(AtomicU64::new(1)) }
+	}
+
+	fn build_locking_key(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> String {
+		if primary_namespace.is_empty() {
+			key.to_owned()
+		} else {
+			format!("{}#{}#{}", primary_namespace, secondary_namespace, key)
+		}
+	}
+
+	fn get_new_version_and_lock_ref(
+		&self, locking_key: String,
+	) -> (Arc<tokio::sync::Mutex<u64>>, u64) {
+		let version = self.next_write_version.fetch_add(1, Ordering::Relaxed);
+		if version == u64::MAX {
+			panic!("FfiDynStore version counter overflowed");
+		}
+
+		let inner_lock_ref = self.inner.get_inner_lock_ref(locking_key);
+
+		(inner_lock_ref, version)
 	}
 
 	pub fn from_kv_store<T: SyncAndAsyncKVStore + Send + Sync + 'static>(store: T) -> Self {
-		Self { inner: Arc::new(DynStoreWrapper(store)) }
+		let store = FfiDynStoreInner::new(Arc::new(DynStoreWrapper(store)));
+		Self { inner: Arc::new(store), next_write_version: Arc::new(AtomicU64::new(1)) }
 	}
 }
 
@@ -272,7 +301,9 @@ impl KVStore for FfiDynStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		async move {
-			this.read_async(primary_namespace, secondary_namespace, key).await.map_err(|e| e.into())
+			this.read_internal_async(primary_namespace, secondary_namespace, key)
+				.await
+				.map_err(|e| e.into())
 		}
 	}
 
@@ -280,13 +311,25 @@ impl KVStore for FfiDynStore {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
 		let this = Arc::clone(&self.inner);
+
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
+
+		let locking_key = self.build_locking_key(&primary_namespace, &secondary_namespace, &key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
 		async move {
-			this.write_async(primary_namespace, secondary_namespace, key, buf)
-				.await
-				.map_err(|e| e.into())
+			this.write_internal_async(
+				inner_lock_ref,
+				locking_key,
+				version,
+				primary_namespace,
+				secondary_namespace,
+				key,
+				buf,
+			)
+			.await
+			.map_err(|e| e.into())
 		}
 	}
 
@@ -294,13 +337,26 @@ impl KVStore for FfiDynStore {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
 		let this = Arc::clone(&self.inner);
+
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
+
+		let locking_key = self.build_locking_key(&primary_namespace, &secondary_namespace, &key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
+
 		async move {
-			this.remove_async(primary_namespace, secondary_namespace, key, lazy)
-				.await
-				.map_err(|e| e.into())
+			this.remove_internal_async(
+				inner_lock_ref,
+				locking_key,
+				version,
+				primary_namespace,
+				secondary_namespace,
+				key,
+				lazy,
+			)
+			.await
+			.map_err(|e| e.into())
 		}
 	}
 
@@ -308,10 +364,14 @@ impl KVStore for FfiDynStore {
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
 		let this = Arc::clone(&self.inner);
+
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
+
 		async move {
-			this.list_async(primary_namespace, secondary_namespace).await.map_err(|e| e.into())
+			this.list_internal_async(primary_namespace, secondary_namespace)
+				.await
+				.map_err(|e| e.into())
 		}
 	}
 }
@@ -320,50 +380,251 @@ impl KVStoreSync for FfiDynStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Result<Vec<u8>, lightning::io::Error> {
-		FfiDynStoreTrait::read(
-			self.inner.as_ref(),
+		self.inner.read_internal(
 			primary_namespace.to_string(),
 			secondary_namespace.to_string(),
 			key.to_string(),
 		)
-		.map_err(|e| e.into())
 	}
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> Result<(), lightning::io::Error> {
-		FfiDynStoreTrait::write(
-			self.inner.as_ref(),
+		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
+
+		self.inner.write_internal(
+			inner_lock_ref,
+			locking_key,
+			version,
 			primary_namespace.to_string(),
 			secondary_namespace.to_string(),
 			key.to_string(),
 			buf,
 		)
-		.map_err(|e| e.into())
 	}
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> Result<(), lightning::io::Error> {
-		FfiDynStoreTrait::remove(
-			self.inner.as_ref(),
+		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
+		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
+
+		self.inner.remove_internal(
+			inner_lock_ref,
+			locking_key,
+			version,
 			primary_namespace.to_string(),
 			secondary_namespace.to_string(),
 			key.to_string(),
 			lazy,
 		)
-		.map_err(|e| e.into())
 	}
 
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Result<Vec<String>, lightning::io::Error> {
-		FfiDynStoreTrait::list(
-			self.inner.as_ref(),
-			primary_namespace.to_string(),
-			secondary_namespace.to_string(),
-		)
-		.map_err(|e| e.into())
+		self.inner.list_internal(primary_namespace.to_string(), secondary_namespace.to_string())
+	}
+}
+
+struct FfiDynStoreInner {
+	ffi_store: Arc<dyn FfiDynStoreTrait>,
+	write_version_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
+}
+
+impl FfiDynStoreInner {
+	fn new(ffi_store: Arc<dyn FfiDynStoreTrait>) -> Self {
+		Self { ffi_store, write_version_locks: Mutex::new(HashMap::new()) }
+	}
+
+	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
+		let mut outer_lock = self.write_version_locks.lock().unwrap();
+		Arc::clone(&outer_lock.entry(locking_key).or_default())
+	}
+
+	async fn read_internal_async(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> bitcoin::io::Result<Vec<u8>> {
+		check_namespace_key_validity(&primary_namespace, &secondary_namespace, Some(&key), "read")?;
+		self.ffi_store
+			.read_async(primary_namespace, secondary_namespace, key)
+			.await
+			.map_err(|e| e.into())
+	}
+
+	fn read_internal(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> bitcoin::io::Result<Vec<u8>> {
+		check_namespace_key_validity(&primary_namespace, &secondary_namespace, Some(&key), "read")?;
+		self.ffi_store.read(primary_namespace, secondary_namespace, key).map_err(|e| e.into())
+	}
+
+	async fn write_internal_async(
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
+		primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> bitcoin::io::Result<()> {
+		check_namespace_key_validity(
+			&primary_namespace,
+			&secondary_namespace,
+			Some(&key),
+			"write",
+		)?;
+
+		let store = Arc::clone(&self.ffi_store);
+
+		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
+			store
+				.write_async(primary_namespace, secondary_namespace, key, buf)
+				.await
+				.map_err(|e| <IOError as Into<bitcoin::io::Error>>::into(e))?;
+
+			Ok(())
+		})
+		.await
+	}
+
+	fn write_internal(
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
+		primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> bitcoin::io::Result<()> {
+		check_namespace_key_validity(
+			&primary_namespace,
+			&secondary_namespace,
+			Some(&key),
+			"write",
+		)?;
+
+		let res = {
+			let mut last_written_version = inner_lock_ref.blocking_lock();
+			if version <= *last_written_version {
+				Ok(())
+			} else {
+				self.ffi_store
+					.write(primary_namespace, secondary_namespace, key, buf)
+					.map_err(|e| e.into())
+					.map(|_| {
+						*last_written_version = version;
+					})
+			}
+		};
+
+		self.clean_locks(&inner_lock_ref, locking_key);
+		res
+	}
+
+	async fn remove_internal_async(
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
+		primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> bitcoin::io::Result<()> {
+		check_namespace_key_validity(
+			&primary_namespace,
+			&secondary_namespace,
+			Some(&key),
+			"remove",
+		)?;
+
+		let store = Arc::clone(&self.ffi_store);
+
+		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
+			store
+				.remove_async(primary_namespace, secondary_namespace, key, lazy)
+				.await
+				.map_err(|e| <IOError as Into<bitcoin::io::Error>>::into(e))?;
+
+			Ok(())
+		})
+		.await
+	}
+
+	fn remove_internal(
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
+		primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> bitcoin::io::Result<()> {
+		check_namespace_key_validity(
+			&primary_namespace,
+			&secondary_namespace,
+			Some(&key),
+			"remove",
+		)?;
+
+		let res = {
+			let mut last_written_version = inner_lock_ref.blocking_lock();
+			if version <= *last_written_version {
+				Ok(())
+			} else {
+				self.ffi_store
+					.remove(primary_namespace, secondary_namespace, key, lazy)
+					.map_err(|e| <IOError as Into<bitcoin::io::Error>>::into(e))
+					.map(|_| {
+						*last_written_version = version;
+					})
+			}
+		};
+
+		self.clean_locks(&inner_lock_ref, locking_key);
+		res
+	}
+
+	async fn list_internal_async(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> bitcoin::io::Result<Vec<String>> {
+		check_namespace_key_validity(&primary_namespace, &secondary_namespace, None, "list")?;
+		self.ffi_store
+			.list_async(primary_namespace, secondary_namespace)
+			.await
+			.map_err(|e| e.into())
+	}
+
+	fn list_internal(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> bitcoin::io::Result<Vec<String>> {
+		check_namespace_key_validity(&primary_namespace, &secondary_namespace, None, "list")?;
+		self.ffi_store.list(primary_namespace, secondary_namespace).map_err(|e| e.into())
+	}
+
+	async fn execute_locked_write<
+		F: Future<Output = Result<(), bitcoin::io::Error>>,
+		FN: FnOnce() -> F,
+	>(
+		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
+		callback: FN,
+	) -> Result<(), bitcoin::io::Error> {
+		let res = {
+			let mut last_written_version = inner_lock_ref.lock().await;
+
+			// Check if we already have a newer version written/removed. This is used in async contexts to realize eventual
+			// consistency.
+			let is_stale_version = version <= *last_written_version;
+
+			// If the version is not stale, we execute the callback. Otherwise we can and must skip writing.
+			if is_stale_version {
+				Ok(())
+			} else {
+				callback().await.map(|_| {
+					*last_written_version = version;
+				})
+			}
+		};
+
+		self.clean_locks(&inner_lock_ref, locking_key);
+
+		res
+	}
+
+	fn clean_locks(&self, inner_lock_ref: &Arc<tokio::sync::Mutex<u64>>, locking_key: String) {
+		// If there no arcs in use elsewhere, this means that there are no in-flight writes. We can remove the map entry
+		// to prevent leaking memory. The two arcs that are expected are the one in the map and the one held here in
+		// inner_lock_ref. The outer lock is obtained first, to avoid a new arc being cloned after we've already
+		// counted.
+		let mut outer_lock = self.write_version_locks.lock().unwrap();
+
+		let strong_count = Arc::strong_count(&inner_lock_ref);
+		debug_assert!(strong_count >= 2, "Unexpected FfiDynStore strong count");
+
+		if strong_count == 2 {
+			outer_lock.remove(&locking_key);
+		}
 	}
 }
 
