@@ -128,7 +128,7 @@ impl SpontaneousPayment {
 				*max_channel_saturation_power_of_half;
 		}
 
-		let mut recipient_fields = RecipientOnionFields::spontaneous_empty();
+		let mut recipient_fields = RecipientOnionFields::spontaneous_empty(amount_msat);
 		if let Some(tlvs) = custom_tlvs {
 			let tlvs_vec = tlvs.into_iter().map(|tlv| (tlv.type_num, tlv.value)).collect();
 			recipient_fields = recipient_fields.with_custom_tlvs(
