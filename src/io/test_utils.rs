@@ -9,6 +9,7 @@ use std::collections::{hash_map, HashMap};
 use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use lightning::events::ClosureReason;
@@ -20,7 +21,8 @@ use lightning::ln::functional_test_utils::{
 	TestChanMonCfg,
 };
 use lightning::util::persist::{
-	KVStore, KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	KVStore, KVStoreSync, MonitorUpdatingPersister, PageToken, PaginatedKVStore,
+	PaginatedKVStoreSync, PaginatedListResponse, KVSTORE_NAMESPACE_KEY_MAX_LEN,
 };
 use lightning::util::test_utils;
 use rand::distr::Alphanumeric;
@@ -37,14 +39,20 @@ type TestMonitorUpdatePersister<'a, K> = MonitorUpdatingPersister<
 
 const EXPECTED_UPDATES_PER_PAYMENT: u64 = 5;
 
+const IN_MEMORY_PAGE_SIZE: usize = 50;
+
 pub struct InMemoryStore {
 	persisted_bytes: Mutex<HashMap<String, HashMap<String, Vec<u8>>>>,
+	creation_counter: AtomicU64,
+	creation_times: Mutex<HashMap<String, HashMap<String, u64>>>,
 }
 
 impl InMemoryStore {
 	pub fn new() -> Self {
 		let persisted_bytes = Mutex::new(HashMap::new());
-		Self { persisted_bytes }
+		let creation_counter = AtomicU64::new(1);
+		let creation_times = Mutex::new(HashMap::new());
+		Self { persisted_bytes, creation_counter, creation_times }
 	}
 
 	fn read_internal(
@@ -71,8 +79,16 @@ impl InMemoryStore {
 		let mut persisted_lock = self.persisted_bytes.lock().unwrap();
 
 		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
-		let outer_e = persisted_lock.entry(prefixed).or_insert(HashMap::new());
+		let outer_e = persisted_lock.entry(prefixed.clone()).or_insert(HashMap::new());
 		outer_e.insert(key.to_string(), buf);
+
+		// Only assign creation time on first write (not on update)
+		let mut ct_lock = self.creation_times.lock().unwrap();
+		let ct_ns = ct_lock.entry(prefixed).or_insert(HashMap::new());
+		ct_ns
+			.entry(key.to_string())
+			.or_insert_with(|| self.creation_counter.fetch_add(1, Ordering::Relaxed));
+
 		Ok(())
 	}
 
@@ -84,6 +100,12 @@ impl InMemoryStore {
 		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
 		if let Some(outer_ref) = persisted_lock.get_mut(&prefixed) {
 			outer_ref.remove(&key.to_string());
+		}
+
+		// Remove creation time entry
+		let mut ct_lock = self.creation_times.lock().unwrap();
+		if let Some(ct_ns) = ct_lock.get_mut(&prefixed) {
+			ct_ns.remove(key);
 		}
 
 		Ok(())
@@ -150,6 +172,78 @@ impl KVStoreSync for InMemoryStore {
 
 	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
 		self.list_internal(primary_namespace, secondary_namespace)
+	}
+}
+
+impl InMemoryStore {
+	fn list_paginated_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> io::Result<PaginatedListResponse> {
+		let ct_lock = self.creation_times.lock().unwrap();
+		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
+
+		let ct_ns = match ct_lock.get(&prefixed) {
+			Some(m) => m,
+			None => {
+				return Ok(PaginatedListResponse { keys: Vec::new(), next_page_token: None });
+			},
+		};
+
+		// Build list of (key, created_at) and sort by created_at DESC, key ASC
+		let mut entries: Vec<(&String, &u64)> = ct_ns.iter().collect();
+		entries.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+
+		// Apply page token filter
+		let start_idx = if let Some(ref token) = page_token {
+			let token_str = token.as_str();
+			let (created_at_str, key) = token_str
+				.split_once(':')
+				.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid page token"))?;
+			let created_at: u64 = created_at_str.parse().map_err(|_| {
+				io::Error::new(io::ErrorKind::InvalidInput, "Invalid page token created_at")
+			})?;
+
+			// Find first entry after the token position
+			entries
+				.iter()
+				.position(|(k, ca)| **ca < created_at || (**ca == created_at && k.as_str() > key))
+				.unwrap_or(entries.len())
+		} else {
+			0
+		};
+
+		let page: Vec<String> = entries[start_idx..]
+			.iter()
+			.take(IN_MEMORY_PAGE_SIZE)
+			.map(|(k, _)| (*k).clone())
+			.collect();
+
+		let next_page_token = if page.len() == IN_MEMORY_PAGE_SIZE {
+			let last_key = page.last().unwrap();
+			let last_ca = ct_ns.get(last_key).unwrap();
+			Some(PageToken::new(format!("{:020}:{}", last_ca, last_key)))
+		} else {
+			None
+		};
+
+		Ok(PaginatedListResponse { keys: page, next_page_token })
+	}
+}
+
+impl PaginatedKVStoreSync for InMemoryStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> io::Result<PaginatedListResponse> {
+		self.list_paginated_internal(primary_namespace, secondary_namespace, page_token)
+	}
+}
+
+impl PaginatedKVStore for InMemoryStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		let res = self.list_paginated_internal(primary_namespace, secondary_namespace, page_token);
+		async move { res }
 	}
 }
 
