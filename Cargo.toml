@@ -80,6 +80,8 @@ prost = { version = "0.11.6", default-features = false}
 #bitcoin-payment-instructions = { version = "0.6" }
 bitcoin-payment-instructions = { git = "https://github.com/jkczyz/bitcoin-payment-instructions", rev = "869fd348c3ca0c78f439d2f31181f4d798c6b20e" }
 
+payjoin = { git = "https://github.com/payjoin/rust-payjoin.git", package = "payjoin", default-features = false, features = ["v2", "io"] }
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
 
