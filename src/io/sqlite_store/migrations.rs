@@ -13,62 +13,55 @@ pub(super) fn migrate_schema(
 ) -> io::Result<()> {
 	assert!(from_version < to_version);
 	if from_version == 1 && to_version == 2 {
-		let tx = connection.transaction().map_err(|e| {
-			let msg = format!(
-				"Failed to migrate table {} from user_version {} to {}: {}",
-				kv_table_name, from_version, to_version, e
-			);
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
-
-		// Rename 'namespace' column to 'primary_namespace'
-		let sql = format!(
-			"ALTER TABLE {}
-				RENAME COLUMN namespace TO primary_namespace;",
-			kv_table_name
-		);
-
-		tx.execute(&sql, []).map_err(|e| {
-			let msg = format!(
-				"Failed to migrate table {} from user_version {} to {}: {}",
-				kv_table_name, from_version, to_version, e
-			);
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
-
-		// Add new 'secondary_namespace' column
-		let sql = format!(
-			"ALTER TABLE {}
-				ADD secondary_namespace TEXT DEFAULT \"\" NOT NULL;",
-			kv_table_name
-		);
-
-		tx.execute(&sql, []).map_err(|e| {
-			let msg = format!(
-				"Failed to migrate table {} from user_version {} to {}: {}",
-				kv_table_name, from_version, to_version, e
-			);
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
-
-		// Update user_version
-		tx.pragma(Some(rusqlite::DatabaseName::Main), "user_version", to_version, |_| Ok(()))
-			.map_err(|e| {
-				let msg = format!(
-					"Failed to upgrade user_version from {} to {}: {}",
-					from_version, to_version, e
-				);
-				io::Error::new(io::ErrorKind::Other, msg)
-			})?;
-
-		tx.commit().map_err(|e| {
-			let msg = format!(
-				"Failed to migrate table {} from user_version {} to {}: {}",
-				kv_table_name, from_version, to_version, e
-			);
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
+		migrate_v1_to_v2(connection, kv_table_name)?;
 	}
+
+	Ok(())
+}
+
+fn migrate_v1_to_v2(connection: &mut Connection, kv_table_name: &str) -> io::Result<()> {
+	let tx = connection.transaction().map_err(|e| {
+		let msg = format!("Failed to migrate table {} from v1 to v2: {}", kv_table_name, e);
+		io::Error::new(io::ErrorKind::Other, msg)
+	})?;
+
+	// Rename 'namespace' column to 'primary_namespace'
+	let sql = format!(
+		"ALTER TABLE {}
+			RENAME COLUMN namespace TO primary_namespace;",
+		kv_table_name
+	);
+
+	tx.execute(&sql, []).map_err(|e| {
+		let msg = format!("Failed to migrate table {} from v1 to v2: {}", kv_table_name, e);
+		io::Error::new(io::ErrorKind::Other, msg)
+	})?;
+
+	// Add new 'secondary_namespace' column
+	let sql = format!(
+		"ALTER TABLE {}
+			ADD secondary_namespace TEXT DEFAULT \"\" NOT NULL;",
+		kv_table_name
+	);
+
+	tx.execute(&sql, []).map_err(|e| {
+		let msg = format!("Failed to migrate table {} from v1 to v2: {}", kv_table_name, e);
+		io::Error::new(io::ErrorKind::Other, msg)
+	})?;
+
+	// Update user_version
+	tx.pragma(Some(rusqlite::DatabaseName::Main), "user_version", 2u16, |_| Ok(())).map_err(
+		|e| {
+			let msg = format!("Failed to upgrade user_version from 1 to 2: {}", e);
+			io::Error::new(io::ErrorKind::Other, msg)
+		},
+	)?;
+
+	tx.commit().map_err(|e| {
+		let msg = format!("Failed to migrate table {} from v1 to v2: {}", kv_table_name, e);
+		io::Error::new(io::ErrorKind::Other, msg)
+	})?;
+
 	Ok(())
 }
 
