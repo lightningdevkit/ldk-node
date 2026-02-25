@@ -1194,17 +1194,8 @@ impl Node {
 			.peer_by_node_id(peer_node_id)
 			.ok_or(Error::ConnectionFailed)?
 			.init_features;
-		let sats = self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-			if init_features.requires_anchors_zero_fee_htlc_tx()
-				&& !c.trusted_peers_no_reserve.contains(peer_node_id)
-			{
-				c.per_channel_reserve_sats
-			} else {
-				0
-			}
-		});
-
-		Ok(sats)
+		let anchor_channel = init_features.requires_anchors_zero_fee_htlc_tx();
+		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 
 	fn check_sufficient_funds_for_channel(
@@ -2008,5 +1999,21 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			})
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
+	})
+}
+
+pub(crate) fn new_channel_anchor_reserve_sats(
+	config: &Config, peer_node_id: &PublicKey, anchor_channel: bool,
+) -> u64 {
+	if !anchor_channel {
+		return 0;
+	}
+
+	config.anchor_channels_config.as_ref().map_or(0, |c| {
+		if c.trusted_peers_no_reserve.contains(peer_node_id) {
+			0
+		} else {
+			c.per_channel_reserve_sats
+		}
 	})
 }

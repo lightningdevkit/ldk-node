@@ -1161,52 +1161,45 @@ where
 				}
 
 				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
-				if anchor_channel {
-					if let Some(anchor_channels_config) =
-						self.config.anchor_channels_config.as_ref()
-					{
-						let cur_anchor_reserve_sats = crate::total_anchor_channels_reserve_sats(
-							&self.channel_manager,
-							&self.config,
-						);
-						let spendable_amount_sats = self
-							.wallet
-							.get_spendable_amount_sats(cur_anchor_reserve_sats)
-							.unwrap_or(0);
+				if anchor_channel && self.config.anchor_channels_config.is_none() {
+					log_error!(
+						self.logger,
+						"Rejecting inbound channel from peer {} due to Anchor channels being disabled.",
+						counterparty_node_id,
+					);
+					self.channel_manager
+						.force_close_broadcasting_latest_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+							"Channel request rejected".to_string(),
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to reject channel: {:?}", e)
+						});
+					return Ok(());
+				}
 
-						let required_amount_sats = if anchor_channels_config
-							.trusted_peers_no_reserve
-							.contains(&counterparty_node_id)
-						{
-							0
-						} else {
-							anchor_channels_config.per_channel_reserve_sats
-						};
+				let required_reserve_sats = crate::new_channel_anchor_reserve_sats(
+					&self.config,
+					&counterparty_node_id,
+					anchor_channel,
+				);
 
-						if spendable_amount_sats < required_amount_sats {
-							log_error!(
-								self.logger,
-								"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves. Available: {}/{}sats",
-								counterparty_node_id,
-								spendable_amount_sats,
-								required_amount_sats,
-							);
-							self.channel_manager
-								.force_close_broadcasting_latest_txn(
-									&temporary_channel_id,
-									&counterparty_node_id,
-									"Channel request rejected".to_string(),
-								)
-								.unwrap_or_else(|e| {
-									log_error!(self.logger, "Failed to reject channel: {:?}", e)
-								});
-							return Ok(());
-						}
-					} else {
+				if required_reserve_sats > 0 {
+					let cur_anchor_reserve_sats = crate::total_anchor_channels_reserve_sats(
+						&self.channel_manager,
+						&self.config,
+					);
+					let spendable_amount_sats =
+						self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+
+					if spendable_amount_sats < required_reserve_sats {
 						log_error!(
 							self.logger,
-							"Rejecting inbound channel from peer {} due to Anchor channels being disabled.",
+							"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves. Available: {}/{}sats",
 							counterparty_node_id,
+							spendable_amount_sats,
+							required_reserve_sats,
 						);
 						self.channel_manager
 							.force_close_broadcasting_latest_txn(
