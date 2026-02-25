@@ -17,14 +17,14 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf, Txid};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
-	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
-	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
-	expect_event, expect_payment_claimable_event, expect_payment_received_event,
-	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
-	open_channel, open_channel_push_amt, premine_and_distribute_funds, premine_blocks, prepare_rbf,
-	random_chain_source, random_config, random_listening_addresses, setup_bitcoind_and_electrsd,
-	setup_builder, setup_node, setup_two_nodes, wait_for_tx, TestChainSource, TestStoreType,
-	TestSyncStore,
+	build_node_with_store, bump_fee_and_broadcast, distribute_funds_unconfirmed,
+	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event,
+	expect_channel_ready_events, expect_event, expect_payment_claimable_event,
+	expect_payment_received_event, expect_payment_successful_event, expect_splice_pending_event,
+	generate_blocks_and_wait, open_channel, open_channel_push_amt, premine_and_distribute_funds,
+	premine_blocks, prepare_rbf, random_chain_source, random_config, random_listening_addresses,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, wait_for_tx,
+	TestChainSource, TestStoreType, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
@@ -37,9 +37,16 @@ use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::{
+	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
+
+use crate::common::{create_tier_stores, random_storage_path, setup_two_nodes_with_store};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
@@ -48,6 +55,85 @@ async fn channel_full_cycle() {
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_full_cycle_tier_store() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (primary_a, backup_a, ephemeral_a) = create_tier_stores(random_storage_path());
+	let (primary_b, backup_b, ephemeral_b) = create_tier_stores(random_storage_path());
+
+	let (node_a, node_b) = setup_two_nodes_with_store(
+		&chain_source,
+		false,
+		true,
+		false,
+		TestStoreType::TierStore {
+			primary: primary_a.clone(),
+			backup: Some(backup_a.clone()),
+			ephemeral: Some(ephemeral_a.clone()),
+		},
+		TestStoreType::TierStore {
+			primary: primary_b,
+			backup: Some(backup_b),
+			ephemeral: Some(ephemeral_b),
+		},
+	);
+	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
+		.await;
+
+	// Verify Primary store contains channel manager data
+	let primary_channel_manager = KVStoreSync::read(
+		&(*primary_a.clone()),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(primary_channel_manager.is_ok(), "Primary should have channel manager data");
+
+	// Verify Primary store contains payment info
+	let primary_payments = KVStoreSync::list(&(*primary_a.clone()), "payments", "");
+	assert!(primary_payments.is_ok(), "Primary should have payment data");
+	assert!(!primary_payments.unwrap().is_empty(), "Primary should have payment entries");
+
+	// Verify Backup store synced critical data
+	let backup_channel_manager = KVStoreSync::read(
+		&(*backup_a.clone()),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(backup_channel_manager.is_ok(), "Backup should have synced channel manager");
+
+	// Verify backup is not empty
+	let backup_all_keys = KVStoreSync::list(&(*backup_a.clone()), "", "").unwrap();
+	assert!(!backup_all_keys.is_empty(), "Backup store should not be empty");
+
+	// Verify Ephemeral does NOT have channel manager
+	let ephemeral_channel_manager = KVStoreSync::read(
+		&(*ephemeral_a.clone()),
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	);
+	assert!(ephemeral_channel_manager.is_err(), "Ephemeral should NOT have channel manager");
+
+	// Verify Ephemeral does NOT have payment info
+	let ephemeral_payments = KVStoreSync::list(&(*ephemeral_a.clone()), "payments", "");
+	assert!(
+		ephemeral_payments.is_err() || ephemeral_payments.unwrap().is_empty(),
+		"Ephemeral should NOT have payment data"
+	);
+
+	//Verify Ephemeral does have network graph
+	let ephemeral_network_graph = KVStoreSync::read(
+		&(*ephemeral_a.clone()),
+		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_KEY,
+	);
+	assert!(ephemeral_network_graph.is_ok(), "Ephemeral should have network graph");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -235,8 +321,18 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+	let node;
+	#[cfg(feature = "uniffi")]
+	{
+		use ldk_node::FfiDynStore;
+
+		let test_sync_store = Arc::new(FfiDynStore::from_kv_store(test_sync_store.clone()));
+		node = build_node_with_store(&builder, config.node_entropy, test_sync_store);
+	}
+	#[cfg(not(feature = "uniffi"))]
+	{
+		node = build_node_with_store(&builder, config.node_entropy, test_sync_store.clone());
+	}
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -274,8 +370,18 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let reinitialized_node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+	let reinitialized_node;
+	#[cfg(feature = "uniffi")]
+	{
+		use ldk_node::FfiDynStore;
+
+		let test_sync_store = Arc::new(FfiDynStore::from_kv_store(test_sync_store));
+		reinitialized_node = build_node_with_store(&builder, config.node_entropy, test_sync_store);
+	}
+	#[cfg(not(feature = "uniffi"))]
+	{
+		reinitialized_node = build_node_with_store(&builder, config.node_entropy, test_sync_store);
+	}
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
