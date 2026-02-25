@@ -16,7 +16,8 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
 use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{
-	ClosureReason, Event as LdkEvent, PaymentFailureReason, PaymentPurpose, ReplayEvent,
+	ClosureReason, Event as LdkEvent, FundingInfo, PaymentFailureReason, PaymentPurpose,
+	ReplayEvent,
 };
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
@@ -1516,7 +1517,26 @@ where
 					},
 				};
 			},
-			LdkEvent::DiscardFunding { .. } => {},
+			LdkEvent::DiscardFunding { channel_id, funding_info } => {
+				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
+					log_info!(
+						self.logger,
+						"Reclaiming unused addresses from channel {} funding",
+						channel_id,
+					);
+
+					let tx = bitcoin::Transaction {
+						version: bitcoin::transaction::Version::TWO,
+						lock_time: bitcoin::absolute::LockTime::ZERO,
+						input: vec![],
+						output: outputs,
+					};
+					if let Err(e) = self.wallet.cancel_tx(&tx) {
+						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
+						return Err(ReplayEvent());
+					}
+				}
+			},
 			LdkEvent::HTLCIntercepted {
 				requested_next_hop_scid,
 				intercept_id,
@@ -1746,7 +1766,6 @@ where
 				user_channel_id,
 				counterparty_node_id,
 				abandoned_funding_txo,
-				contributed_outputs,
 				..
 			} => {
 				if let Some(funding_txo) = abandoned_funding_txo {
@@ -1764,17 +1783,6 @@ where
 						channel_id,
 						counterparty_node_id,
 					);
-				}
-
-				let tx = bitcoin::Transaction {
-					version: bitcoin::transaction::Version::TWO,
-					lock_time: bitcoin::absolute::LockTime::ZERO,
-					input: vec![],
-					output: contributed_outputs,
-				};
-				if let Err(e) = self.wallet.cancel_tx(&tx) {
-					log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
-					return Err(ReplayEvent());
 				}
 
 				let event = Event::SpliceFailed {
