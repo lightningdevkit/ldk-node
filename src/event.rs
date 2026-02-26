@@ -821,7 +821,184 @@ where
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => {
+					PaymentPurpose::Bolt11InvoicePayment {
+						payment_preimage,
+						payment_secret,
+						..
+					} => {
+						if payment_preimage.is_none() {
+							// This is a manual-claim (`_for_hash`) payment that was not
+							// pre-registered in the payment store. Check metadata store for
+							// LSP fee limits and create the store entry.
+							let lsp_fee_limits = self
+								.payment_metadata_store
+								.get_lsp_fee_limits_for_payment_id(&payment_id);
+
+							if let Some(ref limits) = lsp_fee_limits {
+								let max_total_opening_fee_msat = limits
+									.max_total_opening_fee_msat
+									.or_else(|| {
+										limits.max_proportional_opening_fee_ppm_msat.and_then(
+											|max_prop_fee| {
+												compute_opening_fee(amount_msat, 0, max_prop_fee)
+											},
+										)
+									})
+									.unwrap_or(0);
+
+								if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
+									log_info!(
+										self.logger,
+										"Refusing inbound payment with hash {} as the counterparty-withheld fee of {}msat exceeds our limit of {}msat",
+										hex_utils::to_string(&payment_hash.0),
+										counterparty_skimmed_fee_msat,
+										max_total_opening_fee_msat,
+									);
+									self.channel_manager.fail_htlc_backwards(&payment_hash);
+									return Ok(());
+								}
+							}
+
+							let kind = if lsp_fee_limits.is_some() {
+								PaymentKind::Bolt11Jit {
+									hash: payment_hash,
+									preimage: None,
+									secret: Some(payment_secret),
+									counterparty_skimmed_fee_msat: if counterparty_skimmed_fee_msat
+										> 0
+									{
+										Some(counterparty_skimmed_fee_msat)
+									} else {
+										None
+									},
+									lsp_fee_limits: lsp_fee_limits.unwrap(),
+								}
+							} else {
+								PaymentKind::Bolt11 {
+									hash: payment_hash,
+									preimage: None,
+									secret: Some(payment_secret),
+								}
+							};
+
+							let payment = PaymentDetails::new(
+								payment_id,
+								kind,
+								Some(amount_msat),
+								None,
+								PaymentDirection::Inbound,
+								PaymentStatus::Pending,
+							);
+
+							match self.payment_store.insert(payment) {
+								Ok(_) => {},
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to insert payment with ID {}: {}",
+										payment_id,
+										e
+									);
+									return Err(ReplayEvent());
+								},
+							}
+
+							let custom_records = onion_fields
+								.map(|cf| {
+									cf.custom_tlvs().into_iter().map(|tlv| tlv.into()).collect()
+								})
+								.unwrap_or_default();
+							let event = Event::PaymentClaimable {
+								payment_id,
+								payment_hash,
+								claimable_amount_msat: amount_msat,
+								claim_deadline,
+								custom_records,
+							};
+							match self.event_queue.add_event(event).await {
+								Ok(_) => return Ok(()),
+								Err(e) => {
+									log_error!(self.logger, "Failed to push to event queue: {}", e);
+									return Err(ReplayEvent());
+								},
+							};
+						} else {
+							// Auto-claim path: payment has a preimage but was not
+							// pre-registered in the store. Check metadata store for
+							// LSP fee limits and create the store entry before claiming.
+							let lsp_fee_limits = self
+								.payment_metadata_store
+								.get_lsp_fee_limits_for_payment_id(&payment_id);
+
+							if let Some(ref limits) = lsp_fee_limits {
+								let max_total_opening_fee_msat = limits
+									.max_total_opening_fee_msat
+									.or_else(|| {
+										limits.max_proportional_opening_fee_ppm_msat.and_then(
+											|max_prop_fee| {
+												compute_opening_fee(amount_msat, 0, max_prop_fee)
+											},
+										)
+									})
+									.unwrap_or(0);
+
+								if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
+									log_info!(
+										self.logger,
+										"Refusing inbound payment with hash {} as the counterparty-withheld fee of {}msat exceeds our limit of {}msat",
+										hex_utils::to_string(&payment_hash.0),
+										counterparty_skimmed_fee_msat,
+										max_total_opening_fee_msat,
+									);
+									self.channel_manager.fail_htlc_backwards(&payment_hash);
+									return Ok(());
+								}
+							}
+
+							let kind = if lsp_fee_limits.is_some() {
+								PaymentKind::Bolt11Jit {
+									hash: payment_hash,
+									preimage: payment_preimage,
+									secret: Some(payment_secret),
+									counterparty_skimmed_fee_msat: if counterparty_skimmed_fee_msat
+										> 0
+									{
+										Some(counterparty_skimmed_fee_msat)
+									} else {
+										None
+									},
+									lsp_fee_limits: lsp_fee_limits.unwrap(),
+								}
+							} else {
+								PaymentKind::Bolt11 {
+									hash: payment_hash,
+									preimage: payment_preimage,
+									secret: Some(payment_secret),
+								}
+							};
+
+							let payment = PaymentDetails::new(
+								payment_id,
+								kind,
+								Some(amount_msat),
+								None,
+								PaymentDirection::Inbound,
+								PaymentStatus::Pending,
+							);
+
+							match self.payment_store.insert(payment) {
+								Ok(_) => {},
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to insert payment with ID {}: {}",
+										payment_id,
+										e
+									);
+									return Err(ReplayEvent());
+								},
+							}
+						}
 						payment_preimage
 					},
 					PaymentPurpose::Bolt12OfferPayment {
@@ -960,43 +1137,85 @@ where
 					amount_msat,
 				);
 
-				let update = match purpose {
+				let (update, kind_for_insert) = match purpose {
 					PaymentPurpose::Bolt11InvoicePayment {
 						payment_preimage,
 						payment_secret,
 						..
-					} => PaymentDetailsUpdate {
-						preimage: Some(payment_preimage),
-						secret: Some(Some(payment_secret)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+					} => {
+						let kind = PaymentKind::Bolt11 {
+							hash: payment_hash,
+							preimage: payment_preimage,
+							secret: Some(payment_secret.clone()),
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(payment_preimage),
+							secret: Some(Some(payment_secret)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
 					PaymentPurpose::Bolt12OfferPayment {
-						payment_preimage, payment_secret, ..
-					} => PaymentDetailsUpdate {
-						preimage: Some(payment_preimage),
-						secret: Some(Some(payment_secret)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+						payment_preimage,
+						payment_secret,
+						payment_context,
+						..
+					} => {
+						let payer_note = payment_context.invoice_request.payer_note_truncated;
+						let offer_id = payment_context.offer_id;
+						let quantity = payment_context.invoice_request.quantity;
+						let kind = PaymentKind::Bolt12Offer {
+							hash: Some(payment_hash),
+							preimage: payment_preimage,
+							secret: Some(payment_secret.clone()),
+							offer_id,
+							payer_note,
+							quantity,
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(payment_preimage),
+							secret: Some(Some(payment_secret)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
 					PaymentPurpose::Bolt12RefundPayment {
 						payment_preimage,
 						payment_secret,
 						..
-					} => PaymentDetailsUpdate {
-						preimage: Some(payment_preimage),
-						secret: Some(Some(payment_secret)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+					} => {
+						let kind = PaymentKind::Bolt12Refund {
+							hash: Some(payment_hash),
+							preimage: payment_preimage,
+							secret: Some(payment_secret.clone()),
+							payer_note: None,
+							quantity: None,
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(payment_preimage),
+							secret: Some(Some(payment_secret)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
-					PaymentPurpose::SpontaneousPayment(preimage) => PaymentDetailsUpdate {
-						preimage: Some(Some(preimage)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+					PaymentPurpose::SpontaneousPayment(preimage) => {
+						let kind = PaymentKind::Spontaneous {
+							hash: payment_hash,
+							preimage: Some(preimage),
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(Some(preimage)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
 				};
 
@@ -1006,11 +1225,27 @@ where
 						// be the result of a replayed event.
 					),
 					Ok(DataStoreUpdateResult::NotFound) => {
-						log_error!(
-							self.logger,
-							"Claimed payment with ID {} couldn't be found in store",
+						// Payment was auto-claimed without a prior store entry.
+						let payment = PaymentDetails::new(
 							payment_id,
+							kind_for_insert,
+							Some(amount_msat),
+							None,
+							PaymentDirection::Inbound,
+							PaymentStatus::Succeeded,
 						);
+						match self.payment_store.insert(payment) {
+							Ok(_) => (),
+							Err(e) => {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
+							},
+						}
 					},
 					Err(e) => {
 						log_error!(
