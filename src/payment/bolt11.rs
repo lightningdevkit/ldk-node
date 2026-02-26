@@ -30,13 +30,14 @@ use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_try_convert_enum, maybe_wrap};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
+use crate::payment::metadata_store::PaymentMetadataStore;
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, PaymentStore};
+use crate::types::{ChannelManager, KeysManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
@@ -60,6 +61,8 @@ pub struct Bolt11Payment {
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
+	payment_metadata_store: Arc<PaymentMetadataStore>,
+	keys_manager: Arc<KeysManager>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
 	is_running: Arc<RwLock<bool>>,
@@ -71,7 +74,8 @@ impl Bolt11Payment {
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
+		payment_store: Arc<PaymentStore>, payment_metadata_store: Arc<PaymentMetadataStore>,
+		keys_manager: Arc<KeysManager>, peer_store: Arc<PeerStore<Arc<Logger>>>,
 		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
@@ -80,6 +84,8 @@ impl Bolt11Payment {
 			connection_manager,
 			liquidity_source,
 			payment_store,
+			payment_metadata_store,
+			keys_manager,
 			peer_store,
 			config,
 			is_running,
