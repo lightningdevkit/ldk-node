@@ -10,6 +10,7 @@
 pub(crate) mod asynchronous;
 mod bolt11;
 mod bolt12;
+pub(crate) mod metadata_store;
 mod onchain;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
