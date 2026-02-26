@@ -750,7 +750,21 @@ where
 								})
 								.unwrap_or(0)
 						},
-						_ => 0,
+						_ => {
+							// Fallback: check the metadata store for LSP fee limits.
+							self.payment_metadata_store
+								.get_lsp_fee_limits_for_payment_id(&payment_id)
+								.and_then(|limits| {
+									limits.max_total_opening_fee_msat.or_else(|| {
+										limits.max_proportional_opening_fee_ppm_msat.and_then(
+											|max_prop_fee| {
+												compute_opening_fee(amount_msat, 0, max_prop_fee)
+											},
+										)
+									})
+								})
+								.unwrap_or(0)
+						},
 					};
 
 					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {

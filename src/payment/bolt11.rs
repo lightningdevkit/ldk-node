@@ -18,6 +18,7 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::outbound_payment::{Bolt11PaymentError, Retry, RetryableSendFailure};
 use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning::sign::EntropySource;
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
 };
@@ -30,7 +31,9 @@ use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_try_convert_enum, maybe_wrap};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
-use crate::payment::metadata_store::PaymentMetadataStore;
+use crate::payment::metadata_store::{
+	MetadataId, PaymentMetadataEntry, PaymentMetadataKind, PaymentMetadataStore,
+};
 use crate::payment::store::{
 	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus,
@@ -212,6 +215,16 @@ impl Bolt11Payment {
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
 		};
 		let id = PaymentId(payment_hash.0);
+
+		// Store LSP fee limits in the metadata store.
+		let metadata_id = MetadataId { id: self.keys_manager.get_secure_random_bytes() };
+		let metadata_entry = PaymentMetadataEntry {
+			id: metadata_id,
+			kind: PaymentMetadataKind::LSPFeeLimits { limits: lsp_fee_limits },
+			payment_ids: vec![id],
+		};
+		self.payment_metadata_store.insert(metadata_entry)?;
+
 		let preimage =
 			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
 		let kind = PaymentKind::Bolt11Jit {
