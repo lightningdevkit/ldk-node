@@ -21,7 +21,7 @@ use crate::io::{
 	PAYMENT_METADATA_PERSISTENCE_PRIMARY_NAMESPACE,
 	PAYMENT_METADATA_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::logger::{log_error, LdkLogger, Logger};
+use crate::logger::Logger;
 use crate::payment::store::LSPFeeLimits;
 use crate::types::DynStore;
 use crate::Error;
@@ -264,5 +264,252 @@ impl PaymentMetadataStore {
 		}
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use lightning::util::ser::{Readable, Writeable};
+	use lightning::util::test_utils::TestLogger;
+
+	use super::*;
+	use crate::io::test_utils::InMemoryStore;
+	use crate::types::DynStoreWrapper;
+
+	fn make_store() -> (Arc<DynStore>, Arc<Logger>) {
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		(kv_store, logger)
+	}
+
+	fn make_metadata_id(val: u8) -> MetadataId {
+		MetadataId { id: [val; 32] }
+	}
+
+	fn make_payment_id(val: u8) -> PaymentId {
+		PaymentId([val; 32])
+	}
+
+	#[test]
+	fn serialization_roundtrip_lsp_fee_limits() {
+		let limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(1000),
+			max_proportional_opening_fee_ppm_msat: Some(500),
+		};
+		let kind = PaymentMetadataKind::LSPFeeLimits { limits };
+		let entry = PaymentMetadataEntry {
+			id: make_metadata_id(1),
+			kind,
+			payment_ids: vec![make_payment_id(10), make_payment_id(11)],
+		};
+
+		let encoded = entry.encode();
+		let decoded = PaymentMetadataEntry::read(&mut &*encoded).unwrap();
+
+		assert_eq!(entry.id, decoded.id);
+		assert_eq!(entry.payment_ids, decoded.payment_ids);
+		match decoded.kind {
+			PaymentMetadataKind::LSPFeeLimits { limits: decoded_limits } => {
+				assert_eq!(limits, decoded_limits);
+			},
+			_ => panic!("Expected LSPFeeLimits variant"),
+		}
+	}
+
+	#[test]
+	fn insert_get_remove_lifecycle() {
+		let (kv_store, logger) = make_store();
+		let store = PaymentMetadataStore::new(Vec::new(), kv_store, logger);
+
+		let mid = make_metadata_id(1);
+		let pid = make_payment_id(10);
+		let limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(2000),
+			max_proportional_opening_fee_ppm_msat: None,
+		};
+		let entry = PaymentMetadataEntry {
+			id: mid,
+			kind: PaymentMetadataKind::LSPFeeLimits { limits },
+			payment_ids: vec![pid],
+		};
+
+		// Insert
+		let returned_id = store.insert(entry).unwrap();
+		assert_eq!(returned_id, mid);
+
+		// Get
+		let retrieved = store.get(&mid).unwrap();
+		assert_eq!(retrieved.id, mid);
+		assert_eq!(retrieved.payment_ids, vec![pid]);
+
+		// Get by payment ID
+		let entries = store.get_for_payment_id(&pid);
+		assert_eq!(entries.len(), 1);
+		assert_eq!(entries[0].id, mid);
+
+		// Remove
+		store.remove(&mid).unwrap();
+		assert!(store.get(&mid).is_none());
+		assert!(store.get_for_payment_id(&pid).is_empty());
+	}
+
+	#[test]
+	fn reverse_index_multiple_payment_ids() {
+		let (kv_store, logger) = make_store();
+		let store = PaymentMetadataStore::new(Vec::new(), kv_store, logger);
+
+		let mid = make_metadata_id(1);
+		let pid1 = make_payment_id(10);
+		let pid2 = make_payment_id(11);
+		let limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(3000),
+			max_proportional_opening_fee_ppm_msat: None,
+		};
+		let entry = PaymentMetadataEntry {
+			id: mid,
+			kind: PaymentMetadataKind::LSPFeeLimits { limits },
+			payment_ids: vec![pid1, pid2],
+		};
+
+		store.insert(entry).unwrap();
+
+		// Both payment IDs should find the entry
+		assert_eq!(store.get_for_payment_id(&pid1).len(), 1);
+		assert_eq!(store.get_for_payment_id(&pid2).len(), 1);
+
+		// Non-existent payment ID
+		let pid3 = make_payment_id(99);
+		assert!(store.get_for_payment_id(&pid3).is_empty());
+	}
+
+	#[test]
+	fn add_payment_id_updates_reverse_index() {
+		let (kv_store, logger) = make_store();
+		let store = PaymentMetadataStore::new(Vec::new(), kv_store, logger);
+
+		let mid = make_metadata_id(1);
+		let pid1 = make_payment_id(10);
+		let limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(4000),
+			max_proportional_opening_fee_ppm_msat: None,
+		};
+		let entry = PaymentMetadataEntry {
+			id: mid,
+			kind: PaymentMetadataKind::LSPFeeLimits { limits },
+			payment_ids: vec![pid1],
+		};
+
+		store.insert(entry).unwrap();
+
+		let pid2 = make_payment_id(11);
+		store.add_payment_id(mid, pid2).unwrap();
+
+		// Both should now resolve
+		assert_eq!(store.get_for_payment_id(&pid1).len(), 1);
+		assert_eq!(store.get_for_payment_id(&pid2).len(), 1);
+
+		// The entry itself should have both payment IDs
+		let retrieved = store.get(&mid).unwrap();
+		assert_eq!(retrieved.payment_ids.len(), 2);
+		assert!(retrieved.payment_ids.contains(&pid1));
+		assert!(retrieved.payment_ids.contains(&pid2));
+	}
+
+	#[test]
+	fn get_lsp_fee_limits_for_payment_id() {
+		let (kv_store, logger) = make_store();
+		let store = PaymentMetadataStore::new(Vec::new(), kv_store, logger);
+
+		let mid = make_metadata_id(1);
+		let pid = make_payment_id(10);
+		let limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(5000),
+			max_proportional_opening_fee_ppm_msat: Some(100),
+		};
+		let entry = PaymentMetadataEntry {
+			id: mid,
+			kind: PaymentMetadataKind::LSPFeeLimits { limits },
+			payment_ids: vec![pid],
+		};
+
+		store.insert(entry).unwrap();
+
+		let retrieved_limits = store.get_lsp_fee_limits_for_payment_id(&pid).unwrap();
+		assert_eq!(retrieved_limits, limits);
+
+		// Non-existent payment ID
+		let pid2 = make_payment_id(99);
+		assert!(store.get_lsp_fee_limits_for_payment_id(&pid2).is_none());
+	}
+
+	#[test]
+	fn remove_payment_id_cleans_reverse_index() {
+		let (kv_store, logger) = make_store();
+		let store = PaymentMetadataStore::new(Vec::new(), kv_store, logger);
+
+		let mid = make_metadata_id(1);
+		let pid1 = make_payment_id(10);
+		let pid2 = make_payment_id(11);
+		let limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(6000),
+			max_proportional_opening_fee_ppm_msat: None,
+		};
+		let entry = PaymentMetadataEntry {
+			id: mid,
+			kind: PaymentMetadataKind::LSPFeeLimits { limits },
+			payment_ids: vec![pid1, pid2],
+		};
+
+		store.insert(entry).unwrap();
+
+		// Remove pid1
+		store.remove_payment_id(&pid1).unwrap();
+
+		// pid1 should no longer resolve
+		assert!(store.get_for_payment_id(&pid1).is_empty());
+
+		// pid2 should still resolve
+		assert_eq!(store.get_for_payment_id(&pid2).len(), 1);
+
+		// The entry should still exist but with only pid2
+		let retrieved = store.get(&mid).unwrap();
+		assert_eq!(retrieved.payment_ids, vec![pid2]);
+	}
+
+	#[test]
+	fn persistence_roundtrip() {
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+
+		let mid = make_metadata_id(1);
+		let pid = make_payment_id(10);
+		let limits = LSPFeeLimits {
+			max_total_opening_fee_msat: Some(7000),
+			max_proportional_opening_fee_ppm_msat: None,
+		};
+		let entry = PaymentMetadataEntry {
+			id: mid,
+			kind: PaymentMetadataKind::LSPFeeLimits { limits },
+			payment_ids: vec![pid],
+		};
+
+		// Insert via first store instance
+		{
+			let logger = Arc::new(Logger::new_log_facade());
+			let store = PaymentMetadataStore::new(Vec::new(), Arc::clone(&kv_store), logger);
+			store.insert(entry.clone()).unwrap();
+		}
+
+		// Reconstruct from same KVStore — simulate reading persisted entries
+		{
+			let logger = Arc::new(Logger::new_log_facade());
+			let store = PaymentMetadataStore::new(vec![entry], Arc::clone(&kv_store), logger);
+			let retrieved = store.get(&mid).unwrap();
+			assert_eq!(retrieved.id, mid);
+			assert_eq!(retrieved.payment_ids, vec![pid]);
+
+			// Reverse index should work
+			let entries = store.get_for_payment_id(&pid);
+			assert_eq!(entries.len(), 1);
+		}
 	}
 }
