@@ -56,8 +56,8 @@ use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
-	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
-	read_scorer, write_node_metrics,
+	read_node_metrics, read_output_sweeper, read_payment_metadata, read_payments, read_peer_info,
+	read_pending_payments, read_scorer, write_node_metrics,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
@@ -71,6 +71,7 @@ use crate::liquidity::{
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::metadata_store::PaymentMetadataStore;
 use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
@@ -1083,12 +1084,13 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res) =
+	let (payment_store_res, node_metris_res, pending_payment_store_res, payment_metadata_res) =
 		runtime.block_on(async move {
 			tokio::join!(
 				read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
 				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref))
+				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
+				read_payment_metadata(&*kv_store_ref, Arc::clone(&logger_ref))
 			)
 		});
 
@@ -1115,6 +1117,18 @@ fn build_with_store_internal(
 		)),
 		Err(e) => {
 			log_error!(logger, "Failed to read payment data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
+	let payment_metadata_store = match payment_metadata_res {
+		Ok(metadata_entries) => Arc::new(PaymentMetadataStore::new(
+			metadata_entries,
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read payment metadata from store: {}", e);
 			return Err(BuildError::ReadFailed);
 		},
 	};
@@ -1619,7 +1633,6 @@ fn build_with_store_internal(
 				Arc::clone(&wallet),
 				Arc::clone(&channel_manager),
 				Arc::clone(&keys_manager),
-				Arc::clone(&chain_source),
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&kv_store),
 				Arc::clone(&config),
@@ -1810,6 +1823,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		payment_metadata_store,
 		is_running,
 		node_metrics,
 		om_mailbox,

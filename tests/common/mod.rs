@@ -905,13 +905,15 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	});
 	assert_eq!(outbound_payments_b.len(), 0);
 
+	// Wait for events before checking inbound payments, as they are now created on demand
+	// by the event handler.
+	expect_event!(node_a, PaymentSuccessful);
+	expect_event!(node_b, PaymentReceived);
+
 	let inbound_payments_b = node_b.list_payments_with_filter(|p| {
 		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(inbound_payments_b.len(), 1);
-
-	expect_event!(node_a, PaymentSuccessful);
-	expect_event!(node_b, PaymentReceived);
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
@@ -1145,9 +1147,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
 		5
 	);
+	// Note: node_b has 5 (not 6) Bolt11 payments because the receive() invoice used only for the
+	// underpaid attempt (which fails with InvalidAmount) no longer creates a store entry. Only
+	// invoices that result in actual payment events are tracked.
 	assert_eq!(
 		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
-		6
+		5
 	);
 	assert_eq!(
 		node_a

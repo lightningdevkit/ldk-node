@@ -82,3 +82,7 @@ pub(crate) const STATIC_INVOICE_STORE_PRIMARY_NAMESPACE: &str = "static_invoices
 /// The pending payment information will be persisted under this prefix.
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "pending_payments";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
+/// The payment metadata will be persisted under this prefix.
+pub(crate) const PAYMENT_METADATA_PERSISTENCE_PRIMARY_NAMESPACE: &str = "payment_metadata";
+pub(crate) const PAYMENT_METADATA_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";

@@ -151,6 +151,7 @@ use liquidity::{LSPS1Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use payment::metadata_store::PaymentMetadataStore;
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
 	UnifiedPayment,
@@ -220,6 +221,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	payment_metadata_store: Arc<PaymentMetadataStore>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -571,6 +573,7 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.payment_metadata_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
@@ -856,6 +859,8 @@ impl Node {
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.payment_metadata_store),
+			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
@@ -874,6 +879,8 @@ impl Node {
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.payment_metadata_store),
+			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
@@ -1552,7 +1559,9 @@ impl Node {
 
 	/// Remove the payment with the given id from the store.
 	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
-		self.payment_store.remove(&payment_id)
+		self.payment_store.remove(&payment_id)?;
+		self.payment_metadata_store.remove_payment_id(payment_id)?;
+		Ok(())
 	}
 
 	/// Retrieves an overview of all known balances.
