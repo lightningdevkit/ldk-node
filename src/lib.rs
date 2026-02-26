@@ -151,7 +151,8 @@ use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::msgs::SocketAddress;
+use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
+use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStoreSync;
@@ -160,6 +161,9 @@ use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
+use lightning_types::features::{
+	Bolt11InvoiceFeatures, ChannelFeatures, InitFeatures, NodeFeatures,
+};
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -1948,6 +1952,63 @@ impl Node {
 			);
 			Error::PersistenceFailed
 		})
+	}
+
+	/// Return the features used in node announcement.
+	pub fn node_features(&self) -> NodeFeatures {
+		let gossip_features = match self.gossip_source.as_gossip_sync() {
+			lightning_background_processor::GossipSync::P2P(p2p_gossip_sync) => {
+				p2p_gossip_sync.provided_node_features()
+			},
+			lightning_background_processor::GossipSync::Rapid(_) => NodeFeatures::empty(),
+			lightning_background_processor::GossipSync::None => {
+				unreachable!("We must always have a gossip sync!")
+			},
+		};
+		self.channel_manager.node_features()
+			| self.chain_monitor.provided_node_features()
+			| self.onion_messenger.provided_node_features()
+			| gossip_features
+			| self
+				.liquidity_source
+				.as_ref()
+				.map(|ls| ls.liquidity_manager().provided_node_features())
+				.unwrap_or_else(NodeFeatures::empty)
+	}
+
+	/// Return the node's init features.
+	pub fn init_features(&self) -> InitFeatures {
+		let gossip_init_features = match self.gossip_source.as_gossip_sync() {
+			lightning_background_processor::GossipSync::P2P(p2p_gossip_sync) => {
+				p2p_gossip_sync.provided_init_features(self.node_id())
+			},
+			lightning_background_processor::GossipSync::Rapid(_) => InitFeatures::empty(),
+			lightning_background_processor::GossipSync::None => {
+				unreachable!("We must always have a gossip sync!")
+			},
+		};
+		self.channel_manager.init_features()
+			| self.chain_monitor.provided_init_features(self.node_id())
+			| self.onion_messenger.provided_init_features(self.node_id())
+			| gossip_init_features
+			| self
+				.liquidity_source
+				.as_ref()
+				.map(|ls| ls.liquidity_manager().provided_init_features(self.node_id()))
+				.unwrap_or_else(InitFeatures::empty)
+	}
+
+	/// Return the node's channel features.
+	pub fn channel_features(&self) -> ChannelFeatures {
+		self.channel_manager.channel_features()
+	}
+
+	/// Return the node's BOLT 11 invoice features.
+	pub fn bolt11_invoice_features(&self) -> Bolt11InvoiceFeatures {
+		// bolt11_invoice_features() is not public because feature
+		// flags can vary due to invoice type, so we convert from
+		// context.
+		self.channel_manager.init_features().to_context()
 	}
 }
 
