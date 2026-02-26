@@ -122,36 +122,6 @@ impl Bolt11Payment {
 			}
 		};
 
-		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
-		let id = PaymentId(payment_hash.0);
-		let preimage = if manual_claim_payment_hash.is_none() {
-			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
-			// will know the preimage at this point.
-			let res = self
-				.channel_manager
-				.get_payment_preimage(payment_hash, payment_secret.clone())
-				.ok();
-			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
-			res
-		} else {
-			None
-		};
-		let kind = PaymentKind::Bolt11 {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.payment_store.insert(payment)?;
-
 		Ok(invoice)
 	}
 
@@ -209,7 +179,6 @@ impl Bolt11Payment {
 
 		// Register payment in payment store.
 		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
 		let lsp_fee_limits = LSPFeeLimits {
 			max_total_opening_fee_msat: lsp_total_opening_fee,
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
@@ -224,25 +193,6 @@ impl Bolt11Payment {
 			payment_ids: vec![id],
 		};
 		self.payment_metadata_store.insert(metadata_entry)?;
-
-		let preimage =
-			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
-		let kind = PaymentKind::Bolt11Jit {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-			counterparty_skimmed_fee_msat: None,
-			lsp_fee_limits,
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.payment_store.insert(payment)?;
 
 		// Persist LSP peer to make sure we reconnect on restart.
 		self.peer_store.add_peer(peer_info)?;
