@@ -16,6 +16,7 @@ use crate::io;
 
 /// An error that could arise during [`NodeEntropy`] construction.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum EntropyError {
 	/// The given seed bytes are invalid, e.g., have invalid length.
 	InvalidSeedBytes,

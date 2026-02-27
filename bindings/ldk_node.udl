@@ -66,10 +66,7 @@ interface NodeEntropy {
 	constructor(string seed_path);
 };
 
-enum EntropyError {
-	"InvalidSeedBytes",
-	"InvalidSeedFile",
-};
+typedef enum EntropyError;
 
 typedef enum WordCount;
 
@@ -379,23 +376,7 @@ dictionary BestBlock {
 	u32 height;
 };
 
-[Error]
-enum BuildError {
-	"InvalidSystemTime",
-	"InvalidChannelMonitor",
-	"InvalidListeningAddresses",
-	"InvalidAnnouncementAddresses",
-	"InvalidNodeAlias",
-	"RuntimeSetupFailed",
-	"ReadFailed",
-	"WriteFailed",
-	"StoragePathAccessFailed",
-	"KVStoreSetupFailed",
-	"WalletSetupFailed",
-	"LoggerSetupFailed",
-	"NetworkMismatch",
-	"AsyncPaymentsConfigMismatch",
-};
+typedef enum BuildError;
 
 [Trait, WithForeign]
 interface VssHeaderProvider {

@@ -154,6 +154,7 @@ impl std::fmt::Debug for LogWriterConfig {
 ///
 /// [`Node`]: crate::Node
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum BuildError {
 	/// The current system time is invalid, clocks might have gone backwards.
 	InvalidSystemTime,
