@@ -41,6 +41,7 @@ macro_rules! maybe_map_fee_rate_opt {
 /// Should be retrieved by calling [`Node::onchain_payment`].
 ///
 /// [`Node::onchain_payment`]: crate::Node::onchain_payment
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct OnchainPayment {
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
@@ -56,7 +57,10 @@ impl OnchainPayment {
 	) -> Self {
 		Self { wallet, channel_manager, config, is_running, logger }
 	}
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl OnchainPayment {
 	/// Retrieve a new on-chain/funding address.
 	pub fn new_address(&self) -> Result<Address, Error> {
 		let funding_address = self.wallet.get_new_address()?;

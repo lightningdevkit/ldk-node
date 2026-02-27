@@ -138,81 +138,13 @@ interface Node {
 
 typedef enum Bolt11InvoiceDescription;
 
-interface Bolt11Payment {
-	[Throws=NodeError]
-	PaymentId send([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	void send_probes([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	void send_probes_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	void claim_for_hash(PaymentHash payment_hash, u64 claimable_amount_msat, PaymentPreimage preimage);
-	[Throws=NodeError]
-	void fail_for_hash(PaymentHash payment_hash);
-	[Throws=NodeError]
-	Bolt11Invoice receive(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
-	[Throws=NodeError]
-	Bolt11Invoice receive_for_hash(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash);
-	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
-	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_for_hash([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash);
-	[Throws=NodeError]
-	Bolt11Invoice receive_via_jit_channel(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_lsp_fee_limit_msat);
-	[Throws=NodeError]
-	Bolt11Invoice receive_via_jit_channel_for_hash(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_lsp_fee_limit_msat, PaymentHash payment_hash);
-	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_via_jit_channel([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat);
-	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_via_jit_channel_for_hash([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, u64? max_proportional_lsp_fee_limit_ppm_msat, PaymentHash payment_hash);
-};
+typedef interface Bolt11Payment;
 
-interface Bolt12Payment {
-	[Throws=NodeError]
-	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
-	[Throws=NodeError]
-	Offer receive_variable_amount([ByRef]string description, u32? expiry_secs);
-	[Throws=NodeError]
-	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
-	[Throws=NodeError]
-	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	Offer receive_async();
-	[Throws=NodeError]
-	void set_paths_to_static_invoice_server(bytes paths);
-	[Throws=NodeError]
-	bytes blinded_paths_for_async_recipient(bytes recipient_id);
-};
+typedef interface Bolt12Payment;
 
-interface SpontaneousPayment {
-	[Throws=NodeError]
-	PaymentId send(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters, sequence<CustomTlvRecord> custom_tlvs);
-	[Throws=NodeError]
-	PaymentId send_with_preimage(u64 amount_msat, PublicKey node_id, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	PaymentId send_with_preimage_and_custom_tlvs(u64 amount_msat, PublicKey node_id, sequence<CustomTlvRecord> custom_tlvs, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
-	[Throws=NodeError]
-	void send_probes(u64 amount_msat, PublicKey node_id);
-};
+typedef interface SpontaneousPayment;
 
-interface OnchainPayment {
-	[Throws=NodeError]
-	Address new_address();
-	[Throws=NodeError]
-	Txid send_to_address([ByRef]Address address, u64 amount_sats, FeeRate? fee_rate);
-	[Throws=NodeError]
-	Txid send_all_to_address([ByRef]Address address, boolean retain_reserve, FeeRate? fee_rate);
-	[Throws=NodeError]
-	Txid bump_fee_rbf(PaymentId payment_id, FeeRate? fee_rate);
-};
+typedef interface OnchainPayment;
 
 [Remote]
 interface FeeRate {
@@ -225,12 +157,7 @@ interface FeeRate {
 	u64 to_sat_per_vb_ceil();
 };
 
-interface UnifiedPayment {
-	[Throws=NodeError]
-	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
-	[Throws=NodeError, Async]
-	UnifiedPaymentResult send([ByRef]string uri_str, u64? amount_msat, RouteParametersConfig? route_parameters);
-};
+typedef interface UnifiedPayment;
 
 typedef interface LSPS1Liquidity;
 
