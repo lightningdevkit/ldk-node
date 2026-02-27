@@ -455,95 +455,17 @@ typedef enum AsyncPaymentsRole;
 
 typedef dictionary RouteHintHop;
 
-[Traits=(Debug, Display, Eq)]
-interface Bolt11Invoice {
-	[Throws=NodeError, Name=from_str]
-	constructor([ByRef] string invoice_str);
-	sequence<u8> signable_hash();
-	PaymentHash payment_hash();
-	PaymentSecret payment_secret();
-	u64? amount_milli_satoshis();
-	u64 expiry_time_seconds();
-	u64 seconds_since_epoch();
-	u64 seconds_until_expiry();
-	boolean is_expired();
-	boolean would_expire(u64 at_time_seconds);
-	Bolt11InvoiceDescription invoice_description();
-	u64 min_final_cltv_expiry_delta();
-	Network network();
-	Currency currency();
-	sequence<Address> fallback_addresses();
-	sequence<sequence<RouteHintHop>> route_hints();
-	PublicKey recover_payee_pub_key();
-};
+typedef interface Bolt11Invoice;
 
 typedef enum OfferAmount;
 
-[Traits=(Debug, Display, Eq)]
-interface Offer {
-	[Throws=NodeError, Name=from_str]
-	constructor([ByRef] string offer_str);
-	OfferId id();
-	boolean is_expired();
-	string? offer_description();
-	string? issuer();
-	OfferAmount? amount();
-	boolean is_valid_quantity(u64 quantity);
-	boolean expects_quantity();
-	boolean supports_chain(Network chain);
-	sequence<Network> chains();
-	sequence<u8>? metadata();
-	u64? absolute_expiry_seconds();
-	PublicKey? issuer_signing_pubkey();
-};
+typedef interface Offer;
 
-interface HumanReadableName {
-	[Throws=NodeError, Name=from_encoded]
-	constructor([ByRef] string encoded);
-	string user();
-	string domain();
-};
+typedef interface HumanReadableName;
 
-[Traits=(Debug, Display, Eq)]
-interface Refund {
-	[Throws=NodeError, Name=from_str]
-	constructor([ByRef] string refund_str);
-	string refund_description();
-	u64? absolute_expiry_seconds();
-	boolean is_expired();
-	string? issuer();
-	sequence<u8> payer_metadata();
-	Network? chain();
-	u64 amount_msats();
-	u64? quantity();
-	PublicKey payer_signing_pubkey();
-	string? payer_note();
-};
+typedef interface Refund;
 
-interface Bolt12Invoice {
-	[Throws=NodeError, Name=from_str]
-	constructor([ByRef] string invoice_str);
-	PaymentHash payment_hash();
-	u64 amount_msats();
-	OfferAmount? amount();
-	PublicKey signing_pubkey();
-	u64 created_at();
-	u64? absolute_expiry_seconds();
-	u64 relative_expiry();
-	boolean is_expired();
-	string? invoice_description();
-	string? issuer();
-	string? payer_note();
-	sequence<u8>? metadata();
-	u64? quantity();
-	sequence<u8> signable_hash();
-	PublicKey payer_signing_pubkey();
-	PublicKey? issuer_signing_pubkey();
-	sequence<u8> chain();
-	sequence<sequence<u8>>? offer_chains();
-	sequence<Address> fallback_addresses();
-	sequence<u8> encode();
-};
+typedef interface Bolt12Invoice;
 
 [Custom]
 typedef string Txid;

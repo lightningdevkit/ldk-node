@@ -233,12 +233,15 @@ impl From<LdkAmount> for OfferAmount {
 /// [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
 /// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
 /// [`Offer`]: lightning::offers::Offer:amount
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Display, Eq)]
 pub struct Offer {
 	pub(crate) inner: LdkOffer,
 }
 
+#[uniffi::export]
 impl Offer {
+	#[uniffi::constructor]
 	pub fn from_str(offer_str: &str) -> Result<Self, Error> {
 		offer_str.parse()
 	}
@@ -376,15 +379,18 @@ impl std::fmt::Display for Offer {
 /// This struct can also be used for LN-Address recipients.
 ///
 /// [Homograph Attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
+#[derive(uniffi::Object)]
 pub struct HumanReadableName {
 	pub(crate) inner: LdkHumanReadableName,
 }
 
+#[uniffi::export]
 impl HumanReadableName {
 	/// Constructs a new [`HumanReadableName`] from the standard encoding - `user`@`domain`.
 	///
 	/// If `user` includes the standard BIP 353 ₿ prefix it is automatically removed as required by
 	/// BIP 353.
+	#[uniffi::constructor]
 	pub fn from_encoded(encoded: &str) -> Result<Self, Error> {
 		let hrn = match LdkHumanReadableName::from_encoded(encoded) {
 			Ok(hrn) => Ok(hrn),
@@ -438,12 +444,15 @@ impl AsRef<LdkHumanReadableName> for HumanReadableName {
 ///
 /// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
 /// [`Offer`]: lightning::offers::offer::Offer
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Display, Eq)]
 pub struct Refund {
 	pub(crate) inner: LdkRefund,
 }
 
+#[uniffi::export]
 impl Refund {
+	#[uniffi::constructor]
 	pub fn from_str(refund_str: &str) -> Result<Self, Error> {
 		refund_str.parse()
 	}
@@ -550,12 +559,14 @@ impl std::fmt::Display for Refund {
 	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
 pub struct Bolt12Invoice {
 	pub(crate) inner: LdkBolt12Invoice,
 }
 
+#[uniffi::export]
 impl Bolt12Invoice {
+	#[uniffi::constructor]
 	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
 		invoice_str.parse()
 	}
@@ -1055,12 +1066,15 @@ impl From<lightning::routing::router::RouteHintHop> for RouteHintHop {
 }
 
 /// Represents a syntactically and semantically correct lightning BOLT11 invoice.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Display, Eq)]
 pub struct Bolt11Invoice {
 	pub(crate) inner: LdkBolt11Invoice,
 }
 
+#[uniffi::export]
 impl Bolt11Invoice {
+	#[uniffi::constructor]
 	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
 		invoice_str.parse()
 	}
