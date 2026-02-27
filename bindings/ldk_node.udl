@@ -40,15 +40,7 @@ enum LogLevel {
 	"Error",
 };
 
-dictionary LogRecord {
-	LogLevel level;
-	string args;
-	string module_path;
-	u32 line;
-	PublicKey? peer_id;
-	ChannelId? channel_id;
-	PaymentHash? payment_hash;
-};
+typedef dictionary LogRecord;
 
 [Trait, WithForeign]
 interface LogWriter {
@@ -151,11 +143,7 @@ interface Node {
 	bytes export_pathfinding_scores();
 };
 
-[Enum]
-interface Bolt11InvoiceDescription {
-	Hash(string hash);
-	Direct(string description);
-};
+typedef enum Bolt11InvoiceDescription;
 
 interface Bolt11Payment {
 	[Throws=NodeError]
@@ -335,13 +323,7 @@ interface VssHeaderProvider {
 	record<string, string> get_headers(sequence<u8> request);
 };
 
-[Error]
-interface VssHeaderProviderError {
-	InvalidData(string error);
-	RequestError(string error);
-	AuthorizationError(string error);
-	InternalError(string error);
-};
+typedef enum VssHeaderProviderError;
 
 [Remote]
 enum PaymentFailureReason {
@@ -359,12 +341,7 @@ enum PaymentFailureReason {
 
 typedef enum PaymentKind;
 
-[Enum]
-interface UnifiedPaymentResult {
-	Onchain(Txid txid);
-	Bolt11(PaymentId payment_id);
-	Bolt12(PaymentId payment_id);
-};
+typedef enum UnifiedPaymentResult;
 
 typedef enum PaymentDirection;
 
@@ -405,29 +382,11 @@ dictionary LSPS1OrderParams {
 	boolean announce_channel;
 };
 
-dictionary LSPS1PaymentInfo {
-	LSPS1Bolt11PaymentInfo? bolt11;
-	LSPS1OnchainPaymentInfo? onchain;
-};
+typedef dictionary LSPS1PaymentInfo;
 
-dictionary LSPS1Bolt11PaymentInfo {
-	LSPS1PaymentState state;
-	LSPSDateTime expires_at;
-	u64 fee_total_sat;
-	u64 order_total_sat;
-	Bolt11Invoice invoice;
-};
+typedef dictionary LSPS1Bolt11PaymentInfo;
 
-dictionary LSPS1OnchainPaymentInfo {
-	LSPS1PaymentState state;
-	LSPSDateTime expires_at;
-	u64 fee_total_sat;
-	u64 order_total_sat;
-	Address address;
-	u16? min_onchain_payment_confirmations;
-	FeeRate min_fee_for_0conf;
-	Address? refund_onchain_address;
-};
+typedef dictionary LSPS1OnchainPaymentInfo;
 
 [Remote]
 dictionary LSPS1ChannelInfo {
@@ -486,22 +445,9 @@ interface NetworkGraph {
 	NodeInfo? node([ByRef]NodeId node_id);
 };
 
-dictionary ChannelInfo {
-	NodeId node_one;
-	ChannelUpdateInfo? one_to_two;
-	NodeId node_two;
-	ChannelUpdateInfo? two_to_one;
-	u64? capacity_sats;
-};
+typedef dictionary ChannelInfo;
 
-dictionary ChannelUpdateInfo {
-	u32 last_update;
-	boolean enabled;
-	u16 cltv_expiry_delta;
-	u64 htlc_minimum_msat;
-	u64 htlc_maximum_msat;
-	RoutingFees fees;
-};
+typedef dictionary ChannelUpdateInfo;
 
 [Remote]
 dictionary RoutingFees {
@@ -509,16 +455,9 @@ dictionary RoutingFees {
 	u32 proportional_millionths;
 };
 
-dictionary NodeInfo {
-	sequence<u64> channels;
-	NodeAnnouncementInfo? announcement_info;
-};
+typedef dictionary NodeInfo;
 
-dictionary NodeAnnouncementInfo {
-	u32 last_update;
-	string alias;
-	sequence<SocketAddress> addresses;
-};
+typedef dictionary NodeAnnouncementInfo;
 
 [Remote]
 enum Currency {
@@ -531,14 +470,7 @@ enum Currency {
 
 typedef enum AsyncPaymentsRole;
 
-dictionary RouteHintHop {
-	PublicKey src_node_id;
-	u64 short_channel_id;
-	u16 cltv_expiry_delta;
-	u64? htlc_minimum_msat;
-	u64? htlc_maximum_msat;
-	RoutingFees fees;
-};
+typedef dictionary RouteHintHop;
 
 [Traits=(Debug, Display, Eq)]
 interface Bolt11Invoice {
@@ -562,11 +494,7 @@ interface Bolt11Invoice {
 	PublicKey recover_payee_pub_key();
 };
 
-[Enum]
-interface OfferAmount {
-	Bitcoin(u64 amount_msats);
-	Currency(string iso4217_code, u64 amount);
-};
+typedef enum OfferAmount;
 
 [Traits=(Debug, Display, Eq)]
 interface Offer {

@@ -101,6 +101,7 @@ impl fmt::Display for LogContext<'_> {
 /// It is similar to the non-`uniffi` version, but it omits the lifetime parameter
 /// for the `LogRecord`, as the Uniffi-exposed interface cannot handle lifetimes.
 #[cfg(feature = "uniffi")]
+#[derive(uniffi::Record)]
 pub struct LogRecord {
 	/// The verbosity level of the message.
 	pub level: LogLevel,

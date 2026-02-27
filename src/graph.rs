@@ -56,7 +56,7 @@ impl NetworkGraph {
 ///
 /// This is a simplified version of LDK's `ChannelInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ChannelInfo {
 	/// Source node of the first direction of a channel
 	pub node_one: NodeId,
@@ -87,7 +87,7 @@ impl From<lightning::routing::gossip::ChannelInfo> for ChannelInfo {
 ///
 /// This is a simplified version of LDK's `ChannelUpdateInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ChannelUpdateInfo {
 	/// When the last update to the channel direction was issued.
 	/// Value is opaque, as set in the announcement.
@@ -122,7 +122,7 @@ impl From<lightning::routing::gossip::ChannelUpdateInfo> for ChannelUpdateInfo {
 ///
 /// This is a simplified version of LDK's `NodeInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct NodeInfo {
 	/// All valid channels a node has announced
 	pub channels: Vec<u64>,
@@ -146,7 +146,7 @@ impl From<lightning::routing::gossip::NodeInfo> for NodeInfo {
 ///
 /// This is a simplified version of LDK's `NodeAnnouncementInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct NodeAnnouncementInfo {
 	/// When the last known update to the node state was issued.
 	/// Value is opaque, as set in the announcement.

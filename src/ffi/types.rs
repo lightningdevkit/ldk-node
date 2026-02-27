@@ -47,7 +47,7 @@ use vss_client::headers::VssHeaderProvider as VssClientHeaderProvider;
 use vss_client::headers::VssHeaderProviderError as VssClientHeaderProviderError;
 
 /// Errors around providing headers for each VSS request.
-#[derive(Debug)]
+#[derive(Debug, uniffi::Error)]
 pub enum VssHeaderProviderError {
 	/// Invalid data was encountered.
 	InvalidData {
@@ -141,7 +141,7 @@ use crate::builder::sanitize_alias;
 pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig};
 pub use crate::entropy::{generate_entropy_mnemonic, EntropyError, NodeEntropy, WordCount};
 use crate::error::Error;
-pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
+pub use crate::graph::{ChannelInfo, NodeInfo};
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::UnifiedPaymentResult;
@@ -203,7 +203,7 @@ uniffi::custom_type!(ScriptBuf, String, {
 	},
 });
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum OfferAmount {
 	Bitcoin { amount_msats: u64 },
 	Currency { iso4217_code: String, amount: u64 },
@@ -933,7 +933,7 @@ uniffi::custom_type!(NodeAlias, String, {
 
 /// Represents the description of an invoice which has to be either a directly included string or
 /// a hash of a description provided out of band.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum Bolt11InvoiceDescription {
 	/// Contains a full description.
 	Direct {
@@ -1026,7 +1026,7 @@ impl From<lightning_invoice::Currency> for Currency {
 ///
 /// While this generally comes from BOLT 11's `r` field, this struct includes more fields than are
 /// available in BOLT 11.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RouteHintHop {
 	/// The node_id of the non-target end of the route
 	pub src_node_id: PublicKey,
@@ -1198,7 +1198,7 @@ impl std::fmt::Display for Bolt11Invoice {
 	}
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct LSPS1PaymentInfo {
 	/// A Lightning payment using BOLT 11.
 	pub bolt11: Option<crate::ffi::LSPS1Bolt11PaymentInfo>,
@@ -1218,7 +1218,7 @@ impl From<lightning_liquidity::lsps1::msgs::LSPS1PaymentInfo> for LSPS1PaymentIn
 
 /// An onchain payment.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct LSPS1OnchainPaymentInfo {
 	/// Indicates the current state of the payment.
 	pub state: lightning_liquidity::lsps1::msgs::LSPS1PaymentState,
@@ -1257,7 +1257,7 @@ impl From<lightning_liquidity::lsps1::msgs::LSPS1OnchainPaymentInfo> for LSPS1On
 	}
 }
 /// A Lightning payment using BOLT 11.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct LSPS1Bolt11PaymentInfo {
 	/// Indicates the current state of the payment.
 	pub state: LSPS1PaymentState,

@@ -296,6 +296,7 @@ impl UnifiedPayment {
 /// [`PaymentId`]: lightning::ln::channelmanager::PaymentId
 /// [`Txid`]: bitcoin::hash_types::Txid
 #[derive(Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum UnifiedPaymentResult {
 	/// An on-chain payment.
 	Onchain {
