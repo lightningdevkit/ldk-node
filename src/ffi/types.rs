@@ -147,9 +147,7 @@ use crate::error::Error;
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
 pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
-pub use crate::payment::store::{
-	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
-};
+pub use crate::payment::store::{PaymentDirection, PaymentKind, PaymentStatus};
 pub use crate::payment::UnifiedPaymentResult;
 use crate::{hex_utils, SocketAddress, UserChannelId};
 

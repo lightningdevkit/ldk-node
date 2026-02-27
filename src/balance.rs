@@ -67,6 +67,7 @@ pub struct BalanceDetails {
 
 /// Details about the status of a known Lightning balance.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum LightningBalance {
 	/// The channel is not yet closed (or the commitment or closing transaction has not yet
 	/// appeared in a block). The given balance is claimable (less on-chain fees) if the channel is
@@ -304,6 +305,7 @@ impl LightningBalance {
 
 /// Details about the status of a known balance currently being swept to our on-chain wallet.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PendingSweepBalance {
 	/// The spendable output is about to be swept, but a spending transaction has yet to be generated and
 	/// broadcast.

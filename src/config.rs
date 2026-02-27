@@ -555,6 +555,7 @@ impl Default for ChannelConfig {
 ///
 /// See [`LdkChannelConfig::max_dust_htlc_exposure`] for details.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum MaxDustHTLCExposure {
 	/// This sets a fixed limit on the total dust exposure in millisatoshis.
 	///

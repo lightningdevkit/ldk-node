@@ -406,15 +406,7 @@ enum PaymentFailureReason {
 	"BlindedPathCreationFailed",
 };
 
-[Enum]
-interface PaymentKind {
-	Onchain(Txid txid, ConfirmationStatus status);
-	Bolt11(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret);
-	Bolt11Jit(PaymentHash hash, PaymentPreimage? preimage, PaymentSecret? secret, u64? counterparty_skimmed_fee_msat, LSPFeeLimits lsp_fee_limits);
-	Bolt12Offer(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, OfferId offer_id, UntrustedString? payer_note, u64? quantity);
-	Bolt12Refund(PaymentHash? hash, PaymentPreimage? preimage, PaymentSecret? secret, UntrustedString? payer_note, u64? quantity);
-	Spontaneous(PaymentHash hash, PaymentPreimage? preimage);
-};
+typedef enum PaymentKind;
 
 [Enum]
 interface UnifiedPaymentResult {
@@ -427,16 +419,9 @@ typedef enum PaymentDirection;
 
 typedef enum PaymentStatus;
 
-dictionary LSPFeeLimits {
-	u64? max_total_opening_fee_msat;
-	u64? max_proportional_opening_fee_ppm_msat;
-};
+typedef dictionary LSPFeeLimits;
 
-[Enum]
-interface ConfirmationStatus {
-	Confirmed (BlockHash block_hash, u32 height, u64 timestamp);
-	Unconfirmed ();
-};
+typedef enum ConfirmationStatus;
 
 dictionary PaymentDetails {
 	PaymentId id;
@@ -574,54 +559,7 @@ dictionary PeerDetails {
 	boolean is_connected;
 };
 
-[Enum]
-interface LightningBalance {
-	ClaimableOnChannelClose (
-		ChannelId channel_id,
-		PublicKey counterparty_node_id,
-		u64 amount_satoshis,
-		u64 transaction_fee_satoshis,
-		u64 outbound_payment_htlc_rounded_msat,
-		u64 outbound_forwarded_htlc_rounded_msat,
-		u64 inbound_claiming_htlc_rounded_msat,
-		u64 inbound_htlc_rounded_msat
-	);
-	ClaimableAwaitingConfirmations (
-		ChannelId channel_id,
-		PublicKey counterparty_node_id,
-		u64 amount_satoshis,
-		u32 confirmation_height,
-		BalanceSource source
-	);
-	ContentiousClaimable (
-		ChannelId channel_id,
-		PublicKey counterparty_node_id,
-		u64 amount_satoshis,
-		u32 timeout_height,
-		PaymentHash payment_hash,
-		PaymentPreimage payment_preimage
-	);
-	MaybeTimeoutClaimableHTLC (
-		ChannelId channel_id,
-		PublicKey counterparty_node_id,
-		u64 amount_satoshis,
-		u32 claimable_height,
-		PaymentHash payment_hash,
-		boolean outbound_payment
-	);
-	MaybePreimageClaimableHTLC (
-		ChannelId channel_id,
-		PublicKey counterparty_node_id,
-		u64 amount_satoshis,
-		u32 expiry_height,
-		PaymentHash payment_hash
-	);
-	CounterpartyRevokedOutputClaimable (
-		ChannelId channel_id,
-		PublicKey counterparty_node_id,
-		u64 amount_satoshis
-	);
-};
+typedef enum LightningBalance;
 
 [Remote]
 enum BalanceSource {
@@ -631,12 +569,7 @@ enum BalanceSource {
 	"Htlc",
 };
 
-[Enum]
-interface PendingSweepBalance {
-	PendingBroadcast ( ChannelId? channel_id, u64 amount_satoshis );
-	BroadcastAwaitingConfirmation ( ChannelId? channel_id, u32 latest_broadcast_height, Txid latest_spending_txid, u64 amount_satoshis );
-	AwaitingThresholdConfirmations ( ChannelId? channel_id, Txid latest_spending_txid, BlockHash confirmation_hash, u32 confirmation_height, u64 amount_satoshis);
-};
+typedef enum PendingSweepBalance;
 
 dictionary BalanceDetails {
 	u64 total_onchain_balance_sats;
@@ -656,11 +589,7 @@ dictionary ChannelConfig {
 	boolean accept_underpaying_htlcs;
 };
 
-[Enum]
-interface MaxDustHTLCExposure {
-	FixedLimit ( u64 limit_msat );
-	FeeRateMultiplier ( u64 multiplier );
-};
+typedef enum MaxDustHTLCExposure;
 
 interface NetworkGraph {
 	sequence<u64> list_channels();
