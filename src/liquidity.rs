@@ -99,6 +99,7 @@ struct LSPS2Service {
 ///
 /// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct LSPS2ServiceConfig {
 	/// A token we may require to be sent by the clients.
 	///

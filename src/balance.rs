@@ -17,6 +17,7 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage};
 ///
 /// [`Node::list_balances`]: crate::Node::list_balances
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct BalanceDetails {
 	/// The total balance of our on-chain wallet.
 	pub total_onchain_balance_sats: u64,

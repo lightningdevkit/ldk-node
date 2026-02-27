@@ -24,6 +24,7 @@ use crate::hex_utils;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct PaymentDetails {
 	/// The identifier of this payment.
 	pub id: PaymentId,

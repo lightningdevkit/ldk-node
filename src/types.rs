@@ -355,6 +355,7 @@ impl fmt::Display for UserChannelId {
 ///
 /// [`Node::list_channels`]: crate::Node::list_channels
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ChannelDetails {
 	/// The channel's ID (prior to initial channel setup this is a random 32 bytes, thereafter it
 	/// is derived from channel funding or key material).
@@ -591,6 +592,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 ///
 /// [`Node::list_peers`]: crate::Node::list_peers
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct PeerDetails {
 	/// The node ID of the peer.
 	pub node_id: PublicKey,
@@ -604,6 +606,7 @@ pub struct PeerDetails {
 
 /// Custom TLV entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CustomTlvRecord {
 	/// Type number.
 	pub type_num: u64,
