@@ -5,21 +5,11 @@ namespace ldk_node {
 
 typedef dictionary Config;
 
-typedef dictionary AnchorChannelsConfig;
-
-typedef dictionary BackgroundSyncConfig;
-
-typedef dictionary SyncTimeoutsConfig;
-
 typedef dictionary EsploraSyncConfig;
 
 typedef dictionary ElectrumSyncConfig;
 
-typedef dictionary LSPS2ServiceConfig;
-
 typedef interface NodeEntropy;
-
-typedef enum EntropyError;
 
 typedef enum WordCount;
 
@@ -135,8 +125,6 @@ interface Node {
 	[Throws=NodeError]
 	bytes export_pathfinding_scores();
 };
-
-typedef enum Bolt11InvoiceDescription;
 
 typedef interface Bolt11Payment;
 
@@ -254,18 +242,6 @@ enum PaymentFailureReason {
 	"BlindedPathCreationFailed",
 };
 
-typedef enum PaymentKind;
-
-typedef enum UnifiedPaymentResult;
-
-typedef enum PaymentDirection;
-
-typedef enum PaymentStatus;
-
-typedef dictionary LSPFeeLimits;
-
-typedef enum ConfirmationStatus;
-
 typedef dictionary PaymentDetails;
 
 [Remote]
@@ -275,8 +251,6 @@ dictionary RouteParametersConfig {
 	u8 max_path_count;
 	u8 max_channel_saturation_power_of_half;
 };
-
-typedef dictionary CustomTlvRecord;
 
 [Remote]
 dictionary LSPS1OrderStatus {
@@ -298,10 +272,6 @@ dictionary LSPS1OrderParams {
 };
 
 typedef dictionary LSPS1PaymentInfo;
-
-typedef dictionary LSPS1Bolt11PaymentInfo;
-
-typedef dictionary LSPS1OnchainPaymentInfo;
 
 [Remote]
 dictionary LSPS1ChannelInfo {
@@ -335,8 +305,6 @@ typedef dictionary ChannelDetails;
 
 typedef dictionary PeerDetails;
 
-typedef enum LightningBalance;
-
 [Remote]
 enum BalanceSource {
 	"HolderForceClosed",
@@ -345,29 +313,17 @@ enum BalanceSource {
 	"Htlc",
 };
 
-typedef enum PendingSweepBalance;
-
 typedef dictionary BalanceDetails;
 
 typedef dictionary ChannelConfig;
 
-typedef enum MaxDustHTLCExposure;
-
 typedef interface NetworkGraph;
-
-typedef dictionary ChannelInfo;
-
-typedef dictionary ChannelUpdateInfo;
 
 [Remote]
 dictionary RoutingFees {
 	u32 base_msat;
 	u32 proportional_millionths;
 };
-
-typedef dictionary NodeInfo;
-
-typedef dictionary NodeAnnouncementInfo;
 
 [Remote]
 enum Currency {
@@ -379,20 +335,6 @@ enum Currency {
 };
 
 typedef enum AsyncPaymentsRole;
-
-typedef dictionary RouteHintHop;
-
-typedef interface Bolt11Invoice;
-
-typedef enum OfferAmount;
-
-typedef interface Offer;
-
-typedef interface HumanReadableName;
-
-typedef interface Refund;
-
-typedef interface Bolt12Invoice;
 
 [Custom]
 typedef string Txid;
@@ -451,5 +393,4 @@ typedef string LSPSDateTime;
 [Custom]
 typedef string ScriptBuf;
 
-typedef enum ClosureReason;
 typedef enum Event;
