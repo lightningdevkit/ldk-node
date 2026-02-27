@@ -17,14 +17,7 @@ typedef dictionary ElectrumSyncConfig;
 
 typedef dictionary LSPS2ServiceConfig;
 
-interface NodeEntropy {
-	[Name=from_bip39_mnemonic]
-	constructor(Mnemonic mnemonic, string? passphrase);
-	[Throws=EntropyError, Name=from_seed_bytes]
-	constructor(bytes seed_bytes);
-	[Throws=EntropyError, Name=from_seed_path]
-	constructor(string seed_path);
-};
+typedef interface NodeEntropy;
 
 typedef enum EntropyError;
 
@@ -239,12 +232,7 @@ interface UnifiedPayment {
 	UnifiedPaymentResult send([ByRef]string uri_str, u64? amount_msat, RouteParametersConfig? route_parameters);
 };
 
-interface LSPS1Liquidity {
-	[Throws=NodeError]
-	LSPS1OrderStatus request_channel(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel);
-	[Throws=NodeError]
-	LSPS1OrderStatus check_order_status(LSPS1OrderId order_id);
-};
+typedef interface LSPS1Liquidity;
 
 [Error]
 enum NodeError {
@@ -438,12 +426,7 @@ typedef dictionary ChannelConfig;
 
 typedef enum MaxDustHTLCExposure;
 
-interface NetworkGraph {
-	sequence<u64> list_channels();
-	ChannelInfo? channel(u64 short_channel_id);
-	sequence<NodeId> list_nodes();
-	NodeInfo? node([ByRef]NodeId node_id);
-};
+typedef interface NetworkGraph;
 
 typedef dictionary ChannelInfo;
 

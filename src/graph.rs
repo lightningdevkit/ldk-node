@@ -20,6 +20,7 @@ use lightning::routing::gossip::{ChannelInfo, NodeInfo};
 use crate::types::Graph;
 
 /// Represents the network as nodes and channels between them.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct NetworkGraph {
 	inner: Arc<Graph>,
 }
@@ -28,7 +29,10 @@ impl NetworkGraph {
 	pub(crate) fn new(inner: Arc<Graph>) -> Self {
 		Self { inner }
 	}
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl NetworkGraph {
 	/// Returns the list of channels in the graph
 	pub fn list_channels(&self) -> Vec<u64> {
 		self.inner.read_only().channels().unordered_keys().map(|c| *c).collect()

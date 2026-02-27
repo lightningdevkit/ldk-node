@@ -40,13 +40,31 @@ impl std::error::Error for EntropyError {}
 ///
 /// [`Node`]: crate::Node
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct NodeEntropy([u8; WALLET_KEYS_SEED_LEN]);
 
+impl NodeEntropy {
+	/// Configures the [`Node`] instance to source its wallet entropy from the given
+	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
+	///
+	/// [`Node`]: crate::Node
+	#[cfg(not(feature = "uniffi"))]
+	pub fn from_seed_bytes(seed_bytes: [u8; WALLET_KEYS_SEED_LEN]) -> Self {
+		Self(seed_bytes)
+	}
+
+	pub(crate) fn to_seed_bytes(&self) -> [u8; WALLET_KEYS_SEED_LEN] {
+		self.0
+	}
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
 impl NodeEntropy {
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
 	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
 	/// [`Node`]: crate::Node
+	#[cfg_attr(feature = "uniffi", uniffi::constructor)]
 	pub fn from_bip39_mnemonic(mnemonic: Mnemonic, passphrase: Option<String>) -> Self {
 		match passphrase {
 			Some(passphrase) => Self(mnemonic.to_seed(passphrase)),
@@ -57,20 +75,12 @@ impl NodeEntropy {
 	/// Configures the [`Node`] instance to source its wallet entropy from the given
 	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
 	///
-	/// [`Node`]: crate::Node
-	#[cfg(not(feature = "uniffi"))]
-	pub fn from_seed_bytes(seed_bytes: [u8; WALLET_KEYS_SEED_LEN]) -> Self {
-		Self(seed_bytes)
-	}
-
-	/// Configures the [`Node`] instance to source its wallet entropy from the given
-	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
-	///
 	/// Will return an error if the length of the given `Vec` is not exactly
 	/// [`WALLET_KEYS_SEED_LEN`].
 	///
 	/// [`Node`]: crate::Node
 	#[cfg(feature = "uniffi")]
+	#[uniffi::constructor]
 	pub fn from_seed_bytes(seed_bytes: Vec<u8>) -> Result<NodeEntropy, EntropyError> {
 		if seed_bytes.len() != WALLET_KEYS_SEED_LEN {
 			return Err(EntropyError::InvalidSeedBytes);
@@ -86,15 +96,12 @@ impl NodeEntropy {
 	/// stored at the given location.
 	///
 	/// [`Node`]: crate::Node
+	#[cfg_attr(feature = "uniffi", uniffi::constructor)]
 	pub fn from_seed_path(seed_path: String) -> Result<Self, EntropyError> {
 		Ok(Self(
 			io::utils::read_or_generate_seed_file(&seed_path)
 				.map_err(|_| EntropyError::InvalidSeedFile)?,
 		))
-	}
-
-	pub(crate) fn to_seed_bytes(&self) -> [u8; WALLET_KEYS_SEED_LEN] {
-		self.0
 	}
 }
 

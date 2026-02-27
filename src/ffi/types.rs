@@ -139,9 +139,8 @@ impl VssClientHeaderProvider for VssHeaderProviderAdapter {
 
 use crate::builder::sanitize_alias;
 pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig};
-pub use crate::entropy::{generate_entropy_mnemonic, EntropyError, NodeEntropy, WordCount};
+pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
 use crate::error::Error;
-pub use crate::graph::{ChannelInfo, NodeInfo};
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::UnifiedPaymentResult;

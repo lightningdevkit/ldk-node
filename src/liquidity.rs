@@ -1451,6 +1451,7 @@ pub(crate) struct LSPS2BuyResponse {
 /// [`Node::lsps1_liquidity`]: crate::Node::lsps1_liquidity
 /// [`Bolt11Payment::receive_via_jit_channel`]: crate::payment::Bolt11Payment::receive_via_jit_channel
 #[derive(Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct LSPS1Liquidity {
 	runtime: Arc<Runtime>,
 	wallet: Arc<Wallet>,
@@ -1467,7 +1468,10 @@ impl LSPS1Liquidity {
 	) -> Self {
 		Self { runtime, wallet, connection_manager, liquidity_source, logger }
 	}
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl LSPS1Liquidity {
 	/// Connects to the configured LSP and places an order for an inbound channel.
 	///
 	/// The channel will be opened after one of the returned payment options has successfully been
