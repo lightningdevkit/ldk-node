@@ -9,6 +9,7 @@ use core::future::Future;
 use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -494,6 +495,7 @@ where
 	static_invoice_store: Option<StaticInvoiceStore>,
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
+	probe_locked_msat: Option<Arc<AtomicU64>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -509,7 +511,7 @@ where
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
-		config: Arc<Config>,
+		config: Arc<Config>, probe_locked_msat: Option<Arc<AtomicU64>>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -528,6 +530,7 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+			probe_locked_msat,
 		}
 	}
 
@@ -1111,8 +1114,22 @@ where
 
 			LdkEvent::PaymentPathSuccessful { .. } => {},
 			LdkEvent::PaymentPathFailed { .. } => {},
-			LdkEvent::ProbeSuccessful { .. } => {},
-			LdkEvent::ProbeFailed { .. } => {},
+			LdkEvent::ProbeSuccessful { path, .. } => {
+				if let Some(counter) = &self.probe_locked_msat {
+					let amount = path.hops.last().map_or(0, |h| h.fee_msat);
+					let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+						Some(v.saturating_sub(amount))
+					});
+				}
+			},
+			LdkEvent::ProbeFailed { path, .. } => {
+				if let Some(counter) = &self.probe_locked_msat {
+					let amount = path.hops.last().map_or(0, |h| h.fee_msat);
+					let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+						Some(v.saturating_sub(amount))
+					});
+				}
+			},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					liquidity_source.handle_htlc_handling_failed(failure_type).await;
@@ -1356,7 +1373,6 @@ where
 						);
 					}
 				}
-
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					let skimmed_fee_msat = skimmed_fee_msat.unwrap_or(0);
 					liquidity_source

@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::default::Default;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, Once, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{fmt, fs};
 
 use bdk_wallet::template::Bip84;
@@ -47,6 +48,7 @@ use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBING_INTERVAL_SECS, MIN_PROBE_AMOUNT_MSAT,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -72,6 +74,8 @@ use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
+use crate::probing;
+use crate::probing::ProbingStrategy;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -147,6 +151,37 @@ impl std::fmt::Debug for LogWriterConfig {
 				f.debug_tuple("Custom").field(&"<config internal to custom log writer>").finish()
 			},
 		}
+	}
+}
+
+enum ProbingStrategyKind {
+	HighDegree { top_n: usize },
+	Random { max_hops: usize },
+	Custom(Arc<dyn probing::ProbingStrategy>),
+}
+
+struct ProbingStrategyConfig {
+	kind: ProbingStrategyKind,
+	interval: Duration,
+	max_locked_msat: u64,
+}
+
+impl fmt::Debug for ProbingStrategyConfig {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let kind_str = match &self.kind {
+			ProbingStrategyKind::HighDegree { top_n } => {
+				format!("HighDegree {{ top_n: {} }}", top_n)
+			},
+			ProbingStrategyKind::Random { max_hops } => {
+				format!("Random {{ max_hops: {} }}", max_hops)
+			},
+			ProbingStrategyKind::Custom(_) => "Custom(<probing strategy>)".to_string(),
+		};
+		f.debug_struct("ProbingStrategyConfig")
+			.field("kind", &kind_str)
+			.field("interval", &self.interval)
+			.field("max_locked_msat", &self.max_locked_msat)
+			.finish()
 	}
 }
 
@@ -245,6 +280,7 @@ pub struct NodeBuilder {
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	recovery_mode: bool,
+	probing_strategy: Option<ProbingStrategyConfig>,
 }
 
 impl NodeBuilder {
@@ -273,6 +309,7 @@ impl NodeBuilder {
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
 			recovery_mode,
+			probing_strategy: None,
 		}
 	}
 
@@ -557,6 +594,64 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Configures background probing toward the highest-degree nodes in the network graph.
+	///
+	/// `top_n` controls how many of the most-connected nodes are cycled through.
+	pub fn set_high_degree_probing_strategy(&mut self, top_n: usize) -> &mut Self {
+		let kind = ProbingStrategyKind::HighDegree { top_n };
+		self.probing_strategy = Some(self.make_probing_config(kind));
+		self
+	}
+
+	/// Configures background probing via random graph walks of up to `max_hops` hops.
+	pub fn set_random_probing_strategy(&mut self, max_hops: usize) -> &mut Self {
+		let kind = ProbingStrategyKind::Random { max_hops };
+		self.probing_strategy = Some(self.make_probing_config(kind));
+		self
+	}
+
+	/// Configures a custom probing strategy for background channel probing.
+	///
+	/// When set, the node will periodically call [`ProbingStrategy::next_probe`] and dispatch the
+	/// returned probe via the channel manager.
+	pub fn set_probing_strategy(
+		&mut self, strategy: Arc<dyn probing::ProbingStrategy>,
+	) -> &mut Self {
+		let kind = ProbingStrategyKind::Custom(strategy);
+		self.probing_strategy = Some(self.make_probing_config(kind));
+		self
+	}
+
+	/// Overrides the interval between probe attempts. Only has effect if a probing strategy is set.
+	pub fn set_probing_interval(&mut self, interval: Duration) -> &mut Self {
+		if let Some(cfg) = &mut self.probing_strategy {
+			cfg.interval = interval;
+		}
+		self
+	}
+
+	/// Overrides the maximum millisatoshis that may be locked in in-flight probes at any time.
+	/// Only has effect if a probing strategy is set.
+	pub fn set_max_probe_locked_msat(&mut self, max_msat: u64) -> &mut Self {
+		if let Some(cfg) = &mut self.probing_strategy {
+			cfg.max_locked_msat = max_msat;
+		}
+		self
+	}
+
+	fn make_probing_config(&self, kind: ProbingStrategyKind) -> ProbingStrategyConfig {
+		let existing = self.probing_strategy.as_ref();
+		ProbingStrategyConfig {
+			kind,
+			interval: existing
+				.map(|c| c.interval)
+				.unwrap_or(Duration::from_secs(DEFAULT_PROBING_INTERVAL_SECS)),
+			max_locked_msat: existing
+				.map(|c| c.max_locked_msat)
+				.unwrap_or(DEFAULT_MAX_PROBE_LOCKED_MSAT),
+		}
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -697,6 +792,7 @@ impl NodeBuilder {
 			runtime,
 			logger,
 			Arc::new(DynStoreWrapper(kv_store)),
+			self.probing_strategy.as_ref(),
 		)
 	}
 }
@@ -942,6 +1038,11 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_wallet_recovery_mode();
 	}
 
+	/// Configures a probing strategy for background channel probing.
+	pub fn set_probing_strategy(&self, strategy: Arc<dyn probing::ProbingStrategy>) {
+		self.inner.write().unwrap().set_probing_strategy(strategy);
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
@@ -1058,6 +1159,7 @@ fn build_with_store_internal(
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
 	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	probing_config: Option<&ProbingStrategyConfig>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1783,6 +1885,36 @@ fn build_with_store_internal(
 		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
 	}
 
+	let prober = probing_config.map(|config| {
+		let strategy: Arc<dyn probing::ProbingStrategy> = match &config.kind {
+			ProbingStrategyKind::HighDegree { top_n } => {
+				Arc::new(probing::HighDegreeStrategy::new(
+					network_graph.clone(),
+					*top_n,
+					MIN_PROBE_AMOUNT_MSAT,
+					config.max_locked_msat,
+				))
+			},
+			ProbingStrategyKind::Random { max_hops } => Arc::new(probing::RandomStrategy::new(
+				network_graph.clone(),
+				channel_manager.clone(),
+				*max_hops,
+				MIN_PROBE_AMOUNT_MSAT,
+				config.max_locked_msat,
+			)),
+			ProbingStrategyKind::Custom(s) => s.clone(),
+		};
+		Arc::new(probing::Prober {
+			channel_manager: channel_manager.clone(),
+			logger: logger.clone(),
+			strategy,
+			interval: config.interval,
+			liquidity_limit_multiplier: None,
+			max_locked_msat: config.max_locked_msat,
+			locked_msat: Arc::new(AtomicU64::new(0)),
+		})
+	});
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -1815,6 +1947,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver,
+		prober,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})

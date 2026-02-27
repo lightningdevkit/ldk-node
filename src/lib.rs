@@ -100,6 +100,7 @@ pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
+mod probing;
 mod runtime;
 mod scoring;
 mod tx_broadcaster;
@@ -157,6 +158,7 @@ use payment::{
 	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
+pub use probing::{HighDegreeStrategy, Probe, ProbingStrategy, RandomStrategy};
 use rand::Rng;
 use runtime::Runtime;
 use types::{
@@ -227,6 +229,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
+	prober: Option<Arc<probing::Prober>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -563,6 +566,7 @@ impl Node {
 			None
 		};
 
+		let probe_locked_msat = self.prober.as_ref().map(|p| Arc::clone(&p.locked_msat));
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
@@ -580,7 +584,15 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
+			probe_locked_msat,
 		));
+
+		if let Some(prober) = self.prober.clone() {
+			let stop_rx = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				prober.run(stop_rx).await;
+			});
+		}
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
@@ -1031,6 +1043,17 @@ impl Node {
 			Arc::clone(&self.logger),
 		))
 	}
+
+	/// Returns the total millisatoshis currently locked in in-flight probes, or `None` if no
+	/// probing strategy is configured.
+	pub fn probe_locked_msat(&self) -> Option<u64> {
+		self.prober.as_ref().map(|p| p.locked_msat.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+    /// Gives access to the scorer; needed to valuate the probing tests.
+    #[cfg(test)]
+    pub fn scorer(&self) -> &Arc<Mutex<Scorer>> { &self.scorer }
+
 
 	/// Retrieve a list of known channels.
 	pub fn list_channels(&self) -> Vec<ChannelDetails> {
