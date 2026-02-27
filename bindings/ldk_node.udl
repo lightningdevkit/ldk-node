@@ -71,13 +71,7 @@ enum EntropyError {
 	"InvalidSeedFile",
 };
 
-enum WordCount {
-	"Words12",
-	"Words15",
-	"Words18",
-	"Words21",
-	"Words24",
-};
+typedef enum WordCount;
 
 [Remote]
 enum LogLevel {
@@ -448,16 +442,9 @@ interface UnifiedPaymentResult {
 	Bolt12(PaymentId payment_id);
 };
 
-enum PaymentDirection {
-	"Inbound",
-	"Outbound",
-};
+typedef enum PaymentDirection;
 
-enum PaymentStatus {
-	"Pending",
-	"Succeeded",
-	"Failed",
-};
+typedef enum PaymentStatus;
 
 dictionary LSPFeeLimits {
 	u64? max_total_opening_fee_msat;
@@ -744,10 +731,7 @@ enum Currency {
 	"Signet",
 };
 
-enum AsyncPaymentsRole {
-	"Client",
-	"Server",
-};
+typedef enum AsyncPaymentsRole;
 
 dictionary RouteHintHop {
 	PublicKey src_node_id;

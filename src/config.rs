@@ -595,6 +595,7 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 /// The role of the node in an asynchronous payments context.
 ///
 /// See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.

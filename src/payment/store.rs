@@ -317,6 +317,7 @@ impl StorableObject for PaymentDetails {
 
 /// Represents the direction of a payment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PaymentDirection {
 	/// The payment is inbound.
 	Inbound,
@@ -331,6 +332,7 @@ impl_writeable_tlv_based_enum!(PaymentDirection,
 
 /// Represents the current status of a payment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PaymentStatus {
 	/// The payment is still pending.
 	Pending,

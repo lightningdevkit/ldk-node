@@ -125,6 +125,7 @@ pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 
 /// Supported BIP39 mnemonic word counts for entropy generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum WordCount {
 	/// 12-word mnemonic (128-bit entropy)
 	Words12,
