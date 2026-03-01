@@ -114,6 +114,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{any::Any, sync::Weak};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
+pub use bip39;
+pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount};
 #[cfg(feature = "uniffi")]
@@ -137,6 +139,7 @@ use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
+pub use lightning;
 use lightning::chain::BestBlock;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
@@ -147,6 +150,9 @@ use lightning::sign::EntropySource;
 use lightning::util::persist::KVStoreSync;
 use lightning::util::wallet_utils::Wallet as LdkWallet;
 use lightning_background_processor::process_events_async;
+pub use lightning_invoice;
+pub use lightning_liquidity;
+pub use lightning_types;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
@@ -157,16 +163,14 @@ use payment::{
 };
 use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
+pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
-pub use {
-	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
-	vss_client,
-};
+pub use vss_client;
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
 
