@@ -1117,7 +1117,7 @@ where
 			LdkEvent::ProbeSuccessful { path, .. } => {
 				if let Some(counter) = &self.probe_locked_msat {
 					let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-					let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+					let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
 						Some(v.saturating_sub(amount))
 					});
 				}
@@ -1125,7 +1125,7 @@ where
 			LdkEvent::ProbeFailed { path, .. } => {
 				if let Some(counter) = &self.probe_locked_msat {
 					let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-					let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+					let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
 						Some(v.saturating_sub(amount))
 					});
 				}

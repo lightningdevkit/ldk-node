@@ -114,8 +114,6 @@ pub struct RandomStrategy {
     pub min_amount_msat: u64,
     /// Upper bound for the randomly chosen probe amount.
     pub max_amount_msat: u64,
-    /// Cursor advances each tick; used as a seed for hop selection.
-    cursor: AtomicUsize,
 }
 
 impl RandomStrategy {
@@ -134,13 +132,12 @@ impl RandomStrategy {
             max_hops: max_hops.clamp(1, MAX_PATH_LENGTH_ESTIMATE as usize),
             min_amount_msat,
             max_amount_msat,
-            cursor: AtomicUsize::new(0),
         }
     }
 
-    /// Tries to build a path for the given cursor value and hop count. Returns `None` if the
-    /// local node has no usable channels, or the walk terminates before reaching `target_hops`.
-    fn try_build_path(&self, cursor: usize, target_hops: usize, amount_msat: u64) -> Option<Path> {
+    /// Tries to build a path of `target_hops` hops. Returns `None` if the local node has no
+    /// usable channels, or the walk terminates before reaching `target_hops`.
+    fn try_build_path(&self, rng: &mut impl Rng, target_hops: usize, amount_msat: u64) -> Option<Path> {
         let initial_channels =
             self.channel_manager.list_channels().into_iter().filter(|c|
                 c.is_usable && c.short_channel_id.is_some()).collect::<Vec<_>>();
@@ -150,7 +147,7 @@ impl RandomStrategy {
         }
 
         let graph = self.network_graph.read_only();
-        let first_hop = &initial_channels[cursor % initial_channels.len()];
+        let first_hop = &initial_channels[rng.random_range(0..initial_channels.len())];
         let first_hop_scid = first_hop.short_channel_id.unwrap();
         let next_peer_pubkey = first_hop.counterparty.node_id;
         let next_peer_node_id = NodeId::from_pubkey(&next_peer_pubkey);
@@ -165,7 +162,7 @@ impl RandomStrategy {
         let mut prev_scid = first_hop_scid;
         let mut current_node_id = next_peer_node_id;
 
-        for hop_idx in 1..target_hops {
+        for _ in 1..target_hops {
             let node_info = match graph.node(&current_node_id) {
                 Some(n) => n,
                 None => break,
@@ -178,7 +175,7 @@ impl RandomStrategy {
                 break;
             }
 
-            let next_scid = candidates[(cursor + hop_idx) % candidates.len()];
+            let next_scid = candidates[rng.random_range(0..candidates.len())];
             let next_channel = match graph.channel(next_scid) {
                 Some(c) => c,
                 None => break,
@@ -279,8 +276,7 @@ impl ProbingStrategy for RandomStrategy {
         let target_hops = rng.random_range(1..=self.max_hops);
         let amount_msat = rng.random_range(self.min_amount_msat..=self.max_amount_msat);
 
-        let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
-        self.try_build_path(cursor, target_hops, amount_msat).map(Probe::PrebuiltRoute)
+        self.try_build_path(&mut rng, target_hops, amount_msat).map(Probe::PrebuiltRoute)
     }
 }
 
@@ -321,12 +317,12 @@ pub(crate) async fn run_prober(
                     None => {}
                     Some(Probe::PrebuiltRoute(path)) => {
                         let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-                        if prober.locked_msat.load(Ordering::Relaxed) + amount > prober.max_locked_msat {
+                        if prober.locked_msat.load(Ordering::Acquire) + amount > prober.max_locked_msat {
                             log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
                         } else {
                             match prober.channel_manager.send_probe(path) {
                                 Ok(_) => {
-                                    prober.locked_msat.fetch_add(amount, Ordering::Relaxed);
+                                    prober.locked_msat.fetch_add(amount, Ordering::Release);
                                 }
                                 Err(e) => {
                                     log_debug!(prober.logger, "Prebuilt path probe failed: {:?}", e);
@@ -335,7 +331,7 @@ pub(crate) async fn run_prober(
                         }
                     }
                     Some(Probe::Destination { final_node, amount_msat }) => {
-                        if prober.locked_msat.load(Ordering::Relaxed) + amount_msat
+                        if prober.locked_msat.load(Ordering::Acquire) + amount_msat
                             > prober.max_locked_msat
                         {
                             log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
@@ -348,7 +344,7 @@ pub(crate) async fn run_prober(
                             ) {
                                 Ok(probes) => {
                                     if !probes.is_empty() {
-                                        prober.locked_msat.fetch_add(amount_msat, Ordering::Relaxed);
+                                        prober.locked_msat.fetch_add(amount_msat, Ordering::Release);
                                     } else {
                                         log_debug!(prober.logger, "No probe paths found for destination {}; skipping budget increment.", final_node);
                                     }
