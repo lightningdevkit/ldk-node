@@ -47,7 +47,8 @@ use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBING_INTERVAL_SECS, MIN_PROBE_AMOUNT_MSAT,
+	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBING_INTERVAL_SECS,
+	MIN_PROBE_AMOUNT_MSAT,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -74,7 +75,6 @@ use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
 use crate::probing;
-use crate::probing::ProbingStrategy;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -1884,14 +1884,14 @@ fn build_with_store_internal(
 		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
 	}
 
-	let prober = probing_config.map(|config| {
-		let strategy: Arc<dyn probing::ProbingStrategy> = match &config.kind {
+	let prober = probing_config.map(|probing_cfg| {
+		let strategy: Arc<dyn probing::ProbingStrategy> = match &probing_cfg.kind {
 			ProbingStrategyKind::HighDegree { top_n } => {
 				Arc::new(probing::HighDegreeStrategy::new(
 					network_graph.clone(),
 					*top_n,
 					MIN_PROBE_AMOUNT_MSAT,
-					config.max_locked_msat,
+					DEFAULT_MAX_PROBE_AMOUNT_MSAT,
 				))
 			},
 			ProbingStrategyKind::Random { max_hops } => Arc::new(probing::RandomStrategy::new(
@@ -1899,7 +1899,7 @@ fn build_with_store_internal(
 				channel_manager.clone(),
 				*max_hops,
 				MIN_PROBE_AMOUNT_MSAT,
-				config.max_locked_msat,
+				DEFAULT_MAX_PROBE_AMOUNT_MSAT,
 			)),
 			ProbingStrategyKind::Custom(s) => s.clone(),
 		};
@@ -1907,9 +1907,9 @@ fn build_with_store_internal(
 			channel_manager: channel_manager.clone(),
 			logger: logger.clone(),
 			strategy,
-			interval: config.interval,
-			liquidity_limit_multiplier: None,
-			max_locked_msat: config.max_locked_msat,
+			interval: probing_cfg.interval,
+			liquidity_limit_multiplier: Some(config.probing_liquidity_limit_multiplier),
+			max_locked_msat: probing_cfg.max_locked_msat,
 			locked_msat: Arc::new(AtomicU64::new(0)),
 		})
 	});

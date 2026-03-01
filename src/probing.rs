@@ -9,8 +9,8 @@ use bitcoin::secp256k1::PublicKey;
 
 use rand::Rng;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A probe to be dispatched by the Prober.
@@ -46,7 +46,7 @@ pub struct HighDegreeStrategy {
     pub min_amount_msat: u64,
     /// Upper bound for the randomly chosen probe amount.
     pub max_amount_msat: u64,
-    cursor: Mutex<usize>,
+    cursor: AtomicUsize,
 }
 
 impl HighDegreeStrategy {
@@ -54,7 +54,11 @@ impl HighDegreeStrategy {
     pub(crate) fn new(
         network_graph: Arc<Graph>, top_n: usize, min_amount_msat: u64, max_amount_msat: u64,
     ) -> Self {
-        Self { network_graph, top_n, min_amount_msat, max_amount_msat, cursor: Mutex::new(0) }
+        assert!(
+            min_amount_msat <= max_amount_msat,
+            "min_amount_msat must not exceed max_amount_msat"
+        );
+        Self { network_graph, top_n, min_amount_msat, max_amount_msat, cursor: AtomicUsize::new(0) }
     }
 }
 
@@ -79,9 +83,8 @@ impl ProbingStrategy for HighDegreeStrategy {
 
         let top_n = self.top_n.min(nodes_by_degree.len());
 
-        let mut cursor = self.cursor.lock().unwrap();
-        let (final_node, _degree) = nodes_by_degree[*cursor % top_n];
-        *cursor = cursor.wrapping_add(1);
+        let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let (final_node, _degree) = nodes_by_degree[cursor % top_n];
 
         let amount_msat = rand::rng().random_range(self.min_amount_msat..=self.max_amount_msat);
         Some(Probe::Destination { final_node, amount_msat })
@@ -112,7 +115,7 @@ pub struct RandomStrategy {
     /// Upper bound for the randomly chosen probe amount.
     pub max_amount_msat: u64,
     /// Cursor advances each tick; used as a seed for hop selection.
-    cursor: Mutex<usize>,
+    cursor: AtomicUsize,
 }
 
 impl RandomStrategy {
@@ -121,13 +124,17 @@ impl RandomStrategy {
         network_graph: Arc<Graph>, channel_manager: Arc<ChannelManager>, max_hops: usize,
         min_amount_msat: u64, max_amount_msat: u64,
     ) -> Self {
+        assert!(
+            min_amount_msat <= max_amount_msat,
+            "min_amount_msat must not exceed max_amount_msat"
+        );
         Self {
             network_graph,
             channel_manager,
             max_hops: max_hops.clamp(1, MAX_PATH_LENGTH_ESTIMATE as usize),
             min_amount_msat,
             max_amount_msat,
-            cursor: Mutex::new(0),
+            cursor: AtomicUsize::new(0),
         }
     }
 
@@ -272,10 +279,8 @@ impl ProbingStrategy for RandomStrategy {
         let target_hops = rng.random_range(1..=self.max_hops);
         let amount_msat = rng.random_range(self.min_amount_msat..=self.max_amount_msat);
 
-        let mut cursor = self.cursor.lock().unwrap();
-        let path = self.try_build_path(*cursor, target_hops, amount_msat);
-        *cursor = cursor.wrapping_add(1);
-        path.map(Probe::PrebuiltRoute)
+        let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
+        self.try_build_path(cursor, target_hops, amount_msat).map(Probe::PrebuiltRoute)
     }
 }
 
@@ -314,7 +319,7 @@ impl Prober {
                     match self.strategy.next_probe() {
                         None => {}
                         Some(Probe::PrebuiltRoute(path)) => {
-                            let amount = path.hops.last().map_or(0, |h| h.fee_msat);
+                            let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
                             if self.locked_msat.load(Ordering::Relaxed) + amount > self.max_locked_msat {
                                 log_debug!(self.logger, "Skipping probe: locked-msat budget exceeded.");
                             } else {
