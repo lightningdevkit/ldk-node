@@ -684,6 +684,41 @@ pub async fn open_channel(
 	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd).await
 }
 
+/// Like [`open_channel`] but skips the `wait_for_tx` electrum check so that
+/// multiple channels can be opened back-to-back before any blocks are mined.
+/// The caller is responsible for mining blocks and confirming the funding txs.
+pub async fn open_channel_no_electrum_wait(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
+) -> OutPoint {
+	if should_announce {
+		node_a
+			.open_announced_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				None,
+				None,
+			)
+			.unwrap();
+	} else {
+		node_a
+			.open_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				None,
+				None,
+			)
+			.unwrap();
+	}
+	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
+
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(funding_txo_a, funding_txo_b);
+	funding_txo_a
+}
+
 pub async fn open_channel_push_amt(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
 	should_announce: bool, electrsd: &ElectrsD,

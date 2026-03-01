@@ -15,6 +15,7 @@ use bitcoin::Network;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::RouteParametersConfig;
+use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
 use lightning::util::config::{
 	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
 };
@@ -131,9 +132,11 @@ pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                   | None               |
+/// | `scoring_fee_params`                   | See [`ProbabilisticScoringFeeParameters`] |
 ///
-/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
-/// respective default values.
+/// See [`AnchorChannelsConfig`], [`RouteParametersConfig`], and
+/// [`ProbabilisticScoringFeeParameters`] for more information regarding their respective default
+/// values.
 ///
 /// [`Node`]: crate::Node
 pub struct Config {
@@ -195,6 +198,12 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// Parameters for the probabilistic scorer used when computing payment routes.
+	///
+	/// These correspond to [`ProbabilisticScoringFeeParameters`] in LDK. If unset, LDK defaults
+	/// are used. Notably, [`ProbabilisticScoringFeeParameters::probing_diversity_penalty_msat`]
+	/// should be set to a non-zero value for some of the probing strategies.
+	pub scoring_fee_params: ProbabilisticScoringFeeParameters,
 }
 
 impl Default for Config {
@@ -209,6 +218,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			scoring_fee_params: ProbabilisticScoringFeeParameters::default(),
 		}
 	}
 }

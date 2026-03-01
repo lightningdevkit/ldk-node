@@ -1,0 +1,730 @@
+// Integration tests for the probing service.
+//
+// Budget tests – linear A ──[1M sats]──▶ B ──[1M sats]──▶ C topology:
+//
+//   test_probe_budget_increments_and_decrements
+//      Verifies locked_msat rises when a probe is dispatched and returns
+//      to zero once the probe resolves.
+//
+//   test_probe_budget_blocks_when_node_offline
+//      Stops B mid-flight so the HTLC cannot resolve; confirms the budget
+//      stays exhausted and no further probes are sent. After B restarts
+//      the probe fails, the budget clears, and new probes resume.
+//
+// Strategy tests:
+//
+//   test_random_strategy_many_nodes
+//      Brings up a random mesh of nodes, fires random-walk probes via
+//      RandomStrategy and high-degree probes via HighDegreeStrategy, then
+//      runs payment rounds and prints probing perfomance tables.
+
+mod common;
+
+use lightning::routing::gossip::NodeAlias;
+use lightning_invoice::{Bolt11InvoiceDescription, Description};
+
+use common::{
+	expect_channel_ready_event, expect_event, generate_blocks_and_wait, open_channel,
+	open_channel_no_electrum_wait, premine_and_distribute_funds, random_config,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, TestChainSource, TestSyncStore,
+};
+
+use ldk_node::bitcoin::Amount;
+use ldk_node::bitcoin::secp256k1::PublicKey;
+use ldk_node::config::ElectrumSyncConfig;
+use ldk_node::logger::{LogLevel, LogRecord, LogWriter};
+use ldk_node::{Builder, Event, Node, Probe, ProbingStrategy};
+
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const PROBE_AMOUNT_MSAT: u64 = 1_000_000; 
+const MAX_LOCKED_MSAT: u64 = 100_000_000; 
+const PROBING_INTERVAL_MILLISECONDS: u64 = 250;
+const PROBING_DIVERSITY_PENALTY: u64 = 100_000;
+
+/// FixedDestStrategy — always targets one node; used by budget tests.
+struct FixedDestStrategy {
+	destination: PublicKey,
+	amount_msat: u64,
+}
+
+impl FixedDestStrategy {
+	fn new(destination: PublicKey, amount_msat: u64) -> Arc<Self> {
+		Arc::new(Self { destination, amount_msat })
+	}
+}
+
+impl ProbingStrategy for FixedDestStrategy {
+	fn next_probe(&self) -> Option<Probe> {
+		Some(Probe::Destination { final_node: self.destination, amount_msat: self.amount_msat })
+	}
+}
+
+/// CapturingLogger — buffers every log line for post-hoc assertion.  Used by budget tests.
+struct CapturingLogger {
+	messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl CapturingLogger {
+	fn new() -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
+		let messages = Arc::new(Mutex::new(Vec::new()));
+		let logger = Arc::new(Self { messages: Arc::clone(&messages) });
+		(logger, messages)
+	}
+}
+
+impl LogWriter for CapturingLogger {
+	fn log(&self, record: LogRecord) {
+		if record.level >= LogLevel::Debug {
+			let msg = format!("[{}] {}", record.module_path, record.args);
+			self.messages.lock().unwrap().push(msg);
+		}
+	}
+}
+
+// helpers
+fn messages_contain(messages: &Arc<Mutex<Vec<String>>>, substr: &str) -> bool {
+	messages.lock().unwrap().iter().any(|m| m.contains(substr))
+}
+
+async fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
+	let deadline = tokio::time::Instant::now() + timeout;
+	loop {
+		if predicate() {
+			return true;
+		}
+		if tokio::time::Instant::now() >= deadline {
+			return false;
+		}
+		tokio::time::sleep(Duration::from_millis(100)).await;
+	}
+}
+
+fn configure_chain_source(builder: &mut Builder, chain_source: &TestChainSource<'_>) {
+	match chain_source {
+		TestChainSource::Electrum(e) => {
+			let url = format!("tcp://{}", e.electrum_url);
+			let mut sync_cfg = ElectrumSyncConfig::default();
+			sync_cfg.background_sync_config = None;
+			builder.set_chain_source_electrum(url, Some(sync_cfg));
+		},
+		TestChainSource::Esplora(e) => {
+			let url = format!("http://{}", e.esplora_url.as_ref().unwrap());
+			builder.set_chain_source_esplora(url, None);
+		},
+		TestChainSource::BitcoindRpcSync(b) => {
+			let host = b.params.rpc_socket.ip().to_string();
+			let port = b.params.rpc_socket.port();
+			let vals = b.params.get_cookie_values().unwrap().unwrap();
+			builder.set_chain_source_bitcoind_rpc(host, port, vals.user, vals.password);
+		},
+		TestChainSource::BitcoindRestSync(b) => {
+			let host = b.params.rpc_socket.ip().to_string();
+			let port = b.params.rpc_socket.port();
+			let vals = b.params.get_cookie_values().unwrap().unwrap();
+			builder.set_chain_source_bitcoind_rest(
+				host.clone(),
+				port,
+				host,
+				port,
+				vals.user,
+				vals.password,
+			);
+		},
+	}
+}
+
+fn config_with_label(label: &str) -> common::TestConfig {
+	let mut config = random_config(false);
+	let mut alias_bytes = [0u8; 32];
+	let b = label.as_bytes();
+	alias_bytes[..b.len()].copy_from_slice(b);
+	config.node_config.node_alias = Some(NodeAlias(alias_bytes));
+	config
+}
+
+fn build_and_start(builder: Builder, config: common::TestConfig) -> Node {
+	let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
+	let node = builder.build_with_store(config.node_entropy.into(), kv_store).unwrap();
+	node.start().unwrap();
+	node
+}
+
+fn build_node_fixed_dest_probing(
+	chain_source: &TestChainSource<'_>, destination_node_id: PublicKey,
+) -> (Node, Arc<Mutex<Vec<String>>>) {
+	let config = random_config(false);
+	let (capturing_logger, messages) = CapturingLogger::new();
+	setup_builder!(builder, config.node_config);
+	configure_chain_source(&mut builder, chain_source);
+	builder.set_custom_logger(capturing_logger as Arc<dyn LogWriter>);
+	let strategy = FixedDestStrategy::new(destination_node_id, PROBE_AMOUNT_MSAT);
+	builder
+		.set_probing_strategy(strategy)
+		.set_probing_interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+		.set_max_probe_locked_msat(PROBE_AMOUNT_MSAT);
+	(build_and_start(builder, config), messages)
+}
+
+fn build_node_without_probing(chain_source: &TestChainSource<'_>) -> Node {
+	let config = config_with_label("Control");
+	setup_builder!(builder, config.node_config);
+	configure_chain_source(&mut builder, chain_source);
+	build_and_start(builder, config)
+}
+
+fn build_node_random_probing(chain_source: &TestChainSource<'_>, max_hops: usize) -> Node {
+	let config = config_with_label("Random");
+	setup_builder!(builder, config.node_config);
+	configure_chain_source(&mut builder, chain_source);
+	builder
+		.set_random_probing_strategy(max_hops)
+		.set_probing_interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+		.set_max_probe_locked_msat(MAX_LOCKED_MSAT);
+	build_and_start(builder, config)
+}
+
+fn build_node_highdegree_probing(chain_source: &TestChainSource<'_>, top_n: usize) -> Node {
+	let config = config_with_label("HiDeg");
+	setup_builder!(builder, config.node_config);
+	configure_chain_source(&mut builder, chain_source);
+	builder
+		.set_high_degree_probing_strategy(top_n)
+		.set_probing_interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+		.set_max_probe_locked_msat(MAX_LOCKED_MSAT);
+	build_and_start(builder, config)
+}
+
+fn build_node_z_highdegree_probing(chain_source: &TestChainSource<'_>, top_n: usize, probing_diversity_penalty_msat: u64) -> Node {
+	let mut config = config_with_label("HiDeg+P");
+	config.node_config.scoring_fee_params.probing_diversity_penalty_msat = probing_diversity_penalty_msat;
+	setup_builder!(builder, config.node_config);
+	configure_chain_source(&mut builder, chain_source);
+	builder
+		.set_high_degree_probing_strategy(top_n)
+		.set_probing_interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+		.set_max_probe_locked_msat(MAX_LOCKED_MSAT);
+	build_and_start(builder, config)
+}
+
+
+// helpers, formatting
+fn node_label(node: &Node) -> String {
+	node.node_alias()
+		.map(|alias| {
+			let end = alias.0.iter().position(|&b| b == 0).unwrap_or(32);
+			String::from_utf8_lossy(&alias.0[..end]).to_string()
+		})
+		.unwrap_or_else(|| format!("{:.8}", node.node_id()))
+}
+
+fn print_topology(all_nodes: &[&Node]) {
+	let labels: HashMap<PublicKey, String> =
+		all_nodes.iter().map(|n| (n.node_id(), node_label(n))).collect();
+	let label_of =
+		|pk: PublicKey| labels.get(&pk).cloned().unwrap_or_else(|| format!("{:.8}", pk));
+
+	let mut adjacency: BTreeMap<String, Vec<String>> = BTreeMap::new();
+	for node in all_nodes {
+		let local = label_of(node.node_id());
+		let mut peers: Vec<String> = node
+			.list_channels()
+			.into_iter()
+			.filter(|ch| ch.short_channel_id.is_some())
+			.map(|ch| label_of(ch.counterparty_node_id))
+			.collect();
+		peers.sort();
+		peers.dedup();
+		adjacency.entry(local).or_default().extend(peers);
+	}
+
+	println!("\n=== Topology ===");
+	for (node, peers) in &adjacency {
+		println!("  {node} ── {}", peers.join(", "));
+	}
+}
+
+const LABEL_MAX: usize = 8;
+const DIR_W: usize = LABEL_MAX * 2 + 1;
+const SCORER_W: usize = 28;
+
+fn thousands(n: u64) -> String {
+	let s = n.to_string();
+	let mut out = String::with_capacity(s.len() + s.len() / 3);
+	for (i, c) in s.chars().rev().enumerate() {
+		if i > 0 && i % 3 == 0 {
+			out.push(' ');
+		}
+		out.push(c);
+	}
+	out.chars().rev().collect()
+}
+
+fn short_label(label: &str) -> String {
+	label.chars().take(LABEL_MAX).collect()
+}
+
+fn fmt_est(est: Option<(u64, u64)>) -> String {
+	match est {
+		Some((lo, hi)) => format!("[{}, {}]", thousands(lo), thousands(hi)),
+		None => "unknown".into(),
+	}
+}
+
+fn print_probing_perfomance(observers: &[&Node], all_nodes: &[&Node]) {
+	let labels: HashMap<PublicKey, String> = all_nodes
+		.iter()
+		.chain(observers.iter())
+		.map(|n| (n.node_id(), node_label(n)))
+		.collect();
+	let label_of = |pk: PublicKey| {
+		short_label(&labels.get(&pk).cloned().unwrap_or_else(|| format!("{:.8}", pk)))
+	};
+
+	let mut by_scid: BTreeMap<u64, Vec<(PublicKey, PublicKey, u64)>> = BTreeMap::new();
+	for node in all_nodes {
+		let local_pk = node.node_id();
+		for ch in node.list_channels() {
+			if let Some(scid) = ch.short_channel_id {
+				by_scid
+					.entry(scid)
+					.or_default()
+					.push((local_pk, ch.counterparty_node_id, ch.outbound_capacity_msat));
+			}
+		}
+	}
+
+	print!("\n{:<15} {:<width$}", "SCID", "Dir", width = DIR_W);
+	for obs in observers {
+		print!(
+			" {:<width$}",
+			format!("Scorer {} [min,max]", short_label(&node_label(obs))),
+			width = SCORER_W
+		);
+	}
+	println!(" Real outbound msat");
+	println!("{}", "-".repeat(15 + 1 + DIR_W + observers.len() * (SCORER_W + 1) + 20));
+
+	let total_dirs: usize = by_scid.values().map(|v| v.len()).sum();
+	let mut known_counts = vec![0usize; observers.len()];
+
+	for (scid, entries) in &by_scid {
+		for (from_pk, to_pk, outbound_msat) in entries {
+			let dir = format!("{}→{}", label_of(*from_pk), label_of(*to_pk));
+			print!("{:<15} {:<width$}", scid, dir, width = DIR_W);
+			for (i, obs) in observers.iter().enumerate() {
+				let est = obs.scorer_channel_liquidity(*scid, *to_pk);
+				if est.is_some() {
+					known_counts[i] += 1;
+				}
+				print!(" {:<width$}", fmt_est(est), width = SCORER_W);
+			}
+			println!(" {}", thousands(*outbound_msat));
+		}
+	}
+
+	println!("{}", "-".repeat(15 + 1 + DIR_W + observers.len() * (SCORER_W + 1) + 20));
+	print!("{:<15} {:<width$}", "Known dirs", "", width = DIR_W);
+	for count in &known_counts {
+		print!(" {:<width$}", format!("{}/{}", count, total_dirs), width = SCORER_W);
+	}
+	println!();
+}
+
+/// Test change of locked_msat amount
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_probe_budget_increments_and_decrements() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+
+	let config_b = random_config(false);
+	let config_c = random_config(false);
+
+	setup_builder!(builder_b, config_b.node_config);
+	builder_b.set_chain_source_electrum(
+		format!("tcp://{}", electrsd.electrum_url),
+		Some({
+			let mut c = ElectrumSyncConfig::default();
+			c.background_sync_config = None;
+			c
+		}),
+	);
+	let node_b = builder_b
+		.build_with_store(
+			config_b.node_entropy.into(),
+			TestSyncStore::new(config_b.node_config.storage_dir_path.into()),
+		)
+		.unwrap();
+	node_b.start().unwrap();
+
+	setup_builder!(builder_c, config_c.node_config);
+	builder_c.set_chain_source_electrum(
+		format!("tcp://{}", electrsd.electrum_url),
+		Some({
+			let mut c = ElectrumSyncConfig::default();
+			c.background_sync_config = None;
+			c
+		}),
+	);
+	let node_c = builder_c
+		.build_with_store(
+			config_c.node_entropy.into(),
+			TestSyncStore::new(config_c.node_config.storage_dir_path.into()),
+		)
+		.unwrap();
+	node_c.start().unwrap();
+
+	let (node_a, _messages_a) = build_node_fixed_dest_probing(&chain_source, node_c.node_id());
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(2_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_b.sync_wallets().unwrap();
+	open_channel(&node_b, &node_c, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	node_c.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_c, ChannelReady);
+
+	// Give gossip time to propagate to A.
+	tokio::time::sleep(Duration::from_secs(3)).await;
+
+	let went_up = wait_until(Duration::from_secs(10), || node_a.probe_locked_msat().unwrap_or(0) > 0).await;
+	assert!(went_up, "locked_msat never increased — no probe was dispatched");
+	println!("First probe dispatched; locked_msat = {}", node_a.probe_locked_msat().unwrap());
+
+	let cleared = wait_until(Duration::from_secs(20), || node_a.probe_locked_msat().unwrap_or(1) == 0).await;
+	assert!(cleared, "locked_msat never returned to zero after probe resolved");
+	println!("Probe resolved; locked_msat = 0");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+	node_c.stop().unwrap();
+}
+
+/// Test that probing stops if the upper locked in flight probe limit is reached
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_probe_budget_blocks_when_node_offline() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+
+	let config_b = random_config(false);
+	let config_c = random_config(false);
+
+	setup_builder!(builder_b, config_b.node_config);
+	builder_b.set_chain_source_electrum(
+		format!("tcp://{}", electrsd.electrum_url),
+		Some({
+			let mut c = ElectrumSyncConfig::default();
+			c.background_sync_config = None;
+			c
+		}),
+	);
+	let node_b = builder_b
+		.build_with_store(
+			config_b.node_entropy.into(),
+			TestSyncStore::new(config_b.node_config.storage_dir_path.into()),
+		)
+		.unwrap();
+	node_b.start().unwrap();
+
+	setup_builder!(builder_c, config_c.node_config);
+	builder_c.set_chain_source_electrum(
+		format!("tcp://{}", electrsd.electrum_url),
+		Some({
+			let mut c = ElectrumSyncConfig::default();
+			c.background_sync_config = None;
+			c
+		}),
+	);
+	let node_c = builder_c
+		.build_with_store(
+			config_c.node_entropy.into(),
+			TestSyncStore::new(config_c.node_config.storage_dir_path.into()),
+		)
+		.unwrap();
+	node_c.start().unwrap();
+
+	let (node_a, messages_a) = build_node_fixed_dest_probing(&chain_source, node_c.node_id());
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(2_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_b.sync_wallets().unwrap();
+	open_channel(&node_b, &node_c, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	node_c.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_c, ChannelReady);
+
+	// Give gossip time to propagate to A.
+	tokio::time::sleep(Duration::from_secs(3)).await;
+
+	// Record initial outbound capacity on the A→B channel before any probe.
+	let initial_capacity = node_a
+		.list_channels()
+		.iter()
+		.find(|ch| ch.counterparty_node_id == node_b.node_id())
+		.map(|ch| ch.outbound_capacity_msat)
+		.expect("A→B channel not found");
+
+	// Wait for the first probe to lock funds.
+	let locked = wait_until(Duration::from_secs(10), || node_a.probe_locked_msat().unwrap_or(0) > 0).await;
+	assert!(locked, "no probe dispatched within 10 s");
+	println!("First probe dispatched; locked_msat = {}", node_a.probe_locked_msat().unwrap());
+
+	// Stop B while the probe HTLC is in-flight.
+	node_b.stop().unwrap();
+	println!("Node B stopped — HTLC should be stuck in-flight.");
+
+	// The probe HTLC is now consuming outbound capacity on the A→B channel.
+	let stuck_capacity = node_a
+		.list_channels()
+		.into_iter()
+		.find(|ch| ch.counterparty_node_id == node_b.node_id())
+		.map(|ch| ch.outbound_capacity_msat)
+		.expect("A→B channel not found after B stopped");
+	assert!(
+		stuck_capacity < initial_capacity,
+		"HTLC not visible in channel state: capacity unchanged ({initial_capacity} msat)"
+	);
+
+	// Let several Prober ticks fire; the budget is exhausted so they must be skipped.
+	// Assert that neither the budget counter clears nor a new HTLC is sent.
+	let unexpectedly_resolved = wait_until(Duration::from_secs(10), || {
+		node_a.probe_locked_msat().unwrap_or(0) == 0
+	})
+	.await;
+	assert!(!unexpectedly_resolved, "probe resolved unexpectedly while B was offline");
+
+	let new_htlc_sent = wait_until(Duration::from_secs(10), || {
+		node_a
+			.list_channels()
+			.into_iter()
+			.find(|ch| ch.counterparty_node_id == node_b.node_id())
+			.map(|ch| ch.outbound_capacity_msat)
+			.unwrap_or(u64::MAX)
+			< stuck_capacity
+	})
+	.await;
+	assert!(!new_htlc_sent, "a new probe HTLC was sent despite budget being exhausted");
+
+	assert!(
+		messages_contain(&messages_a, "locked-msat budget exceeded"),
+		"expected 'budget exceeded' log while B is offline"
+	);
+
+	// Bring B back; the stuck HTLC should fail and locked_msat should drop to zero.
+	node_b.start().unwrap();
+	println!("Node B restarted — waiting for HTLC to resolve...");
+
+	let cleared = wait_until(Duration::from_secs(30), || node_a.probe_locked_msat().unwrap_or(1) == 0).await;
+	assert!(cleared, "locked_msat never cleared after B came back online");
+	println!("locked_msat cleared.");
+
+	// Once the budget is freed, a new probe should be dispatched within a tick.
+	let new_probe = wait_until(Duration::from_secs(5), || node_a.probe_locked_msat().unwrap_or(0) > 0).await;
+	assert!(new_probe, "no new probe dispatched after budget was freed");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+	node_c.stop().unwrap();
+}
+
+/// Strategies perfomance test
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_random_strategy_many_nodes() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+
+	let num_nodes = 6;
+	let channel_capacity_sat = 1_000_000u64;
+	// Each observer opens 1 channel; regular nodes open at most (num_nodes-1) each.
+	// num_nodes UTXOs per node is a safe upper bound for funding.
+	let utxos_per_node = num_nodes;
+	let utxo_per_channel = Amount::from_sat(channel_capacity_sat + 50_000);
+
+	let mut nodes: Vec<Node> = Vec::new();
+	for i in 0..num_nodes {
+		let label = char::from(b'B' + i as u8).to_string();
+		let mut config = random_config(false);
+		let mut alias_bytes = [0u8; 32];
+		alias_bytes[..label.as_bytes().len()].copy_from_slice(label.as_bytes());
+		config.node_config.node_alias = Some(NodeAlias(alias_bytes));
+		nodes.push(setup_node(&chain_source, config));
+	}
+	let node_a = build_node_random_probing(&chain_source, 5);
+	let node_x = build_node_without_probing(&chain_source);
+	let node_y = build_node_highdegree_probing(&chain_source, 5);
+	let node_z = build_node_z_highdegree_probing(&chain_source, 5, PROBING_DIVERSITY_PENALTY);
+
+	let seed = std::env::var("TEST_SEED")
+		.ok()
+		.and_then(|s| s.parse::<u64>().ok())
+		.unwrap_or_else(|| rand::rng().random());
+	println!("RNG seed: {seed}  (re-run with TEST_SEED={seed} to reproduce)");
+	let mut rng = StdRng::seed_from_u64(seed);
+	let channels_per_node = rng.random_range(1..=num_nodes - 1);
+	let channels_per_nodes: Vec<usize> =
+		(0..num_nodes).map(|_| rng.random_range(1..=channels_per_node)).collect();
+
+	let observer_nodes: [&Node; 4] = [&node_a, &node_y, &node_z, &node_x];
+
+	let mut addresses = Vec::new();
+	for node in observer_nodes {
+		for _ in 0..utxos_per_node {
+			addresses.push(node.onchain_payment().new_address().unwrap());
+		}
+	}
+	for node in &nodes {
+		for _ in 0..utxos_per_node {
+			addresses.push(node.onchain_payment().new_address().unwrap());
+		}
+	}
+
+	premine_and_distribute_funds(&bitcoind.client, &electrsd.client, addresses, utxo_per_channel).await;
+
+	println!("distributed initial sats");
+	for node in nodes.iter().chain(observer_nodes) {
+		node.sync_wallets().unwrap();
+	}
+
+	fn drain_events(node: &Node) {
+		while let Some(_) = node.next_event() {
+			node.event_handled().unwrap();
+		}
+	}
+
+	println!("opening channels");
+	for node in observer_nodes {
+		let idx = rng.random_range(0..num_nodes);
+		open_channel_no_electrum_wait(node, &nodes[idx], channel_capacity_sat, true).await;
+	}
+	for (i, &count) in channels_per_nodes.iter().enumerate() {
+		let targets: Vec<usize> = (0..num_nodes).filter(|&j| j != i).take(count).collect();
+		for j in targets {
+			open_channel_no_electrum_wait(&nodes[i], &nodes[j], channel_capacity_sat, true).await;
+		}
+	}
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	for node in nodes.iter().chain(observer_nodes) {
+		node.sync_wallets().unwrap();
+	}
+	for node in nodes.iter().chain(observer_nodes) {
+		drain_events(node);
+	}
+
+	tokio::time::sleep(Duration::from_secs(3)).await;
+
+	let mut node_map = HashMap::new();
+	for (i, node) in nodes.iter().enumerate() {
+		node_map.insert(node.node_id(), i);
+	}
+
+	let all_nodes: Vec<&Node> = nodes.iter().chain(observer_nodes).collect();
+
+	print_topology(&all_nodes);
+
+	println!("\nbefore payments");
+	print_probing_perfomance(&observer_nodes, &all_nodes);
+
+	let desc = Bolt11InvoiceDescription::Direct(Description::new("test".to_string()).unwrap());
+	for round in 0..10 {
+		let mut sent = 0u32;
+		for sender_idx in 0..num_nodes {
+			let channels: Vec<_> = nodes[sender_idx]
+				.list_channels()
+				.into_iter()
+				.filter(|ch| ch.is_channel_ready && ch.outbound_capacity_msat > 1_000)
+				.collect();
+			if channels.is_empty() {
+				continue;
+			}
+			let ch = &channels[rng.random_range(0..channels.len())];
+			let amount_msat =
+				rng.random_range(1_000..=ch.outbound_capacity_msat.min(100_000_000));
+			if let Some(&receiver_idx) = node_map.get(&ch.counterparty_node_id) {
+				let invoice = nodes[receiver_idx]
+					.bolt11_payment()
+					.receive(amount_msat, &desc.clone().into(), 3600)
+					.unwrap();
+				if nodes[sender_idx].bolt11_payment().send(&invoice, None).is_ok() {
+					sent += 1;
+				}
+			}
+		}
+		println!("round {round}: sent {sent} payments");
+		tokio::time::sleep(Duration::from_millis(500)).await;
+		for node in nodes.iter().chain(observer_nodes) {
+			drain_events(node);
+		}
+	}
+
+	tokio::time::sleep(Duration::from_secs(5)).await;
+	println!("\n=== after payments ===");
+	print_probing_perfomance(&observer_nodes, &all_nodes);
+
+	let count_known = |observer: &Node| -> usize {
+		all_nodes
+			.iter()
+			.flat_map(|n| {
+				let local = n.node_id();
+				n.list_channels()
+					.into_iter()
+					.filter_map(move |ch| ch.short_channel_id.map(|scid| (scid, ch.counterparty_node_id, local)))
+			})
+			.filter(|(scid, to_pk, _)| observer.scorer_channel_liquidity(*scid, *to_pk).is_some())
+			.count()
+	};
+	let z_known = count_known(&node_z);
+	let y_known = count_known(&node_y);
+	assert!(
+		z_known >= y_known,
+		"node_z with probing_diversity_penalty should have at least as many observations as node_y without it: z={z_known}, y={y_known}"
+	);
+
+	for node in nodes.iter().chain(observer_nodes) {
+		node.stop().unwrap();
+	}
+}

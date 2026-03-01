@@ -30,7 +30,6 @@ use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
 	CombinedScorer, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
-	ProbabilisticScoringFeeParameters,
 };
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::config::HTLCInterceptionFlags;
@@ -1551,7 +1550,7 @@ fn build_with_store_internal(
 		},
 	}
 
-	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let scoring_fee_params = config.scoring_fee_params.clone();
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),

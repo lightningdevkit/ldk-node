@@ -63,7 +63,6 @@ impl ProbingStrategy for HighDegreeStrategy {
         let graph = self.network_graph.read_only();
 
         // Collect (pubkey, channel_count) for all nodes.
-        // wtf it does why we need to iterate here and then sort? maybe we can go just once?
         let mut nodes_by_degree: Vec<(PublicKey, usize)> = graph
             .nodes()
             .unordered_iter()
@@ -76,8 +75,6 @@ impl ProbingStrategy for HighDegreeStrategy {
             return None;
         }
 
-        // Most-connected first.
-        // wtf it does
         nodes_by_degree.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
         let top_n = self.top_n.min(nodes_by_degree.len());
@@ -137,37 +134,30 @@ impl RandomStrategy {
     /// Tries to build a path for the given cursor value and hop count. Returns `None` if the
     /// local node has no usable channels, or the walk terminates before reaching `target_hops`.
     fn try_build_path(&self, cursor: usize, target_hops: usize, amount_msat: u64) -> Option<Path> {
-        // Collect confirmed, usable channels: (scid, peer_pubkey).
-        let our_channels: Vec<(u64, PublicKey)> = self
-            .channel_manager
-            .list_channels()
-            .into_iter()
-            .filter_map(|c| {
-                if c.is_usable {
-                    c.short_channel_id.map(|scid| (scid, c.counterparty.node_id))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let initial_channels =
+            self.channel_manager.list_channels().into_iter().filter(|c|
+                c.is_usable && c.short_channel_id.is_some()).collect::<Vec<_>>();
 
-        if our_channels.is_empty() {
+        if initial_channels.is_empty() {
             return None;
         }
 
         let graph = self.network_graph.read_only();
-        let (our_scid, peer_pubkey) = our_channels[cursor % our_channels.len()];
-        let peer_node_id = NodeId::from_pubkey(&peer_pubkey);
+        let first_hop = &initial_channels[cursor % initial_channels.len()];
+        let first_hop_scid = first_hop.short_channel_id.unwrap();
+        let next_peer_pubkey = first_hop.counterparty.node_id;
+        let next_peer_node_id = NodeId::from_pubkey(&next_peer_pubkey);
 
-        // Walk the graph: each entry is (node_id, arrived_via_scid, pubkey).
-        // We start by having "arrived at peer via our_scid".
-        let mut visited: Vec<(NodeId, u64, PublicKey)> =
-            vec![(peer_node_id, our_scid, peer_pubkey)];
+        // Track the tightest HTLC limit across all hops to cap the probe amount.
+        // The first hop limit comes from our live channel state; subsequent hops use htlc_maximum_msat from the gossip channel update.
+        let mut route_least_htlc_upper_bound = first_hop.next_outbound_htlc_limit_msat;
 
-        let mut prev_scid = our_scid;
-        let mut current_node_id = peer_node_id;
+        // Walk the graph: each entry is (node_id, arrived_via_scid, pubkey); first entry is set:
+        let mut route: Vec<(NodeId, u64, PublicKey)> = vec![(next_peer_node_id, first_hop_scid, next_peer_pubkey)];
 
-        //wtf the real amount of hops is -1 of target?
+        let mut prev_scid = first_hop_scid;
+        let mut current_node_id = next_peer_node_id;
+
         for hop_idx in 1..target_hops {
             let node_info = match graph.node(&current_node_id) {
                 Some(n) => n,
@@ -187,46 +177,48 @@ impl RandomStrategy {
                 None => break,
             };
 
-            // Determine direction and fetch the channel-update.
-            let (update, next_node_id) = if next_channel.node_one == current_node_id {
-                match next_channel.one_to_two.as_ref() {
-                    Some(u) => (u, next_channel.node_two),
-                    None => break,
-                }
-            } else if next_channel.node_two == current_node_id {
-                match next_channel.two_to_one.as_ref() {
-                    Some(u) => (u, next_channel.node_one),
-                    None => break,
-                }
-            } else {
+            // as_directed_from validates that current_node_id is a channel endpoint and that
+            // both direction updates are present; effective_capacity covers both htlc_maximum_msat
+            // and funding capacity.
+            let Some((directed, next_node_id)) = next_channel.as_directed_from(&current_node_id)
+            else {
                 break;
+            };
+            // Retrieve the direction-specific update via the public ChannelInfo fields.
+            // Safe to unwrap: as_directed_from already checked both directions are Some.
+            let update = if directed.source() == &next_channel.node_one {
+                next_channel.one_to_two.as_ref().unwrap()
+            } else {
+                next_channel.two_to_one.as_ref().unwrap()
             };
 
             if !update.enabled {
                 break;
             }
 
-            let next_pubkey = match PublicKey::try_from(next_node_id) {
+            route_least_htlc_upper_bound = route_least_htlc_upper_bound.min(update.htlc_maximum_msat);
+
+            let next_pubkey = match PublicKey::try_from(*next_node_id) {
                 Ok(pk) => pk,
                 Err(_) => break,
             };
 
-            visited.push((next_node_id, next_scid, next_pubkey));
+            route.push((*next_node_id, next_scid, next_pubkey));
             prev_scid = next_scid;
-            current_node_id = next_node_id;
+            current_node_id = *next_node_id;
         }
 
-        // Require the full requested depth; shorter walks are uninformative.
-        if visited.len() < target_hops {
+        let amount_msat = amount_msat.min(route_least_htlc_upper_bound); //cap probe amount
+        if amount_msat < self.min_amount_msat {
             return None;
         }
 
         // Assemble hops.
-        // For hop i: fee and CLTV are determined by the *next* channel (what visited[i]
+        // For hop i: fee and CLTV are determined by the *next* channel (what route[i]
         // will charge to forward onward).  For the last hop they are amount_msat and zero expiry delta.
-        let mut hops = Vec::with_capacity(visited.len());
-        for i in 0..visited.len() {
-            let (node_id, via_scid, pubkey) = visited[i];
+        let mut hops = Vec::with_capacity(route.len());
+        for i in 0..route.len() {
+            let (node_id, via_scid, pubkey) = route[i];
 
             let channel_info = graph.channel(via_scid)?;
 
@@ -235,22 +227,22 @@ impl RandomStrategy {
                 .and_then(|n| n.announcement_info.as_ref().map(|a| a.features().clone()))
                 .unwrap_or_else(NodeFeatures::empty);
 
-            let (fee_msat, cltv_expiry_delta) = if i + 1 < visited.len() {
-                // Intermediate hop: look up the next channel's update from node_id.
-                let (_next_node_id, next_scid, _) = visited[i + 1];
-                let next_channel = graph.channel(next_scid)?;
-                let update = if next_channel.node_one == node_id {
-                    next_channel.one_to_two.as_ref()?
+            let (fee_msat, cltv_expiry_delta) =
+                if i + 1 < route.len() { // non-final hop
+                    let (_, next_scid, _) = route[i + 1];
+                    let next_channel = graph.channel(next_scid)?;
+                    let (directed, _) = next_channel.as_directed_from(&node_id)?;
+                    let update = if directed.source() == &next_channel.node_one {
+                        next_channel.one_to_two.as_ref().unwrap()
+                    } else {
+                        next_channel.two_to_one.as_ref().unwrap()
+                    };
+                    let fee = update.fees.base_msat as u64 + (amount_msat * update.fees.proportional_millionths as u64 / 1_000_000);
+                    (fee, update.cltv_expiry_delta as u32)
                 } else {
-                    next_channel.two_to_one.as_ref()?
+                    // Final hop: fee_msat carries the delivery amount; cltv delta is zero.
+                    (amount_msat, 0)
                 };
-                let fee = update.fees.base_msat as u64
-                    + (amount_msat * update.fees.proportional_millionths as u64 / 1_000_000);
-                (fee, update.cltv_expiry_delta as u32)
-            } else {
-                // Final hop.
-                (amount_msat, 0)
-            };
 
             hops.push(RouteHop {
                 pubkey,
@@ -261,6 +253,13 @@ impl RandomStrategy {
                 cltv_expiry_delta,
                 maybe_announced_channel: true,
             });
+        }
+
+        // The first-hop HTLC carries amount_msat + all intermediate fees.
+        // Verify the total fits within our live outbound limit before returning.
+        let total_outgoing: u64 = hops.iter().map(|h| h.fee_msat).sum();
+        if total_outgoing > first_hop.next_outbound_htlc_limit_msat {
+            return None;
         }
 
         Some(Path { hops, blinded_tail: None })
