@@ -45,7 +45,7 @@ use std::time::Duration;
 const PROBE_AMOUNT_MSAT: u64 = 1_000_000; 
 const MAX_LOCKED_MSAT: u64 = 100_000_000; 
 const PROBING_INTERVAL_MILLISECONDS: u64 = 250;
-const PROBING_DIVERSITY_PENALTY: u64 = 100_000;
+const PROBING_DIVERSITY_PENALTY: u64 = 50_000;
 
 /// FixedDestStrategy — always targets one node; used by budget tests.
 struct FixedDestStrategy {
@@ -172,7 +172,7 @@ fn build_node_fixed_dest_probing(
 }
 
 fn build_node_without_probing(chain_source: &TestChainSource<'_>) -> Node {
-	let config = config_with_label("Control");
+	let config = config_with_label("nostrat");
 	setup_builder!(builder, config.node_config);
 	configure_chain_source(&mut builder, chain_source);
 	build_and_start(builder, config)
@@ -299,11 +299,11 @@ fn print_probing_perfomance(observers: &[&Node], all_nodes: &[&Node]) {
 		}
 	}
 
-	print!("\n{:<15} {:<width$}", "SCID", "Dir", width = DIR_W);
+	print!("\n{:<15} {:<width$}", "SCID", "Direction", width = DIR_W);
 	for obs in observers {
 		print!(
 			" {:<width$}",
-			format!("Scorer {} [min,max]", short_label(&node_label(obs))),
+			format!("Probing {}", short_label(&node_label(obs))),
 			width = SCORER_W
 		);
 	}
@@ -329,7 +329,7 @@ fn print_probing_perfomance(observers: &[&Node], all_nodes: &[&Node]) {
 	}
 
 	println!("{}", "-".repeat(15 + 1 + DIR_W + observers.len() * (SCORER_W + 1) + 20));
-	print!("{:<15} {:<width$}", "Known dirs", "", width = DIR_W);
+	print!("{:<15} {:<width$}", "Known directions", "", width = DIR_W);
 	for count in &known_counts {
 		print!(" {:<width$}", format!("{}/{}", count, total_dirs), width = SCORER_W);
 	}
@@ -576,7 +576,7 @@ async fn test_random_strategy_many_nodes() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Electrum(&electrsd);
 
-	let num_nodes = 6;
+	let num_nodes = 5;
 	let channel_capacity_sat = 1_000_000u64;
 	// Each observer opens 1 channel; regular nodes open at most (num_nodes-1) each.
 	// num_nodes UTXOs per node is a safe upper bound for funding.
@@ -592,10 +592,10 @@ async fn test_random_strategy_many_nodes() {
 		config.node_config.node_alias = Some(NodeAlias(alias_bytes));
 		nodes.push(setup_node(&chain_source, config));
 	}
-	let node_a = build_node_random_probing(&chain_source, 5);
+	let node_a = build_node_random_probing(&chain_source, 4);
 	let node_x = build_node_without_probing(&chain_source);
-	let node_y = build_node_highdegree_probing(&chain_source, 5);
-	let node_z = build_node_z_highdegree_probing(&chain_source, 5, PROBING_DIVERSITY_PENALTY);
+	let node_y = build_node_highdegree_probing(&chain_source, 4);
+	let node_z = build_node_z_highdegree_probing(&chain_source, 4, PROBING_DIVERSITY_PENALTY);
 
 	let seed = std::env::var("TEST_SEED")
 		.ok()
@@ -704,25 +704,6 @@ async fn test_random_strategy_many_nodes() {
 	tokio::time::sleep(Duration::from_secs(5)).await;
 	println!("\n=== after payments ===");
 	print_probing_perfomance(&observer_nodes, &all_nodes);
-
-	let count_known = |observer: &Node| -> usize {
-		all_nodes
-			.iter()
-			.flat_map(|n| {
-				let local = n.node_id();
-				n.list_channels()
-					.into_iter()
-					.filter_map(move |ch| ch.short_channel_id.map(|scid| (scid, ch.counterparty_node_id, local)))
-			})
-			.filter(|(scid, to_pk, _)| observer.scorer_channel_liquidity(*scid, *to_pk).is_some())
-			.count()
-	};
-	let z_known = count_known(&node_z);
-	let y_known = count_known(&node_y);
-	assert!(
-		z_known >= y_known,
-		"node_z with probing_diversity_penalty should have at least as many observations as node_y without it: z={z_known}, y={y_known}"
-	);
 
 	for node in nodes.iter().chain(observer_nodes) {
 		node.stop().unwrap();

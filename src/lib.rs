@@ -590,7 +590,7 @@ impl Node {
 		if let Some(prober) = self.prober.clone() {
 			let stop_rx = self.stop_sender.subscribe();
 			self.runtime.spawn_cancellable_background_task(async move {
-				prober.run(stop_rx).await;
+				probing::run_prober(prober, stop_rx).await;
 			});
 		}
 

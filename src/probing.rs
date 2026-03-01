@@ -303,51 +303,58 @@ pub struct Prober {
     pub(crate) locked_msat: Arc<AtomicU64>,
 }
 
-impl Prober {
-    /// Runs the probing loop until `stop_rx` fires.
-    pub async fn run(self: Arc<Self>, mut stop_rx: tokio::sync::watch::Receiver<()>) {
-        let mut ticker = tokio::time::interval(self.interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+/// Runs the probing loop for the given [`Prober`] until `stop_rx` fires.
+pub(crate) async fn run_prober(
+    prober: Arc<Prober>, mut stop_rx: tokio::sync::watch::Receiver<()>,
+) {
+    let mut ticker = tokio::time::interval(prober.interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        loop {
-            tokio::select! {
-                _ = stop_rx.changed() => {
-                    log_debug!(self.logger, "Stopping background probing.");
-                    return;
-                }
-                _ = ticker.tick() => {
-                    match self.strategy.next_probe() {
-                        None => {}
-                        Some(Probe::PrebuiltRoute(path)) => {
-                            let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-                            if self.locked_msat.load(Ordering::Relaxed) + amount > self.max_locked_msat {
-                                log_debug!(self.logger, "Skipping probe: locked-msat budget exceeded.");
-                            } else {
-                                match self.channel_manager.send_probe(path) {
-                                    Ok(_) => {
-                                        self.locked_msat.fetch_add(amount, Ordering::Relaxed);
-                                    }
-                                    Err(e) => {
-                                        log_debug!(self.logger, "Prebuilt path probe failed: {:?}", e);
-                                    }
+    loop {
+        tokio::select! {
+            _ = stop_rx.changed() => {
+                log_debug!(prober.logger, "Stopping background probing.");
+                return;
+            }
+            _ = ticker.tick() => {
+                match prober.strategy.next_probe() {
+                    None => {}
+                    Some(Probe::PrebuiltRoute(path)) => {
+                        let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
+                        if prober.locked_msat.load(Ordering::Relaxed) + amount > prober.max_locked_msat {
+                            log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
+                        } else {
+                            match prober.channel_manager.send_probe(path) {
+                                Ok(_) => {
+                                    prober.locked_msat.fetch_add(amount, Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    log_debug!(prober.logger, "Prebuilt path probe failed: {:?}", e);
                                 }
                             }
                         }
-                        Some(Probe::Destination { final_node, amount_msat }) => {
-                            if self.locked_msat.load(Ordering::Relaxed) + amount_msat > self.max_locked_msat {
-                                log_debug!(self.logger, "Skipping probe: locked-msat budget exceeded.");
-                            } else {
-                                match self.channel_manager.send_spontaneous_preflight_probes(final_node, amount_msat, 18, self.liquidity_limit_multiplier) {
-                                    Ok(probes) => {
-                                        if !probes.is_empty() {
-                                            self.locked_msat.fetch_add(amount_msat, Ordering::Relaxed);
-                                        } else {
-                                            log_debug!( self.logger, "No probe paths found for destination {}; skipping budget increment.", final_node);
-                                        }
+                    }
+                    Some(Probe::Destination { final_node, amount_msat }) => {
+                        if prober.locked_msat.load(Ordering::Relaxed) + amount_msat
+                            > prober.max_locked_msat
+                        {
+                            log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
+                        } else {
+                            match prober.channel_manager.send_spontaneous_preflight_probes(
+                                final_node,
+                                amount_msat,
+                                18,
+                                prober.liquidity_limit_multiplier,
+                            ) {
+                                Ok(probes) => {
+                                    if !probes.is_empty() {
+                                        prober.locked_msat.fetch_add(amount_msat, Ordering::Relaxed);
+                                    } else {
+                                        log_debug!(prober.logger, "No probe paths found for destination {}; skipping budget increment.", final_node);
                                     }
-                                    Err(e) => {
-                                        log_debug!( self.logger, "Route-follow probe to {} failed: {:?}", final_node, e);
-                                    }
+                                }
+                                Err(e) => {
+                                    log_debug!(prober.logger, "Route-follow probe to {} failed: {:?}", final_node, e);
                                 }
                             }
                         }
