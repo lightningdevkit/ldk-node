@@ -57,6 +57,7 @@ type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 ///
 /// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 /// [`Node::bolt12_payment`]: crate::Node::bolt12_payment
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Bolt12Payment {
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
@@ -84,156 +85,6 @@ impl Bolt12Payment {
 		}
 	}
 
-	/// Send a payment given an offer.
-	///
-	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
-	/// response.
-	///
-	/// If `quantity` is `Some` it represents the number of items requested.
-	///
-	/// If `route_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send(
-		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
-		route_parameters: Option<RouteParametersConfig>,
-	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().unwrap() {
-			return Err(Error::NotRunning);
-		}
-
-		let offer = maybe_deref(offer);
-
-		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let route_parameters =
-			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-
-		let offer_amount_msat = match offer.amount() {
-			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
-			Some(_) => {
-				log_error!(self.logger, "Failed to send payment as the provided offer was denominated in an unsupported currency.");
-				return Err(Error::UnsupportedCurrency);
-			},
-			None => {
-				log_error!(self.logger, "Failed to send payment due to the given offer being \"zero-amount\". Please use send_using_amount instead.");
-				return Err(Error::InvalidOffer);
-			},
-		};
-
-		let params = OptionalOfferPaymentParams {
-			payer_note: payer_note.clone(),
-			retry_strategy,
-			route_params_config: route_parameters,
-		};
-		let res = if let Some(quantity) = quantity {
-			self.channel_manager
-				.pay_for_offer_with_quantity(&offer, None, payment_id, params, quantity)
-		} else {
-			self.channel_manager.pay_for_offer(&offer, None, payment_id, params)
-		};
-
-		match res {
-			Ok(()) => {
-				let payee_pubkey = offer.issuer_signing_pubkey();
-				log_info!(
-					self.logger,
-					"Initiated sending {}msat to {:?}",
-					offer_amount_msat,
-					payee_pubkey
-				);
-
-				let kind = PaymentKind::Bolt12Offer {
-					hash: None,
-					preimage: None,
-					secret: None,
-					offer_id: offer.id(),
-					payer_note: payer_note.map(UntrustedString),
-					quantity,
-				};
-				let payment = PaymentDetails::new(
-					payment_id,
-					kind,
-					Some(offer_amount_msat),
-					None,
-					PaymentDirection::Outbound,
-					PaymentStatus::Pending,
-				);
-				self.payment_store.insert(payment)?;
-
-				Ok(payment_id)
-			},
-			Err(e) => {
-				log_error!(self.logger, "Failed to send invoice request: {:?}", e);
-				match e {
-					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
-					_ => {
-						let kind = PaymentKind::Bolt12Offer {
-							hash: None,
-							preimage: None,
-							secret: None,
-							offer_id: offer.id(),
-							payer_note: payer_note.map(UntrustedString),
-							quantity,
-						};
-						let payment = PaymentDetails::new(
-							payment_id,
-							kind,
-							Some(offer_amount_msat),
-							None,
-							PaymentDirection::Outbound,
-							PaymentStatus::Failed,
-						);
-						self.payment_store.insert(payment)?;
-						Err(Error::InvoiceRequestCreationFailed)
-					},
-				}
-			},
-		}
-	}
-
-	/// Send a payment given an offer and an amount in millisatoshi.
-	///
-	/// This will fail if the amount given is less than the value required by the given offer.
-	///
-	/// This can be used to pay a so-called "zero-amount" offers, i.e., an offer that leaves the
-	/// amount paid to be determined by the user.
-	///
-	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
-	/// response.
-	///
-	/// If `route_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send_using_amount(
-		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
-		route_parameters: Option<RouteParametersConfig>,
-	) -> Result<PaymentId, Error> {
-		let payment_id = self.send_using_amount_inner(
-			offer,
-			amount_msat,
-			quantity,
-			payer_note,
-			route_parameters,
-			None,
-		)?;
-		Ok(payment_id)
-	}
-
-	/// Internal helper to send a BOLT12 offer payment given an offer
-	/// and an amount in millisatoshi.
-	///
-	/// This function contains the core payment logic and is called by
-	/// [`Self::send_using_amount`] and other internal logic that resolves
-	/// payment parameters (e.g. [`crate::UnifiedPayment::send`]).
-	///
-	/// It wraps the core LDK `pay_for_offer` logic and handles necessary pre-checks,
-	/// payment ID generation, and payment details storage.
-	///
-	/// The amount validation logic ensures the provided `amount_msat` is sufficient
-	/// based on the offer's required amount.
-	///
-	/// If `hrn` is `Some`, the payment is initiated using [`ChannelManager::pay_for_offer_from_hrn`]
-	/// for offers resolved from a Human-Readable Name ([`HumanReadableName`]).
-	/// Otherwise, it falls back to the standard offer payment methods.
 	pub(crate) fn send_using_amount_inner(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,
@@ -378,6 +229,158 @@ impl Bolt12Payment {
 		})?;
 
 		Ok(finalized_offer)
+	}
+
+	fn blinded_paths_for_async_recipient_internal(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<BlindedMessagePath>, Error> {
+		match self.async_payments_role {
+			Some(AsyncPaymentsRole::Server) => {},
+			_ => {
+				return Err(Error::AsyncPaymentServicesDisabled);
+			},
+		}
+
+		self.channel_manager
+			.blinded_paths_for_async_recipient(recipient_id, None)
+			.or(Err(Error::InvalidBlindedPaths))
+	}
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl Bolt12Payment {
+	/// Send a payment given an offer.
+	///
+	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+	/// response.
+	///
+	/// If `quantity` is `Some` it represents the number of items requested.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	pub fn send(
+		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
+		route_parameters: Option<RouteParametersConfig>,
+	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let offer = maybe_deref(offer);
+
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let route_parameters =
+			route_parameters.or(self.config.route_parameters).unwrap_or_default();
+
+		let offer_amount_msat = match offer.amount() {
+			Some(Amount::Bitcoin { amount_msats }) => amount_msats,
+			Some(_) => {
+				log_error!(self.logger, "Failed to send payment as the provided offer was denominated in an unsupported currency.");
+				return Err(Error::UnsupportedCurrency);
+			},
+			None => {
+				log_error!(self.logger, "Failed to send payment due to the given offer being \"zero-amount\". Please use send_using_amount instead.");
+				return Err(Error::InvalidOffer);
+			},
+		};
+
+		let params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
+			retry_strategy,
+			route_params_config: route_parameters,
+		};
+		let res = if let Some(quantity) = quantity {
+			self.channel_manager
+				.pay_for_offer_with_quantity(&offer, None, payment_id, params, quantity)
+		} else {
+			self.channel_manager.pay_for_offer(&offer, None, payment_id, params)
+		};
+
+		match res {
+			Ok(()) => {
+				let payee_pubkey = offer.issuer_signing_pubkey();
+				log_info!(
+					self.logger,
+					"Initiated sending {}msat to {:?}",
+					offer_amount_msat,
+					payee_pubkey
+				);
+
+				let kind = PaymentKind::Bolt12Offer {
+					hash: None,
+					preimage: None,
+					secret: None,
+					offer_id: offer.id(),
+					payer_note: payer_note.map(UntrustedString),
+					quantity,
+				};
+				let payment = PaymentDetails::new(
+					payment_id,
+					kind,
+					Some(offer_amount_msat),
+					None,
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
+				self.payment_store.insert(payment)?;
+
+				Ok(payment_id)
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to send invoice request: {:?}", e);
+				match e {
+					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
+					_ => {
+						let kind = PaymentKind::Bolt12Offer {
+							hash: None,
+							preimage: None,
+							secret: None,
+							offer_id: offer.id(),
+							payer_note: payer_note.map(UntrustedString),
+							quantity,
+						};
+						let payment = PaymentDetails::new(
+							payment_id,
+							kind,
+							Some(offer_amount_msat),
+							None,
+							PaymentDirection::Outbound,
+							PaymentStatus::Failed,
+						);
+						self.payment_store.insert(payment)?;
+						Err(Error::InvoiceRequestCreationFailed)
+					},
+				}
+			},
+		}
+	}
+
+	/// Send a payment given an offer and an amount in millisatoshi.
+	///
+	/// This will fail if the amount given is less than the value required by the given offer.
+	///
+	/// This can be used to pay a so-called "zero-amount" offers, i.e., an offer that leaves the
+	/// amount paid to be determined by the user.
+	///
+	/// If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+	/// response.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	pub fn send_using_amount(
+		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
+		route_parameters: Option<RouteParametersConfig>,
+	) -> Result<PaymentId, Error> {
+		let payment_id = self.send_using_amount_inner(
+			offer,
+			amount_msat,
+			quantity,
+			payer_note,
+			route_parameters,
+			None,
+		)?;
+		Ok(payment_id)
 	}
 
 	/// Returns a payable offer that can be used to request and receive a payment of the amount
@@ -543,7 +546,10 @@ impl Bolt12Payment {
 			.map(maybe_wrap)
 			.or(Err(Error::OfferCreationFailed))
 	}
+}
 
+#[cfg(not(feature = "uniffi"))]
+impl Bolt12Payment {
 	/// Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
 	/// static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
 	///
@@ -551,7 +557,6 @@ impl Bolt12Payment {
 	///
 	/// [`Offer`]: lightning::offers::offer::Offer
 	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
-	#[cfg(not(feature = "uniffi"))]
 	pub fn set_paths_to_static_invoice_server(
 		&self, paths: Vec<BlindedMessagePath>,
 	) -> Result<(), Error> {
@@ -560,6 +565,23 @@ impl Bolt12Payment {
 			.or(Err(Error::InvalidBlindedPaths))
 	}
 
+	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
+	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
+	///
+	/// **Caution**: Async payments support is considered experimental.
+	///
+	/// [`Offer`]: lightning::offers::offer::Offer
+	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+	pub fn blinded_paths_for_async_recipient(
+		&self, recipient_id: Vec<u8>,
+	) -> Result<Vec<BlindedMessagePath>, Error> {
+		self.blinded_paths_for_async_recipient_internal(recipient_id)
+	}
+}
+
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl Bolt12Payment {
 	/// Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
 	/// static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
 	///
@@ -567,7 +589,6 @@ impl Bolt12Payment {
 	///
 	/// [`Offer`]: lightning::offers::offer::Offer
 	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
-	#[cfg(feature = "uniffi")]
 	pub fn set_paths_to_static_invoice_server(&self, paths: Vec<u8>) -> Result<(), Error> {
 		let decoded_paths = <Vec<BlindedMessagePath> as Readable>::read(&mut &paths[..])
 			.or(Err(Error::InvalidBlindedPaths))?;
@@ -584,21 +605,6 @@ impl Bolt12Payment {
 	///
 	/// [`Offer`]: lightning::offers::offer::Offer
 	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
-	#[cfg(not(feature = "uniffi"))]
-	pub fn blinded_paths_for_async_recipient(
-		&self, recipient_id: Vec<u8>,
-	) -> Result<Vec<BlindedMessagePath>, Error> {
-		self.blinded_paths_for_async_recipient_internal(recipient_id)
-	}
-
-	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
-	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
-	///
-	/// **Caution**: Async payments support is considered experimental.
-	///
-	/// [`Offer`]: lightning::offers::offer::Offer
-	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
-	#[cfg(feature = "uniffi")]
 	pub fn blinded_paths_for_async_recipient(
 		&self, recipient_id: Vec<u8>,
 	) -> Result<Vec<u8>, Error> {
@@ -607,20 +613,5 @@ impl Bolt12Payment {
 		let mut bytes = Vec::new();
 		paths.write(&mut bytes).or(Err(Error::InvalidBlindedPaths))?;
 		Ok(bytes)
-	}
-
-	fn blinded_paths_for_async_recipient_internal(
-		&self, recipient_id: Vec<u8>,
-	) -> Result<Vec<BlindedMessagePath>, Error> {
-		match self.async_payments_role {
-			Some(AsyncPaymentsRole::Server) => {},
-			_ => {
-				return Err(Error::AsyncPaymentServicesDisabled);
-			},
-		}
-
-		self.channel_manager
-			.blinded_paths_for_async_recipient(recipient_id, None)
-			.or(Err(Error::InvalidBlindedPaths))
 	}
 }

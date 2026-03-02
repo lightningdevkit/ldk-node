@@ -58,6 +58,7 @@ struct Extras {
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 /// [`Node::unified_payment`]: crate::Node::unified_payment
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct UnifiedPayment {
 	onchain_payment: Arc<OnchainPayment>,
 	bolt11_invoice: Arc<Bolt11Payment>,
@@ -75,7 +76,10 @@ impl UnifiedPayment {
 	) -> Self {
 		Self { onchain_payment, bolt11_invoice, bolt12_payment, config, logger, hrn_resolver }
 	}
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl UnifiedPayment {
 	/// Generates a URI with an on-chain address, [BOLT 11] invoice and [BOLT 12] offer.
 	///
 	/// The URI allows users to send the payment request allowing the wallet to decide
@@ -296,6 +300,7 @@ impl UnifiedPayment {
 /// [`PaymentId`]: lightning::ln::channelmanager::PaymentId
 /// [`Txid`]: bitcoin::hash_types::Txid
 #[derive(Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum UnifiedPaymentResult {
 	/// An on-chain payment.
 	Onchain {

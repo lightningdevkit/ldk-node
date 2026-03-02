@@ -1735,6 +1735,7 @@ impl Drop for Node {
 
 /// Represents the status of the [`Node`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct NodeStatus {
 	/// Indicates whether the [`Node`] is running.
 	pub is_running: bool,

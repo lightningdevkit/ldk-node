@@ -60,6 +60,7 @@ use crate::{
 ///
 /// [`Node`]: [`crate::Node`]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Event {
 	/// A sent payment was successful.
 	PaymentSuccessful {

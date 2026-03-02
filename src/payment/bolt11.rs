@@ -54,6 +54,7 @@ type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 ///
 /// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 /// [`Node::bolt11_payment`]: crate::Node::bolt11_payment
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Bolt11Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
@@ -87,6 +88,152 @@ impl Bolt11Payment {
 		}
 	}
 
+	pub(crate) fn receive_inner(
+		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
+		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
+	) -> Result<LdkBolt11Invoice, Error> {
+		let invoice = {
+			let invoice_params = Bolt11InvoiceParameters {
+				amount_msats: amount_msat,
+				description: invoice_description.clone(),
+				invoice_expiry_delta_secs: Some(expiry_secs),
+				payment_hash: manual_claim_payment_hash,
+				..Default::default()
+			};
+
+			match self.channel_manager.create_bolt11_invoice(invoice_params) {
+				Ok(inv) => {
+					log_info!(self.logger, "Invoice created: {}", inv);
+					inv
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to create invoice: {}", e);
+					return Err(Error::InvoiceCreationFailed);
+				},
+			}
+		};
+
+		let payment_hash = invoice.payment_hash();
+		let payment_secret = invoice.payment_secret();
+		let id = PaymentId(payment_hash.0);
+		let preimage = if manual_claim_payment_hash.is_none() {
+			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
+			// will know the preimage at this point.
+			let res = self
+				.channel_manager
+				.get_payment_preimage(payment_hash, payment_secret.clone())
+				.ok();
+			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
+			res
+		} else {
+			None
+		};
+		let kind = PaymentKind::Bolt11 {
+			hash: payment_hash,
+			preimage,
+			secret: Some(payment_secret.clone()),
+		};
+		let payment = PaymentDetails::new(
+			id,
+			kind,
+			amount_msat,
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		self.payment_store.insert(payment)?;
+
+		Ok(invoice)
+	}
+
+	fn receive_via_jit_channel_inner(
+		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
+		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
+	) -> Result<LdkBolt11Invoice, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (node_id, address) =
+			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let peer_info = PeerInfo { node_id, address };
+
+		let con_node_id = peer_info.node_id;
+		let con_addr = peer_info.address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
+			self.runtime.block_on(async move {
+				if let Some(amount_msat) = amount_msat {
+					liquidity_source
+						.lsps2_receive_to_jit_channel(
+							amount_msat,
+							description,
+							expiry_secs,
+							max_total_lsp_fee_limit_msat,
+							payment_hash,
+						)
+						.await
+						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
+				} else {
+					liquidity_source
+						.lsps2_receive_variable_amount_to_jit_channel(
+							description,
+							expiry_secs,
+							max_proportional_lsp_fee_limit_ppm_msat,
+							payment_hash,
+						)
+						.await
+						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
+				}
+			})?;
+
+		// Register payment in payment store.
+		let payment_hash = invoice.payment_hash();
+		let payment_secret = invoice.payment_secret();
+		let lsp_fee_limits = LSPFeeLimits {
+			max_total_opening_fee_msat: lsp_total_opening_fee,
+			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
+		};
+		let id = PaymentId(payment_hash.0);
+		let preimage =
+			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
+		let kind = PaymentKind::Bolt11Jit {
+			hash: payment_hash,
+			preimage,
+			secret: Some(payment_secret.clone()),
+			counterparty_skimmed_fee_msat: None,
+			lsp_fee_limits,
+		};
+		let payment = PaymentDetails::new(
+			id,
+			kind,
+			amount_msat,
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		self.payment_store.insert(payment)?;
+
+		// Persist LSP peer to make sure we reconnect on restart.
+		self.peer_store.add_peer(peer_info)?;
+
+		Ok(invoice)
+	}
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl Bolt11Payment {
 	/// Send a payment given an invoice.
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
@@ -478,64 +625,6 @@ impl Bolt11Payment {
 		Ok(maybe_wrap(invoice))
 	}
 
-	pub(crate) fn receive_inner(
-		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
-		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
-	) -> Result<LdkBolt11Invoice, Error> {
-		let invoice = {
-			let invoice_params = Bolt11InvoiceParameters {
-				amount_msats: amount_msat,
-				description: invoice_description.clone(),
-				invoice_expiry_delta_secs: Some(expiry_secs),
-				payment_hash: manual_claim_payment_hash,
-				..Default::default()
-			};
-
-			match self.channel_manager.create_bolt11_invoice(invoice_params) {
-				Ok(inv) => {
-					log_info!(self.logger, "Invoice created: {}", inv);
-					inv
-				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to create invoice: {}", e);
-					return Err(Error::InvoiceCreationFailed);
-				},
-			}
-		};
-
-		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
-		let id = PaymentId(payment_hash.0);
-		let preimage = if manual_claim_payment_hash.is_none() {
-			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
-			// will know the preimage at this point.
-			let res = self
-				.channel_manager
-				.get_payment_preimage(payment_hash, payment_secret.clone())
-				.ok();
-			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
-			res
-		} else {
-			None
-		};
-		let kind = PaymentKind::Bolt11 {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.payment_store.insert(payment)?;
-
-		Ok(invoice)
-	}
-
 	/// Returns a payable invoice that can be used to request a payment of the amount given and
 	/// receive it via a newly created just-in-time (JIT) channel.
 	///
@@ -666,91 +755,6 @@ impl Bolt11Payment {
 			Some(payment_hash),
 		)?;
 		Ok(maybe_wrap(invoice))
-	}
-
-	fn receive_via_jit_channel_inner(
-		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
-		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
-	) -> Result<LdkBolt11Invoice, Error> {
-		let liquidity_source =
-			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let (node_id, address) =
-			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let peer_info = PeerInfo { node_id, address };
-
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
-
-		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
-
-		let liquidity_source = Arc::clone(&liquidity_source);
-		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
-			self.runtime.block_on(async move {
-				if let Some(amount_msat) = amount_msat {
-					liquidity_source
-						.lsps2_receive_to_jit_channel(
-							amount_msat,
-							description,
-							expiry_secs,
-							max_total_lsp_fee_limit_msat,
-							payment_hash,
-						)
-						.await
-						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
-				} else {
-					liquidity_source
-						.lsps2_receive_variable_amount_to_jit_channel(
-							description,
-							expiry_secs,
-							max_proportional_lsp_fee_limit_ppm_msat,
-							payment_hash,
-						)
-						.await
-						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
-				}
-			})?;
-
-		// Register payment in payment store.
-		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
-		let lsp_fee_limits = LSPFeeLimits {
-			max_total_opening_fee_msat: lsp_total_opening_fee,
-			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
-		};
-		let id = PaymentId(payment_hash.0);
-		let preimage =
-			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
-		let kind = PaymentKind::Bolt11Jit {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-			counterparty_skimmed_fee_msat: None,
-			lsp_fee_limits,
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.payment_store.insert(payment)?;
-
-		// Persist LSP peer to make sure we reconnect on restart.
-		self.peer_store.add_peer(peer_info)?;
-
-		Ok(invoice)
 	}
 
 	/// Sends payment probes over all paths of a route that would be used to pay the given invoice.

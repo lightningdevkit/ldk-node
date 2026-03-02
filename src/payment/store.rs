@@ -24,6 +24,7 @@ use crate::hex_utils;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct PaymentDetails {
 	/// The identifier of this payment.
 	pub id: PaymentId,
@@ -317,6 +318,7 @@ impl StorableObject for PaymentDetails {
 
 /// Represents the direction of a payment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PaymentDirection {
 	/// The payment is inbound.
 	Inbound,
@@ -331,6 +333,7 @@ impl_writeable_tlv_based_enum!(PaymentDirection,
 
 /// Represents the current status of a payment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PaymentStatus {
 	/// The payment is still pending.
 	Pending,
@@ -348,6 +351,7 @@ impl_writeable_tlv_based_enum!(PaymentStatus,
 
 /// Represents the kind of a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PaymentKind {
 	/// An on-chain payment.
 	///
@@ -494,6 +498,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 
 /// Represents the confirmation status of a transaction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ConfirmationStatus {
 	/// The transaction is confirmed in the best chain.
 	Confirmed {
@@ -523,6 +528,7 @@ impl_writeable_tlv_based_enum!(ConfirmationStatus,
 ///
 /// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct LSPFeeLimits {
 	/// The maximal total amount we allow any configured LSP withhold from us when forwarding the
 	/// payment.

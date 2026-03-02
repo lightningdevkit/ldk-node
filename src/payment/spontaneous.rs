@@ -32,6 +32,7 @@ const LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 144;
 /// Should be retrieved by calling [`Node::spontaneous_payment`].
 ///
 /// [`Node::spontaneous_payment`]: crate::Node::spontaneous_payment
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct SpontaneousPayment {
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
@@ -48,41 +49,6 @@ impl SpontaneousPayment {
 		logger: Arc<Logger>,
 	) -> Self {
 		Self { channel_manager, keys_manager, payment_store, config, is_running, logger }
-	}
-
-	/// Send a spontaneous aka. "keysend", payment.
-	///
-	/// If `route_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send(
-		&self, amount_msat: u64, node_id: PublicKey,
-		route_parameters: Option<RouteParametersConfig>,
-	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, None, None)
-	}
-
-	/// Send a spontaneous payment including a list of custom TLVs.
-	pub fn send_with_custom_tlvs(
-		&self, amount_msat: u64, node_id: PublicKey,
-		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Vec<CustomTlvRecord>,
-	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), None)
-	}
-
-	/// Send a spontaneous payment with custom preimage
-	pub fn send_with_preimage(
-		&self, amount_msat: u64, node_id: PublicKey, preimage: PaymentPreimage,
-		route_parameters: Option<RouteParametersConfig>,
-	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, None, Some(preimage))
-	}
-
-	/// Send a spontaneous payment with custom preimage including a list of custom TLVs.
-	pub fn send_with_preimage_and_custom_tlvs(
-		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<CustomTlvRecord>,
-		preimage: PaymentPreimage, route_parameters: Option<RouteParametersConfig>,
-	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), Some(preimage))
 	}
 
 	fn send_inner(
@@ -193,6 +159,44 @@ impl SpontaneousPayment {
 				}
 			},
 		}
+	}
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl SpontaneousPayment {
+	/// Send a spontaneous aka. "keysend", payment.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	pub fn send(
+		&self, amount_msat: u64, node_id: PublicKey,
+		route_parameters: Option<RouteParametersConfig>,
+	) -> Result<PaymentId, Error> {
+		self.send_inner(amount_msat, node_id, route_parameters, None, None)
+	}
+
+	/// Send a spontaneous payment including a list of custom TLVs.
+	pub fn send_with_custom_tlvs(
+		&self, amount_msat: u64, node_id: PublicKey,
+		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Vec<CustomTlvRecord>,
+	) -> Result<PaymentId, Error> {
+		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), None)
+	}
+
+	/// Send a spontaneous payment with custom preimage
+	pub fn send_with_preimage(
+		&self, amount_msat: u64, node_id: PublicKey, preimage: PaymentPreimage,
+		route_parameters: Option<RouteParametersConfig>,
+	) -> Result<PaymentId, Error> {
+		self.send_inner(amount_msat, node_id, route_parameters, None, Some(preimage))
+	}
+
+	/// Send a spontaneous payment with custom preimage including a list of custom TLVs.
+	pub fn send_with_preimage_and_custom_tlvs(
+		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<CustomTlvRecord>,
+		preimage: PaymentPreimage, route_parameters: Option<RouteParametersConfig>,
+	) -> Result<PaymentId, Error> {
+		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), Some(preimage))
 	}
 
 	/// Sends payment probes over all paths of a route that would be used to pay the given

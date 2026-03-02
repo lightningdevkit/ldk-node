@@ -20,6 +20,7 @@ use lightning::routing::gossip::{ChannelInfo, NodeInfo};
 use crate::types::Graph;
 
 /// Represents the network as nodes and channels between them.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct NetworkGraph {
 	inner: Arc<Graph>,
 }
@@ -28,7 +29,10 @@ impl NetworkGraph {
 	pub(crate) fn new(inner: Arc<Graph>) -> Self {
 		Self { inner }
 	}
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl NetworkGraph {
 	/// Returns the list of channels in the graph
 	pub fn list_channels(&self) -> Vec<u64> {
 		self.inner.read_only().channels().unordered_keys().map(|c| *c).collect()
@@ -56,7 +60,7 @@ impl NetworkGraph {
 ///
 /// This is a simplified version of LDK's `ChannelInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ChannelInfo {
 	/// Source node of the first direction of a channel
 	pub node_one: NodeId,
@@ -87,7 +91,7 @@ impl From<lightning::routing::gossip::ChannelInfo> for ChannelInfo {
 ///
 /// This is a simplified version of LDK's `ChannelUpdateInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ChannelUpdateInfo {
 	/// When the last update to the channel direction was issued.
 	/// Value is opaque, as set in the announcement.
@@ -122,7 +126,7 @@ impl From<lightning::routing::gossip::ChannelUpdateInfo> for ChannelUpdateInfo {
 ///
 /// This is a simplified version of LDK's `NodeInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct NodeInfo {
 	/// All valid channels a node has announced
 	pub channels: Vec<u64>,
@@ -146,7 +150,7 @@ impl From<lightning::routing::gossip::NodeInfo> for NodeInfo {
 ///
 /// This is a simplified version of LDK's `NodeAnnouncementInfo` for bindings.
 #[cfg(feature = "uniffi")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct NodeAnnouncementInfo {
 	/// When the last known update to the node state was issued.
 	/// Value is opaque, as set in the announcement.

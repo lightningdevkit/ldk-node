@@ -108,6 +108,7 @@ pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
 ///
 /// ### Defaults
@@ -238,6 +239,7 @@ impl Default for Config {
 ///
 /// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AnchorChannelsConfig {
 	/// A list of peers that we trust to get the required channel closing transactions confirmed
 	/// on-chain.
@@ -353,6 +355,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 /// | `lightning_wallet_sync_interval_secs`  | 30                 |
 /// | `fee_rate_cache_update_interval_secs`  | 600                |
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct BackgroundSyncConfig {
 	/// The time in-between background sync attempts of the onchain wallet, in seconds.
 	///
@@ -392,6 +395,7 @@ impl Default for BackgroundSyncConfig {
 /// | `tx_broadcast_timeout_secs`            | 10                 |
 /// | `per_request_timeout_secs`             | 10                 |
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SyncTimeoutsConfig {
 	/// The timeout after which we abort syncing the onchain wallet.
 	pub onchain_wallet_sync_timeout_secs: u64,
@@ -422,6 +426,7 @@ impl Default for SyncTimeoutsConfig {
 /// Background syncing is enabled by default, using the default values specified in
 /// [`BackgroundSyncConfig`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct EsploraSyncConfig {
 	/// Background sync configuration.
 	///
@@ -448,6 +453,7 @@ impl Default for EsploraSyncConfig {
 /// Background syncing is enabled by default, using the default values specified in
 /// [`BackgroundSyncConfig`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ElectrumSyncConfig {
 	/// Background sync configuration.
 	///
@@ -481,6 +487,7 @@ pub struct BitcoindRestClientConfig {
 /// Options which apply on a per-channel basis and may change at runtime or based on negotiation
 /// with our counterparty.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ChannelConfig {
 	/// Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
 	/// over the channel.
@@ -555,6 +562,7 @@ impl Default for ChannelConfig {
 ///
 /// See [`LdkChannelConfig::max_dust_htlc_exposure`] for details.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum MaxDustHTLCExposure {
 	/// This sets a fixed limit on the total dust exposure in millisatoshis.
 	///
@@ -595,6 +603,7 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 /// The role of the node in an asynchronous payments context.
 ///
 /// See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.
