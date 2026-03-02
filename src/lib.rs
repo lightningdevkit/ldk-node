@@ -96,6 +96,7 @@ pub mod graph;
 mod hex_utils;
 pub mod io;
 pub mod liquidity;
+mod lnurl_auth;
 pub mod logger;
 mod message_handler;
 pub mod payment;
@@ -126,7 +127,8 @@ pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
-	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
+	RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 pub use error::Error as NodeError;
@@ -154,6 +156,7 @@ pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
+use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
@@ -224,6 +227,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -1007,6 +1011,26 @@ impl Node {
 			Arc::clone(&self.logger),
 			Arc::clone(&self.hrn_resolver),
 		))
+	}
+
+	/// Authenticates the user via [LNURL-auth] for the given LNURL string.
+	///
+	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	pub fn lnurl_auth(&self, lnurl: String) -> Result<(), Error> {
+		let auth = Arc::clone(&self.lnurl_auth);
+		self.runtime.block_on(async move {
+			let res = tokio::time::timeout(
+				Duration::from_secs(LNURL_AUTH_TIMEOUT_SECS),
+				auth.authenticate(&lnurl),
+			)
+			.await;
+
+			match res {
+				Ok(Ok(())) => Ok(()),
+				Ok(Err(e)) => Err(e),
+				Err(_) => Err(Error::LnurlAuthTimeout),
+			}
+		})
 	}
 
 	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.

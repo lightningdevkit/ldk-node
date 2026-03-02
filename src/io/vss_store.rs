@@ -43,6 +43,7 @@ use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 
 use crate::entropy::NodeEntropy;
 use crate::io::utils::check_namespace_key_validity;
+use crate::lnurl_auth::LNURL_AUTH_HARDENED_CHILD_INDEX;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
 	JitteredRetryPolicy<
@@ -68,7 +69,6 @@ impl_writeable_tlv_based_enum!(VssSchemaVersion,
 );
 
 const VSS_HARDENED_CHILD_INDEX: u32 = 877;
-const VSS_LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
 const VSS_SCHEMA_VERSION_KEY: &str = "vss_schema_version";
 
 // We set this to a small number of threads that would still allow to make some progress if one
@@ -902,7 +902,7 @@ impl VssStoreBuilder {
 		let lnurl_auth_xprv = vss_xprv
 			.derive_priv(
 				&secp_ctx,
-				&[ChildNumber::Hardened { index: VSS_LNURL_AUTH_HARDENED_CHILD_INDEX }],
+				&[ChildNumber::Hardened { index: LNURL_AUTH_HARDENED_CHILD_INDEX }],
 			)
 			.map_err(|_| VssStoreBuildError::KeyDerivationFailed)?;
 
