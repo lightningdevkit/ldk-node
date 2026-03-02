@@ -15,6 +15,8 @@ use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
 use lightning::events::bump_transaction::BumpTransactionEvent;
+#[cfg(not(feature = "uniffi"))]
+use lightning::events::PaidBolt12Invoice;
 use lightning::events::{
 	ClosureReason, Event as LdkEvent, FundingInfo, PaymentFailureReason, PaymentPurpose,
 	ReplayEvent,
@@ -37,6 +39,8 @@ use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::fee_estimator::ConfirmationTarget;
+#[cfg(feature = "uniffi")]
+use crate::ffi::PaidBolt12Invoice;
 use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -79,6 +83,17 @@ pub enum Event {
 		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
+		/// The BOLT12 invoice that was paid.
+		///
+		/// This is useful for proof of payment. A third party can verify that the payment was made
+		/// by checking that the `payment_hash` in the invoice matches `sha256(payment_preimage)`.
+		///
+		/// Will be `None` for non-BOLT12 payments.
+		///
+		/// Note that static invoices (indicated by [`PaidBolt12Invoice::StaticInvoice`], used for
+		/// async payments) do not support proof of payment as the payment hash is not derived
+		/// from a preimage known only to the recipient.
+		bolt12_invoice: Option<PaidBolt12Invoice>,
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
@@ -268,6 +283,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(1, fee_paid_msat, option),
 		(3, payment_id, option),
 		(5, payment_preimage, option),
+		(7, bolt12_invoice, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, option),
@@ -1028,6 +1044,7 @@ where
 				payment_preimage,
 				payment_hash,
 				fee_paid_msat,
+				bolt12_invoice,
 				..
 			} => {
 				let payment_id = if let Some(id) = payment_id {
@@ -1073,6 +1090,7 @@ where
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
+					bolt12_invoice: bolt12_invoice.map(Into::into),
 				};
 
 				match self.event_queue.add_event(event).await {
