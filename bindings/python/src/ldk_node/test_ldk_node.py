@@ -112,6 +112,16 @@ def get_esplora_endpoint():
         return str(os.environ['ESPLORA_ENDPOINT'])
     return DEFAULT_ESPLORA_SERVER_URL
 
+
+def expect_event(node, expected_event_type):
+    event = node.wait_next_event()
+    assert isinstance(event, expected_event_type)
+    print("EVENT:", event)
+    node.event_handled()
+    return event 
+
+
+
 class TestLdkNode(unittest.TestCase):
     def setUp(self):
         bitcoin_cli("createwallet ldk_node_test")
@@ -175,16 +185,9 @@ class TestLdkNode(unittest.TestCase):
 
         node_1.open_channel(node_id_2, listening_addresses_2[0], 50000, None, None)
 
-        channel_pending_event_1 = node_1.wait_next_event()
-        assert isinstance(channel_pending_event_1, Event.CHANNEL_PENDING)
-        print("EVENT:", channel_pending_event_1)
-        node_1.event_handled()
 
-        channel_pending_event_2 = node_2.wait_next_event()
-        assert isinstance(channel_pending_event_2, Event.CHANNEL_PENDING)
-        print("EVENT:", channel_pending_event_2)
-        node_2.event_handled()
-
+        channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
+        channel_pending_event_2 = expect_event(node_2, Event.CHANNEL_PENDING)
         funding_txid = channel_pending_event_1.funding_txo.txid
         wait_for_tx(esplora_endpoint, funding_txid)
         mine_and_wait(esplora_endpoint, 6)
@@ -192,42 +195,26 @@ class TestLdkNode(unittest.TestCase):
         node_1.sync_wallets()
         node_2.sync_wallets()
 
-        channel_ready_event_1 = node_1.wait_next_event()
-        assert isinstance(channel_ready_event_1, Event.CHANNEL_READY)
-        print("EVENT:", channel_ready_event_1)
+        channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
         print("funding_txo:", funding_txid)
-        node_1.event_handled()
 
-        channel_ready_event_2 = node_2.wait_next_event()
-        assert isinstance(channel_ready_event_2, Event.CHANNEL_READY)
-        print("EVENT:", channel_ready_event_2)
-        node_2.event_handled()
+        channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
 
         description = Bolt11InvoiceDescription.DIRECT("asdf")
         invoice = node_2.bolt11_payment().receive(2500000, description, 9217)
         node_1.bolt11_payment().send(invoice, None)
+  
+        expect_event(node_1, Event.PAYMENT_SUCCESSFUL)
 
-        payment_successful_event_1 = node_1.wait_next_event()
-        assert isinstance(payment_successful_event_1, Event.PAYMENT_SUCCESSFUL)
-        print("EVENT:", payment_successful_event_1)
-        node_1.event_handled()
-
-        payment_received_event_2 = node_2.wait_next_event()
-        assert isinstance(payment_received_event_2, Event.PAYMENT_RECEIVED)
-        print("EVENT:", payment_received_event_2)
-        node_2.event_handled()
+        expect_event(node_2, Event.PAYMENT_RECEIVED)
+    
 
         node_2.close_channel(channel_ready_event_2.user_channel_id, node_id_1)
 
-        channel_closed_event_1 = node_1.wait_next_event()
-        assert isinstance(channel_closed_event_1, Event.CHANNEL_CLOSED)
-        print("EVENT:", channel_closed_event_1)
-        node_1.event_handled()
+        # expect channel closed event on both nodes
+        expect_event(node_1, Event.CHANNEL_CLOSED)
 
-        channel_closed_event_2 = node_2.wait_next_event()
-        assert isinstance(channel_closed_event_2, Event.CHANNEL_CLOSED)
-        print("EVENT:", channel_closed_event_2)
-        node_2.event_handled()
+        expect_event(node_2, Event.CHANNEL_CLOSED)
 
         mine_and_wait(esplora_endpoint, 1)
 
@@ -251,4 +238,3 @@ class TestLdkNode(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
