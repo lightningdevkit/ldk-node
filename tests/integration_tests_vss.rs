@@ -28,7 +28,7 @@ async fn channel_full_cycle_with_vss_store() {
 		.build_with_vss_store(
 			config_a.node_entropy,
 			vss_base_url.clone(),
-			"".to_owned(),
+			"store_id".to_owned(),
 			HashMap::new(),
 		)
 		.unwrap();
@@ -39,7 +39,12 @@ async fn channel_full_cycle_with_vss_store() {
 	let mut builder_b = Builder::from_config(config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b
-		.build_with_vss_store(config_b.node_entropy, vss_base_url, "".to_owned(), HashMap::new())
+		.build_with_vss_store(
+			config_b.node_entropy,
+			vss_base_url,
+			"store".to_owned(),
+			HashMap::new(),
+		)
 		.unwrap();
 	node_b.start().unwrap();
 
@@ -73,7 +78,12 @@ async fn vss_node_restart() {
 		builder.set_storage_dir_path(storage_path.clone());
 		builder.set_chain_source_esplora(esplora_url.clone(), None);
 		let node = builder
-			.build_with_vss_store(node_entropy, vss_base_url.clone(), "".to_owned(), HashMap::new())
+			.build_with_vss_store(
+				node_entropy,
+				vss_base_url.clone(),
+				"store_id".to_owned(),
+				HashMap::new(),
+			)
 			.unwrap();
 
 		node.start().unwrap();
@@ -102,7 +112,7 @@ async fn vss_node_restart() {
 	builder.set_chain_source_esplora(esplora_url, None);
 
 	let node = builder
-		.build_with_vss_store(node_entropy, vss_base_url, "".to_owned(), HashMap::new())
+		.build_with_vss_store(node_entropy, vss_base_url, "store_id".to_owned(), HashMap::new())
 		.unwrap();
 
 	node.start().unwrap();
