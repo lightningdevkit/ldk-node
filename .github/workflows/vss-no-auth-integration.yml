@@ -1,0 +1,47 @@
+name: CI Checks - VSS No-Auth Integration Tests
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:latest
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          path: ldk-node
+      - name: Checkout VSS
+        uses: actions/checkout@v3
+        with:
+          repository: lightningdevkit/vss-server
+          path: vss-server
+
+      - name: Build and Deploy VSS Server
+        run: |
+          cd vss-server/rust
+          RUSTFLAGS=--cfg=noop_authorizer cargo run --no-default-features server/vss-server-config.toml&
+      - name: Run VSS Integration tests
+        run: |
+          cd ldk-node
+          export TEST_VSS_BASE_URL="http://localhost:8080/vss"
+          RUSTFLAGS="--cfg vss_test --cfg cycle_tests" cargo test --test integration_tests_vss_no_auth
