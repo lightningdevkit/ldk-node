@@ -1089,7 +1089,19 @@ async fn simple_bolt12_send_receive() {
 		.send(&offer, expected_quantity, expected_payer_note.clone(), None)
 		.unwrap();
 
-	expect_payment_successful_event!(node_a, Some(payment_id), None);
+	let event = node_a.next_event_async().await;
+	match event {
+		ref e @ Event::PaymentSuccessful { payment_id: ref evt_id, ref bolt12_invoice, .. } => {
+			println!("{} got event {:?}", node_a.node_id(), e);
+			assert_eq!(*evt_id, Some(payment_id));
+			assert!(
+				bolt12_invoice.is_some(),
+				"bolt12_invoice should be present for BOLT12 payments"
+			);
+			node_a.event_handled().unwrap();
+		},
+		ref e => panic!("{} got unexpected event!: {:?}", "node_a", e),
+	}
 	let node_a_payments =
 		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
 	assert_eq!(node_a_payments.len(), 1);

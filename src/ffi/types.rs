@@ -10,6 +10,7 @@
 //
 // Make sure to add any re-exported items that need to be used in uniffi below.
 
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -22,17 +23,20 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
+use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::msgs::DecodeError;
 pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
 use lightning::offers::refund::Refund as LdkRefund;
+use lightning::offers::static_invoice::StaticInvoice as LdkStaticInvoice;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
-use lightning::util::ser::Writeable;
+use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
 pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
@@ -41,10 +45,10 @@ pub use lightning_liquidity::lsps1::msgs::{
 };
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
-use std::collections::HashMap;
-
-use vss_client::headers::VssHeaderProvider as VssClientHeaderProvider;
-use vss_client::headers::VssHeaderProviderError as VssClientHeaderProviderError;
+use vss_client::headers::{
+	VssHeaderProvider as VssClientHeaderProvider,
+	VssHeaderProviderError as VssClientHeaderProviderError,
+};
 
 /// Errors around providing headers for each VSS request.
 #[derive(Debug, uniffi::Error)]
@@ -772,6 +776,95 @@ impl Deref for Bolt12Invoice {
 impl AsRef<LdkBolt12Invoice> for Bolt12Invoice {
 	fn as_ref(&self) -> &LdkBolt12Invoice {
 		self.deref()
+	}
+}
+
+/// A static invoice used for async payments.
+///
+/// Static invoices are a special type of BOLT12 invoice where proof of payment is not possible,
+/// as the payment hash is not derived from a preimage known only to the recipient.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+pub struct StaticInvoice {
+	pub(crate) inner: LdkStaticInvoice,
+}
+
+#[uniffi::export]
+impl StaticInvoice {
+	/// The amount for a successful payment of the invoice, if specified.
+	pub fn amount(&self) -> Option<OfferAmount> {
+		self.inner.amount().map(|amount| amount.into())
+	}
+}
+
+impl From<LdkStaticInvoice> for StaticInvoice {
+	fn from(invoice: LdkStaticInvoice) -> Self {
+		StaticInvoice { inner: invoice }
+	}
+}
+
+impl Deref for StaticInvoice {
+	type Target = LdkStaticInvoice;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<LdkStaticInvoice> for StaticInvoice {
+	fn as_ref(&self) -> &LdkStaticInvoice {
+		self.deref()
+	}
+}
+
+/// The BOLT12 invoice that was paid, surfaced in [`Event::PaymentSuccessful`].
+///
+/// [`Event::PaymentSuccessful`]: crate::Event::PaymentSuccessful
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum PaidBolt12Invoice {
+	/// The BOLT12 invoice, allowing the user to perform proof of payment.
+	Bolt12(Arc<Bolt12Invoice>),
+	/// The static invoice, used in async payments, where the user cannot perform proof of
+	/// payment.
+	Static(Arc<StaticInvoice>),
+}
+
+impl From<LdkPaidBolt12Invoice> for PaidBolt12Invoice {
+	fn from(ldk: LdkPaidBolt12Invoice) -> Self {
+		match ldk {
+			LdkPaidBolt12Invoice::Bolt12Invoice(invoice) => {
+				PaidBolt12Invoice::Bolt12(Arc::new(Bolt12Invoice::from(invoice)))
+			},
+			LdkPaidBolt12Invoice::StaticInvoice(invoice) => {
+				PaidBolt12Invoice::Static(Arc::new(StaticInvoice::from(invoice)))
+			},
+		}
+	}
+}
+
+impl From<PaidBolt12Invoice> for LdkPaidBolt12Invoice {
+	fn from(wrapper: PaidBolt12Invoice) -> Self {
+		match wrapper {
+			PaidBolt12Invoice::Bolt12(invoice) => {
+				LdkPaidBolt12Invoice::Bolt12Invoice(invoice.inner.clone())
+			},
+			PaidBolt12Invoice::Static(invoice) => {
+				LdkPaidBolt12Invoice::StaticInvoice(invoice.inner.clone())
+			},
+		}
+	}
+}
+
+impl Writeable for PaidBolt12Invoice {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), lightning::io::Error> {
+		// TODO: Find way to avoid cloning invoice data.
+		let ldk_type: LdkPaidBolt12Invoice = self.clone().into();
+		ldk_type.write(w)
+	}
+}
+
+impl Readable for PaidBolt12Invoice {
+	fn read<R: lightning::io::Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let ldk_type = LdkPaidBolt12Invoice::read(r)?;
+		Ok(ldk_type.into())
 	}
 }
 

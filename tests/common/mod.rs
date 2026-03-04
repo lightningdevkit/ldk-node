@@ -953,7 +953,17 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	});
 	assert_eq!(inbound_payments_b.len(), 1);
 
-	expect_event!(node_a, PaymentSuccessful);
+	// Verify bolt12_invoice is None for BOLT11 payments
+	match node_a.next_event_async().await {
+		ref e @ Event::PaymentSuccessful { ref bolt12_invoice, .. } => {
+			println!("{} got event {:?}", node_a.node_id(), e);
+			assert!(bolt12_invoice.is_none(), "bolt12_invoice should be None for BOLT11 payments");
+			node_a.event_handled().unwrap();
+		},
+		ref e => {
+			panic!("{} got unexpected event!: {:?}", std::stringify!(node_a), e);
+		},
+	}
 	expect_event!(node_b, PaymentReceived);
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
