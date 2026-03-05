@@ -26,7 +26,10 @@ use bitcoin::{
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
-use ldk_node::config::{AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig};
+use ldk_node::config::{
+	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
+	HumanReadableNamesConfig,
+};
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
@@ -402,11 +405,18 @@ pub(crate) fn setup_two_nodes_with_store(
 	println!("== Node A ==");
 	let mut config_a = random_config(anchor_channels);
 	config_a.store_type = store_type;
+
+	if cfg!(hrn_tests) {
+		config_a.node_config.hrn_config =
+			HumanReadableNamesConfig { resolution_config: HRNResolverConfig::Blip32 };
+	}
+
 	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	config_b.store_type = store_type;
+
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
