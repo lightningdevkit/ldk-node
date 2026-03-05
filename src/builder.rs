@@ -39,6 +39,7 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
+use lightning_liquidity::lsps2::router::LSPS2BOLT12Router;
 use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 
@@ -1627,13 +1628,14 @@ fn build_with_store_internal(
 	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	let router = Arc::new(DefaultRouter::new(
+	let inner_router = DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
 		scoring_fee_params,
-	));
+	);
+	let router = Arc::new(LSPS2BOLT12Router::new(inner_router, Arc::clone(&keys_manager)));
 
 	let mut user_config = default_user_config(&config);
 
@@ -1790,56 +1792,62 @@ fn build_with_store_internal(
 		},
 	};
 
-	let (liquidity_source, custom_message_handler) =
-		if let Some(lsc) = liquidity_source_config.as_ref() {
-			let mut liquidity_source_builder = LiquiditySourceBuilder::new(
-				Arc::clone(&wallet),
-				Arc::clone(&channel_manager),
-				Arc::clone(&keys_manager),
-				Arc::clone(&chain_source),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
+	let (liquidity_source, custom_message_handler) = if let Some(lsc) =
+		liquidity_source_config.as_ref()
+	{
+		let mut liquidity_source_builder = LiquiditySourceBuilder::new(
+			Arc::clone(&wallet),
+			Arc::clone(&channel_manager),
+			Arc::clone(&keys_manager),
+			Arc::clone(&router),
+			Arc::clone(&chain_source),
+			Arc::clone(&tx_broadcaster),
+			Arc::clone(&kv_store),
+			Arc::clone(&config),
+			Some(Arc::clone(&onion_messenger)
+				as Arc<
+					dyn lightning::onion_message::messenger::OnionMessageInterceptor + Send + Sync,
+				>),
+			Arc::clone(&logger),
+		);
+
+		lsc.lsps1_client.as_ref().map(|config| {
+			liquidity_source_builder.lsps1_client(
+				config.node_id,
+				config.address.clone(),
+				config.token.clone(),
+			)
+		});
+
+		lsc.lsps2_client.as_ref().map(|config| {
+			liquidity_source_builder.lsps2_client(
+				config.node_id,
+				config.address.clone(),
+				config.token.clone(),
+			)
+		});
+
+		let promise_secret = {
+			let lsps_xpriv = derive_xprv(
 				Arc::clone(&config),
+				&seed_bytes,
+				LSPS_HARDENED_CHILD_INDEX,
 				Arc::clone(&logger),
-			);
-
-			lsc.lsps1_client.as_ref().map(|config| {
-				liquidity_source_builder.lsps1_client(
-					config.node_id,
-					config.address.clone(),
-					config.token.clone(),
-				)
-			});
-
-			lsc.lsps2_client.as_ref().map(|config| {
-				liquidity_source_builder.lsps2_client(
-					config.node_id,
-					config.address.clone(),
-					config.token.clone(),
-				)
-			});
-
-			let promise_secret = {
-				let lsps_xpriv = derive_xprv(
-					Arc::clone(&config),
-					&seed_bytes,
-					LSPS_HARDENED_CHILD_INDEX,
-					Arc::clone(&logger),
-				)?;
-				lsps_xpriv.private_key.secret_bytes()
-			};
-			lsc.lsps2_service.as_ref().map(|config| {
-				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
-			});
-
-			let liquidity_source = runtime
-				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
-			let custom_message_handler =
-				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
-			(Some(liquidity_source), custom_message_handler)
-		} else {
-			(None, Arc::new(NodeCustomMessageHandler::new_ignoring()))
+			)?;
+			lsps_xpriv.private_key.secret_bytes()
 		};
+		lsc.lsps2_service
+			.as_ref()
+			.map(|config| liquidity_source_builder.lsps2_service(promise_secret, config.clone()));
+
+		let liquidity_source = runtime
+			.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
+		let custom_message_handler =
+			Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
+		(Some(liquidity_source), custom_message_handler)
+	} else {
+		(None, Arc::new(NodeCustomMessageHandler::new_ignoring()))
+	};
 
 	let msg_handler = match gossip_source.as_gossip_sync() {
 		GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
