@@ -1842,6 +1842,8 @@ fn build_with_store_internal(
 
 		let liquidity_source = runtime
 			.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
+		// TODO: Rehydrate persisted `OfferId -> LSPS2Bolt12InvoiceParameters` mappings here for
+		// client nodes and call `router.register_offer(...)` before startup completes.
 		let custom_message_handler =
 			Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
 		(Some(liquidity_source), custom_message_handler)
