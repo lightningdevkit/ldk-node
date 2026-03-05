@@ -603,6 +603,24 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	.await;
 }
 
+pub(crate) async fn wait_for_cbf_sync(node: &TestNode) {
+	let before = node.status().latest_onchain_wallet_sync_timestamp;
+	let mut delay = Duration::from_millis(200);
+	for _ in 0..30 {
+		if node.sync_wallets().is_ok() {
+			let after = node.status().latest_onchain_wallet_sync_timestamp;
+			if after > before {
+				return;
+			}
+		}
+		tokio::time::sleep(delay).await;
+		if delay < Duration::from_secs(2) {
+			delay = delay.mul_f32(1.5);
+		}
+	}
+	panic!("wait_for_cbf_sync: timed out waiting for CBF sync to complete");
+}
+
 pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
 where
 	F: FnMut() -> Option<T>,
