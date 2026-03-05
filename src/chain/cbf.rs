@@ -5,25 +5,27 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::Update;
+use bip157::chain::{BlockHeaderChanges, IndexedHeader};
 use bip157::{
 	BlockHash, Builder, Client, Event, Info, Requester, SyncUpdate, TrustedPeer, Warning,
 };
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::{Amount, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
-use lightning::chain::WatchedOutput;
+use lightning::chain::{Confirm, WatchedOutput};
 use lightning::util::ser::Writeable;
 use tokio::sync::{mpsc, oneshot};
 
 use super::WalletSyncStatus;
 use crate::config::{CbfSyncConfig, Config, BDK_CLIENT_STOP_GAP};
+use crate::error::Error;
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	OnchainFeeEstimator,
@@ -32,7 +34,7 @@ use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
+use crate::NodeMetrics;
 
 /// Minimum fee rate: 1 sat/vB = 250 sat/kWU. Used as a floor for computed fee rates.
 const MIN_FEERATE_SAT_PER_KWU: u64 = 250;
@@ -53,14 +55,26 @@ pub(super) struct CbfChainSource {
 	watched_scripts: Arc<RwLock<Vec<ScriptBuf>>>,
 	/// Block (height, hash) pairs where filters matched watched scripts.
 	matched_block_hashes: Arc<Mutex<Vec<(u32, BlockHash)>>>,
+	/// Queued chain reorganization events, drained at the start of each lightning sync.
+	reorg_queue: Arc<Mutex<Vec<ReorgEvent>>>,
 	/// One-shot channel sender to signal filter scan completion.
 	sync_completion_tx: Arc<Mutex<Option<oneshot::Sender<SyncUpdate>>>>,
 	/// Filters at or below this height are skipped during incremental scans.
 	filter_skip_height: Arc<AtomicU32>,
+	/// Serializes concurrent filter scans (on-chain and lightning).
+	scan_lock: tokio::sync::Mutex<()>,
+	/// Scripts registered by LDK's Filter trait for lightning channel monitoring.
+	registered_scripts: Mutex<Vec<ScriptBuf>>,
+	/// Set when new scripts are registered; forces a full rescan on next lightning sync.
+	lightning_scripts_dirty: AtomicBool,
 	/// Last block height reached by on-chain wallet sync, used for incremental scans.
 	last_onchain_synced_height: Mutex<Option<u32>>,
+	/// Last block height reached by lightning wallet sync, used for incremental scans.
+	last_lightning_synced_height: Mutex<Option<u32>>,
 	/// Deduplicates concurrent on-chain wallet sync requests.
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
+	/// Deduplicates concurrent lightning wallet sync requests.
+	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	/// Shared fee rate estimator, updated by this chain source.
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	/// Persistent key-value store for node metrics.
@@ -84,7 +98,16 @@ struct CbfEventState {
 	watched_scripts: Arc<RwLock<Vec<ScriptBuf>>>,
 	matched_block_hashes: Arc<Mutex<Vec<(u32, BlockHash)>>>,
 	sync_completion_tx: Arc<Mutex<Option<oneshot::Sender<SyncUpdate>>>>,
+	reorg_queue: Arc<Mutex<Vec<ReorgEvent>>>,
 	filter_skip_height: Arc<AtomicU32>,
+}
+
+/// A chain reorganization event queued for processing during the next lightning sync.
+struct ReorgEvent {
+	/// Block hashes that were removed from the chain.
+	reorganized: Vec<BlockHash>,
+	/// Headers of blocks newly accepted on the winning fork.
+	accepted: Vec<IndexedHeader>,
 }
 
 impl CbfChainSource {
@@ -97,10 +120,16 @@ impl CbfChainSource {
 		let latest_tip = Arc::new(Mutex::new(None));
 		let watched_scripts = Arc::new(RwLock::new(Vec::new()));
 		let matched_block_hashes = Arc::new(Mutex::new(Vec::new()));
+		let reorg_queue = Arc::new(Mutex::new(Vec::new()));
 		let sync_completion_tx = Arc::new(Mutex::new(None));
 		let filter_skip_height = Arc::new(AtomicU32::new(0));
+		let registered_scripts = Mutex::new(Vec::new());
+		let lightning_scripts_dirty = AtomicBool::new(true);
+		let scan_lock = tokio::sync::Mutex::new(());
 		let last_onchain_synced_height = Mutex::new(None);
+		let last_lightning_synced_height = Mutex::new(None);
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		Self {
 			peers,
 			sync_config,
@@ -108,10 +137,16 @@ impl CbfChainSource {
 			latest_tip,
 			watched_scripts,
 			matched_block_hashes,
+			reorg_queue,
 			sync_completion_tx,
 			filter_skip_height,
+			registered_scripts,
+			lightning_scripts_dirty,
+			scan_lock,
 			last_onchain_synced_height,
+			last_lightning_synced_height,
 			onchain_wallet_sync_status,
+			lightning_wallet_sync_status,
 			fee_estimator,
 			kv_store,
 			config,
@@ -181,6 +216,7 @@ impl CbfChainSource {
 			watched_scripts: Arc::clone(&self.watched_scripts),
 			matched_block_hashes: Arc::clone(&self.matched_block_hashes),
 			sync_completion_tx: Arc::clone(&self.sync_completion_tx),
+			reorg_queue: Arc::clone(&self.reorg_queue),
 			filter_skip_height: Arc::clone(&self.filter_skip_height),
 		};
 		let event_logger = Arc::clone(&self.logger);
@@ -243,8 +279,27 @@ impl CbfChainSource {
 				Event::Block(indexed_block) => {
 					log_trace!(logger, "CBF received block at height {}", indexed_block.height,);
 				},
-				Event::ChainUpdate(header_changes) => {
-					log_debug!(logger, "CBF chain update: {:?}", header_changes);
+				Event::ChainUpdate(header_changes) => match header_changes {
+					BlockHeaderChanges::Reorganized { accepted, reorganized } => {
+						log_debug!(
+							logger,
+							"CBF chain reorg detected: {} blocks removed, {} blocks accepted.",
+							reorganized.len(),
+							accepted.len(),
+						);
+						let reorg_hashes = reorganized.iter().map(|h| h.block_hash()).collect();
+						state
+							.reorg_queue
+							.lock()
+							.unwrap()
+							.push(ReorgEvent { reorganized: reorg_hashes, accepted });
+					},
+					BlockHeaderChanges::Connected(header) => {
+						log_trace!(logger, "CBF block connected at height {}", header.height,);
+					},
+					BlockHeaderChanges::ForkAdded(header) => {
+						log_trace!(logger, "CBF fork block observed at height {}", header.height,);
+					},
 				},
 				Event::IndexedFilter(indexed_filter) => {
 					let skip_height = state.filter_skip_height.load(Ordering::Acquire);
@@ -279,6 +334,18 @@ impl CbfChainSource {
 		}
 	}
 
+	/// Register a transaction script for Lightning channel monitoring.
+	pub(crate) fn register_tx(&self, _txid: &Txid, script_pubkey: &Script) {
+		self.registered_scripts.lock().unwrap().push(script_pubkey.to_owned());
+		self.lightning_scripts_dirty.store(true, Ordering::Release);
+	}
+
+	/// Register a watched output script for Lightning channel monitoring.
+	pub(crate) fn register_output(&self, output: WatchedOutput) {
+		self.registered_scripts.lock().unwrap().push(output.script_pubkey.clone());
+		self.lightning_scripts_dirty.store(true, Ordering::Release);
+	}
+
 	/// Run a CBF filter scan: set watched scripts, trigger a rescan, wait for
 	/// completion, and return the sync update along with matched block hashes.
 	///
@@ -288,6 +355,8 @@ impl CbfChainSource {
 		&self, scripts: Vec<ScriptBuf>, skip_before_height: Option<u32>,
 	) -> Result<(SyncUpdate, Vec<(u32, BlockHash)>), Error> {
 		let requester = self.requester()?;
+
+		let _scan_guard = self.scan_lock.lock().await;
 
 		self.filter_skip_height.store(skip_before_height.unwrap_or(0), Ordering::Release);
 		self.matched_block_hashes.lock().unwrap().clear();
@@ -439,14 +508,172 @@ impl CbfChainSource {
 
 	/// Sync the Lightning wallet by confirming channel transactions via compact block filters.
 	pub(crate) async fn sync_lightning_wallet(
-		&self, _channel_manager: Arc<ChannelManager>, _chain_monitor: Arc<ChainMonitor>,
-		_output_sweeper: Arc<Sweeper>,
+		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		log_error!(self.logger, "Lightning wallet sync via CBF is not yet implemented.");
-		Err(Error::TxSyncFailed)
+		let receiver_res = {
+			let mut status_lock = self.lightning_wallet_sync_status.lock().unwrap();
+			status_lock.register_or_subscribe_pending_sync()
+		};
+		if let Some(mut sync_receiver) = receiver_res {
+			log_debug!(self.logger, "Lightning wallet sync already in progress, waiting.");
+			return sync_receiver.recv().await.map_err(|e| {
+				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
+				Error::TxSyncFailed
+			})?;
+		}
+
+		let res = async {
+			let requester = self.requester()?;
+			let now = Instant::now();
+
+			let scripts: Vec<ScriptBuf> = self.registered_scripts.lock().unwrap().clone();
+			if scripts.is_empty() {
+				log_debug!(self.logger, "No registered scripts for CBF lightning sync.");
+				return Ok(());
+			}
+
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(
+					self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs,
+				),
+				self.sync_lightning_wallet_op(
+					requester,
+					channel_manager,
+					chain_monitor,
+					output_sweeper,
+					scripts,
+				),
+			);
+
+			match timeout_fut.await {
+				Ok(res) => res?,
+				Err(e) => {
+					log_error!(self.logger, "Sync of Lightning wallet timed out: {}", e);
+					return Err(Error::TxSyncTimeout);
+				},
+			};
+
+			log_debug!(
+				self.logger,
+				"Sync of Lightning wallet via CBF finished in {}ms.",
+				now.elapsed().as_millis()
+			);
+
+			update_node_metrics_timestamp(
+				&self.node_metrics,
+				&*self.kv_store,
+				&*self.logger,
+				|m, t| {
+					m.latest_lightning_wallet_sync_timestamp = t;
+				},
+			)?;
+
+			Ok(())
+		}
+		.await;
+
+		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+
+		res
 	}
 
-	/// Estimate fee rates from recent block data.
+	async fn sync_lightning_wallet_op(
+		&self, requester: Requester, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>, scripts: Vec<ScriptBuf>,
+	) -> Result<(), Error> {
+		let scripts_dirty = self.lightning_scripts_dirty.load(Ordering::Acquire);
+		let skip_height =
+			if scripts_dirty { None } else { *self.last_lightning_synced_height.lock().unwrap() };
+		let (sync_update, matched) = self.run_filter_scan(scripts, skip_height).await?;
+
+		log_debug!(
+			self.logger,
+			"CBF lightning filter scan complete: {} matching blocks found.",
+			matched.len()
+		);
+
+		let confirmables: Vec<&(dyn Confirm + Sync + Send)> =
+			vec![&*channel_manager, &*chain_monitor, &*output_sweeper];
+
+		// Process any queued reorg events before the regular sync.
+		// A reorg invalidates our last synced height since blocks may have changed.
+		let pending_reorgs = std::mem::take(&mut *self.reorg_queue.lock().unwrap());
+		if !pending_reorgs.is_empty() {
+			*self.last_lightning_synced_height.lock().unwrap() = None;
+		}
+		for reorg in &pending_reorgs {
+			let reorg_set: HashSet<BlockHash> = reorg.reorganized.iter().copied().collect();
+
+			// Unconfirm txs that were in reorganized blocks.
+			for confirmable in &confirmables {
+				for (txid, _height, block_hash_opt) in confirmable.get_relevant_txids() {
+					if let Some(block_hash) = block_hash_opt {
+						if reorg_set.contains(&block_hash) {
+							log_debug!(
+								self.logger,
+								"Unconfirming transaction {} due to chain reorg.",
+								txid,
+							);
+							confirmable.transaction_unconfirmed(&txid);
+						}
+					}
+				}
+			}
+
+			// Confirm txs in newly accepted blocks (in chain order).
+			let mut accepted_sorted = reorg.accepted.clone();
+			accepted_sorted.sort_by_key(|h| h.height);
+			for indexed_header in &accepted_sorted {
+				let block_hash = indexed_header.header.block_hash();
+				confirm_block_transactions(
+					&requester,
+					block_hash,
+					indexed_header.height,
+					&confirmables,
+					&self.logger,
+				)
+				.await?;
+			}
+
+			// Update the best block to the last accepted header.
+			if let Some(last_accepted) = accepted_sorted.last() {
+				for confirmable in &confirmables {
+					confirmable.best_block_updated(&last_accepted.header, last_accepted.height);
+				}
+			}
+		}
+
+		// Fetch matching blocks and confirm all their transactions.
+		// The compact block filter already matched our scripts (covering both
+		// created outputs and spent inputs), so we confirm every transaction
+		// from matched blocks and let LDK determine relevance.
+		for (height, block_hash) in &matched {
+			confirm_block_transactions(
+				&requester,
+				*block_hash,
+				*height,
+				&confirmables,
+				&self.logger,
+			)
+			.await?;
+		}
+
+		// Update the best block tip.
+		let tip = sync_update.tip();
+		if let Some(tip_header) = sync_update.recent_history().get(&tip.height) {
+			for confirmable in &confirmables {
+				confirmable.best_block_updated(tip_header, tip.height);
+			}
+		}
+
+		*self.last_lightning_synced_height.lock().unwrap() = Some(tip.height);
+		self.lightning_scripts_dirty.store(false, Ordering::Release);
+
+		Ok(())
+	}
+
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		let requester = self.requester()?;
 
@@ -655,16 +882,6 @@ impl CbfChainSource {
 			}
 		}
 	}
-
-	/// Register a transaction script for Lightning channel monitoring.
-	pub(crate) fn register_tx(&self, _txid: &Txid, _script_pubkey: &Script) {
-		log_error!(self.logger, "CBF register_tx is not yet implemented.");
-	}
-
-	/// Register a watched output script for Lightning channel monitoring.
-	pub(crate) fn register_output(&self, _output: WatchedOutput) {
-		log_error!(self.logger, "CBF register_output is not yet implemented.");
-	}
 }
 
 /// Record the current timestamp in a `NodeMetrics` field and persist the metrics.
@@ -676,6 +893,26 @@ fn update_node_metrics_timestamp(
 	let mut locked = node_metrics.write().unwrap();
 	setter(&mut locked, unix_time_secs_opt);
 	write_node_metrics(&*locked, kv_store, logger)?;
+	Ok(())
+}
+
+/// Fetch a block by hash and call `transactions_confirmed` on each confirmable.
+async fn confirm_block_transactions(
+	requester: &Requester, block_hash: BlockHash, height: u32,
+	confirmables: &[&(dyn Confirm + Sync + Send)], logger: &Logger,
+) -> Result<(), Error> {
+	let indexed_block = requester.get_block(block_hash).await.map_err(|e| {
+		log_error!(logger, "Failed to fetch block {}: {:?}", block_hash, e);
+		Error::TxSyncFailed
+	})?;
+	let block = &indexed_block.block;
+	let header = &block.header;
+	let txdata: Vec<(usize, &Transaction)> = block.txdata.iter().enumerate().collect();
+	if !txdata.is_empty() {
+		for confirmable in confirmables {
+			confirmable.transactions_confirmed(header, &txdata, height);
+		}
+	}
 	Ok(())
 }
 
