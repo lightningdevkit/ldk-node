@@ -249,7 +249,12 @@ where
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
 			let lsps5_service_config = None;
 			let advertise_service = s.service_config.advertise_service;
-			LiquidityServiceConfig { lsps2_service_config, lsps5_service_config, advertise_service }
+			LiquidityServiceConfig {
+				lsps1_service_config: None,
+				lsps2_service_config,
+				lsps5_service_config,
+				advertise_service,
+			}
 		});
 
 		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.ldk_client_config.clone());
@@ -266,8 +271,6 @@ where
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.channel_manager),
-				Some(Arc::clone(&self.chain_source)),
-				None,
 				Arc::clone(&self.kv_store),
 				Arc::clone(&self.tx_broadcaster),
 				liquidity_service_config,

@@ -232,7 +232,6 @@ pub(crate) type LiquidityManager = lightning_liquidity::LiquidityManager<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<ChannelManager>,
-	Arc<ChainSource>,
 	Arc<DynStore>,
 	DefaultTimeProvider,
 	Arc<Broadcaster>,
@@ -263,7 +262,7 @@ pub(crate) type InnerRouter = DefaultRouter<
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
-pub(crate) type Router = LSPS2BOLT12Router<InnerRouter, Arc<KeysManager>>;
+pub(crate) type Router = LSPS2BOLT12Router<InnerRouter, InnerMessageRouter, Arc<KeysManager>>;
 pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
@@ -297,11 +296,12 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 
 pub(crate) type HRNResolver = LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>;
 
-pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
+pub(crate) type InnerMessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
 	Arc<Logger>,
 	Arc<KeysManager>,
 >;
+pub(crate) type MessageRouter = Router;
 
 pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,

@@ -1306,17 +1306,19 @@ where
 				}
 			},
 			LdkEvent::PaymentForwarded {
-				prev_channel_id,
-				next_channel_id,
-				prev_user_channel_id,
-				next_user_channel_id,
-				prev_node_id,
-				next_node_id,
+				prev_htlcs,
+				next_htlcs,
 				total_fee_earned_msat,
 				skimmed_fee_msat,
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
 			} => {
+				let prev_channel_id = prev_htlcs.first().map(|h| h.channel_id);
+				let next_channel_id = next_htlcs.first().map(|h| h.channel_id);
+				let prev_user_channel_id = prev_htlcs.first().and_then(|h| h.user_channel_id);
+				let next_user_channel_id = next_htlcs.first().and_then(|h| h.user_channel_id);
+				let prev_node_id = prev_htlcs.first().and_then(|h| h.node_id);
+				let next_node_id = next_htlcs.first().and_then(|h| h.node_id);
 				{
 					let read_only_network_graph = self.network_graph.read_only();
 					let nodes = read_only_network_graph.nodes();
