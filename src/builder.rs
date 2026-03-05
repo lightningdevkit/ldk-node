@@ -45,7 +45,7 @@ use vss_client::headers::VssHeaderProvider;
 use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	BitcoindRestClientConfig, CbfSyncConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
@@ -104,6 +104,10 @@ enum ChainDataSourceConfig {
 		rpc_user: String,
 		rpc_password: String,
 		rest_client_config: Option<BitcoindRestClientConfig>,
+	},
+	Cbf {
+		peers: Vec<String>,
+		sync_config: Option<CbfSyncConfig>,
 	},
 }
 
@@ -373,6 +377,21 @@ impl NodeBuilder {
 			rest_client_config: Some(BitcoindRestClientConfig { rest_host, rest_port }),
 		});
 
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data via BIP 157 compact block
+	/// filters.
+	///
+	/// `peers` is an optional list of peer addresses to connect to for sourcing compact block
+	/// filters. If empty, the node will discover peers via DNS seeds.
+	///
+	/// If no `sync_config` is given, default values are used. See [`CbfSyncConfig`] for more
+	/// information.
+	pub fn set_chain_source_cbf(
+		&mut self, peers: Vec<String>, sync_config: Option<CbfSyncConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config = Some(ChainDataSourceConfig::Cbf { peers, sync_config });
 		self
 	}
 
@@ -1253,6 +1272,20 @@ fn build_with_store_internal(
 				)
 				.await
 			}),
+		},
+
+		Some(ChainDataSourceConfig::Cbf { peers, sync_config }) => {
+			let sync_config = sync_config.clone().unwrap_or(CbfSyncConfig::default());
+			ChainSource::new_cbf(
+				peers.clone(),
+				sync_config,
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			)
 		},
 
 		None => {
