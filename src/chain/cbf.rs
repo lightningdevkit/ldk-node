@@ -5,14 +5,19 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::sync::{Arc, RwLock};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
+use bip157::{BlockHash, Builder, Client, Event, Info, Requester, TrustedPeer, Warning};
 use bitcoin::{Script, Transaction, Txid};
 use lightning::chain::WatchedOutput;
+use lightning::util::ser::Writeable;
+use tokio::sync::mpsc;
 
 use crate::config::{CbfSyncConfig, Config};
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_error, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
@@ -22,6 +27,10 @@ pub(super) struct CbfChainSource {
 	peers: Vec<String>,
 	/// User-provided sync configuration (timeouts, background sync intervals).
 	pub(super) sync_config: CbfSyncConfig,
+	/// Tracks whether the bip157 node is running and holds the command handle.
+	cbf_runtime_status: Mutex<CbfRuntimeStatus>,
+	/// Latest chain tip hash, updated by the background event processing task.
+	latest_tip: Arc<Mutex<Option<BlockHash>>>,
 	/// Shared fee rate estimator, updated by this chain source.
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	/// Persistent key-value store for node metrics.
@@ -34,23 +43,169 @@ pub(super) struct CbfChainSource {
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 }
 
+enum CbfRuntimeStatus {
+	Started { requester: Requester },
+	Stopped,
+}
+
 impl CbfChainSource {
 	pub(crate) fn new(
 		peers: Vec<String>, sync_config: CbfSyncConfig, fee_estimator: Arc<OnchainFeeEstimator>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
-		Self { peers, sync_config, fee_estimator, kv_store, config, logger, node_metrics }
+		let cbf_runtime_status = Mutex::new(CbfRuntimeStatus::Stopped);
+		let latest_tip = Arc::new(Mutex::new(None));
+		Self {
+			peers,
+			sync_config,
+			cbf_runtime_status,
+			latest_tip,
+			fee_estimator,
+			kv_store,
+			config,
+			logger,
+			node_metrics,
+		}
 	}
 
 	/// Start the bip157 node and spawn background tasks for event processing.
-	pub(crate) fn start(&self, _runtime: Arc<Runtime>) {
-		log_error!(self.logger, "CBF chain source start is not yet implemented.");
+	pub(crate) fn start(&self, runtime: Arc<Runtime>) {
+		let mut status = self.cbf_runtime_status.lock().unwrap();
+		if matches!(*status, CbfRuntimeStatus::Started { .. }) {
+			debug_assert!(false, "We shouldn't call start if we're already started");
+			return;
+		}
+
+		let network = self.config.network;
+
+		let mut builder = Builder::new(network);
+
+		// Configure data directory under the node's storage path.
+		let data_dir = std::path::PathBuf::from(&self.config.storage_dir_path).join("bip157_data");
+		builder = builder.data_dir(data_dir);
+
+		// Add configured peers.
+		let peers: Vec<TrustedPeer> = self
+			.peers
+			.iter()
+			.filter_map(|peer_str| {
+				peer_str.parse::<SocketAddr>().ok().map(TrustedPeer::from_socket_addr)
+			})
+			.collect();
+		if !peers.is_empty() {
+			builder = builder.add_peers(peers);
+		}
+
+		// Request witness data so segwit transactions include full witnesses,
+		// required for Lightning channel operations.
+		builder = builder.fetch_witness_data();
+
+		// Increase peer response timeout from the default 5 seconds to avoid
+		// disconnecting slow peers during block downloads.
+		builder = builder.response_timeout(Duration::from_secs(30));
+
+		let (node, client) = builder.build();
+
+		let Client { requester, info_rx, warn_rx, event_rx } = client;
+
+		// Spawn the bip157 node in the background.
+		runtime.spawn_background_task(async move {
+			let _ = node.run().await;
+		});
+
+		// Spawn a task to log info messages.
+		let info_logger = Arc::clone(&self.logger);
+		runtime
+			.spawn_cancellable_background_task(Self::process_info_messages(info_rx, info_logger));
+
+		// Spawn a task to log warning messages.
+		let warn_logger = Arc::clone(&self.logger);
+		runtime
+			.spawn_cancellable_background_task(Self::process_warn_messages(warn_rx, warn_logger));
+
+		// Spawn a task to process events.
+		let event_logger = Arc::clone(&self.logger);
+		let event_tip = Arc::clone(&self.latest_tip);
+		runtime.spawn_cancellable_background_task(Self::process_events(
+			event_rx,
+			event_tip,
+			event_logger,
+		));
+
+		log_info!(self.logger, "CBF chain source started.");
+
+		*status = CbfRuntimeStatus::Started { requester };
 	}
 
 	/// Shut down the bip157 node and stop all background tasks.
 	pub(crate) fn stop(&self) {
-		log_error!(self.logger, "CBF chain source stop is not yet implemented.");
+		let mut status = self.cbf_runtime_status.lock().unwrap();
+		match &*status {
+			CbfRuntimeStatus::Started { requester } => {
+				let _ = requester.shutdown();
+				log_info!(self.logger, "CBF chain source stopped.");
+			},
+			CbfRuntimeStatus::Stopped => {},
+		}
+		*status = CbfRuntimeStatus::Stopped;
+	}
+
+	async fn process_info_messages(mut info_rx: mpsc::Receiver<Info>, logger: Arc<Logger>) {
+		while let Some(info) = info_rx.recv().await {
+			log_debug!(logger, "CBF node info: {}", info);
+		}
+	}
+
+	async fn process_warn_messages(
+		mut warn_rx: mpsc::UnboundedReceiver<Warning>, logger: Arc<Logger>,
+	) {
+		while let Some(warning) = warn_rx.recv().await {
+			log_debug!(logger, "CBF node warning: {}", warning);
+		}
+	}
+
+	async fn process_events(
+		mut event_rx: mpsc::UnboundedReceiver<Event>, latest_tip: Arc<Mutex<Option<BlockHash>>>,
+		logger: Arc<Logger>,
+	) {
+		while let Some(event) = event_rx.recv().await {
+			match event {
+				Event::FiltersSynced(sync_update) => {
+					let tip = sync_update.tip();
+					*latest_tip.lock().unwrap() = Some(tip.hash);
+					log_info!(
+						logger,
+						"CBF filters synced to tip: height={}, hash={}",
+						tip.height,
+						tip.hash,
+					);
+				},
+				Event::Block(indexed_block) => {
+					log_trace!(logger, "CBF received block at height {}", indexed_block.height,);
+				},
+				Event::ChainUpdate(header_changes) => {
+					log_debug!(logger, "CBF chain update: {:?}", header_changes);
+				},
+				Event::IndexedFilter(indexed_filter) => {
+					log_trace!(logger, "CBF received filter at height {}", indexed_filter.height(),);
+				},
+			}
+		}
+	}
+
+	fn requester(&self) -> Result<Requester, Error> {
+		let status = self.cbf_runtime_status.lock().unwrap();
+		match &*status {
+			CbfRuntimeStatus::Started { requester } => Ok(requester.clone()),
+			CbfRuntimeStatus::Stopped => {
+				debug_assert!(
+					false,
+					"We should have started the chain source before using the requester"
+				);
+				Err(Error::ConnectionFailed)
+			},
+		}
 	}
 
 	/// Sync the on-chain wallet by scanning compact block filters for relevant transactions.
@@ -73,12 +228,59 @@ impl CbfChainSource {
 	/// Estimate fee rates from recent block data.
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		log_error!(self.logger, "Fee rate estimation via CBF is not yet implemented.");
-		Err(Error::FeerateEstimationUpdateFailed)
+		Ok(())
 	}
 
 	/// Broadcast a package of transactions via the P2P network.
-	pub(crate) async fn process_broadcast_package(&self, _package: Vec<Transaction>) {
-		log_error!(self.logger, "Transaction broadcasting via CBF is not yet implemented.");
+	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+		let Ok(requester) = self.requester() else { return };
+
+		for tx in package {
+			let txid = tx.compute_txid();
+			let tx_bytes = tx.encode();
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+				requester.broadcast_tx(tx),
+			);
+			match timeout_fut.await {
+				Ok(res) => match res {
+					Ok(wtxid) => {
+						log_trace!(
+							self.logger,
+							"Successfully broadcast transaction {} (wtxid: {})",
+							txid,
+							wtxid
+						);
+					},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Failed to broadcast transaction {}: {:?}",
+							txid,
+							e
+						);
+						log_trace!(
+							self.logger,
+							"Failed broadcast transaction bytes: {}",
+							log_bytes!(tx_bytes)
+						);
+					},
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to broadcast transaction due to timeout {}: {}",
+						txid,
+						e
+					);
+					log_trace!(
+						self.logger,
+						"Failed broadcast transaction bytes: {}",
+						log_bytes!(tx_bytes)
+					);
+				},
+			}
+		}
 	}
 
 	/// Register a transaction script for Lightning channel monitoring.

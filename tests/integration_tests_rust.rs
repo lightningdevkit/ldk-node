@@ -2805,3 +2805,20 @@ async fn splice_in_with_all_balance() {
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn start_stop_cbf() {
+	let (bitcoind, _electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	assert!(node.status().is_running);
+	node.stop().unwrap();
+	assert_eq!(node.stop(), Err(NodeError::NotRunning));
+
+	node.start().unwrap();
+	assert_eq!(node.start(), Err(NodeError::AlreadyRunning));
+	assert!(node.status().is_running);
+
+	node.stop().unwrap();
+}

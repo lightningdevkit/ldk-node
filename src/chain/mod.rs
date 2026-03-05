@@ -252,7 +252,7 @@ impl ChainSource {
 			ChainSourceKind::Esplora(_) => true,
 			ChainSourceKind::Electrum { .. } => true,
 			ChainSourceKind::Bitcoind { .. } => false,
-			ChainSourceKind::Cbf { .. } => false,
+			ChainSourceKind::Cbf { .. } => true,
 		}
 	}
 
