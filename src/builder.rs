@@ -78,8 +78,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
-	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
-	Persister, SyncAndAsyncKVStore,
+	InnerMessageRouter, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	PendingPaymentStore, Persister, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1548,6 +1548,7 @@ fn build_with_store_internal(
 		Arc::clone(&persister),
 		Arc::clone(&keys_manager),
 		peer_storage_key,
+		false,
 	));
 
 	// Initialize the network graph, scorer, and router
@@ -1635,7 +1636,13 @@ fn build_with_store_internal(
 		Arc::clone(&scorer),
 		scoring_fee_params,
 	);
-	let router = Arc::new(LSPS2BOLT12Router::new(inner_router, Arc::clone(&keys_manager)));
+	let inner_message_router =
+		InnerMessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
+	let router = Arc::new(LSPS2BOLT12Router::new(
+		inner_router,
+		inner_message_router,
+		Arc::clone(&keys_manager),
+	));
 
 	let mut user_config = default_user_config(&config);
 
@@ -1663,8 +1670,7 @@ fn build_with_store_internal(
 		}
 	}
 
-	let message_router =
-		Arc::new(MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager)));
+	let message_router = Arc::clone(&router);
 
 	// Initialize the ChannelManager
 	let channel_manager = {
