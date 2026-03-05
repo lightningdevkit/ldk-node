@@ -262,6 +262,7 @@ where
 				Arc::clone(&self.tx_broadcaster),
 				liquidity_service_config,
 				liquidity_client_config,
+				None,
 			)
 			.await
 			.map_err(|_| BuildError::ReadFailed)?,
