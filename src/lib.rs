@@ -39,7 +39,7 @@
 //! 	builder.set_network(Network::Testnet);
 //! 	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
 //! 	builder.set_gossip_source_rgs(
-//! 		"https://rapidsync.lightningdevkit.org/testnet/snapshot".to_string(),
+//! 		"https://rapidsync.lightningdevkit.org/testnet/v2/snapshot".to_string(),
 //! 	);
 //!
 //! 	let mnemonic = generate_entropy_mnemonic(None);
