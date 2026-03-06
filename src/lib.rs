@@ -771,6 +771,12 @@ impl Node {
 		}
 	}
 
+	/// Returns the number of pending deferred chain monitor operations that have not
+	/// been flushed yet by the background processor.
+	pub fn pending_monitor_operation_count(&self) -> usize {
+		self.chain_monitor.pending_operation_count()
+	}
+
 	/// Returns the config with which the [`Node`] was initialized.
 	pub fn config(&self) -> Config {
 		self.config.as_ref().clone()
