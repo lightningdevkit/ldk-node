@@ -5,18 +5,19 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use crate::logger::{log_debug, log_error, Logger};
-use crate::Error;
-
-use bitcoin::bip32::{ChildNumber, Xpriv};
-use bitcoin::hashes::{hex::FromHex, sha256, Hash, HashEngine, Hmac, HmacEngine};
-use bitcoin::secp256k1::{All, Message, Secp256k1, SecretKey};
-use lightning::util::logger::Logger as LdkLogger;
+use std::sync::Arc;
 
 use bitcoin::bech32;
+use bitcoin::bip32::{ChildNumber, Xpriv};
+use bitcoin::hashes::hex::FromHex;
+use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+use bitcoin::secp256k1::{All, Message, Secp256k1, SecretKey};
 use bitreq::Client;
+use lightning::util::logger::Logger as LdkLogger;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+
+use crate::logger::{log_debug, log_error, Logger};
+use crate::Error;
 
 /// The BIP-32 hardened child index used for LNURL-auth key derivation as defined by LUD-05.
 pub(crate) const LNURL_AUTH_HARDENED_CHILD_INDEX: u32 = 138;
@@ -188,8 +189,9 @@ fn linking_key_path(hashing_key: &[u8; 32], domain_name: &str) -> Vec<ChildNumbe
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use bitcoin::Network;
+
+	use super::*;
 
 	fn build_auth(seed: [u8; 32]) -> LnurlAuth {
 		let logger = Arc::new(Logger::new_log_facade());
