@@ -222,6 +222,11 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+	// Enable compact block filters so BIP-157 (kyoto) nodes can connect to this instance.
+	// The overhead for regtest-scale tests is negligible.
+	bitcoind_conf.args.push("-blockfilterindex=1");
+	bitcoind_conf.args.push("-peerblockfilters=1");
+	bitcoind_conf.p2p = corepc_node::P2P::Yes;
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
@@ -326,6 +331,9 @@ pub(crate) enum TestChainSource<'a> {
 	Electrum(&'a ElectrsD),
 	BitcoindRpcSync(&'a BitcoinD),
 	BitcoindRestSync(&'a BitcoinD),
+	/// BIP-157 compact block filters via kyoto. The inner `BitcoinD` must have been started with
+	/// `-blockfilterindex=1 -peerblockfilters=1`; use [`setup_bitcoind_with_filters`].
+	Bip157(&'a BitcoinD),
 }
 
 #[derive(Clone, Copy)]
@@ -463,6 +471,14 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 				rpc_password,
 			);
 		},
+		TestChainSource::Bip157(bitcoind) => {
+			let p2p_addr: std::net::SocketAddr = bitcoind
+				.params
+				.p2p_socket
+				.expect("BIP-157 tests require P2P to be enabled on bitcoind")
+				.into();
+			builder.set_chain_source_bip157(vec![p2p_addr]);
+		},
 	}
 
 	match &config.log_writer {
@@ -497,7 +513,11 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 	node.start().unwrap();
 	assert!(node.status().is_running);
-	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+	// BIP-157 nodes have no chain tip on first startup so the fee rate cache may not be
+	// populated yet (the first update_fee_rate_estimates call returns Ok(None) for kyoto).
+	if !matches!(chain_source, TestChainSource::Bip157(_)) {
+		assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+	}
 	node
 }
 

@@ -42,7 +42,7 @@ use lightning::util::sweep::OutputSweeper;
 use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 
-use crate::chain::ChainSource;
+use crate::chain::{ChainSource, FeeSourceConfig};
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
@@ -104,6 +104,9 @@ enum ChainDataSourceConfig {
 		rpc_user: String,
 		rpc_password: String,
 		rest_client_config: Option<BitcoindRestClientConfig>,
+	},
+	CompactBlockFilter {
+		peers: Vec<std::net::SocketAddr>,
 	},
 }
 
@@ -240,6 +243,7 @@ impl std::error::Error for BuildError {}
 pub struct NodeBuilder {
 	config: Config,
 	chain_data_source_config: Option<ChainDataSourceConfig>,
+	fee_source_config: Option<FeeSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
@@ -259,6 +263,7 @@ impl NodeBuilder {
 	/// Creates a new builder instance from an [`Config`].
 	pub fn from_config(config: Config) -> Self {
 		let chain_data_source_config = None;
+		let fee_source_config = None;
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
@@ -268,6 +273,7 @@ impl NodeBuilder {
 		Self {
 			config,
 			chain_data_source_config,
+			fee_source_config,
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
@@ -349,6 +355,40 @@ impl NodeBuilder {
 			rpc_password,
 			rest_client_config: None,
 		});
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data via BIP157 compact block filters.
+	///
+	/// The given `peers` will be used as seed peers for the compact block filter node. An empty
+	/// list is valid for standard networks (mainnet, testnet, signet) where DNS seeds are used
+	/// for peer discovery. For custom networks (e.g. custom signets), at least one peer must be
+	/// provided.
+	pub fn set_chain_source_bip157(&mut self, peers: Vec<std::net::SocketAddr>) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::CompactBlockFilter { peers });
+		self
+	}
+
+	/// Configures the BIP-157 chain source to use an Esplora server for fee rate estimation.
+	///
+	/// By default the BIP-157 backend derives fee rates from the latest block's coinbase output.
+	/// Setting this provides more accurate, per-target fee estimates from a mempool-aware server.
+	///
+	/// Only takes effect when the chain source is set to BIP-157 via [`Self::set_chain_source_bip157`].
+	pub fn set_fee_source_esplora(&mut self, server_url: String) -> &mut Self {
+		self.fee_source_config = Some(FeeSourceConfig::Esplora(server_url));
+		self
+	}
+
+	/// Configures the BIP-157 chain source to use an Electrum server for fee rate estimation.
+	///
+	/// By default the BIP-157 backend derives fee rates from the latest block's coinbase output.
+	/// Setting this provides more accurate, per-target fee estimates from a mempool-aware server.
+	///
+	/// Only takes effect when the chain source is set to BIP-157 via [`Self::set_chain_source_bip157`].
+	pub fn set_fee_source_electrum(&mut self, server_url: String) -> &mut Self {
+		self.fee_source_config = Some(FeeSourceConfig::Electrum(server_url));
 		self
 	}
 
@@ -727,6 +767,7 @@ impl NodeBuilder {
 		build_with_store_internal(
 			config,
 			self.chain_data_source_config.as_ref(),
+			self.fee_source_config.clone(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
 			self.pathfinding_scores_sync_config.as_ref(),
@@ -845,6 +886,21 @@ impl ArcedNodeBuilder {
 			rpc_user,
 			rpc_password,
 		);
+	}
+
+	/// Configures the [`Node`] instance to synchronize chain data via BIP-157 compact block filters.
+	pub fn set_chain_source_bip157(&self, peers: Vec<std::net::SocketAddr>) {
+		self.inner.write().unwrap().set_chain_source_bip157(peers);
+	}
+
+	/// Configures the BIP-157 chain source to use an Esplora server for fee rate estimation.
+	pub fn set_fee_source_esplora(&self, server_url: String) {
+		self.inner.write().unwrap().set_fee_source_esplora(server_url);
+	}
+
+	/// Configures the BIP-157 chain source to use an Electrum server for fee rate estimation.
+	pub fn set_fee_source_electrum(&self, server_url: String) {
+		self.inner.write().unwrap().set_fee_source_electrum(server_url);
 	}
 
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
@@ -1121,7 +1177,7 @@ impl ArcedNodeBuilder {
 /// Builds a [`Node`] instance according to the options previously configured.
 fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
-	gossip_source_config: Option<&GossipSourceConfig>,
+	fee_source_config: Option<FeeSourceConfig>, gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
@@ -1254,6 +1310,16 @@ fn build_with_store_internal(
 				.await
 			}),
 		},
+		Some(ChainDataSourceConfig::CompactBlockFilter { peers }) => ChainSource::new_kyoto(
+			peers.clone(),
+			fee_source_config,
+			Arc::clone(&fee_estimator),
+			Arc::clone(&tx_broadcaster),
+			Arc::clone(&kv_store),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			Arc::clone(&node_metrics),
+		),
 
 		None => {
 			// Default to Esplora client.
