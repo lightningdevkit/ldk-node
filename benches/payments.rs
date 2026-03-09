@@ -127,6 +127,7 @@ fn payment_benchmark(c: &mut Criterion) {
 		true,
 		false,
 		common::TestStoreType::Sqlite,
+		common::TestStoreType::Sqlite,
 	);
 
 	let runtime =
