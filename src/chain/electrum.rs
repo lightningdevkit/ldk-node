@@ -37,7 +37,7 @@ use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
-const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
+pub(crate) const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
 
 pub(super) struct ElectrumChainSource {
 	server_url: String,

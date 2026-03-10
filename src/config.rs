@@ -42,7 +42,7 @@ pub(crate) const DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 10;
 pub(crate) const DEFAULT_TX_BROADCAST_TIMEOUT_SECS: u64 = 10;
 
 // The default {Esplora,Electrum} client timeout we're using.
-const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
+pub(crate) const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
 
 /// The default log level.
 pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;

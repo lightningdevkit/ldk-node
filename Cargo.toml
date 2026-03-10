@@ -76,6 +76,7 @@ serde_json = { version = "1.0.128", default-features = false, features = ["std"]
 log = { version = "0.4.22", default-features = false, features = ["std"]}
 
 async-trait = { version = "0.1", default-features = false }
+bip157 = "0.3.4"
 vss-client = { package = "vss-client-ng", version = "0.5" }
 prost = { version = "0.11.6", default-features = false}
 #bitcoin-payment-instructions = { version = "0.6" }
@@ -91,7 +92,6 @@ proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
 ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
-
 [target.'cfg(not(no_download))'.dev-dependencies]
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
 

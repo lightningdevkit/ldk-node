@@ -8,6 +8,7 @@
 pub(crate) mod bitcoind;
 mod electrum;
 mod esplora;
+mod kyoto;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -19,6 +20,7 @@ use lightning::chain::{BestBlock, Filter};
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
 use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
+use crate::chain::kyoto::KyotoChainSource;
 use crate::config::{
 	BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
@@ -28,6 +30,15 @@ use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
+
+/// Optional fee estimation source for chain backends that lack mempool visibility (e.g. BIP157).
+#[derive(Debug, Clone)]
+pub(crate) enum FeeSourceConfig {
+	/// Use an Esplora HTTP server for fee rate estimation.
+	Esplora(String),
+	/// Use an Electrum server for fee rate estimation.
+	Electrum(String),
+}
 
 pub(crate) enum WalletSyncStatus {
 	Completed,
@@ -93,6 +104,7 @@ enum ChainSourceKind {
 	Esplora(EsploraChainSource),
 	Electrum(ElectrumChainSource),
 	Bitcoind(BitcoindChainSource),
+    Kyoto(KyotoChainSource),
 }
 
 impl ChainSource {
@@ -160,6 +172,26 @@ impl ChainSource {
 		(Self { kind, registered_txids, tx_broadcaster, logger }, best_block)
 	}
 
+	pub(crate) fn new_kyoto(
+		peers: Vec<std::net::SocketAddr>, fee_source_config: Option<FeeSourceConfig>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
+	) -> (Self, Option<BestBlock>) {
+		let kyoto_chain_source = KyotoChainSource::new(
+			peers,
+			fee_source_config,
+			fee_estimator,
+			kv_store,
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			node_metrics,
+		);
+		let kind = ChainSourceKind::Kyoto(kyoto_chain_source);
+		let registered_txids = Mutex::new(Vec::new());
+		(Self { kind, registered_txids, tx_broadcaster, logger }, None)
+	}
+
 	pub(crate) async fn new_bitcoind_rest(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
@@ -189,6 +221,9 @@ impl ChainSource {
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.start(runtime)?
 			},
+			ChainSourceKind::Kyoto(kyoto_chain_source) => {
+				kyoto_chain_source.start(runtime)?
+			},
 			_ => {
 				// Nothing to do for other chain sources.
 			},
@@ -199,6 +234,7 @@ impl ChainSource {
 	pub(crate) fn stop(&self) {
 		match &self.kind {
 			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.stop(),
+			ChainSourceKind::Kyoto(kyoto_chain_source) => kyoto_chain_source.stop(),
 			_ => {
 				// Nothing to do for other chain sources.
 			},
@@ -223,6 +259,7 @@ impl ChainSource {
 			ChainSourceKind::Esplora(_) => true,
 			ChainSourceKind::Electrum { .. } => true,
 			ChainSourceKind::Bitcoind { .. } => false,
+			ChainSourceKind::Kyoto { .. } => false,
 		}
 	}
 
@@ -280,6 +317,17 @@ impl ChainSource {
 			},
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source
+					.continuously_sync_wallets(
+						stop_sync_receiver,
+						onchain_wallet,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+					)
+					.await
+			},
+			ChainSourceKind::Kyoto(kyoto_chain_source) => {
+				kyoto_chain_source
 					.continuously_sync_wallets(
 						stop_sync_receiver,
 						onchain_wallet,
@@ -368,6 +416,9 @@ impl ChainSource {
 				// `ChainPoller`. So nothing to do here.
 				unreachable!("Onchain wallet will be synced via chain polling")
 			},
+			ChainSourceKind::Kyoto { .. } => {
+				unreachable!("Onchain wallet will be synced via the kyoto event loop")
+			},
 		}
 	}
 
@@ -392,6 +443,9 @@ impl ChainSource {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
 				// `ChainPoller`. So nothing to do here.
 				unreachable!("Lightning wallet will be synced via chain polling")
+			},
+			ChainSourceKind::Kyoto { .. } => {
+				unreachable!("Lightning wallet will be synced via the kyoto event loop")
 			},
 		}
 	}
@@ -421,6 +475,9 @@ impl ChainSource {
 					)
 					.await
 			},
+			ChainSourceKind::Kyoto { .. } => {
+				unreachable!("Listeners will be synced via the kyoto event loop")
+			},
 		}
 	}
 
@@ -434,6 +491,9 @@ impl ChainSource {
 			},
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source.update_fee_rate_estimates().await
+			},
+			ChainSourceKind::Kyoto(kyoto_chain_source) => {
+				kyoto_chain_source.update_fee_rate_estimates().await
 			},
 		}
 	}
@@ -463,6 +523,9 @@ impl ChainSource {
 						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 							bitcoind_chain_source.process_broadcast_package(next_package).await
 						},
+						ChainSourceKind::Kyoto(kyoto_chain_source) => {
+							kyoto_chain_source.process_broadcast_package(next_package).await
+						},
 					}
 				}
 			}
@@ -481,6 +544,7 @@ impl Filter for ChainSource {
 				electrum_chain_source.register_tx(txid, script_pubkey)
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
+		ChainSourceKind::Kyoto { .. } => (),
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
@@ -492,6 +556,7 @@ impl Filter for ChainSource {
 				electrum_chain_source.register_output(output)
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
+		ChainSourceKind::Kyoto { .. } => (),
 		}
 	}
 }
