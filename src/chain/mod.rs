@@ -224,7 +224,12 @@ impl ChainSource {
 				let utxo_source = bitcoind_chain_source.as_utxo_source();
 				utxo_source.get_block_hash_by_height(height).await.map_err(|_| ())
 			},
-			_ => Err(()),
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				esplora_chain_source.get_block_hash_by_height(height).await
+			},
+			ChainSourceKind::Electrum(electrum_chain_source) => {
+				electrum_chain_source.get_block_hash_by_height(height).await
+			},
 		}
 	}
 
