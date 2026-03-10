@@ -74,6 +74,12 @@ impl EsploraChainSource {
 		}
 	}
 
+	pub(super) async fn get_block_hash_by_height(
+		&self, height: u32,
+	) -> Result<bitcoin::BlockHash, ()> {
+		self.esplora_client.get_block_hash(height).await.map_err(|_| ())
+	}
+
 	pub(super) async fn sync_onchain_wallet(
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
