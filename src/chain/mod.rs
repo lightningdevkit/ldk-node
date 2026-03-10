@@ -17,6 +17,7 @@ use bitcoin::{Script, Txid};
 use lightning::chain::{BestBlock, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
+use lightning_block_sync::gossip::UtxoSource;
 use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
 use crate::config::{
@@ -211,6 +212,19 @@ impl ChainSource {
 				Some(bitcoind_chain_source.as_utxo_source())
 			},
 			_ => None,
+		}
+	}
+
+	/// Fetches the block hash at the given height from the chain source.
+	pub(crate) async fn get_block_hash_by_height(
+		&self, height: u32,
+	) -> Result<bitcoin::BlockHash, ()> {
+		match &self.kind {
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				let utxo_source = bitcoind_chain_source.as_utxo_source();
+				utxo_source.get_block_hash_by_height(height).await.map_err(|_| ())
+			},
+			_ => Err(()),
 		}
 	}
 
