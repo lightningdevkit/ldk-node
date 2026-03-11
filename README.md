@@ -5,6 +5,7 @@
 [![Maven Central Android](https://img.shields.io/maven-central/v/org.lightningdevkit/ldk-node-android)](https://central.sonatype.com/artifact/org.lightningdevkit/ldk-node-android)
 [![Maven Central JVM](https://img.shields.io/maven-central/v/org.lightningdevkit/ldk-node-jvm)](https://central.sonatype.com/artifact/org.lightningdevkit/ldk-node-jvm)
 [![Security Audit](https://github.com/lightningdevkit/ldk-node/actions/workflows/audit.yml/badge.svg)](https://github.com/lightningdevkit/ldk-node/actions/workflows/audit.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/lightningdevkit/ldk-node)
 
 A ready-to-go Lightning node library built using [LDK][ldk] and [BDK][bdk].
 
