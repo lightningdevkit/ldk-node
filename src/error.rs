@@ -137,6 +137,12 @@ pub enum Error {
 	LnurlAuthTimeout,
 	/// The provided lnurl is invalid.
 	InvalidLnurl,
+	/// Payjoin is not configured.
+	PayjoinNotConfigured,
+	/// Payjoin session creation failed.
+	PayjoinSessionCreationFailed,
+	/// Payjoin session failed.
+	PayjoinSessionFailed,
 }
 
 impl fmt::Display for Error {
@@ -222,6 +228,9 @@ impl fmt::Display for Error {
 			Self::LnurlAuthFailed => write!(f, "LNURL-auth authentication failed."),
 			Self::LnurlAuthTimeout => write!(f, "LNURL-auth authentication timed out."),
 			Self::InvalidLnurl => write!(f, "The provided lnurl is invalid."),
+			Self::PayjoinNotConfigured => write!(f, "Payjoin is not configured."),
+			Self::PayjoinSessionCreationFailed => write!(f, "Payjoin session creation failed."),
+			Self::PayjoinSessionFailed => write!(f, "Payjoin session failed."),
 		}
 	}
 }

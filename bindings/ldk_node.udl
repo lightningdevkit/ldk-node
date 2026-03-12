@@ -93,6 +93,7 @@ interface Node {
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
 	UnifiedPayment unified_payment();
+	PayjoinPayment payjoin_payment();
 	LSPS1Liquidity lsps1_liquidity();
 	[Throws=NodeError]
 	void lnurl_auth(string lnurl);
@@ -156,6 +157,8 @@ interface FeeRate {
 };
 
 typedef interface UnifiedPayment;
+
+typedef interface PayjoinPayment;
 
 typedef interface LSPS1Liquidity;
 
@@ -221,6 +224,9 @@ enum NodeError {
 	"LnurlAuthFailed",
 	"LnurlAuthTimeout",
 	"InvalidLnurl",
+	"PayjoinNotConfigured",
+	"PayjoinSessionCreationFailed",
+	"PayjoinSessionFailed"
 };
 
 typedef dictionary NodeStatus;
