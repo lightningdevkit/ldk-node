@@ -118,6 +118,10 @@ pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use bip39;
 pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
+#[cfg(feature = "uniffi")]
+pub use bitcoin::FeeRate;
+#[cfg(not(feature = "uniffi"))]
+use bitcoin::FeeRate;
 use bitcoin::{Address, Amount};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
@@ -1403,7 +1407,9 @@ impl Node {
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate =
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
 
 			let splice_amount_sats = match splice_amount_sats {
 				FundingAmount::Exact { amount_sats } => amount_sats,
@@ -1437,7 +1443,7 @@ impl Node {
 							shared_input,
 							funding_output.script_pubkey.clone(),
 							cur_anchor_reserve_sats,
-							fee_rate,
+							min_feerate,
 						)
 						.map_err(|e| {
 							log_error!(
@@ -1451,7 +1457,7 @@ impl Node {
 						self.logger,
 						"Splicing in with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
 						amount,
-						fee_rate.to_sat_per_kwu(),
+						min_feerate.to_sat_per_kwu(),
 						cur_anchor_reserve_sats,
 					);
 
@@ -1463,7 +1469,12 @@ impl Node {
 
 			let funding_template = self
 				.channel_manager
-				.splice_channel(&channel_details.channel_id, &counterparty_node_id, fee_rate)
+				.splice_channel(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					min_feerate,
+					max_feerate,
+				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
@@ -1568,11 +1579,18 @@ impl Node {
 
 			self.wallet.parse_and_validate_address(address)?;
 
-			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate =
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
 
 			let funding_template = self
 				.channel_manager
-				.splice_channel(&channel_details.channel_id, &counterparty_node_id, fee_rate)
+				.splice_channel(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					min_feerate,
+					max_feerate,
+				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
