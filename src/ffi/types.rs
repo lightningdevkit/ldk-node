@@ -382,7 +382,7 @@ impl std::fmt::Display for Offer {
 /// This struct can also be used for LN-Address recipients.
 ///
 /// [Homograph Attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
-#[derive(uniffi::Object)]
+#[derive(Eq, Hash, PartialEq, uniffi::Object)]
 pub struct HumanReadableName {
 	pub(crate) inner: LdkHumanReadableName,
 }
