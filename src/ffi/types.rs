@@ -145,9 +145,15 @@ use crate::builder::sanitize_alias;
 pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig};
 pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
 use crate::error::Error;
+use crate::event::{HTLCLocator, HTLCSet};
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 use crate::{hex_utils, SocketAddress, UserChannelId};
+
+uniffi::custom_type!(HTLCSet, Vec<HTLCLocator>, {
+	try_lift: |val| Ok(HTLCSet(val)),
+	lower: |obj| obj.0,
+});
 
 uniffi::custom_type!(PublicKey, String, {
 	remote,

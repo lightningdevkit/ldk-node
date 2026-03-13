@@ -21,8 +21,8 @@ use lightning::events::{
 	ClosureReason, Event as LdkEvent, FundingInfo, PaymentFailureReason, PaymentPurpose,
 	ReplayEvent,
 };
-use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::msgs::DecodeError;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
@@ -31,7 +31,10 @@ use lightning::util::config::{
 };
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{
+	CollectionLength, MaybeReadable, Readable, ReadableArgs, Writeable, Writer,
+};
+use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
@@ -60,6 +63,70 @@ use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
 };
+
+/// A set of multiple htlcs all associated with same forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HTLCSet(pub Vec<HTLCLocator>);
+
+impl Writeable for HTLCSet {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), lightning::io::Error> {
+		lightning::util::ser::CollectionLength(self.0.len() as u64).write(w)?;
+		for elem in self.0.iter() {
+			elem.write(w)?;
+		}
+		Ok(())
+	}
+}
+
+impl Readable for HTLCSet {
+	fn read<R: lightning::io::Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let len: CollectionLength = Readable::read(r)?;
+		let mut ret = Vec::with_capacity(std::cmp::min(
+			len.0 as usize,
+			lightning::util::ser::MAX_BUF_SIZE / core::mem::size_of::<HTLCLocator>(),
+		));
+		for _ in 0..len.0 {
+			if let Some(val) = MaybeReadable::read(r)? {
+				ret.push(val);
+			}
+		}
+		Ok(HTLCSet(ret))
+	}
+}
+
+/// Identifies the channel and counterparty that a HTLC was processed with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct HTLCLocator {
+	/// The channel that the HTLC was sent or received on.
+	pub channel_id: ChannelId,
+	/// The `user_channel_id` for the channel.
+	///
+	/// Will only be `None` for events serialized with LDK Node v0.3.0 or prior, or if the
+	/// payment was settled via an on-chain transaction.
+	pub user_channel_id: Option<UserChannelId>,
+	/// The node id of the counterparty for this HTLC.
+	///
+	/// This is only `None` for HTLCs received prior to LDK Node v0.5 or for events serialized by
+	/// versions prior to v0.5.
+	pub node_id: Option<PublicKey>,
+}
+
+impl_writeable_tlv_based!(HTLCLocator, {
+	(1, channel_id, required),
+	(3, user_channel_id, option),
+	(5, node_id, option),
+});
+
+impl From<lightning::events::HTLCLocator> for HTLCLocator {
+	fn from(value: lightning::events::HTLCLocator) -> Self {
+		HTLCLocator {
+			channel_id: value.channel_id,
+			user_channel_id: value.user_channel_id.map(|u| UserChannelId(u)),
+			node_id: value.node_id,
+		}
+	}
+}
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -128,29 +195,14 @@ pub enum Event {
 	},
 	/// A payment has been forwarded.
 	PaymentForwarded {
-		/// The channel id of the incoming channel between the previous node and us.
-		prev_channel_id: ChannelId,
-		/// The channel id of the outgoing channel between the next node and us.
-		next_channel_id: ChannelId,
-		/// The `user_channel_id` of the incoming channel between the previous node and us.
-		///
-		/// Will only be `None` for events serialized with LDK Node v0.3.0 or prior.
-		prev_user_channel_id: Option<UserChannelId>,
-		/// The `user_channel_id` of the outgoing channel between the next node and us.
-		///
-		/// This will be `None` if the payment was settled via an on-chain transaction. See the
-		/// caveat described for the `total_fee_earned_msat` field.
-		next_user_channel_id: Option<UserChannelId>,
-		/// The node id of the previous node.
-		///
-		/// This is only `None` for HTLCs received prior to LDK Node v0.5 or for events serialized by
-		/// versions prior to v0.5.
-		prev_node_id: Option<PublicKey>,
-		/// The node id of the next node.
-		///
-		/// This is only `None` for HTLCs received prior to LDK Node v0.5 or for events serialized by
-		/// versions prior to v0.5.
-		next_node_id: Option<PublicKey>,
+		/// The set of incoming HTLCs that were forwarded to our node. Contains a single HTLC for
+		/// source-routed payments, and may contain multiple HTLCs when we acted as a trampoline
+		/// router.
+		prev_htlcs: HTLCSet,
+		/// The set of outgoing HTLCs forwarded by our node. Contains a single HTLC for regular
+		/// source-routed payments, and may contain multiple HTLCs when we acted as a trampoline
+		/// router.
+		next_htlcs: HTLCSet,
 		/// The total fee, in milli-satoshis, which was earned as a result of the payment.
 		///
 		/// Note that if we force-closed the channel over which we forwarded an HTLC while the HTLC
@@ -323,16 +375,58 @@ impl_writeable_tlv_based_enum!(Event,
 		(7, custom_records, optional_vec),
 	},
 	(7, PaymentForwarded) => {
-		(0, prev_channel_id, required),
-		(1, prev_node_id, option),
-		(2, next_channel_id, required),
-		(3, next_node_id, option),
-		(4, prev_user_channel_id, option),
-		(6, next_user_channel_id, option),
+		// For backwards compatibility, write the first prev/next_htlc to our legacy fields. This
+		// allows use to downgrade with some information loss about the remaining htlcs.
+		(0, prev_channel_id_legacy, (legacy, ChannelId, |_| Ok(()),
+			|us: &Event| match us {
+				Event::PaymentForwarded { prev_htlcs, .. } => prev_htlcs.0.first().map(|h| h.channel_id),
+				_ => unreachable!(),
+			}
+		)),
+		(1, prev_node_id_legacy, (legacy, PublicKey, |_| Ok(()),
+			|us: &Event| match us {
+				Event::PaymentForwarded { prev_htlcs, .. } => prev_htlcs.0.first().and_then(|h| h.node_id),
+				_ => unreachable!(),
+			}
+		)),
+		(2, next_channel_id_legacy, (legacy, ChannelId, |_| Ok(()),
+			|us: &Event| match us {
+				Event::PaymentForwarded { next_htlcs, .. } => next_htlcs.0.first().map(|h| h.channel_id),
+				_ => unreachable!(),
+			}
+		)),
+		(3, next_node_id_legacy, (legacy, PublicKey, |_| Ok(()),
+			|us: &Event| match us {
+				Event::PaymentForwarded { next_htlcs, .. } => next_htlcs.0.first().and_then(|h| h.node_id),
+				_ => unreachable!(),
+			}
+		)),
+		(4, prev_user_channel_id_legacy, (legacy, UserChannelId, |_| Ok(()),
+			|us: &Event| match us {
+				Event::PaymentForwarded { prev_htlcs, .. } => prev_htlcs.0.first().and_then(|h| h.user_channel_id),
+				_ => unreachable!(),
+			}
+		)),
+		(6, next_user_channel_id_legacy, (legacy, UserChannelId, |_| Ok(()),
+			|us: &Event| match us {
+				Event::PaymentForwarded { next_htlcs, .. } => next_htlcs.0.first().and_then(|h| h.user_channel_id),
+				_ => unreachable!(),
+			}
+		)),
 		(8, total_fee_earned_msat, option),
 		(10, skimmed_fee_msat, option),
 		(12, claim_from_onchain_tx, required),
 		(14, outbound_amount_forwarded_msat, option),
+		(15, prev_htlcs, (default_value, HTLCSet(vec![HTLCLocator {
+			channel_id: prev_channel_id_legacy.ok_or(lightning::ln::msgs::DecodeError::InvalidValue)?,
+			user_channel_id: prev_user_channel_id_legacy,
+			node_id: prev_node_id_legacy,
+		}]))),
+		(17, next_htlcs, (default_value, HTLCSet(vec![HTLCLocator {
+			channel_id: next_channel_id_legacy.ok_or(lightning::ln::msgs::DecodeError::InvalidValue)?,
+			user_channel_id: next_user_channel_id_legacy,
+			node_id: next_node_id_legacy,
+		}]))),
 	},
 	(8, SplicePending) => {
 		(1, channel_id, required),
@@ -644,7 +738,8 @@ where
 							)
 							.unwrap_or_else(|e| {
 								log_error!(self.logger, "Failed to force close channel after funding generation failed: {:?}", e);
-								debug_assert!(false,
+								debug_assert!(
+									false,
 									"Failed to force close channel after funding generation failed"
 								);
 							});
@@ -1306,12 +1401,8 @@ where
 				}
 			},
 			LdkEvent::PaymentForwarded {
-				prev_channel_id,
-				next_channel_id,
-				prev_user_channel_id,
-				next_user_channel_id,
-				prev_node_id,
-				next_node_id,
+				prev_htlcs,
+				next_htlcs,
 				total_fee_earned_msat,
 				skimmed_fee_msat,
 				claim_from_onchain_tx,
@@ -1322,11 +1413,10 @@ where
 					let nodes = read_only_network_graph.nodes();
 					let channels = self.channel_manager.list_channels();
 
-					let node_str = |channel_id: &Option<ChannelId>| {
-						channel_id
-							.and_then(|channel_id| {
-								channels.iter().find(|c| c.channel_id == channel_id)
-							})
+					let node_str = |channel_id: &ChannelId| {
+						channels
+							.iter()
+							.find(|c| c.channel_id == *channel_id)
 							.and_then(|channel| {
 								nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id))
 							})
@@ -1338,21 +1428,22 @@ where
 									})
 							})
 					};
-					let channel_str = |channel_id: &Option<ChannelId>| {
-						channel_id
-							.map(|channel_id| format!(" with channel {}", channel_id))
-							.unwrap_or_default()
-					};
-					let from_prev_str = format!(
-						" from {}{}",
-						node_str(&prev_channel_id),
-						channel_str(&prev_channel_id)
-					);
-					let to_next_str = format!(
-						" to {}{}",
-						node_str(&next_channel_id),
-						channel_str(&next_channel_id)
-					);
+
+					let from_prev_str: String = prev_htlcs
+						.iter()
+						.map(|htlc| {
+							format!("with {} on {}", node_str(&htlc.channel_id), htlc.channel_id)
+						})
+						.collect::<Vec<_>>()
+						.join(", ");
+
+					let to_next_str: String = next_htlcs
+						.iter()
+						.map(|htlc| {
+							format!("with {} on {}", node_str(&htlc.channel_id), htlc.channel_id)
+						})
+						.collect::<Vec<_>>()
+						.join(", ");
 
 					let fee_earned = total_fee_earned_msat.unwrap_or(0);
 					if claim_from_onchain_tx {
@@ -1367,8 +1458,10 @@ where
 					} else {
 						log_info!(
 							self.logger,
-							"Forwarded payment{}{} of {}msat, earning {}msat in fees.",
+							"Forwarded payment with {} inbound HTLC(s) ({}) and {} outbound HTLC(s) ({}) of {}msat, earning {}msat in fees.",
+							prev_htlcs.len(),
 							from_prev_str,
+							next_htlcs.len(),
 							to_next_str,
 							outbound_amount_forwarded_msat.unwrap_or(0),
 							fee_earned,
@@ -1378,18 +1471,16 @@ where
 
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					let skimmed_fee_msat = skimmed_fee_msat.unwrap_or(0);
-					liquidity_source
-						.handle_payment_forwarded(next_channel_id, skimmed_fee_msat)
-						.await;
+					for next_htlc in next_htlcs.iter() {
+						liquidity_source
+							.handle_payment_forwarded(Some(next_htlc.channel_id), skimmed_fee_msat)
+							.await;
+					}
 				}
 
 				let event = Event::PaymentForwarded {
-					prev_channel_id: prev_channel_id.expect("prev_channel_id expected for events generated by LDK versions greater than 0.0.107."),
-					next_channel_id: next_channel_id.expect("next_channel_id expected for events generated by LDK versions greater than 0.0.107."),
-					prev_user_channel_id: prev_user_channel_id.map(UserChannelId),
-					next_user_channel_id: next_user_channel_id.map(UserChannelId),
-					prev_node_id,
-					next_node_id,
+					prev_htlcs: HTLCSet(prev_htlcs.into_iter().map(|h| h.into()).collect()),
+					next_htlcs: HTLCSet(next_htlcs.into_iter().map(|h| h.into()).collect()),
 					total_fee_earned_msat,
 					skimmed_fee_msat,
 					claim_from_onchain_tx,
