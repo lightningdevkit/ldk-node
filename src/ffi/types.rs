@@ -21,7 +21,7 @@ pub use bip39::Mnemonic;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, ScriptBuf, Txid};
+pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
 use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
@@ -145,9 +145,15 @@ use crate::builder::sanitize_alias;
 pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig};
 pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
 use crate::error::Error;
+use crate::event::{HTLCLocator, HTLCSet};
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 use crate::{hex_utils, SocketAddress, UserChannelId};
+
+uniffi::custom_type!(HTLCSet, Vec<HTLCLocator>, {
+	try_lift: |val| Ok(HTLCSet(val)),
+	lower: |obj| obj.0,
+});
 
 uniffi::custom_type!(PublicKey, String, {
 	remote,
