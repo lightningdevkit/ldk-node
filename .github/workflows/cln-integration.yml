@@ -13,18 +13,64 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y socat
+      - name: Create temporary directory for CLN data
+        run: echo "CLN_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
 
-      - name: Start bitcoind, electrs, and lightningd
-        run: docker compose -f docker-compose-cln.yml up -d
+      - name: Start bitcoind and electrs
+        run: docker compose -f docker-compose-cln.yml up -d bitcoin electrs
+        env:
+          CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
 
-      - name: Forward lightningd RPC socket
+      - name: Wait for bitcoind to be healthy
         run: |
-          docker exec ldk-node-cln-1 sh -c "socat -d -d TCP-LISTEN:9937,fork,reuseaddr UNIX-CONNECT:/root/.lightning/regtest/lightning-rpc&"
-          socat -d -d UNIX-LISTEN:/tmp/lightning-rpc,reuseaddr,fork TCP:127.0.0.1:9937&
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose-cln.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockchaininfo > /dev/null 2>&1; then
+              echo "bitcoind is ready"
+              exit 0
+            fi
+            echo "Waiting for bitcoind... ($i/30)"
+            sleep 2
+          done
+          echo "ERROR: bitcoind not ready"
+          exit 1
+
+      - name: Mine initial block for CLN
+        run: |
+          docker compose -f docker-compose-cln.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass createwallet miner
+          ADDR=$(docker compose -f docker-compose-cln.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=miner getnewaddress)
+          docker compose -f docker-compose-cln.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass generatetoaddress 1 "$ADDR"
+          docker compose -f docker-compose-cln.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass unloadwallet miner
+
+      - name: Start lightningd
+        run: docker compose -f docker-compose-cln.yml up -d cln
+        env:
+          CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
+
+      - name: Wait for CLN to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose-cln.yml exec cln test -S /root/.lightning/regtest/lightning-rpc 2>/dev/null; then
+              echo "CLN RPC socket found"
+              break
+            fi
+            echo "Waiting for CLN RPC socket... ($i/30)"
+            sleep 2
+          done
+          docker compose -f docker-compose-cln.yml exec cln test -S /root/.lightning/regtest/lightning-rpc || {
+            echo "ERROR: CLN RPC socket not found after 60 seconds"
+            docker compose -f docker-compose-cln.yml logs cln
+            exit 1
+          }
+
+      - name: Set permissions for CLN data directory
+        run: |
+          sudo chown -R $(id -u):$(id -g) $CLN_DATA_DIR
+          sudo chmod -R 755 $CLN_DATA_DIR
+        env:
+          CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
 
       - name: Run CLN integration tests
-        run: RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln
+        run: CLN_SOCKET_PATH=$CLN_DATA_DIR/regtest/lightning-rpc
+          RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln -- --show-output --test-threads=1
+        env:
+          CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}

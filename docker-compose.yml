@@ -1,8 +1,6 @@
-version: '3'
-
 services:
   bitcoin:
-    image: blockstream/bitcoind:27.2
+    image: blockstream/bitcoind:30.2
     platform: linux/amd64
     command:
       [
@@ -14,11 +12,15 @@ services:
         "-rpcuser=user",
         "-rpcpassword=pass",
         "-fallbackfee=0.00001",
-        "-rest"
+        "-rest",
+        "-zmqpubrawblock=tcp://0.0.0.0:28332",
+        "-zmqpubrawtx=tcp://0.0.0.0:28333"
       ]
     ports:
       - "18443:18443"  # Regtest REST and RPC port
       - "18444:18444"  # Regtest P2P port
+      - "28332:28332"  # ZMQ block port
+      - "28333:28333"  # ZMQ tx port
     networks:
       - bitcoin-electrs
     healthcheck:
@@ -41,10 +43,12 @@ services:
         "--cookie=user:pass",
         "--network=regtest",
         "--daemon-rpc-addr=bitcoin:18443",
-        "--http-addr=0.0.0.0:3002"
+        "--http-addr=0.0.0.0:3002",
+        "--electrum-rpc-addr=0.0.0.0:50001"
       ]
     ports:
       - "3002:3002"
+      - "50001:50001"
     networks:
       - bitcoin-electrs
 

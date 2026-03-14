@@ -10,17 +10,17 @@ HOST_PLATFORM="$(rustc --version --verbose | grep "host:" | awk '{ print $2 }')"
 ELECTRS_DL_ENDPOINT="https://github.com/RCasatta/electrsd/releases/download/electrs_releases"
 ELECTRS_VERSION="esplora_a33e97e1a1fc63fa9c20a116bb92579bbf43b254"
 BITCOIND_DL_ENDPOINT="https://bitcoincore.org/bin/"
-BITCOIND_VERSION="27.2"
+BITCOIND_VERSION="29.0"
 if [[ "$HOST_PLATFORM" == *linux* ]]; then
 	ELECTRS_DL_FILE_NAME=electrs_linux_"$ELECTRS_VERSION".zip
 	ELECTRS_DL_HASH="865e26a96e8df77df01d96f2f569dcf9622fc87a8d99a9b8fe30861a4db9ddf1"
 	BITCOIND_DL_FILE_NAME=bitcoin-"$BITCOIND_VERSION"-x86_64-linux-gnu.tar.gz
-	BITCOIND_DL_HASH="acc223af46c178064c132b235392476f66d486453ddbd6bca6f1f8411547da78"
+	BITCOIND_DL_HASH="a681e4f6ce524c338a105f214613605bac6c33d58c31dc5135bbc02bc458bb6c"
 elif [[ "$HOST_PLATFORM" == *darwin* ]]; then
 	ELECTRS_DL_FILE_NAME=electrs_macos_"$ELECTRS_VERSION".zip
 	ELECTRS_DL_HASH="2d5ff149e8a2482d3658e9b386830dfc40c8fbd7c175ca7cbac58240a9505bcd"
 	BITCOIND_DL_FILE_NAME=bitcoin-"$BITCOIND_VERSION"-x86_64-apple-darwin.tar.gz
-	BITCOIND_DL_HASH="6ebc56ca1397615d5a6df2b5cf6727b768e3dcac320c2d5c2f321dcaabc7efa2"
+	BITCOIND_DL_HASH="5bb824fc86a15318d6a83a1b821ff4cd4b3d3d0e1ec3d162b805ccf7cae6fca8"
 else
 	printf "\n\n"
 	echo "Unsupported platform: $HOST_PLATFORM Exiting.."

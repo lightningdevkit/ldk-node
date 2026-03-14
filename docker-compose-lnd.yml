@@ -1,6 +1,6 @@
 services:
   bitcoin:
-    image: blockstream/bitcoind:27.2
+    image: blockstream/bitcoind:29.1
     platform: linux/amd64
     command:
       [
@@ -12,14 +12,15 @@ services:
         "-rpcuser=user",
         "-rpcpassword=pass",
         "-fallbackfee=0.00001",
+        "-rest",
         "-zmqpubrawblock=tcp://0.0.0.0:28332",
         "-zmqpubrawtx=tcp://0.0.0.0:28333"
       ]
     ports:
-      - "18443:18443"  # Regtest RPC port
-      - "18444:18444"  # Regtest P2P port
-      - "28332:28332"  # ZMQ block port
-      - "28333:28333"  # ZMQ tx port
+      - "18443:18443"
+      - "18444:18444"
+      - "28332:28332"
+      - "28333:28333"
     networks:
       - bitcoin-electrs
     healthcheck:
@@ -55,9 +56,10 @@ services:
     image: lightninglabs/lnd:v0.18.5-beta
     container_name: ldk-node-lnd
     depends_on:
-      - bitcoin
+      bitcoin:
+        condition: service_healthy
     volumes:
-      - ${LND_DATA_DIR}:/root/.lnd
+      - ${LND_DATA_DIR:-/tmp/lnd-data}:/root/.lnd
     ports:
       - "8081:8081"
       - "9735:9735"

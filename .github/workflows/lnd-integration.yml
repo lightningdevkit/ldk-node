@@ -14,9 +14,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check and install CMake if needed
-        # lnd_grpc_rust (via prost-build v0.10.4) requires CMake >= 3.5 but is incompatible with CMake >= 4.0.
-        # This step checks if CMake is missing, below 3.5, or 4.0 or higher, and installs CMake 3.31.6 if needed,
-        # ensuring compatibility with prost-build in ubuntu-latest.
         run: |
           if ! command -v cmake &> /dev/null ||
              [ "$(cmake --version | head -n1 | cut -d' ' -f3)" \< "3.5" ] ||
@@ -33,7 +30,6 @@ jobs:
           fi
 
       - name: Create temporary directory for LND data
-        id: create-temp-dir
         run: echo "LND_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
 
       - name: Start bitcoind, electrs, and LND
@@ -41,16 +37,47 @@ jobs:
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
 
+      - name: Wait for LND to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec ldk-node-lnd test -f /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon 2>/dev/null; then
+              echo "LND macaroon found"
+              break
+            fi
+            echo "Waiting for LND macaroon... ($i/30)"
+            sleep 2
+          done
+          docker exec ldk-node-lnd test -f /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon || {
+            echo "ERROR: LND macaroon not found after 60 seconds"
+            docker compose -f docker-compose-lnd.yml logs lnd
+            exit 1
+          }
+
       - name: Set permissions for LND data directory
-        # In PR 4622 (https://github.com/lightningnetwork/lnd/pull/4622),
-        # LND sets file permissions to 0700, preventing test code from accessing them.
-        # This step ensures the test suite has the necessary permissions.
         run: sudo chmod -R 755 $LND_DATA_DIR
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
 
+      - name: Wait for LND gRPC to be ready
+        run: |
+          for i in $(seq 1 15); do
+            if docker exec ldk-node-lnd lncli \
+                --rpcserver=localhost:8081 \
+                --tlscertpath=/root/.lnd/tls.cert \
+                --macaroonpath=/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon \
+                --network=regtest getinfo 2>/dev/null; then
+              echo "LND gRPC is ready"
+              exit 0
+            fi
+            echo "Waiting for LND gRPC... ($i/15)"
+            sleep 2
+          done
+          echo "ERROR: LND gRPC not ready after 30 seconds"
+          docker compose -f docker-compose-lnd.yml logs lnd
+          exit 1
+
       - name: Run LND integration tests
         run: LND_CERT_PATH=$LND_DATA_DIR/tls.cert LND_MACAROON_PATH=$LND_DATA_DIR/data/chain/bitcoin/regtest/admin.macaroon
-          RUSTFLAGS="--cfg lnd_test" cargo test --test integration_tests_lnd -- --exact --show-output
+          RUSTFLAGS="--cfg lnd_test" cargo test --test integration_tests_lnd -- --show-output --test-threads=1
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
