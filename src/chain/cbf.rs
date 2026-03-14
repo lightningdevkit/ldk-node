@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -54,6 +55,10 @@ pub(super) struct CbfChainSource {
 	matched_block_hashes: Arc<Mutex<Vec<(u32, BlockHash)>>>,
 	/// One-shot channel sender to signal filter scan completion.
 	sync_completion_tx: Arc<Mutex<Option<oneshot::Sender<SyncUpdate>>>>,
+	/// Filters at or below this height are skipped during incremental scans.
+	filter_skip_height: Arc<AtomicU32>,
+	/// Last block height reached by on-chain wallet sync, used for incremental scans.
+	last_onchain_synced_height: Mutex<Option<u32>>,
 	/// Deduplicates concurrent on-chain wallet sync requests.
 	onchain_wallet_sync_status: Mutex<WalletSyncStatus>,
 	/// Shared fee rate estimator, updated by this chain source.
@@ -79,6 +84,7 @@ struct CbfEventState {
 	watched_scripts: Arc<RwLock<Vec<ScriptBuf>>>,
 	matched_block_hashes: Arc<Mutex<Vec<(u32, BlockHash)>>>,
 	sync_completion_tx: Arc<Mutex<Option<oneshot::Sender<SyncUpdate>>>>,
+	filter_skip_height: Arc<AtomicU32>,
 }
 
 impl CbfChainSource {
@@ -92,6 +98,8 @@ impl CbfChainSource {
 		let watched_scripts = Arc::new(RwLock::new(Vec::new()));
 		let matched_block_hashes = Arc::new(Mutex::new(Vec::new()));
 		let sync_completion_tx = Arc::new(Mutex::new(None));
+		let filter_skip_height = Arc::new(AtomicU32::new(0));
+		let last_onchain_synced_height = Mutex::new(None);
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		Self {
 			peers,
@@ -101,6 +109,8 @@ impl CbfChainSource {
 			watched_scripts,
 			matched_block_hashes,
 			sync_completion_tx,
+			filter_skip_height,
+			last_onchain_synced_height,
 			onchain_wallet_sync_status,
 			fee_estimator,
 			kv_store,
@@ -171,6 +181,7 @@ impl CbfChainSource {
 			watched_scripts: Arc::clone(&self.watched_scripts),
 			matched_block_hashes: Arc::clone(&self.matched_block_hashes),
 			sync_completion_tx: Arc::clone(&self.sync_completion_tx),
+			filter_skip_height: Arc::clone(&self.filter_skip_height),
 		};
 		let event_logger = Arc::clone(&self.logger);
 		runtime.spawn_cancellable_background_task(Self::process_events(
@@ -236,6 +247,10 @@ impl CbfChainSource {
 					log_debug!(logger, "CBF chain update: {:?}", header_changes);
 				},
 				Event::IndexedFilter(indexed_filter) => {
+					let skip_height = state.filter_skip_height.load(Ordering::Acquire);
+					if skip_height > 0 && indexed_filter.height() <= skip_height {
+						continue;
+					}
 					let scripts = state.watched_scripts.read().unwrap();
 					if !scripts.is_empty() && indexed_filter.contains_any(scripts.iter()) {
 						state
@@ -266,11 +281,15 @@ impl CbfChainSource {
 
 	/// Run a CBF filter scan: set watched scripts, trigger a rescan, wait for
 	/// completion, and return the sync update along with matched block hashes.
+	///
+	/// When `skip_before_height` is `Some(h)`, filters at or below height `h` are
+	/// skipped, making the scan incremental.
 	async fn run_filter_scan(
-		&self, scripts: Vec<ScriptBuf>,
+		&self, scripts: Vec<ScriptBuf>, skip_before_height: Option<u32>,
 	) -> Result<(SyncUpdate, Vec<(u32, BlockHash)>), Error> {
 		let requester = self.requester()?;
 
+		self.filter_skip_height.store(skip_before_height.unwrap_or(0), Ordering::Release);
 		self.matched_block_hashes.lock().unwrap().clear();
 		*self.watched_scripts.write().unwrap() = scripts;
 
@@ -287,6 +306,7 @@ impl CbfChainSource {
 			Error::WalletOperationFailed
 		})?;
 
+		self.filter_skip_height.store(0, Ordering::Release);
 		self.watched_scripts.write().unwrap().clear();
 		let matched = std::mem::take(&mut *self.matched_block_hashes.lock().unwrap());
 
@@ -310,69 +330,79 @@ impl CbfChainSource {
 			})?;
 		}
 
-		let requester = self.requester()?;
-		let now = Instant::now();
+		let res = async {
+			let requester = self.requester()?;
+			let now = Instant::now();
 
-		let scripts = onchain_wallet.get_spks_for_cbf_sync(BDK_CLIENT_STOP_GAP);
-		if scripts.is_empty() {
-			log_debug!(self.logger, "No wallet scripts to sync via CBF.");
-			return Ok(());
-		}
-
-		let timeout_fut = tokio::time::timeout(
-			Duration::from_secs(self.sync_config.timeouts_config.onchain_wallet_sync_timeout_secs),
-			self.sync_onchain_wallet_op(requester, scripts),
-		);
-
-		let (tx_update, sync_update) = match timeout_fut.await {
-			Ok(res) => res?,
-			Err(e) => {
-				log_error!(self.logger, "Sync of on-chain wallet timed out: {}", e);
-				return Err(Error::WalletOperationTimeout);
-			},
-		};
-
-		// Build chain checkpoint extending from the wallet's current tip.
-		let mut cp = onchain_wallet.latest_checkpoint();
-		for (height, header) in sync_update.recent_history() {
-			if *height > cp.height() {
-				let block_id = BlockId { height: *height, hash: header.block_hash() };
-				cp = cp.push(block_id).unwrap_or_else(|old| old);
+			let scripts = onchain_wallet.get_spks_for_cbf_sync(BDK_CLIENT_STOP_GAP);
+			if scripts.is_empty() {
+				log_debug!(self.logger, "No wallet scripts to sync via CBF.");
+				return Ok(());
 			}
+
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(
+					self.sync_config.timeouts_config.onchain_wallet_sync_timeout_secs,
+				),
+				self.sync_onchain_wallet_op(requester, scripts),
+			);
+
+			let (tx_update, sync_update) = match timeout_fut.await {
+				Ok(res) => res?,
+				Err(e) => {
+					log_error!(self.logger, "Sync of on-chain wallet timed out: {}", e);
+					return Err(Error::WalletOperationTimeout);
+				},
+			};
+
+			// Build chain checkpoint extending from the wallet's current tip.
+			let mut cp = onchain_wallet.latest_checkpoint();
+			for (height, header) in sync_update.recent_history() {
+				if *height > cp.height() {
+					let block_id = BlockId { height: *height, hash: header.block_hash() };
+					cp = cp.push(block_id).unwrap_or_else(|old| old);
+				}
+			}
+			let tip = sync_update.tip();
+			if tip.height > cp.height() {
+				let tip_block_id = BlockId { height: tip.height, hash: tip.hash };
+				cp = cp.push(tip_block_id).unwrap_or_else(|old| old);
+			}
+
+			let update =
+				Update { last_active_indices: BTreeMap::new(), tx_update, chain: Some(cp) };
+
+			onchain_wallet.apply_update(update)?;
+
+			log_debug!(
+				self.logger,
+				"Sync of on-chain wallet via CBF finished in {}ms.",
+				now.elapsed().as_millis()
+			);
+
+			update_node_metrics_timestamp(
+				&self.node_metrics,
+				&*self.kv_store,
+				&*self.logger,
+				|m, t| {
+					m.latest_onchain_wallet_sync_timestamp = t;
+				},
+			)?;
+
+			Ok(())
 		}
-		let tip = sync_update.tip();
-		if tip.height > cp.height() {
-			let tip_block_id = BlockId { height: tip.height, hash: tip.hash };
-			cp = cp.push(tip_block_id).unwrap_or_else(|old| old);
-		}
+		.await;
 
-		let update = Update { last_active_indices: BTreeMap::new(), tx_update, chain: Some(cp) };
+		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
 
-		// Apply update to wallet.
-		onchain_wallet.apply_update(update)?;
-
-		log_debug!(
-			self.logger,
-			"Sync of on-chain wallet via CBF finished in {}ms.",
-			now.elapsed().as_millis()
-		);
-
-		update_node_metrics_timestamp(
-			&self.node_metrics,
-			&*self.kv_store,
-			&*self.logger,
-			|m, t| {
-				m.latest_onchain_wallet_sync_timestamp = t;
-			},
-		)?;
-
-		Ok(())
+		res
 	}
 
 	async fn sync_onchain_wallet_op(
 		&self, requester: Requester, scripts: Vec<ScriptBuf>,
 	) -> Result<(TxUpdate<ConfirmationBlockTime>, SyncUpdate), Error> {
-		let (sync_update, matched) = self.run_filter_scan(scripts).await?;
+		let skip_height = *self.last_onchain_synced_height.lock().unwrap();
+		let (sync_update, matched) = self.run_filter_scan(scripts, skip_height).await?;
 
 		log_debug!(
 			self.logger,
@@ -400,6 +430,9 @@ impl CbfChainSource {
 				tx_update.anchors.insert((conf_time, txid));
 			}
 		}
+
+		let tip = sync_update.tip();
+		*self.last_onchain_synced_height.lock().unwrap() = Some(tip.height);
 
 		Ok((tx_update, sync_update))
 	}

@@ -2850,3 +2850,30 @@ async fn fee_rate_estimation_after_manual_sync_cbf() {
 
 	node.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn repeated_manual_sync_cbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	let addr = node.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 100_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	wait_for_cbf_sync(&node).await;
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	// Regression: the second manual sync must not block forever.
+	node.sync_wallets().unwrap();
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	node.stop().unwrap();
+}
