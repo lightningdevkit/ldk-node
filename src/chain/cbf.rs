@@ -598,10 +598,11 @@ impl CbfChainSource {
 			vec![&*channel_manager, &*chain_monitor, &*output_sweeper];
 
 		// Process any queued reorg events before the regular sync.
-		// A reorg invalidates our last synced height since blocks may have changed.
+		// A reorg invalidates our last synced heights since blocks may have changed.
 		let pending_reorgs = std::mem::take(&mut *self.reorg_queue.lock().unwrap());
 		if !pending_reorgs.is_empty() {
 			*self.last_lightning_synced_height.lock().unwrap() = None;
+			*self.last_onchain_synced_height.lock().unwrap() = None;
 		}
 		for reorg in &pending_reorgs {
 			let reorg_set: HashSet<BlockHash> = reorg.reorganized.iter().copied().collect();

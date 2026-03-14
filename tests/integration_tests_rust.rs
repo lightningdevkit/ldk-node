@@ -21,10 +21,11 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
 	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
-	open_channel, open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds,
-	premine_blocks, prepare_rbf, random_chain_source, random_config, random_listening_addresses,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_cbf_sync, wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	invalidate_blocks, open_channel, open_channel_push_amt, open_channel_with_all,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
+	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
+	setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_cbf_sync, wait_for_tx,
+	TestChainSource, TestStoreType, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
@@ -2874,6 +2875,104 @@ async fn repeated_manual_sync_cbf() {
 	// Regression: the second manual sync must not block forever.
 	node.sync_wallets().unwrap();
 	assert_eq!(node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_wallet_sync_cbf_after_reorg() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	let first_addr = node.onchain_payment().new_address().unwrap();
+	let first_amount_sat = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![first_addr],
+		Amount::from_sat(first_amount_sat),
+	)
+	.await;
+
+	wait_for_cbf_sync(&node).await;
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, first_amount_sat);
+
+	// Advance the tip so the reorg happens below our synced checkpoint.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 2).await;
+	wait_for_cbf_sync(&node).await;
+
+	// Replace the last two blocks with a different branch that has no wallet activity.
+	invalidate_blocks(&bitcoind.client, 2);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 2).await;
+	wait_for_cbf_sync(&node).await;
+
+	let second_addr = node.onchain_payment().new_address().unwrap();
+	let second_amount_sat = 50_000;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![second_addr],
+		Amount::from_sat(second_amount_sat),
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	wait_for_cbf_sync(&node).await;
+
+	assert_eq!(
+		node.list_balances().spendable_onchain_balance_sats,
+		first_amount_sat + second_amount_sat
+	);
+	assert_eq!(
+		node.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+		})
+		.len(),
+		2
+	);
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_wallet_sync_cbf_reorgs_out_confirmed_receive() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	let addr = node.onchain_payment().new_address().unwrap();
+	premine_blocks(&bitcoind.client, &electrsd.client).await;
+	let cur_height = bitcoind.client.get_blockchain_info().unwrap().blocks as usize;
+	let reward_block_hash =
+		bitcoind.client.generate_to_address(1, &addr).unwrap().0.pop().unwrap().parse().unwrap();
+	wait_for_block(&electrsd.client, cur_height + 1).await;
+	let reward_block = bitcoind.client.get_block(reward_block_hash).unwrap();
+	let txid = reward_block.txdata[0].compute_txid();
+	wait_for_cbf_sync(&node).await;
+	assert_eq!(node.list_balances().total_onchain_balance_sats, 5_000_000_000);
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, 0);
+
+	let payment_id = PaymentId(txid.to_byte_array());
+	let payment = node.payment(&payment_id).unwrap();
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	match payment.kind {
+		PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. } => {},
+		other => panic!("Unexpected payment state before reorg: {:?}", other),
+	}
+
+	invalidate_blocks(&bitcoind.client, 1);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 2).await;
+	wait_for_cbf_sync(&node).await;
+
+	assert_eq!(node.list_balances().total_onchain_balance_sats, 0);
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, 0);
+	let payment = node.payment(&payment_id).unwrap();
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	match payment.kind {
+		PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. } => {},
+		other => panic!("Unexpected payment state after reorg: {:?}", other),
+	}
 
 	node.stop().unwrap();
 }
