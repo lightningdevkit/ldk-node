@@ -8,7 +8,15 @@
 #![cfg(any(test, cln_test, lnd_test, vss_test))]
 #![allow(dead_code)]
 
+pub(crate) mod external_node;
 pub(crate) mod logging;
+
+#[cfg(cln_test)]
+pub(crate) mod cln;
+#[cfg(eclair_test)]
+pub(crate) mod eclair;
+#[cfg(lnd_test)]
+pub(crate) mod lnd;
 
 use std::collections::{HashMap, HashSet};
 use std::env;
