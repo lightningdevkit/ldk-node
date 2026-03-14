@@ -31,8 +31,8 @@ use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
-	UserChannelId,
+	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
+	PendingSweepBalance, UserChannelId,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -918,6 +918,28 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
+	// After channel_ready, no shutdown should be in progress on either side.
+	for channel in node_a.list_channels() {
+		assert!(
+			matches!(
+				channel.channel_shutdown_state,
+				None | Some(ChannelShutdownState::NotShuttingDown)
+			),
+			"Expected no shutdown in progress on node_a, got {:?}",
+			channel.channel_shutdown_state,
+		);
+	}
+	for channel in node_b.list_channels() {
+		assert!(
+			matches!(
+				channel.channel_shutdown_state,
+				None | Some(ChannelShutdownState::NotShuttingDown)
+			),
+			"Expected no shutdown in progress on node_b, got {:?}",
+			channel.channel_shutdown_state,
+		);
+	}
+
 	println!("\nB receive");
 	let invoice_amount_1_msat = 2500_000;
 	let invoice_description: Bolt11InvoiceDescription =
@@ -1233,6 +1255,20 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
+	// After the splice-out, the channel must still report no shutdown in progress.
+	for channel in node_a.list_channels() {
+		assert!(matches!(
+			channel.channel_shutdown_state,
+			None | Some(ChannelShutdownState::NotShuttingDown)
+		));
+	}
+	for channel in node_b.list_channels() {
+		assert!(matches!(
+			channel.channel_shutdown_state,
+			None | Some(ChannelShutdownState::NotShuttingDown)
+		));
+	}
+
 	assert_eq!(
 		node_a
 			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
@@ -1254,6 +1290,20 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// After the splice-in, the channel must still report no shutdown in progress.
+	for channel in node_a.list_channels() {
+		assert!(matches!(
+			channel.channel_shutdown_state,
+			None | Some(ChannelShutdownState::NotShuttingDown)
+		));
+	}
+	for channel in node_b.list_channels() {
+		assert!(matches!(
+			channel.channel_shutdown_state,
+			None | Some(ChannelShutdownState::NotShuttingDown)
+		));
+	}
 
 	assert_eq!(
 		node_a

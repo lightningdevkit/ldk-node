@@ -33,7 +33,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{Builder, ChannelShutdownState, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -2108,24 +2108,26 @@ async fn lsps2_client_trusts_lsp() {
 
 	service_node.sync_wallets().unwrap();
 	client_node.sync_wallets().unwrap();
-	assert_eq!(
-		client_node
-			.list_channels()
-			.iter()
-			.find(|c| c.counterparty_node_id == service_node_id)
-			.unwrap()
-			.confirmations,
-		Some(0)
-	);
-	assert_eq!(
-		service_node
-			.list_channels()
-			.iter()
-			.find(|c| c.counterparty_node_id == client_node_id)
-			.unwrap()
-			.confirmations,
-		Some(0)
-	);
+	let client_channel = client_node
+		.list_channels()
+		.into_iter()
+		.find(|c| c.counterparty_node_id == service_node_id)
+		.unwrap();
+	assert_eq!(client_channel.confirmations, Some(0));
+	assert!(matches!(
+		client_channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
+	let service_channel = service_node
+		.list_channels()
+		.into_iter()
+		.find(|c| c.counterparty_node_id == client_node_id)
+		.unwrap();
+	assert_eq!(service_channel.confirmations, Some(0));
+	assert!(matches!(
+		service_channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
 
 	// Now claim the JIT payment, which should release the funding transaction
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
@@ -2152,24 +2154,26 @@ async fn lsps2_client_trusts_lsp() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	service_node.sync_wallets().unwrap();
 	client_node.sync_wallets().unwrap();
-	assert_eq!(
-		client_node
-			.list_channels()
-			.iter()
-			.find(|c| c.counterparty_node_id == service_node_id)
-			.unwrap()
-			.confirmations,
-		Some(6)
-	);
-	assert_eq!(
-		service_node
-			.list_channels()
-			.iter()
-			.find(|c| c.counterparty_node_id == client_node_id)
-			.unwrap()
-			.confirmations,
-		Some(6)
-	);
+	let client_channel = client_node
+		.list_channels()
+		.into_iter()
+		.find(|c| c.counterparty_node_id == service_node_id)
+		.unwrap();
+	assert_eq!(client_channel.confirmations, Some(6));
+	assert!(matches!(
+		client_channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
+	let service_channel = service_node
+		.list_channels()
+		.into_iter()
+		.find(|c| c.counterparty_node_id == client_node_id)
+		.unwrap();
+	assert_eq!(service_channel.confirmations, Some(6));
+	assert!(matches!(
+		service_channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -2280,24 +2284,26 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	service_node.sync_wallets().unwrap();
 	client_node.sync_wallets().unwrap();
-	assert_eq!(
-		client_node
-			.list_channels()
-			.iter()
-			.find(|c| c.counterparty_node_id == service_node_id)
-			.unwrap()
-			.confirmations,
-		Some(6)
-	);
-	assert_eq!(
-		service_node
-			.list_channels()
-			.iter()
-			.find(|c| c.counterparty_node_id == client_node_id)
-			.unwrap()
-			.confirmations,
-		Some(6)
-	);
+	let client_channel = client_node
+		.list_channels()
+		.into_iter()
+		.find(|c| c.counterparty_node_id == service_node_id)
+		.unwrap();
+	assert_eq!(client_channel.confirmations, Some(6));
+	assert!(matches!(
+		client_channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
+	let service_channel = service_node
+		.list_channels()
+		.into_iter()
+		.find(|c| c.counterparty_node_id == client_node_id)
+		.unwrap();
+	assert_eq!(service_channel.confirmations, Some(6));
+	assert!(matches!(
+		service_channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -2672,6 +2678,10 @@ async fn open_channel_with_all_with_anchors() {
 	assert!(channel.channel_value_sats > premine_amount_sat - anchor_reserve_sat - 500);
 	assert_eq!(channel.counterparty_node_id, node_b.node_id());
 	assert_eq!(channel.funding_txo.unwrap(), funding_txo);
+	assert!(matches!(
+		channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
@@ -2723,6 +2733,10 @@ async fn open_channel_with_all_without_anchors() {
 	assert!(channel.channel_value_sats > premine_amount_sat - 500);
 	assert_eq!(channel.counterparty_node_id, node_b.node_id());
 	assert_eq!(channel.funding_txo.unwrap(), funding_txo);
+	assert!(matches!(
+		channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
@@ -2766,6 +2780,10 @@ async fn splice_in_with_all_balance() {
 	assert_eq!(channels.len(), 1);
 	assert_eq!(channels[0].channel_value_sats, channel_amount_sat);
 	assert_eq!(channels[0].funding_txo.unwrap(), funding_txo);
+	assert!(matches!(
+		channels[0].channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
 
 	let balance_before_splice = node_a.list_balances().spendable_onchain_balance_sats;
 	assert!(balance_before_splice > 0);
@@ -2787,6 +2805,10 @@ async fn splice_in_with_all_balance() {
 	let channels = node_a.list_channels();
 	assert_eq!(channels.len(), 1);
 	let channel = &channels[0];
+	assert!(matches!(
+		channel.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	));
 	assert!(
 		channel.channel_value_sats > premine_amount_sat - anchor_reserve_sat - 1000,
 		"Channel value {} should be close to premined amount {} minus anchor reserve {} and fees",

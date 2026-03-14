@@ -145,7 +145,7 @@ pub use lightning;
 use lightning::chain::BestBlock;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
-use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
+use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
@@ -173,7 +173,10 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{
+	ChannelDetails, ChannelShutdownState, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore,
+	UserChannelId,
+};
 pub use vss_client;
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
