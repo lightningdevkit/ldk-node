@@ -316,6 +316,8 @@ dictionary OutPoint {
 
 typedef dictionary ChannelDetails;
 
+typedef enum ChannelShutdownState;
+
 typedef dictionary PeerDetails;
 
 [Remote]

@@ -145,7 +145,9 @@ pub use lightning;
 use lightning::chain::BestBlock;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
-use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
+use lightning::ln::channel_state::{
+	ChannelDetails as LdkChannelDetails, ChannelShutdownState as LdkChannelShutdownState,
+};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
@@ -173,7 +175,10 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{
+	ChannelDetails, ChannelShutdownState, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore,
+	UserChannelId,
+};
 pub use vss_client;
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
@@ -2021,7 +2026,7 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.filter(|c| {
 				!anchor_channels_config.trusted_peers_no_reserve.contains(&c.counterparty.node_id)
 					&& c.channel_shutdown_state
-						.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
+						.map_or(true, |s| s != LdkChannelShutdownState::ShutdownComplete)
 					&& c.channel_type
 						.as_ref()
 						.map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
