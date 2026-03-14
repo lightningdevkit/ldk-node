@@ -483,6 +483,7 @@ impl Default for ElectrumSyncConfig {
 /// Background syncing is enabled by default, using the default values specified in
 /// [`BackgroundSyncConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CbfSyncConfig {
 	/// Background sync configuration.
 	///
