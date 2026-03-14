@@ -24,7 +24,7 @@ use common::{
 	open_channel, open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds,
 	premine_blocks, prepare_rbf, random_chain_source, random_config, random_listening_addresses,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	wait_for_cbf_sync, wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
 };
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
@@ -2819,6 +2819,34 @@ async fn start_stop_cbf() {
 	node.start().unwrap();
 	assert_eq!(node.start(), Err(NodeError::AlreadyRunning));
 	assert!(node.status().is_running);
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn fee_rate_estimation_after_manual_sync_cbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	let addr = node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(100_000),
+	)
+	.await;
+
+	wait_for_cbf_sync(&node).await;
+	let first_fee_update = node.status().latest_fee_rate_cache_update_timestamp;
+	assert!(first_fee_update.is_some());
+
+	// Subsequent manual syncs should keep the fee cache populated.
+	node.sync_wallets().unwrap();
+	let second_fee_update = node.status().latest_fee_rate_cache_update_timestamp;
+	assert!(second_fee_update.is_some());
+	assert!(second_fee_update >= first_fee_update);
 
 	node.stop().unwrap();
 }

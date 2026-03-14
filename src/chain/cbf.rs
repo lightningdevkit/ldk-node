@@ -15,7 +15,8 @@ use bdk_wallet::Update;
 use bip157::{
 	BlockHash, Builder, Client, Event, Info, Requester, SyncUpdate, TrustedPeer, Warning,
 };
-use bitcoin::{Script, ScriptBuf, Transaction, Txid};
+use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
+use bitcoin::{Amount, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use lightning::chain::WatchedOutput;
 use lightning::util::ser::Writeable;
 use tokio::sync::{mpsc, oneshot};
@@ -23,13 +24,20 @@ use tokio::sync::{mpsc, oneshot};
 use super::WalletSyncStatus;
 use crate::config::{CbfSyncConfig, Config, BDK_CLIENT_STOP_GAP};
 use crate::fee_estimator::{
-	apply_post_estimation_adjustments, get_all_conf_targets, OnchainFeeEstimator,
+	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
+	OnchainFeeEstimator,
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
+
+/// Minimum fee rate: 1 sat/vB = 250 sat/kWU. Used as a floor for computed fee rates.
+const MIN_FEERATE_SAT_PER_KWU: u64 = 250;
+
+/// Number of recent blocks to look back for per-target fee rate estimation.
+const FEE_RATE_LOOKBACK_BLOCKS: usize = 6;
 
 pub(super) struct CbfChainSource {
 	/// Peer addresses for sourcing compact block filters via P2P.
@@ -406,8 +414,6 @@ impl CbfChainSource {
 	}
 
 	/// Estimate fee rates from recent block data.
-	// NOTE: This is a single-block fee estimation. A multi-block lookback with
-	// per-target percentile selection is added later.
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		let requester = self.requester()?;
 
@@ -421,26 +427,118 @@ impl CbfChainSource {
 
 		let now = Instant::now();
 
-		let base_fee_rate = tokio::time::timeout(
-			Duration::from_secs(
-				self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
-			),
-			requester.average_fee_rate(tip_hash),
-		)
-		.await
-		.map_err(|e| {
-			log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
-			Error::FeerateEstimationUpdateTimeout
-		})?
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve fee rate estimate: {:?}", e);
-			Error::FeerateEstimationUpdateFailed
-		})?;
+		// Fetch fee rates from the last N blocks for per-target estimation.
+		// We compute fee rates ourselves rather than using Requester::average_fee_rate,
+		// so we can sample multiple blocks and select percentiles per confirmation target.
+		let mut block_fee_rates: Vec<u64> = Vec::with_capacity(FEE_RATE_LOOKBACK_BLOCKS);
+		let mut current_hash = tip_hash;
+
+		let timeout = Duration::from_secs(
+			self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
+		);
+		let fetch_start = Instant::now();
+
+		for idx in 0..FEE_RATE_LOOKBACK_BLOCKS {
+			// Check if we've exceeded the overall timeout for fee estimation.
+			let remaining_timeout = timeout.saturating_sub(fetch_start.elapsed());
+			if remaining_timeout.is_zero() {
+				log_error!(self.logger, "Updating fee rate estimates timed out.");
+				return Err(Error::FeerateEstimationUpdateTimeout);
+			}
+
+			// Fetch the block via P2P. On the first iteration, a fetch failure
+			// likely means the cached tip is stale (initial sync or reorg), so
+			// we clear the tip and skip gracefully instead of returning an error.
+			let indexed_block =
+				match tokio::time::timeout(remaining_timeout, requester.get_block(current_hash))
+					.await
+				{
+					Ok(Ok(indexed_block)) => indexed_block,
+					Ok(Err(e)) if idx == 0 => {
+						log_debug!(
+							self.logger,
+							"Cached CBF tip {} was unavailable during fee estimation, \
+							 likely due to initial sync or a reorg: {:?}",
+							current_hash,
+							e
+						);
+						*self.latest_tip.lock().unwrap() = None;
+						return Ok(());
+					},
+					Ok(Err(e)) => {
+						log_error!(
+							self.logger,
+							"Failed to fetch block for fee estimation: {:?}",
+							e
+						);
+						return Err(Error::FeerateEstimationUpdateFailed);
+					},
+					Err(e) if idx == 0 => {
+						log_debug!(
+							self.logger,
+							"Timed out fetching cached CBF tip {} during fee estimation, \
+							 likely due to initial sync or a reorg: {}",
+							current_hash,
+							e
+						);
+						*self.latest_tip.lock().unwrap() = None;
+						return Ok(());
+					},
+					Err(e) => {
+						log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
+						return Err(Error::FeerateEstimationUpdateTimeout);
+					},
+				};
+
+			let height = indexed_block.height;
+			let block = &indexed_block.block;
+			let weight_kwu = block.weight().to_kwu_floor();
+
+			// Compute fee rate: (coinbase_output - subsidy) / weight.
+			// For blocks with zero weight (e.g. coinbase-only in regtest), use the floor rate.
+			let fee_rate_sat_per_kwu = if weight_kwu == 0 {
+				MIN_FEERATE_SAT_PER_KWU
+			} else {
+				let subsidy = block_subsidy(height);
+				let revenue = block
+					.txdata
+					.first()
+					.map(|tx| tx.output.iter().map(|o| o.value).sum())
+					.unwrap_or(Amount::ZERO);
+				let block_fees = revenue.checked_sub(subsidy).unwrap_or(Amount::ZERO);
+
+				if block_fees == Amount::ZERO && self.config.network == Network::Bitcoin {
+					log_error!(
+						self.logger,
+						"Failed to retrieve fee rate estimates: zero block fees are disallowed on Mainnet.",
+					);
+					return Err(Error::FeerateEstimationUpdateFailed);
+				}
+
+				(block_fees.to_sat() / weight_kwu).max(MIN_FEERATE_SAT_PER_KWU)
+			};
+
+			block_fee_rates.push(fee_rate_sat_per_kwu);
+			// Walk backwards through the chain via prev_blockhash.
+			if height == 0 {
+				break;
+			}
+			current_hash = block.header.prev_blockhash;
+		}
+
+		if block_fee_rates.is_empty() {
+			log_error!(self.logger, "No blocks available for fee rate estimation.");
+			return Err(Error::FeerateEstimationUpdateFailed);
+		}
+
+		block_fee_rates.sort();
 
 		let confirmation_targets = get_all_conf_targets();
 		let mut new_fee_rate_cache = HashMap::with_capacity(confirmation_targets.len());
 
 		for target in confirmation_targets {
+			let num_blocks = get_num_block_defaults_for_target(target);
+			let base_fee_rate = select_fee_rate_for_target(&block_fee_rates, num_blocks);
 			let adjusted_fee_rate = apply_post_estimation_adjustments(target, base_fee_rate);
 			new_fee_rate_cache.insert(target, adjusted_fee_rate);
 
@@ -456,8 +554,9 @@ impl CbfChainSource {
 
 		log_debug!(
 			self.logger,
-			"Fee rate cache update finished in {}ms.",
-			now.elapsed().as_millis()
+			"Fee rate cache update finished in {}ms ({} blocks sampled).",
+			now.elapsed().as_millis(),
+			block_fee_rates.len(),
 		);
 
 		update_node_metrics_timestamp(
@@ -545,4 +644,185 @@ fn update_node_metrics_timestamp(
 	setter(&mut locked, unix_time_secs_opt);
 	write_node_metrics(&*locked, kv_store, logger)?;
 	Ok(())
+}
+
+/// Compute the block subsidy (mining reward before fees) at the given block height.
+fn block_subsidy(height: u32) -> Amount {
+	let halvings = height / SUBSIDY_HALVING_INTERVAL;
+	if halvings >= 64 {
+		return Amount::ZERO;
+	}
+	let base = Amount::ONE_BTC.to_sat() * 50;
+	Amount::from_sat(base >> halvings)
+}
+
+/// Select a fee rate from sorted block fee rates based on confirmation urgency.
+///
+/// For urgent targets (1 block), uses the highest observed fee rate.
+/// For medium targets (2-6 blocks), uses the 75th percentile.
+/// For standard targets (7-12 blocks), uses the median.
+/// For low-urgency targets (13+ blocks), uses the 25th percentile.
+fn select_fee_rate_for_target(sorted_rates: &[u64], num_blocks: usize) -> FeeRate {
+	if sorted_rates.is_empty() {
+		return FeeRate::from_sat_per_kwu(MIN_FEERATE_SAT_PER_KWU);
+	}
+
+	let len = sorted_rates.len();
+	let idx = if num_blocks <= 1 {
+		len - 1
+	} else if num_blocks <= 6 {
+		(len * 3) / 4
+	} else if num_blocks <= 12 {
+		len / 2
+	} else {
+		len / 4
+	};
+
+	FeeRate::from_sat_per_kwu(sorted_rates[idx.min(len - 1)])
+}
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
+	use bitcoin::{Amount, FeeRate};
+
+	use super::{block_subsidy, select_fee_rate_for_target, MIN_FEERATE_SAT_PER_KWU};
+	use crate::fee_estimator::{
+		apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
+	};
+
+	#[test]
+	fn select_fee_rate_empty_returns_floor() {
+		let rate = select_fee_rate_for_target(&[], 1);
+		assert_eq!(rate, FeeRate::from_sat_per_kwu(MIN_FEERATE_SAT_PER_KWU));
+	}
+
+	#[test]
+	fn select_fee_rate_single_element_returns_it_for_all_buckets() {
+		let rates = [5000u64];
+		// Every urgency bucket should return the single available rate.
+		for num_blocks in [1, 3, 6, 12, 144, 1008] {
+			let rate = select_fee_rate_for_target(&rates, num_blocks);
+			assert_eq!(
+				rate,
+				FeeRate::from_sat_per_kwu(5000),
+				"num_blocks={} should return the only available rate",
+				num_blocks,
+			);
+		}
+	}
+
+	#[test]
+	fn select_fee_rate_picks_correct_percentile() {
+		// 6 sorted rates: indices 0..5
+		let rates = [100, 200, 300, 400, 500, 600];
+		// 1-block (most urgent): highest → index 5 → 600
+		assert_eq!(select_fee_rate_for_target(&rates, 1), FeeRate::from_sat_per_kwu(600));
+		// 6-block (medium): 75th percentile → (6*3)/4 = 4 → 500
+		assert_eq!(select_fee_rate_for_target(&rates, 6), FeeRate::from_sat_per_kwu(500));
+		// 12-block (standard): median → 6/2 = 3 → 400
+		assert_eq!(select_fee_rate_for_target(&rates, 12), FeeRate::from_sat_per_kwu(400));
+		// 144-block (low): 25th percentile → 6/4 = 1 → 200
+		assert_eq!(select_fee_rate_for_target(&rates, 144), FeeRate::from_sat_per_kwu(200));
+	}
+
+	#[test]
+	fn select_fee_rate_monotonic_urgency() {
+		// More urgent targets should never produce lower rates than less urgent ones.
+		let rates = [250, 500, 1000, 2000, 4000, 8000];
+		let urgent = select_fee_rate_for_target(&rates, 1);
+		let medium = select_fee_rate_for_target(&rates, 6);
+		let standard = select_fee_rate_for_target(&rates, 12);
+		let low = select_fee_rate_for_target(&rates, 144);
+
+		assert!(
+			urgent >= medium,
+			"urgent ({}) >= medium ({})",
+			urgent.to_sat_per_kwu(),
+			medium.to_sat_per_kwu()
+		);
+		assert!(
+			medium >= standard,
+			"medium ({}) >= standard ({})",
+			medium.to_sat_per_kwu(),
+			standard.to_sat_per_kwu()
+		);
+		assert!(
+			standard >= low,
+			"standard ({}) >= low ({})",
+			standard.to_sat_per_kwu(),
+			low.to_sat_per_kwu()
+		);
+	}
+
+	#[test]
+	fn uniform_rates_match_naive_single_rate() {
+		// When all blocks have the same fee rate (like the old single-block
+		// approach), every target should select that same base rate. This
+		// proves the optimized multi-block approach is backwards-compatible.
+
+		let uniform_rate = 3000u64;
+		let rates = [uniform_rate; 6];
+		for target in get_all_conf_targets() {
+			let num_blocks = get_num_block_defaults_for_target(target);
+			let optimized = select_fee_rate_for_target(&rates, num_blocks);
+			let naive = FeeRate::from_sat_per_kwu(uniform_rate);
+			assert_eq!(
+				optimized, naive,
+				"For target {:?} (num_blocks={}), optimized rate should match naive single-rate",
+				target, num_blocks,
+			);
+
+			// Also verify the post-estimation adjustments produce the same
+			// result for both approaches.
+			let adjusted_optimized = apply_post_estimation_adjustments(target, optimized);
+			let adjusted_naive = apply_post_estimation_adjustments(target, naive);
+			assert_eq!(adjusted_optimized, adjusted_naive);
+		}
+	}
+
+	#[test]
+	fn block_subsidy_genesis() {
+		assert_eq!(block_subsidy(0), Amount::from_sat(50 * 100_000_000));
+	}
+
+	#[test]
+	fn block_subsidy_first_halving() {
+		assert_eq!(block_subsidy(SUBSIDY_HALVING_INTERVAL), Amount::from_sat(25 * 100_000_000));
+	}
+
+	#[test]
+	fn block_subsidy_second_halving() {
+		assert_eq!(block_subsidy(SUBSIDY_HALVING_INTERVAL * 2), Amount::from_sat(1_250_000_000));
+	}
+
+	#[test]
+	fn block_subsidy_exhausted_after_64_halvings() {
+		assert_eq!(block_subsidy(SUBSIDY_HALVING_INTERVAL * 64), Amount::ZERO);
+		assert_eq!(block_subsidy(SUBSIDY_HALVING_INTERVAL * 100), Amount::ZERO);
+	}
+
+	#[test]
+	fn select_fee_rate_two_elements() {
+		let rates = [1000, 5000];
+		// 1-block: index 1 (highest) → 5000
+		assert_eq!(select_fee_rate_for_target(&rates, 1), FeeRate::from_sat_per_kwu(5000));
+		// 6-block: (2*3)/4 = 1 → 5000
+		assert_eq!(select_fee_rate_for_target(&rates, 6), FeeRate::from_sat_per_kwu(5000));
+		// 12-block: 2/2 = 1 → 5000
+		assert_eq!(select_fee_rate_for_target(&rates, 12), FeeRate::from_sat_per_kwu(5000));
+		// 144-block: 2/4 = 0 → 1000
+		assert_eq!(select_fee_rate_for_target(&rates, 144), FeeRate::from_sat_per_kwu(1000));
+	}
+
+	#[test]
+	fn select_fee_rate_all_targets_use_valid_indices() {
+		for size in 1..=6 {
+			let rates: Vec<u64> = (1..=size).map(|i| i as u64 * 1000).collect();
+			for target in get_all_conf_targets() {
+				let num_blocks = get_num_block_defaults_for_target(target);
+				let _ = select_fee_rate_for_target(&rates, num_blocks);
+			}
+		}
+	}
 }
