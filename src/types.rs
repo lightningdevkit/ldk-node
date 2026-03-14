@@ -15,7 +15,9 @@ use bitcoin::{OutPoint, ScriptBuf};
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
-use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
+use lightning::ln::channel_state::{
+	ChannelDetails as LdkChannelDetails, ChannelShutdownState as LdkChannelShutdownState,
+};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::types::ChannelId;
@@ -347,6 +349,40 @@ impl fmt::Display for UserChannelId {
 	}
 }
 
+/// The shutdown state of a channel as returned in [`ChannelDetails::channel_shutdown_state`].
+///
+/// [`ChannelDetails::channel_shutdown_state`]: crate::ChannelDetails::channel_shutdown_state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ChannelShutdownState {
+	/// Channel has not sent or received a shutdown message.
+	NotShuttingDown,
+	/// Local node has sent a shutdown message for this channel.
+	ShutdownInitiated,
+	/// Shutdown message exchanges have concluded and the channels are in the midst of
+	/// resolving all existing open HTLCs before closing can continue.
+	ResolvingHTLCs,
+	/// All HTLCs have been resolved, nodes are currently negotiating channel close onchain fee rates.
+	NegotiatingClosingFee,
+	/// We've successfully negotiated a closing_signed dance. At this point `ChannelManager` is about
+	/// to drop the channel.
+	ShutdownComplete,
+}
+
+impl From<LdkChannelShutdownState> for ChannelShutdownState {
+	fn from(value: LdkChannelShutdownState) -> Self {
+		match value {
+			LdkChannelShutdownState::NotShuttingDown => ChannelShutdownState::NotShuttingDown,
+			LdkChannelShutdownState::ShutdownInitiated => ChannelShutdownState::ShutdownInitiated,
+			LdkChannelShutdownState::ResolvingHTLCs => ChannelShutdownState::ResolvingHTLCs,
+			LdkChannelShutdownState::NegotiatingClosingFee => {
+				ChannelShutdownState::NegotiatingClosingFee
+			},
+			LdkChannelShutdownState::ShutdownComplete => ChannelShutdownState::ShutdownComplete,
+		}
+	}
+}
+
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
 /// When a channel is spliced, most fields continue to refer to the original pre-splice channel
@@ -529,6 +565,10 @@ pub struct ChannelDetails {
 	pub inbound_htlc_maximum_msat: Option<u64>,
 	/// Set of configurable parameters that affect channel operation.
 	pub config: ChannelConfig,
+	/// The current shutdown state of the channel, if any.
+	///
+	/// Returns `None` for channels that have not yet started the shutdown process.
+	pub channel_shutdown_state: Option<ChannelShutdownState>,
 }
 
 impl From<LdkChannelDetails> for ChannelDetails {
@@ -584,6 +624,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
 			// unwrap safety: `config` is only `None` for LDK objects serialized prior to 0.0.109.
 			config: value.config.map(|c| c.into()).unwrap(),
+			channel_shutdown_state: value.channel_shutdown_state.map(|s| s.into()),
 		}
 	}
 }
