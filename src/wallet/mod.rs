@@ -260,6 +260,7 @@ impl Wallet {
 
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.or_else(|| self.find_payment_by_conflicting_tx(locked_wallet, &tx))
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					let payment = self.create_payment_from_tx(
@@ -348,6 +349,7 @@ impl Wallet {
 				WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.or_else(|| self.find_payment_by_conflicting_tx(locked_wallet, &tx))
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					let payment = self.create_payment_from_tx(
@@ -396,6 +398,7 @@ impl Wallet {
 				WalletEvent::TxDropped { txid, tx } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.or_else(|| self.find_payment_by_conflicting_tx(locked_wallet, &tx))
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 					let payment = self.create_payment_from_tx(
 						locked_wallet,
@@ -1209,6 +1212,58 @@ impl Wallet {
 			return Some(replaced_details.details.id);
 		}
 
+		// Also check the payment store for onchain payments with this txid.
+		// First try direct lookup by payment_id, then fall back to scanning by txid.
+		if let Some(payment) = self.payment_store.get(&direct_payment_id) {
+			if payment.status != PaymentStatus::Succeeded {
+				return Some(payment.id);
+			}
+		}
+
+		if let Some(payment) = self
+			.payment_store
+			.list_filter(|p| {
+				matches!(&p.kind, PaymentKind::Onchain { txid, .. } if *txid == target_txid)
+					&& p.status != PaymentStatus::Succeeded
+			})
+			.first()
+		{
+			return Some(payment.id);
+		}
+
+		None
+	}
+
+	fn find_payment_by_conflicting_tx(
+		&self, locked_wallet: &PersistedWallet<KVStoreWalletPersister>, tx: &Transaction,
+	) -> Option<PaymentId> {
+		let target_txid = tx.compute_txid();
+		let spent_outpoints: std::collections::HashSet<OutPoint> =
+			tx.input.iter().map(|input| input.previous_output).collect();
+
+		let pending_onchain_payments = self.pending_payment_store.list_filter(|p| {
+			matches!(p.details.kind, PaymentKind::Onchain { .. })
+				&& p.details.status != PaymentStatus::Failed
+		});
+
+		for pending_payment in pending_onchain_payments {
+			if let PaymentKind::Onchain { txid: existing_txid, .. } = &pending_payment.details.kind
+			{
+				if *existing_txid == target_txid {
+					continue;
+				}
+				if let Some(existing_tx_details) = locked_wallet.tx_details(*existing_txid) {
+					let shares_inputs = existing_tx_details
+						.tx
+						.input
+						.iter()
+						.any(|input| spent_outpoints.contains(&input.previous_output));
+					if shares_inputs {
+						return Some(pending_payment.details.id);
+					}
+				}
+			}
+		}
 		None
 	}
 
