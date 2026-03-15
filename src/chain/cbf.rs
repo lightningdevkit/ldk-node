@@ -5,9 +5,10 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bip157::{BlockHash, Builder, Client, Event, Info, Requester, TrustedPeer, Warning};
 use bitcoin::{Script, Transaction, Txid};
@@ -16,7 +17,10 @@ use lightning::util::ser::Writeable;
 use tokio::sync::mpsc;
 
 use crate::config::{CbfSyncConfig, Config};
-use crate::fee_estimator::OnchainFeeEstimator;
+use crate::fee_estimator::{
+	apply_post_estimation_adjustments, get_all_conf_targets, OnchainFeeEstimator,
+};
+use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
@@ -226,8 +230,69 @@ impl CbfChainSource {
 	}
 
 	/// Estimate fee rates from recent block data.
+	// NOTE: This is a single-block fee estimation. A multi-block lookback with
+	// per-target percentile selection is added later.
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
-		log_error!(self.logger, "Fee rate estimation via CBF is not yet implemented.");
+		let requester = self.requester()?;
+
+		let tip_hash = match *self.latest_tip.lock().unwrap() {
+			Some(hash) => hash,
+			None => {
+				log_debug!(self.logger, "No tip available yet for fee rate estimation, skipping.");
+				return Ok(());
+			},
+		};
+
+		let now = Instant::now();
+
+		let base_fee_rate = tokio::time::timeout(
+			Duration::from_secs(
+				self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
+			),
+			requester.average_fee_rate(tip_hash),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
+			Error::FeerateEstimationUpdateTimeout
+		})?
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve fee rate estimate: {:?}", e);
+			Error::FeerateEstimationUpdateFailed
+		})?;
+
+		let confirmation_targets = get_all_conf_targets();
+		let mut new_fee_rate_cache = HashMap::with_capacity(confirmation_targets.len());
+
+		for target in confirmation_targets {
+			let adjusted_fee_rate = apply_post_estimation_adjustments(target, base_fee_rate);
+			new_fee_rate_cache.insert(target, adjusted_fee_rate);
+
+			log_trace!(
+				self.logger,
+				"Fee rate estimation updated for {:?}: {} sats/kwu",
+				target,
+				adjusted_fee_rate.to_sat_per_kwu(),
+			);
+		}
+
+		self.fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
+
+		log_debug!(
+			self.logger,
+			"Fee rate cache update finished in {}ms.",
+			now.elapsed().as_millis()
+		);
+
+		update_node_metrics_timestamp(
+			&self.node_metrics,
+			&*self.kv_store,
+			&*self.logger,
+			|m, t| {
+				m.latest_fee_rate_cache_update_timestamp = t;
+			},
+		)?;
+
 		Ok(())
 	}
 
@@ -292,4 +357,16 @@ impl CbfChainSource {
 	pub(crate) fn register_output(&self, _output: WatchedOutput) {
 		log_error!(self.logger, "CBF register_output is not yet implemented.");
 	}
+}
+
+/// Record the current timestamp in a `NodeMetrics` field and persist the metrics.
+fn update_node_metrics_timestamp(
+	node_metrics: &RwLock<NodeMetrics>, kv_store: &DynStore, logger: &Logger,
+	setter: impl FnOnce(&mut NodeMetrics, Option<u64>),
+) -> Result<(), Error> {
+	let unix_time_secs_opt = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+	let mut locked = node_metrics.write().unwrap();
+	setter(&mut locked, unix_time_secs_opt);
+	write_node_metrics(&*locked, kv_store, logger)?;
+	Ok(())
 }
