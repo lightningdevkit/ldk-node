@@ -1213,11 +1213,19 @@ impl Wallet {
 		}
 
 		// Also check the payment store for onchain payments with this txid.
+		// First try direct lookup by payment_id, then fall back to scanning by txid.
+		if let Some(payment) = self.payment_store.get(&direct_payment_id) {
+			if payment.status != PaymentStatus::Succeeded {
+				return Some(payment.id);
+			}
+		}
+
 		if let Some(payment) = self
 			.payment_store
-			.list_filter(
-				|p| matches!(&p.kind, PaymentKind::Onchain { txid, .. } if *txid == target_txid),
-			)
+			.list_filter(|p| {
+				matches!(&p.kind, PaymentKind::Onchain { txid, .. } if *txid == target_txid)
+					&& p.status != PaymentStatus::Succeeded
+			})
 			.first()
 		{
 			return Some(payment.id);
@@ -1233,12 +1241,14 @@ impl Wallet {
 		let spent_outpoints: std::collections::HashSet<OutPoint> =
 			tx.input.iter().map(|input| input.previous_output).collect();
 
-		let onchain_payments = self.payment_store.list_filter(|p| {
-			matches!(p.kind, PaymentKind::Onchain { .. }) && p.status != PaymentStatus::Failed
+		let pending_onchain_payments = self.pending_payment_store.list_filter(|p| {
+			matches!(p.details.kind, PaymentKind::Onchain { .. })
+				&& p.details.status != PaymentStatus::Failed
 		});
 
-		for payment in onchain_payments {
-			if let PaymentKind::Onchain { txid: existing_txid, .. } = &payment.kind {
+		for pending_payment in pending_onchain_payments {
+			if let PaymentKind::Onchain { txid: existing_txid, .. } = &pending_payment.details.kind
+			{
 				if *existing_txid == target_txid {
 					continue;
 				}
@@ -1249,7 +1259,7 @@ impl Wallet {
 						.iter()
 						.any(|input| spent_outpoints.contains(&input.previous_output));
 					if shares_inputs {
-						return Some(payment.id);
+						return Some(pending_payment.details.id);
 					}
 				}
 			}
