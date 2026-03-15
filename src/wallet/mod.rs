@@ -122,6 +122,28 @@ impl Wallet {
 		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
 	}
 
+	pub(crate) fn get_spks_for_cbf_sync(&self, stop_gap: usize) -> Vec<ScriptBuf> {
+		let wallet = self.inner.lock().unwrap();
+		let mut scripts: Vec<ScriptBuf> =
+			wallet.spk_index().revealed_spks(..).map(|((_, _), spk)| spk).collect();
+
+		// For first sync when no scripts have been revealed yet, generate
+		// lookahead scripts up to the stop gap for both keychains.
+		if scripts.is_empty() {
+			for keychain in [KeychainKind::External, KeychainKind::Internal] {
+				for idx in 0..stop_gap as u32 {
+					scripts.push(wallet.peek_address(keychain, idx).address.script_pubkey());
+				}
+			}
+		}
+
+		scripts
+	}
+
+	pub(crate) fn latest_checkpoint(&self) -> bdk_chain::CheckPoint {
+		self.inner.lock().unwrap().latest_checkpoint()
+	}
+
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
 		self.inner.lock().unwrap().tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
 	}
@@ -296,22 +318,60 @@ impl Wallet {
 
 					for mut payment in pending_payments {
 						match payment.details.kind {
-							PaymentKind::Onchain {
-								status: ConfirmationStatus::Confirmed { height, .. },
-								..
-							} => {
+							PaymentKind::Onchain { txid, .. } => {
+								let current_confirmation_status = locked_wallet
+									.tx_details(txid)
+									.map(|tx_details| match tx_details.chain_position {
+										bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
+											ConfirmationStatus::Confirmed {
+												block_hash: anchor.block_id.hash,
+												height: anchor.block_id.height,
+												timestamp: anchor.confirmation_time,
+											}
+										},
+										bdk_chain::ChainPosition::Unconfirmed { .. } => {
+											ConfirmationStatus::Unconfirmed
+										},
+									});
 								let payment_id = payment.details.id;
-								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-									payment.details.status = PaymentStatus::Succeeded;
-									self.payment_store.insert_or_update(payment.details)?;
-									self.pending_payment_store.remove(&payment_id)?;
+								match current_confirmation_status {
+									Some(ConfirmationStatus::Confirmed {
+										block_hash,
+										height,
+										timestamp,
+									}) => {
+										payment.details.kind = PaymentKind::Onchain {
+											txid,
+											status: ConfirmationStatus::Confirmed {
+												block_hash,
+												height,
+												timestamp,
+											},
+										};
+										if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
+											payment.details.status = PaymentStatus::Succeeded;
+											self.payment_store.insert_or_update(payment.details)?;
+											self.pending_payment_store.remove(&payment_id)?;
+										} else {
+											self.payment_store
+												.insert_or_update(payment.details.clone())?;
+											self.pending_payment_store.insert_or_update(payment)?;
+										}
+									},
+									Some(ConfirmationStatus::Unconfirmed) | None => {
+										payment.details.kind = PaymentKind::Onchain {
+											txid,
+											status: ConfirmationStatus::Unconfirmed,
+										};
+										payment.details.status = PaymentStatus::Pending;
+										if payment.details.direction == PaymentDirection::Outbound {
+											unconfirmed_outbound_txids.push(txid);
+										}
+										self.payment_store
+											.insert_or_update(payment.details.clone())?;
+										self.pending_payment_store.insert_or_update(payment)?;
+									},
 								}
-							},
-							PaymentKind::Onchain {
-								txid,
-								status: ConfirmationStatus::Unconfirmed,
-							} if payment.details.direction == PaymentDirection::Outbound => {
-								unconfirmed_outbound_txids.push(txid);
 							},
 							_ => {},
 						}
