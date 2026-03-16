@@ -1558,12 +1558,7 @@ impl Node {
 
 			let funding_template = self
 				.channel_manager
-				.splice_channel(
-					&channel_details.channel_id,
-					&counterparty_node_id,
-					min_feerate,
-					max_feerate,
-				)
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
@@ -1571,12 +1566,14 @@ impl Node {
 
 			let contribution = self
 				.runtime
-				.block_on(
-					funding_template
-						.splice_in(Amount::from_sat(splice_amount_sats), Arc::clone(&self.wallet)),
-				)
-				.map_err(|()| {
-					log_error!(self.logger, "Failed to splice channel: coin selection failed");
+				.block_on(funding_template.splice_in(
+					Amount::from_sat(splice_amount_sats),
+					min_feerate,
+					max_feerate,
+					Arc::clone(&self.wallet),
+				))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
 
@@ -1674,12 +1671,7 @@ impl Node {
 
 			let funding_template = self
 				.channel_manager
-				.splice_channel(
-					&channel_details.channel_id,
-					&counterparty_node_id,
-					min_feerate,
-					max_feerate,
-				)
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
@@ -1691,9 +1683,14 @@ impl Node {
 			}];
 			let contribution = self
 				.runtime
-				.block_on(funding_template.splice_out(outputs, Arc::clone(&self.wallet)))
-				.map_err(|()| {
-					log_error!(self.logger, "Failed to splice channel: coin selection failed");
+				.block_on(funding_template.splice_out(
+					outputs,
+					min_feerate,
+					max_feerate,
+					Arc::clone(&self.wallet),
+				))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
 
