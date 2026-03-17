@@ -11,8 +11,8 @@ use bitcoin::{Amount, Network};
 use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_event,
 	expect_payment_received_event, expect_payment_successful_event, generate_blocks_and_wait,
-	premine_and_distribute_funds, random_storage_path, setup_bitcoind_and_electrsd,
-	setup_builder, setup_two_nodes, wait_for_tx, TestChainSource,
+	premine_and_distribute_funds, random_storage_path, setup_bitcoind_and_electrsd, setup_builder,
+	setup_two_nodes, wait_for_tx, TestChainSource,
 };
 use ldk_node::config::Config;
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};

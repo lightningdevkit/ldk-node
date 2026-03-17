@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use bitcoin::{Script, Txid};
+use bitcoin::{Script, ScriptBuf, Txid};
 use lightning::chain::{BestBlock, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
@@ -104,7 +104,7 @@ enum ChainSourceKind {
 	Esplora(EsploraChainSource),
 	Electrum(ElectrumChainSource),
 	Bitcoind(BitcoindChainSource),
-    Kyoto(KyotoChainSource),
+	Kyoto(KyotoChainSource),
 }
 
 impl ChainSource {
@@ -221,9 +221,7 @@ impl ChainSource {
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.start(runtime)?
 			},
-			ChainSourceKind::Kyoto(kyoto_chain_source) => {
-				kyoto_chain_source.start(runtime)?
-			},
+			ChainSourceKind::Kyoto(kyoto_chain_source) => kyoto_chain_source.start(runtime)?,
 			_ => {
 				// Nothing to do for other chain sources.
 			},
@@ -252,6 +250,16 @@ impl ChainSource {
 
 	pub(crate) fn registered_txids(&self) -> Vec<Txid> {
 		self.registered_txids.lock().unwrap().clone()
+	}
+
+	/// Register a script pubkey to watch in compact block filters.
+	///
+	/// This is a no-op for chain backends other than BIP157/kyoto, which rely on transaction-based
+	/// sync and don't need an explicit script watchlist.
+	pub(crate) fn register_script(&self, script: ScriptBuf) {
+		if let ChainSourceKind::Kyoto(kyoto_chain_source) = &self.kind {
+			kyoto_chain_source.register_output(script);
+		}
 	}
 
 	pub(crate) fn is_transaction_based(&self) -> bool {
@@ -399,8 +407,7 @@ impl ChainSource {
 		}
 	}
 
-	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum,
-	// etc.)
+	// Synchronize the onchain wallet via transaction-based protocols (i.e., Esplora, Electrum, etc.)
 	pub(crate) async fn sync_onchain_wallet(
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
@@ -450,7 +457,7 @@ impl ChainSource {
 		}
 	}
 
-	pub(crate) async fn poll_and_update_listeners(
+	pub(crate) async fn sync_listeners_to_tip(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
@@ -475,8 +482,8 @@ impl ChainSource {
 					)
 					.await
 			},
-			ChainSourceKind::Kyoto { .. } => {
-				unreachable!("Listeners will be synced via the kyoto event loop")
+			ChainSourceKind::Kyoto(kyoto_chain_source) => {
+				kyoto_chain_source.wait_until_synced().await
 			},
 		}
 	}
@@ -544,7 +551,9 @@ impl Filter for ChainSource {
 				electrum_chain_source.register_tx(txid, script_pubkey)
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
-		ChainSourceKind::Kyoto { .. } => (),
+			ChainSourceKind::Kyoto(kyoto_chain_source) => {
+				kyoto_chain_source.register_output(script_pubkey.to_owned())
+			},
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
@@ -556,7 +565,9 @@ impl Filter for ChainSource {
 				electrum_chain_source.register_output(output)
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
-		ChainSourceKind::Kyoto { .. } => (),
+			ChainSourceKind::Kyoto(kyoto_chain_source) => {
+				kyoto_chain_source.register_output(output.script_pubkey)
+			},
 		}
 	}
 }

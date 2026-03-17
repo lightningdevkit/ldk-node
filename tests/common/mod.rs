@@ -240,10 +240,33 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	(bitcoind, electrsd)
 }
 
+/// Skip the current test when the BIP-157 chain source is active.
+///
+/// Some tests rely on mempool visibility or gossip behaviour that is fundamentally
+/// incompatible with compact block filters (no mempool, no `GossipVerifier`).
+macro_rules! skip_if_bip157 {
+	($chain_source:expr) => {
+		if matches!($chain_source, TestChainSource::Bip157(_)) {
+			println!("Skipping test: not compatible with BIP-157 chain source");
+			return;
+		}
+	};
+}
+pub(crate) use skip_if_bip157;
+
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..3);
+	// Allow forcing a specific backend via LDK_TEST_CHAIN_SOURCE env var.
+	// Valid values: "esplora"=0, "electrum"=1, "bitcoind-rpc"=2, "bitcoind-rest"=3, "bip157"=4
+	let r = match std::env::var("LDK_TEST_CHAIN_SOURCE").ok().as_deref() {
+		Some("esplora") => 0,
+		Some("electrum") => 1,
+		Some("bitcoind-rpc") => 2,
+		Some("bitcoind-rest") => 3,
+		Some("bip157") => 4,
+		_ => rand::random_range(0..5),
+	};
 	match r {
 		0 => {
 			println!("Randomly setting up Esplora chain syncing...");
@@ -260,6 +283,10 @@ pub(crate) fn random_chain_source<'a>(
 		3 => {
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
+		},
+		4 => {
+			println!("Randomly setting up BIP-157 compact block filter syncing...");
+			TestChainSource::Bip157(bitcoind)
 		},
 		_ => unreachable!(),
 	}
@@ -523,7 +550,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
-) {
+) -> u32 {
 	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	print!("Generating {} blocks...", num);
@@ -532,9 +559,11 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
-	wait_for_block(electrs, cur_height as usize + num).await;
+	let target_height = cur_height as usize + num;
+	wait_for_block(electrs, target_height).await;
 	print!(" Done!");
 	println!("\n");
+	target_height as u32
 }
 
 pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
@@ -575,6 +604,26 @@ pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usiz
 	}
 }
 
+/// Wait until the node's LDK channel manager has processed blocks up to `min_height`.
+///
+/// For BIP-157 backends the wallet is synced by a background event loop, so
+/// `current_best_block` advances asynchronously as kyoto delivers blocks. This
+/// function polls until the node has caught up, which is necessary before
+/// checking balances after mining new blocks.
+pub(crate) async fn wait_for_node_block(node: &TestNode, min_height: u32) {
+	if node.status().current_best_block.height >= min_height {
+		return;
+	}
+	exponential_backoff_poll(|| {
+		if node.status().current_best_block.height >= min_height {
+			Some(())
+		} else {
+			None
+		}
+	})
+	.await;
+}
+
 pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	if electrs.transaction_get(&txid).is_ok() {
 		return;
@@ -583,24 +632,6 @@ pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	exponential_backoff_poll(|| {
 		electrs.ping().unwrap();
 		electrs.transaction_get(&txid).ok()
-	})
-	.await;
-}
-
-pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
-	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
-	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
-
-	let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
-	if is_spent {
-		return;
-	}
-
-	exponential_backoff_poll(|| {
-		electrs.ping().unwrap();
-
-		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
-		is_spent.then_some(())
 	})
 	.await;
 }
@@ -887,7 +918,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	wait_for_tx(electrsd, funding_txo_a.txid).await;
 
 	if !allow_0conf {
-		generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		let tip = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		wait_for_node_block(&node_a, tip).await;
+		wait_for_node_block(&node_b, tip).await;
 	}
 
 	node_a.sync_wallets().unwrap();
@@ -1236,17 +1269,23 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	// Mine a block to give time for the HTLC to resolve
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let tip = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	wait_for_node_block(&node_a, tip).await;
+	wait_for_node_block(&node_b, tip).await;
 
 	println!("\nB splices out to pay A");
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let splice_out_sat = funding_amount_sat / 2;
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
+	let splice_out_txo = expect_splice_pending_event!(node_a, node_b.node_id());
+	wait_for_tx(electrsd, splice_out_txo.txid).await;
 	expect_splice_pending_event!(node_b, node_a.node_id());
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	let tip = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	wait_for_node_block(&node_a, tip).await;
+	wait_for_node_block(&node_b, tip).await;
+
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1265,12 +1304,15 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_in_sat = splice_out_sat;
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
+	let splice_in_txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(electrsd, splice_in_txo.txid).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	let tip = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
+	wait_for_node_block(&node_a, tip).await;
+	wait_for_node_block(&node_b, tip).await;
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
@@ -1285,24 +1327,30 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nB close_channel (force: {})", force_close);
 	if force_close {
-		tokio::time::sleep(Duration::from_secs(1)).await;
 		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+		tokio::time::sleep(Duration::from_secs(3)).await;
 	} else {
 		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+		tokio::time::sleep(Duration::from_secs(3)).await;
 	}
 
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(electrsd, funding_txo_b).await;
+	wait_for_tx(electrsd, splice_in_txo.txid).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let tip = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
+	wait_for_node_block(&node_a, tip).await;
+	wait_for_node_block(&node_b, tip).await;
 	if force_close {
 		// Check node_b properly sees all balances and sweeps them.
 		assert_eq!(node_b.list_balances().lightning_balances.len(), 1);
+		println!("before debug");
+		println!("{:?}", node_b.list_balances().lightning_balances[0]);
+		println!("after debug");
 		match node_b.list_balances().lightning_balances[0] {
 			LightningBalance::ClaimableAwaitingConfirmations {
 				counterparty_node_id,
@@ -1312,9 +1360,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 				assert_eq!(counterparty_node_id, node_a.node_id());
 				let cur_height = node_b.status().current_best_block.height;
 				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
-				node_b.sync_wallets().unwrap();
+				let tip =
+					generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
 				node_a.sync_wallets().unwrap();
+				node_b.sync_wallets().unwrap();
+				wait_for_node_block(&node_a, tip).await;
+				wait_for_node_block(&node_b, tip).await;
 			},
 			_ => panic!("Unexpected balance state!"),
 		}
@@ -1322,12 +1373,16 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		assert!(node_b.list_balances().lightning_balances.is_empty());
 		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
 		match node_b.list_balances().pending_balances_from_channel_closures[0] {
-			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
+			PendingSweepBalance::BroadcastAwaitingConfirmation { latest_spending_txid, .. } => {
+				wait_for_tx(electrsd, latest_spending_txid).await;
+			},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+		let tip = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 		node_b.sync_wallets().unwrap();
 		node_a.sync_wallets().unwrap();
+		wait_for_node_block(&node_a, tip).await;
+		wait_for_node_block(&node_b, tip).await;
 
 		assert!(node_b.list_balances().lightning_balances.is_empty());
 		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
@@ -1335,9 +1390,11 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
+		let tip = generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
 		node_b.sync_wallets().unwrap();
 		node_a.sync_wallets().unwrap();
+		wait_for_node_block(&node_a, tip).await;
+		wait_for_node_block(&node_b, tip).await;
 
 		assert!(node_b.list_balances().lightning_balances.is_empty());
 		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
@@ -1353,9 +1410,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 				assert_eq!(counterparty_node_id, node_b.node_id());
 				let cur_height = node_a.status().current_best_block.height;
 				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
+				let tip =
+					generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
 				node_a.sync_wallets().unwrap();
 				node_b.sync_wallets().unwrap();
+				wait_for_node_block(&node_a, tip).await;
+				wait_for_node_block(&node_b, tip).await;
 			},
 			_ => panic!("Unexpected balance state!"),
 		}
@@ -1363,12 +1423,17 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		assert!(node_a.list_balances().lightning_balances.is_empty());
 		assert_eq!(node_a.list_balances().pending_balances_from_channel_closures.len(), 1);
 		match node_a.list_balances().pending_balances_from_channel_closures[0] {
-			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
+			PendingSweepBalance::BroadcastAwaitingConfirmation { latest_spending_txid, .. } => {
+				wait_for_tx(electrsd, latest_spending_txid).await;
+			},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+		let tip = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
+
+		wait_for_node_block(&node_a, tip).await;
+		wait_for_node_block(&node_b, tip).await;
 
 		assert!(node_a.list_balances().lightning_balances.is_empty());
 		assert_eq!(node_a.list_balances().pending_balances_from_channel_closures.len(), 1);
@@ -1376,9 +1441,11 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
 			_ => panic!("Unexpected balance state!"),
 		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
+		let tip = generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
+		wait_for_node_block(&node_a, tip).await;
+		wait_for_node_block(&node_b, tip).await;
 	}
 
 	let sum_of_all_payments_sat = (push_msat

@@ -272,6 +272,9 @@ impl Node {
 		let chain_source = Arc::clone(&self.chain_source);
 		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
 
+		// For BIP157 backends: seed kyoto's script watchlist with all previously-derived wallet addresses
+		self.wallet.seed_watched_scripts();
+
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
@@ -1642,7 +1645,7 @@ impl Node {
 			} else {
 				chain_source.update_fee_rate_estimates().await?;
 				chain_source
-					.poll_and_update_listeners(
+					.sync_listeners_to_tip(
 						sync_wallet,
 						sync_cman,
 						sync_cmon,

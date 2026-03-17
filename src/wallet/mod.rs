@@ -9,6 +9,7 @@ use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
@@ -120,6 +121,35 @@ impl Wallet {
 
 	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
 		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
+	}
+
+	/// Register all previously-revealed wallet scripts into the chain source's script watchlist.
+	///
+	/// For BIP157 backends the kyoto compact-filter scanner only checks scripts that have been
+	/// explicitly registered. When the node restarts, previously-derived addresses need to be
+	/// re-seeded so that blocks containing payments to those addresses are not silently skipped.
+	/// This is a no-op for non-BIP157 backends.
+	pub(crate) fn seed_watched_scripts(&self) {
+		let locked_wallet = self.inner.lock().unwrap();
+		for ((_, _), spk) in locked_wallet.spk_index().revealed_spks(..) {
+			self.chain_source.register_script(spk);
+		}
+	}
+
+	/// Advance the wallet's internal [`LocalChain`] to include the given block header.
+	///
+	/// Called by the BIP157 backend for every `ChainUpdate::Connected` event so the chain stays
+	/// in sync with kyoto's header stream. Without this, subsequent `block_connected` calls would
+	/// fail because BDK requires the parent block to already be in the chain before connecting the
+	/// next block.
+	pub(crate) fn apply_header(&self, header: &bitcoin::block::Header, height: u32) {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		let block_id = bdk_chain::BlockId { height, hash: header.block_hash() };
+		let latest_cp = locked_wallet.latest_checkpoint().insert(block_id);
+		let update = bdk_wallet::Update { chain: Some(latest_cp), ..Default::default() };
+		if let Err(e) = locked_wallet.apply_update(update) {
+			log_error!(self.logger, "BIP157: Failed to apply header at height {}: {}", height, e);
+		}
 	}
 
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
@@ -329,13 +359,17 @@ impl Wallet {
 							let tx_refs: Vec<(
 								&Transaction,
 								lightning::chain::chaininterface::TransactionType,
-							)> =
-								txs_to_broadcast
-									.iter()
-									.map(|tx| {
-										(tx, lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] })
-									})
-									.collect();
+							)> = txs_to_broadcast
+								.iter()
+								.map(|tx| {
+									(
+										tx,
+										lightning::chain::chaininterface::TransactionType::Sweep {
+											channels: vec![],
+										},
+									)
+								})
+								.collect();
 							self.broadcaster.broadcast_transactions(&tx_refs);
 							log_info!(
 								self.logger,
@@ -426,44 +460,50 @@ impl Wallet {
 	) -> Result<Transaction, Error> {
 		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut tx_builder = locked_wallet.build_tx();
+		let tx = {
+			let mut locked_wallet = self.inner.lock().unwrap();
+			let mut tx_builder = locked_wallet.build_tx();
 
-		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
+			tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
 
-		let mut psbt = match tx_builder.finish() {
-			Ok(psbt) => {
-				log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
-				psbt
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create funding transaction: {}", err);
-				return Err(err.into());
-			},
-		};
+			let mut psbt = match tx_builder.finish() {
+				Ok(psbt) => {
+					log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
+					psbt
+				},
+				Err(err) => {
+					log_error!(self.logger, "Failed to create funding transaction: {}", err);
+					return Err(err.into());
+				},
+			};
 
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
-			Ok(finalized) => {
-				if !finalized {
-					return Err(Error::OnchainTxCreationFailed);
-				}
-			},
-			Err(err) => {
-				log_error!(self.logger, "Failed to create funding transaction: {}", err);
-				return Err(err.into());
-			},
-		}
+			match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+				Ok(finalized) => {
+					if !finalized {
+						return Err(Error::OnchainTxCreationFailed);
+					}
+				},
+				Err(err) => {
+					log_error!(self.logger, "Failed to create funding transaction: {}", err);
+					return Err(err.into());
+				},
+			}
 
-		let mut locked_persister = self.persister.lock().unwrap();
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
+			let mut locked_persister = self.persister.lock().unwrap();
+			locked_wallet.persist(&mut locked_persister).map_err(|e| {
+				log_error!(self.logger, "Failed to persist wallet: {}", e);
+				Error::PersistenceFailed
+			})?;
 
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			e
-		})?;
+			psbt.extract_tx().map_err(|e| {
+				log_error!(self.logger, "Failed to extract transaction: {}", e);
+				e
+			})?
+		}; // locked_wallet drops here
+
+		// Re-seed watched scripts so the BIP-157 chain source learns about any
+		// change addresses that BDK derived internally when building the tx.
+		self.seed_watched_scripts();
 
 		Ok(tx)
 	}
@@ -473,6 +513,8 @@ impl Wallet {
 		let mut locked_persister = self.persister.lock().unwrap();
 
 		let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
+		// For BIP157 backends, register the script so kyoto watches it in compact filters.
+		self.chain_source.register_script(address_info.address.script_pubkey());
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
@@ -485,6 +527,8 @@ impl Wallet {
 		let mut locked_persister = self.persister.lock().unwrap();
 
 		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
+		// For BIP157 backends, register the script so kyoto watches it in compact filters.
+		self.chain_source.register_script(address_info.address.script_pubkey());
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
@@ -811,7 +855,8 @@ impl Wallet {
 					let (sent, received) = locked_wallet.sent_and_received(&psbt.unsigned_tx);
 					let drain_amount = sent - received;
 					if spendable_amount_sats < drain_amount.to_sat() {
-						log_error!(self.logger,
+						log_error!(
+							self.logger,
 							"Unable to send payment due to insufficient funds. Available: {}sats, Required: {}",
 							spendable_amount_sats,
 							drain_amount,
@@ -846,12 +891,29 @@ impl Wallet {
 			})?
 		};
 
+		// Re-seed watched scripts so the BIP-157 chain source learns about any
+		// change addresses that BDK derived internally when building the tx.
+		self.seed_watched_scripts();
+
 		self.broadcaster.broadcast_transactions(&[(
 			&tx,
 			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
 		)]);
 
 		let txid = tx.compute_txid();
+
+		// Eagerly register the just-sent tx as unconfirmed in BDK so the payment
+		// store entry is immediately visible via Node::payment(). Without this,
+		// backends without mempool support (e.g. BIP157) would only see the payment
+		// after the tx is confirmed in a block.
+		let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+		if let Err(e) = self.apply_mempool_txs(vec![(tx, now_secs)], vec![]) {
+			log_error!(
+				self.logger,
+				"Failed to eagerly apply outgoing transaction to payment store: {:?}",
+				e
+			);
+		}
 
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
@@ -1336,7 +1398,13 @@ impl Wallet {
 						final_fee_rate_sat_per_kwu.saturating_mul(3).saturating_div(2),
 					);
 					if required_fee_rate > max_allowed_fee_rate {
-						log_error!( self.logger, "BDK required fee rate {} exceeds sanity cap {} (1.5x our estimate) for tx {}", required_fee_rate, max_allowed_fee_rate, txid );
+						log_error!(
+							self.logger,
+							"BDK required fee rate {} exceeds sanity cap {} (1.5x our estimate) for tx {}",
+							required_fee_rate,
+							max_allowed_fee_rate,
+							txid
+						);
 						return Err(Error::InvalidFeeRate);
 					}
 
