@@ -382,7 +382,8 @@ impl std::fmt::Display for Offer {
 /// This struct can also be used for LN-Address recipients.
 ///
 /// [Homograph Attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
-#[derive(uniffi::Object)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Display, Eq)]
 pub struct HumanReadableName {
 	pub(crate) inner: LdkHumanReadableName,
 }
@@ -436,6 +437,12 @@ impl Deref for HumanReadableName {
 impl AsRef<LdkHumanReadableName> for HumanReadableName {
 	fn as_ref(&self) -> &LdkHumanReadableName {
 		self.deref()
+	}
+}
+
+impl std::fmt::Display for HumanReadableName {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
 	}
 }
 
@@ -1986,5 +1993,22 @@ mod tests {
 		assert_eq!(ldk_invoice.encode(), wrapped_invoice.encode());
 
 		assert_eq!(ldk_invoice.signable_hash().to_vec(), wrapped_invoice.signable_hash());
+	}
+
+	#[test]
+	fn test_hrn_traits() {
+		let encoded = "alice@lightning.space";
+		let hrn1 = HumanReadableName::from_encoded(encoded).unwrap();
+		let hrn2 = HumanReadableName::from_encoded(encoded).unwrap();
+
+		assert_eq!(hrn1.to_string(), "₿alice@lightning.space");
+
+		assert_eq!(hrn1, hrn2);
+
+		let debug_output = format!("{:?}", hrn1);
+		assert!(debug_output.contains("HumanReadableName"));
+
+		let hrn3 = hrn1;
+		assert_eq!(hrn1, hrn3);
 	}
 }
