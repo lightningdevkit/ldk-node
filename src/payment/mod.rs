@@ -18,6 +18,7 @@ mod unified;
 
 pub use bolt11::Bolt11Payment;
 pub use bolt12::Bolt12Payment;
+pub(crate) use bolt12::PendingBolt12InvoiceContexts;
 pub use onchain::OnchainPayment;
 pub use pending_payment_store::PendingPaymentDetails;
 pub use spontaneous::SpontaneousPayment;
