@@ -89,7 +89,7 @@ async fn test_cln() {
 	// Open the channel
 	let funding_amount_sat = 1_000_000;
 
-	node.open_channel(cln_node_id, cln_address, funding_amount_sat, Some(500_000_000), None)
+	node.open_channel(cln_node_id, Some(cln_address), funding_amount_sat, Some(500_000_000), None)
 		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);

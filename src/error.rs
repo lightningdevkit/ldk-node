@@ -25,6 +25,8 @@ pub enum Error {
 	OnchainTxCreationFailed,
 	/// A network connection has been closed.
 	ConnectionFailed,
+	/// The peer is not connected.
+	NotConnected,
 	/// Invoice creation failed.
 	InvoiceCreationFailed,
 	/// Invoice request creation failed.
@@ -148,6 +150,7 @@ impl fmt::Display for Error {
 				write!(f, "On-chain transaction could not be created.")
 			},
 			Self::ConnectionFailed => write!(f, "Network connection closed."),
+			Self::NotConnected => write!(f, "The peer is not connected."),
 			Self::InvoiceCreationFailed => write!(f, "Failed to create invoice."),
 			Self::InvoiceRequestCreationFailed => write!(f, "Failed to create invoice request."),
 			Self::OfferCreationFailed => write!(f, "Failed to create offer."),

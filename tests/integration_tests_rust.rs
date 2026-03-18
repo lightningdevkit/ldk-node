@@ -114,7 +114,7 @@ async fn channel_open_fails_when_funds_insufficient() {
 		Err(NodeError::InsufficientFunds),
 		node_a.open_channel(
 			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			node_b.listening_addresses().unwrap().first().cloned(),
 			120000,
 			None,
 			None,
@@ -875,6 +875,54 @@ async fn do_connection_restart_behavior(persist: bool) {
 		assert!(node_a.list_peers().is_empty());
 		assert!(node_b.list_peers().is_empty());
 	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_with_optional_address() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 2_125_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Opening a channel with no address and no prior connection should fail.
+	let res = node_a.open_channel(node_b.node_id(), None, 120000, None, None);
+	assert_eq!(res, Err(NodeError::NotConnected));
+
+	// Connect to the peer with persist=false.
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	node_a.connect(node_b.node_id(), node_addr_b, false).unwrap();
+	assert!(!node_a.list_peers().first().unwrap().is_persisted);
+
+	// Opening a channel with no address should now succeed since we're already connected.
+	node_a.open_channel(node_b.node_id(), None, 120000, None, None).unwrap();
+
+	// The peer should now be persisted after the channel open.
+	assert!(node_a.list_peers().first().unwrap().is_persisted);
+
+	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
+	expect_channel_pending_event!(node_b, node_a.node_id());
+
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
