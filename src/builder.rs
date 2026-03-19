@@ -155,6 +155,7 @@ impl std::fmt::Debug for LogWriterConfig {
 	}
 }
 
+#[cfg_attr(feature = "uniffi", allow(dead_code))]
 enum ProbingStrategyKind {
 	HighDegree { top_n: usize },
 	Random { max_hops: usize },
@@ -659,6 +660,7 @@ impl NodeBuilder {
 	/// Configures background probing toward the highest-degree nodes in the network graph.
 	///
 	/// `top_n` controls how many of the most-connected nodes are cycled through.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn set_high_degree_probing_strategy(&mut self, top_n: usize) -> &mut Self {
 		let kind = ProbingStrategyKind::HighDegree { top_n };
 		self.probing_strategy = Some(self.make_probing_config(kind));
@@ -666,6 +668,7 @@ impl NodeBuilder {
 	}
 
 	/// Configures background probing via random graph walks of up to `max_hops` hops.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn set_random_probing_strategy(&mut self, max_hops: usize) -> &mut Self {
 		let kind = ProbingStrategyKind::Random { max_hops };
 		self.probing_strategy = Some(self.make_probing_config(kind));
@@ -674,8 +677,9 @@ impl NodeBuilder {
 
 	/// Configures a custom probing strategy for background channel probing.
 	///
-	/// When set, the node will periodically call [`ProbingStrategy::next_probe`] and dispatch the
+	/// When set, the node will periodically call [`probing::ProbingStrategy::next_probe`] and dispatch the
 	/// returned probe via the channel manager.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn set_custom_probing_strategy(
 		&mut self, strategy: Arc<dyn probing::ProbingStrategy>,
 	) -> &mut Self {
@@ -685,6 +689,7 @@ impl NodeBuilder {
 	}
 
 	/// Overrides the interval between probe attempts. Only has effect if a probing strategy is set.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn set_probing_interval(&mut self, interval: Duration) -> &mut Self {
 		if let Some(cfg) = &mut self.probing_strategy {
 			cfg.interval = interval;
@@ -694,6 +699,7 @@ impl NodeBuilder {
 
 	/// Overrides the maximum millisatoshis that may be locked in in-flight probes at any time.
 	/// Only has effect if a probing strategy is set.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn set_max_probe_locked_msat(&mut self, max_msat: u64) -> &mut Self {
 		if let Some(cfg) = &mut self.probing_strategy {
 			cfg.max_locked_msat = max_msat;
@@ -708,15 +714,17 @@ impl NodeBuilder {
 	/// quadratically over 24 hours.
 	///
 	/// This is only useful for probing strategies that route through the scorer
-	/// (e.g., [`HighDegreeStrategy`]). Strategies that build paths manually
-	/// (e.g., [`RandomStrategy`]) bypass the scorer entirely.
+	/// (e.g., [`probing::HighDegreeStrategy`]). Strategies that build paths manually
+	/// (e.g., [`probing::RandomStrategy`]) bypass the scorer entirely.
 	///
 	/// If unset, LDK's default of `0` (no penalty) is used.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn set_probing_diversity_penalty_msat(&mut self, penalty_msat: u64) -> &mut Self {
 		self.probing_diversity_penalty_msat = Some(penalty_msat);
 		self
 	}
 
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	fn make_probing_config(&self, kind: ProbingStrategyKind) -> ProbingStrategyConfig {
 		let existing = self.probing_strategy.as_ref();
 		ProbingStrategyConfig {
