@@ -229,6 +229,7 @@ impl UnifiedPayment {
 			PaymentMethod::LightningBolt12(_) => 0,
 			PaymentMethod::LightningBolt11(_) => 1,
 			PaymentMethod::OnChain(_) => 2,
+			PaymentMethod::Cashu(_) => 3,
 		});
 
 		for method in sorted_payment_methods {
@@ -281,6 +282,10 @@ impl UnifiedPayment {
 
 					let txid = self.onchain_payment.send_to_address(&address, amt_sats, None)?;
 					return Ok(UnifiedPaymentResult::Onchain { txid });
+				},
+				PaymentMethod::Cashu(_) => {
+					log_error!(self.logger, "Cashu payments are not supported.");
+					return Err(Error::PaymentSendingFailed);
 				},
 			}
 		}
