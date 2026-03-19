@@ -253,7 +253,8 @@ fn print_probing_perfomance(observers: &[&Node], all_nodes: &[&Node]) {
 	println!();
 }
 
-/// Test change of locked_msat amount
+/// Verifies that `locked_msat` increases when a probe is dispatched and returns
+/// to zero once the probe resolves (succeeds or fails).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_budget_increments_and_decrements() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -308,8 +309,11 @@ async fn probe_budget_increments_and_decrements() {
 	node_c.stop().unwrap();
 }
 
-/// Test that probing stops if the upper locked in flight probe limit is reached.
-/// Uses a slow probing interval (3s) so we can capture baseline capacity before the first probe.
+/// Verifies that no new probes are dispatched once the in-flight budget is exhausted.
+///
+/// Exhaustion is triggered by stopping the intermediate node (B) while a probe HTLC
+/// is in-flight, preventing resolution and keeping the budget locked. After B restarts
+/// the HTLC fails, the budget clears, and probing resumes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhausted_probe_budget_blocks_new_probes() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -424,7 +428,9 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	node_c.stop().unwrap();
 }
 
-/// Strategies perfomance test
+/// Builds a random mesh of nodes, runs `RandomStrategy` and `HighDegreeStrategy`
+/// probers alongside payment rounds, then prints scorer liquidity estimates to
+/// compare probing coverage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probing_strategies_perfomance() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
