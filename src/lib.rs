@@ -1570,6 +1570,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.min_rbf_feerate().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: pending splice requires RBF, use rbf_channel instead"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let contribution = self
 				.runtime
 				.block_on(funding_template.splice_in(
@@ -1683,6 +1691,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.min_rbf_feerate().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: pending splice requires RBF, use rbf_channel instead"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
@@ -1709,6 +1725,69 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id {} and counterparty {}",
+				user_channel_id,
+				counterparty_node_id
+			);
+			Err(Error::ChannelSplicingFailed)
+		}
+	}
+
+	/// Replace a pending splice's funding transaction with a higher-feerate version.
+	///
+	/// If a prior splice negotiation is pending, this bumps its feerate via RBF. The prior
+	/// contribution is reused when possible; otherwise, coin selection is re-run.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental and may change in the future.
+	pub fn rbf_channel(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			let min_feerate =
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
+
+			let funding_template = self
+				.channel_manager
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			if funding_template.min_rbf_feerate().is_none() {
+				log_error!(self.logger, "Failed to RBF channel: no pending splice to replace");
+				return Err(Error::ChannelSplicingFailed);
+			}
+
+			let contribution = self
+				.runtime
+				.block_on(funding_template.rbf(max_feerate, Arc::clone(&self.wallet)))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			self.channel_manager
+				.funding_contributed(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
 					Error::ChannelSplicingFailed
 				})
 		} else {

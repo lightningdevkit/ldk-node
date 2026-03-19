@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -1083,9 +1084,12 @@ impl Wallet {
 		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| {
 			log_error!(self.logger, "Failed to construct PSBT: {}", e);
 		})?;
+		// Use list_output rather than get_utxo to include outputs spent by unconfirmed
+		// transactions (e.g., a prior splice being replaced via RBF).
+		let mut wallet_outputs: HashMap<bitcoin::OutPoint, bdk_wallet::LocalOutput> =
+			locked_wallet.list_output().map(|o| (o.outpoint, o)).collect();
 		for (i, txin) in psbt.unsigned_tx.input.iter().enumerate() {
-			if let Some(utxo) = locked_wallet.get_utxo(txin.previous_output) {
-				debug_assert!(!utxo.is_spent);
+			if let Some(utxo) = wallet_outputs.remove(&txin.previous_output) {
 				psbt.inputs[i] = locked_wallet.get_psbt_input(utxo, None, true).map_err(|e| {
 					log_error!(self.logger, "Failed to construct PSBT input: {}", e);
 				})?;

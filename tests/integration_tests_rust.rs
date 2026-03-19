@@ -26,7 +26,7 @@ use common::{
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
 	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
 };
-use electrsd::corepc_node::Node as BitcoinD;
+use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
@@ -1125,6 +1125,122 @@ async fn splice_channel() {
 		node_a.list_balances().total_lightning_balance_sats,
 		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - expected_splice_out_fee_sat
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rbf_splice_channel() {
+	// Use a custom bitcoind config with a lower incrementalrelayfee so that the +25 sat/kwu
+	// (0.1 sat/vB) RBF feerate bump satisfies BIP125's absolute fee increase requirement.
+	let bitcoind_exe = std::env::var("BITCOIND_EXE")
+		.ok()
+		.or_else(|| corepc_node::downloaded_exe_path().ok())
+		.expect(
+			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
+		);
+	let mut bitcoind_conf = corepc_node::Conf::default();
+	bitcoind_conf.network = "regtest";
+	bitcoind_conf.args.push("-rest");
+	bitcoind_conf.args.push("-incrementalrelayfee=0.00000100");
+	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
+
+	let electrs_exe = std::env::var("ELECTRS_EXE")
+		.ok()
+		.or_else(electrsd::downloaded_exe_path)
+		.expect("you need to provide env var ELECTRS_EXE or specify an electrsd version feature");
+	let mut electrsd_conf = electrsd::Conf::default();
+	electrsd_conf.http_enabled = true;
+	electrsd_conf.network = "regtest";
+	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// rbf_channel should fail when there's no pending splice
+	assert_eq!(
+		node_b.rbf_channel(&user_channel_id_b, node_a.node_id()),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+
+	// Initiate a splice-in to create a pending splice
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+
+	let original_txo = expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	// splice_in should fail when there's a pending splice (RBF guard)
+	assert_eq!(
+		node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+
+	// splice_out should fail when there's a pending splice (RBF guard)
+	let address = node_a.onchain_payment().new_address().unwrap();
+	assert_eq!(
+		node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, 100_000),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+
+	// rbf_channel should succeed when there's a pending splice
+	node_b.rbf_channel(&user_channel_id_b, node_a.node_id()).unwrap();
+
+	let rbf_txo = expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	assert_ne!(original_txo, rbf_txo, "RBF should produce a different funding txo");
+
+	// Wait for the RBF transaction to replace the original in the mempool
+	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+
+	// Mine blocks and confirm the RBF splice
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Verify the RBF transaction is the one that locked, not the original
+	match node_a.next_event_async().await {
+		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
+			assert_eq!(counterparty_node_id, Some(node_b.node_id()));
+			assert_eq!(funding_txo, Some(rbf_txo));
+			node_a.event_handled().unwrap();
+		},
+		ref e => panic!("node_a got unexpected event: {:?}", e),
+	}
+	match node_b.next_event_async().await {
+		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
+			assert_eq!(counterparty_node_id, Some(node_a.node_id()));
+			assert_eq!(funding_txo, Some(rbf_txo));
+			node_b.event_handled().unwrap();
+		},
+		ref e => panic!("node_b got unexpected event: {:?}", e),
+	}
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

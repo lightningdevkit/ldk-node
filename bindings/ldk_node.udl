@@ -123,6 +123,8 @@ interface Node {
 	[Throws=NodeError]
 	void splice_out([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, [ByRef]Address address, u64 splice_amount_sats);
 	[Throws=NodeError]
+	void rbf_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
+	[Throws=NodeError]
 	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
 	void force_close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, string? reason);
