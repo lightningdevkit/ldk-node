@@ -236,9 +236,40 @@ impl std::error::Error for BuildError {}
 /// the getgo.
 ///
 /// ### Defaults
-/// - Wallet entropy is sourced from a `keys_seed` file located under [`Config::storage_dir_path`]
+/// - See [`Config`] for the default values of all configuration options.
 /// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
 /// - Gossip data is sourced via the peer-to-peer network
+/// - Logs are written to the filesystem (see [Logging] below)
+///
+/// ### Storage
+///
+/// Several `build` methods are available depending on the desired storage backend:
+/// - [`build`] uses an SQLite database (recommended default).
+/// - [`build_with_fs_store`] uses a filesystem-based store.
+/// - [`build_with_vss_store`] and variants use a [VSS] remote store (**experimental**).
+/// - [`build_with_store`] allows providing a custom [`KVStore`] implementation.
+///
+/// ### Logging
+///
+/// By default, logs are written to the filesystem via an internal file logger at
+/// [`DEFAULT_LOG_LEVEL`]. The log file path and level can be customized via
+/// [`set_filesystem_logger`].
+///
+/// Alternatively, logs can be written to the [`log`] facade via [`set_log_facade_logger`], or to
+/// a custom [`LogWriter`] via [`set_custom_logger`].
+///
+/// [`build`]: Self::build
+/// [`build_with_fs_store`]: Self::build_with_fs_store
+/// [`build_with_vss_store`]: Self::build_with_vss_store
+/// [`build_with_store`]: Self::build_with_store
+/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+/// [`KVStore`]: lightning::util::persist::KVStore
+/// [`DEFAULT_LOG_LEVEL`]: crate::config::DEFAULT_LOG_LEVEL
+/// [`set_filesystem_logger`]: Self::set_filesystem_logger
+/// [`set_log_facade_logger`]: Self::set_log_facade_logger
+/// [`set_custom_logger`]: Self::set_custom_logger
+/// [`log`]: https://crates.io/crates/log
+/// [Logging]: #logging
 #[derive(Debug)]
 pub struct NodeBuilder {
 	config: Config,
@@ -471,6 +502,10 @@ impl NodeBuilder {
 	///
 	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
 	/// [`DEFAULT_LOG_LEVEL`].
+	///
+	/// **Note:** Log rotation and pruning are the responsibility of the user and are not handled
+	/// internally. For example, UNIX system tooling such as `logrotate` and `cron` can be used to
+	/// manage log file sizes and retention.
 	///
 	/// [`DEFAULT_LOG_FILENAME`]: crate::config::DEFAULT_LOG_FILENAME
 	pub fn set_filesystem_logger(
@@ -764,9 +799,41 @@ impl NodeBuilder {
 /// the getgo.
 ///
 /// ### Defaults
-/// - Wallet entropy is sourced from a `keys_seed` file located under [`Config::storage_dir_path`]
+/// - See [`Config`] for the default values of all configuration options.
 /// - Chain data is sourced from the Esplora endpoint `https://blockstream.info/api`
 /// - Gossip data is sourced via the peer-to-peer network
+/// - Logs are written to the filesystem (see [Logging] below)
+///
+/// ### Storage
+///
+/// Several `build` methods are available depending on the desired storage backend:
+/// - [`build`] uses an SQLite database (recommended default).
+/// - [`build_with_fs_store`] uses a filesystem-based store.
+/// - [`build_with_vss_store`] and variants use a [VSS] remote store (**experimental**).
+/// - [`build_with_store`] allows providing a custom [`KVStore`] implementation.
+///
+/// ### Logging
+///
+/// By default, logs are written to the filesystem via an internal file logger at
+/// [`DEFAULT_LOG_LEVEL`]. The log file path and level can be customized via
+/// [`set_filesystem_logger`].
+///
+/// Alternatively, logs can be written to the [`log`] facade via [`set_log_facade_logger`], or to
+/// a custom [`LogWriter`] via [`set_custom_logger`].
+///
+/// [`build`]: Self::build
+/// [`build_with_fs_store`]: Self::build_with_fs_store
+/// [`build_with_vss_store`]: Self::build_with_vss_store
+/// [`build_with_store`]: Self::build_with_store
+/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+/// [`KVStore`]: lightning::util::persist::KVStore
+/// [`DEFAULT_LOG_LEVEL`]: crate::config::DEFAULT_LOG_LEVEL
+/// [`set_filesystem_logger`]: Self::set_filesystem_logger
+/// [`set_log_facade_logger`]: Self::set_log_facade_logger
+/// [`set_custom_logger`]: Self::set_custom_logger
+/// [`log`]: https://crates.io/crates/log
+/// [Logging]: #logging
+/// [Storage]: #storage
 #[derive(Debug)]
 #[cfg(feature = "uniffi")]
 pub struct ArcedNodeBuilder {
@@ -936,6 +1003,10 @@ impl ArcedNodeBuilder {
 	///
 	/// If set, the `max_log_level` sets the maximum log level. Otherwise, the latter defaults to
 	/// [`DEFAULT_LOG_LEVEL`].
+	///
+	/// **Note:** Log rotation and pruning are the responsibility of the user and are not handled
+	/// internally. For example, UNIX system tooling such as `logrotate` and `cron` can be used to
+	/// manage log file sizes and retention.
 	///
 	/// [`DEFAULT_LOG_FILENAME`]: crate::config::DEFAULT_LOG_FILENAME
 	pub fn set_filesystem_logger(

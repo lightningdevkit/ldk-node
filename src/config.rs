@@ -119,17 +119,12 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | Parameter                              | Value              |
 /// |----------------------------------------|--------------------|
 /// | `storage_dir_path`                     | /tmp/ldk_node/     |
-/// | `log_dir_path`                         | None               |
 /// | `network`                              | Bitcoin            |
 /// | `listening_addresses`                  | None               |
+/// | `announcement_addresses`               | None               |
 /// | `node_alias`                           | None               |
-/// | `default_cltv_expiry_delta`            | 144                |
-/// | `onchain_wallet_sync_interval_secs`    | 80                 |
-/// | `wallet_sync_interval_secs`            | 30                 |
-/// | `fee_rate_cache_update_interval_secs`  | 600                |
 /// | `trusted_peers_0conf`                  | []                 |
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
-/// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                     | None               |
 /// | `tor_config`                           | None               |
@@ -273,7 +268,7 @@ pub struct AnchorChannelsConfig {
 	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`], we will always try to spend the Anchor
 	/// outputs with *any* on-chain funds available, i.e., the total reserve value as well as any
 	/// spendable funds available in the on-chain wallet. Therefore, this per-channel multiplier is
-	/// really a emergency reserve that we maintain at all time to reduce reduce the risk of
+	/// really an emergency reserve that we maintain at all time to reduce the risk of
 	/// insufficient funds at time of a channel closure. To this end, we will refuse to open
 	/// outbound or accept inbound channels if we don't have sufficient on-chain funds available to
 	/// cover the additional reserve requirement.
