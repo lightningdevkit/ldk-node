@@ -412,7 +412,8 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(Some(amount_msat), &description, expiry_secs, None)?;
+		let invoice =
+			self.receive_inner(Some(amount_msat), &description, expiry_secs, None, None)?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -435,8 +436,44 @@ impl Bolt11Payment {
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice =
-			self.receive_inner(Some(amount_msat), &description, expiry_secs, Some(payment_hash))?;
+		let invoice = self.receive_inner(
+			Some(amount_msat),
+			&description,
+			expiry_secs,
+			Some(payment_hash),
+			None,
+		)?;
+		Ok(maybe_wrap(invoice))
+	}
+
+	/// Returns a payable invoice that can be used to request a payment of the amount
+	/// given for the given payment hash.
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
+	/// the inbound payment arrives.
+	///
+	/// `min_cltv_expiry_delta` sets the minimum CLTV delta to use for the final hop.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	pub fn receive_for_hash_with_min_cltv_expiry_delta(
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: PaymentHash, min_cltv_expiry_delta: u16,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(
+			Some(amount_msat),
+			&description,
+			expiry_secs,
+			Some(payment_hash),
+			Some(min_cltv_expiry_delta),
+		)?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -448,7 +485,7 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, None)?;
+		let invoice = self.receive_inner(None, &description, expiry_secs, None, None)?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -470,19 +507,53 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, Some(payment_hash))?;
+		let invoice =
+			self.receive_inner(None, &description, expiry_secs, Some(payment_hash), None)?;
+		Ok(maybe_wrap(invoice))
+	}
+
+	/// Returns a payable invoice that can be used to request a payment for the given payment hash
+	/// and the amount to be determined by the user, also known as a "zero-amount" invoice.
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
+	/// the inbound payment arrives.
+	///
+	/// `min_cltv_expiry_delta` sets the minimum CLTV delta to use for the final hop.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	pub fn receive_variable_amount_for_hash_with_min_cltv_expiry_delta(
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
+		min_cltv_expiry_delta: u16,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(
+			None,
+			&description,
+			expiry_secs,
+			Some(payment_hash),
+			Some(min_cltv_expiry_delta),
+		)?;
 		Ok(maybe_wrap(invoice))
 	}
 
 	pub(crate) fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
+		min_cltv_expiry_delta: Option<u16>,
 	) -> Result<LdkBolt11Invoice, Error> {
 		let invoice = {
 			let invoice_params = Bolt11InvoiceParameters {
 				amount_msats: amount_msat,
 				description: invoice_description.clone(),
 				invoice_expiry_delta_secs: Some(expiry_secs),
+				min_final_cltv_expiry_delta: min_cltv_expiry_delta,
 				payment_hash: manual_claim_payment_hash,
 				..Default::default()
 			};
