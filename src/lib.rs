@@ -179,7 +179,7 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId};
 pub use vss_client;
 
 use crate::ffi::maybe_wrap;
@@ -1145,7 +1145,11 @@ impl Node {
 
 	/// Retrieve a list of known channels.
 	pub fn list_channels(&self) -> Vec<ChannelDetails> {
-		self.channel_manager.list_channels().into_iter().map(|c| c.into()).collect()
+		self.channel_manager
+			.list_channels()
+			.into_iter()
+			.map(|c| ChannelDetails::from_ldk(c, self.config.anchor_channels_config.as_ref()))
+			.collect()
 	}
 
 	/// Connect to a node on the peer-to-peer network.
