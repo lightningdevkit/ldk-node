@@ -385,7 +385,7 @@ async fn wait_for_v070_usable_channel(node: &ldk_node_070::Node, counterparty_no
 
 fn assert_current_channel_ready(node: &CurrentNode, counterparty_node_id: PublicKey) {
 	let channels = node.list_channels();
-	let channel = channels.iter().find(|c| c.counterparty_node_id == counterparty_node_id).unwrap();
+	let channel = channels.iter().find(|c| c.counterparty.node_id == counterparty_node_id).unwrap();
 	assert_eq!(channel.channel_value_sats, CHANNEL_AMOUNT_SAT);
 	assert!(channel.is_channel_ready);
 }
