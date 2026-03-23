@@ -2112,7 +2112,7 @@ async fn lsps2_client_trusts_lsp() {
 		client_node
 			.list_channels()
 			.iter()
-			.find(|c| c.counterparty_node_id == service_node_id)
+			.find(|c| c.counterparty.node_id == service_node_id)
 			.unwrap()
 			.confirmations,
 		Some(0)
@@ -2121,7 +2121,7 @@ async fn lsps2_client_trusts_lsp() {
 		service_node
 			.list_channels()
 			.iter()
-			.find(|c| c.counterparty_node_id == client_node_id)
+			.find(|c| c.counterparty.node_id == client_node_id)
 			.unwrap()
 			.confirmations,
 		Some(0)
@@ -2156,7 +2156,7 @@ async fn lsps2_client_trusts_lsp() {
 		client_node
 			.list_channels()
 			.iter()
-			.find(|c| c.counterparty_node_id == service_node_id)
+			.find(|c| c.counterparty.node_id == service_node_id)
 			.unwrap()
 			.confirmations,
 		Some(6)
@@ -2165,7 +2165,7 @@ async fn lsps2_client_trusts_lsp() {
 		service_node
 			.list_channels()
 			.iter()
-			.find(|c| c.counterparty_node_id == client_node_id)
+			.find(|c| c.counterparty.node_id == client_node_id)
 			.unwrap()
 			.confirmations,
 		Some(6)
@@ -2284,7 +2284,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 		client_node
 			.list_channels()
 			.iter()
-			.find(|c| c.counterparty_node_id == service_node_id)
+			.find(|c| c.counterparty.node_id == service_node_id)
 			.unwrap()
 			.confirmations,
 		Some(6)
@@ -2293,7 +2293,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 		service_node
 			.list_channels()
 			.iter()
-			.find(|c| c.counterparty_node_id == client_node_id)
+			.find(|c| c.counterparty.node_id == client_node_id)
 			.unwrap()
 			.confirmations,
 		Some(6)
@@ -2670,7 +2670,7 @@ async fn open_channel_with_all_with_anchors() {
 	assert_eq!(channels.len(), 1);
 	let channel = &channels[0];
 	assert!(channel.channel_value_sats > premine_amount_sat - anchor_reserve_sat - 500);
-	assert_eq!(channel.counterparty_node_id, node_b.node_id());
+	assert_eq!(channel.counterparty.node_id, node_b.node_id());
 	assert_eq!(channel.funding_txo.unwrap(), funding_txo);
 
 	node_a.stop().unwrap();
@@ -2721,7 +2721,7 @@ async fn open_channel_with_all_without_anchors() {
 	assert_eq!(channels.len(), 1);
 	let channel = &channels[0];
 	assert!(channel.channel_value_sats > premine_amount_sat - 500);
-	assert_eq!(channel.counterparty_node_id, node_b.node_id());
+	assert_eq!(channel.counterparty.node_id, node_b.node_id());
 	assert_eq!(channel.funding_txo.unwrap(), funding_txo);
 
 	node_a.stop().unwrap();

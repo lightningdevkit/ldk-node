@@ -16,6 +16,7 @@ use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECH
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
+pub use lightning::ln::channel_state::CounterpartyForwardingInfo;
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::types::ChannelId;
@@ -23,6 +24,7 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
+use lightning::types::features::InitFeatures;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, MonitorUpdatingPersister, MonitorUpdatingPersisterAsync,
 };
@@ -346,6 +348,56 @@ impl fmt::Display for UserChannelId {
 	}
 }
 
+/// Information needed for constructing an invoice route hint for this channel.
+#[cfg(feature = "uniffi")]
+#[uniffi::remote(Record)]
+pub struct CounterpartyForwardingInfo {
+	/// Base routing fee in millisatoshis.
+	pub fee_base_msat: u32,
+	/// Amount in millionths of a satoshi the channel will charge per transferred satoshi.
+	pub fee_proportional_millionths: u32,
+	/// The minimum difference in cltv_expiry between an ingoing HTLC and its outgoing counterpart,
+	/// such that the outgoing HTLC is forwardable to this counterparty.
+	pub cltv_expiry_delta: u16,
+}
+
+#[cfg(feature = "uniffi")]
+uniffi::custom_type!(InitFeatures, Vec<u8>, {
+	remote,
+	try_lift: |val| Ok(InitFeatures::from_le_bytes(val)),
+	lower: |obj| obj.le_flags().to_vec(),
+});
+
+/// Channel parameters which apply to our counterparty. These are split out from [`ChannelDetails`]
+/// to better separate parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ChannelCounterparty {
+	/// The node_id of our counterparty
+	pub node_id: PublicKey,
+	/// The Features the channel counterparty provided upon last connection.
+	/// Useful for routing as it is the most up-to-date copy of the counterparty's features and
+	/// many routing-relevant features are present in the init context.
+	pub features: InitFeatures,
+	/// The value, in satoshis, that must always be held in the channel for our counterparty. This
+	/// value ensures that if our counterparty broadcasts a revoked state, we can punish them by
+	/// claiming at least this value on chain.
+	///
+	/// This value is not included in [`inbound_capacity_msat`] as it can never be spent.
+	///
+	/// [`inbound_capacity_msat`]: ChannelDetails::inbound_capacity_msat
+	pub unspendable_punishment_reserve: u64,
+	/// Information on the fees and requirements that the counterparty requires when forwarding
+	/// payments to us through this channel.
+	pub forwarding_info: Option<CounterpartyForwardingInfo>,
+	/// The smallest value HTLC (in msat) the remote peer will accept, for this channel. This field
+	/// is only `None` before we have received either the `OpenChannel` or `AcceptChannel` message
+	/// from the remote peer, or for `ChannelCounterparty` objects serialized prior to LDK 0.0.107.
+	pub outbound_htlc_minimum_msat: Option<u64>,
+	/// The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
+	pub outbound_htlc_maximum_msat: Option<u64>,
+}
+
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
 /// When a channel is spliced, most fields continue to refer to the original pre-splice channel
@@ -362,8 +414,8 @@ pub struct ChannelDetails {
 	/// Note that this means this value is *not* persistent - it can change once during the
 	/// lifetime of the channel.
 	pub channel_id: ChannelId,
-	/// The node ID of our the channel's counterparty.
-	pub counterparty_node_id: PublicKey,
+	/// Parameters which apply to our counterparty. See individual fields for more information.
+	pub counterparty: ChannelCounterparty,
 	/// The channel's funding transaction output, if we've negotiated the funding transaction with
 	/// our counterparty already.
 	///
@@ -479,28 +531,6 @@ pub struct ChannelDetails {
 	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
 	/// the channel.
 	pub cltv_expiry_delta: Option<u16>,
-	/// The value, in satoshis, that must always be held in the channel for our counterparty. This
-	/// value ensures that if our counterparty broadcasts a revoked state, we can punish them by
-	/// claiming at least this value on chain.
-	///
-	/// This value is not included in [`inbound_capacity_msat`] as it can never be spent.
-	///
-	/// [`inbound_capacity_msat`]: ChannelDetails::inbound_capacity_msat
-	pub counterparty_unspendable_punishment_reserve: u64,
-	/// The smallest value HTLC (in msat) the remote peer will accept, for this channel.
-	///
-	/// This field is only `None` before we have received either the `OpenChannel` or
-	/// `AcceptChannel` message from the remote peer.
-	pub counterparty_outbound_htlc_minimum_msat: Option<u64>,
-	/// The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
-	pub counterparty_outbound_htlc_maximum_msat: Option<u64>,
-	/// Base routing fee in millisatoshis.
-	pub counterparty_forwarding_info_fee_base_msat: Option<u32>,
-	/// Proportional fee, in millionths of a satoshi the channel will charge per transferred satoshi.
-	pub counterparty_forwarding_info_fee_proportional_millionths: Option<u32>,
-	/// The minimum difference in CLTV expiry between an ingoing HTLC and its outgoing counterpart,
-	/// such that the outgoing HTLC is forwardable to this counterparty.
-	pub counterparty_forwarding_info_cltv_expiry_delta: Option<u16>,
 	/// The available outbound capacity for sending a single HTLC to the remote peer. This is
 	/// similar to [`ChannelDetails::outbound_capacity_msat`] but it may be further restricted by
 	/// the current state and per-HTLC limit(s). This is intended for use when routing, allowing us
@@ -534,7 +564,14 @@ impl From<LdkChannelDetails> for ChannelDetails {
 	fn from(value: LdkChannelDetails) -> Self {
 		ChannelDetails {
 			channel_id: value.channel_id,
-			counterparty_node_id: value.counterparty.node_id,
+			counterparty: ChannelCounterparty {
+				node_id: value.counterparty.node_id,
+				features: value.counterparty.features,
+				unspendable_punishment_reserve: value.counterparty.unspendable_punishment_reserve,
+				forwarding_info: value.counterparty.forwarding_info,
+				outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat,
+				outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
+			},
 			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
 			funding_redeem_script: value.funding_redeem_script,
 			short_channel_id: value.short_channel_id,
@@ -555,26 +592,6 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			is_usable: value.is_usable,
 			is_announced: value.is_announced,
 			cltv_expiry_delta: value.config.map(|c| c.cltv_expiry_delta),
-			counterparty_unspendable_punishment_reserve: value
-				.counterparty
-				.unspendable_punishment_reserve,
-			counterparty_outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat,
-			counterparty_outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
-			counterparty_forwarding_info_fee_base_msat: value
-				.counterparty
-				.forwarding_info
-				.as_ref()
-				.map(|f| f.fee_base_msat),
-			counterparty_forwarding_info_fee_proportional_millionths: value
-				.counterparty
-				.forwarding_info
-				.as_ref()
-				.map(|f| f.fee_proportional_millionths),
-			counterparty_forwarding_info_cltv_expiry_delta: value
-				.counterparty
-				.forwarding_info
-				.as_ref()
-				.map(|f| f.cltv_expiry_delta),
 			next_outbound_htlc_limit_msat: value.next_outbound_htlc_limit_msat,
 			next_outbound_htlc_minimum_msat: value.next_outbound_htlc_minimum_msat,
 			force_close_spend_delay: value.force_close_spend_delay,
