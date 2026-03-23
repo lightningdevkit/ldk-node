@@ -159,6 +159,7 @@ use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
+pub use lightning_persister::vss_client;
 pub use lightning_types;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use lnurl_auth::LnurlAuth;
@@ -178,7 +179,6 @@ use types::{
 	Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
-pub use vss_client;
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
