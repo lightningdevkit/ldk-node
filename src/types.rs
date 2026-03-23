@@ -33,7 +33,7 @@ use lightning_net_tokio::SocketDescriptor;
 
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
-use crate::config::ChannelConfig;
+use crate::config::{AnchorChannelsConfig, ChannelConfig};
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
@@ -411,6 +411,47 @@ pub struct ChannelCounterparty {
 	pub outbound_htlc_maximum_msat: Option<u64>,
 }
 
+/// Describes the reserve behavior of a channel based on its type and trust configuration.
+///
+/// This captures the combination of the channel's on-chain construction (anchor outputs vs legacy
+/// static_remote_key) and whether the counterparty is in our trusted peers list. It tells the
+/// user what reserve obligations exist for this channel without exposing internal protocol details.
+///
+/// See [`AnchorChannelsConfig`] for how reserve behavior is configured.
+///
+/// [`AnchorChannelsConfig`]: crate::config::AnchorChannelsConfig
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ReserveType {
+	/// An anchor outputs channel where we maintain a per-channel on-chain reserve for fee
+	/// bumping force-close transactions.
+	///
+	/// Anchor channels allow either party to fee-bump commitment transactions via CPFP
+	/// at broadcast time. Because the pre-signed commitment fee may be insufficient under
+	/// current fee conditions, the broadcaster must supply additional funds (hence adaptive)
+	/// through an anchor output spend. The reserve ensures sufficient on-chain funds are
+	/// available to cover this.
+	///
+	/// This is the default for anchor channels when the counterparty is not in
+	/// [`trusted_peers_no_reserve`].
+	///
+	/// [`trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
+	Adaptive,
+	/// An anchor outputs channel where we do not maintain any reserve, because the counterparty
+	/// is in our [`trusted_peers_no_reserve`] list.
+	///
+	/// In this mode, we trust the counterparty to broadcast a valid commitment transaction on
+	/// our behalf and do not set aside funds for fee bumping.
+	///
+	/// [`trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
+	TrustedPeersNoReserve,
+	/// A legacy (pre-anchor) channel using only `option_static_remotekey`.
+	///
+	/// These channels do not use anchor outputs and therefore do not require an on-chain reserve
+	/// for fee bumping. Commitment transaction fees are pre-committed at channel open time.
+	Legacy,
+}
+
 /// Details of a channel as returned by [`Node::list_channels`].
 ///
 /// When a channel is spliced, most fields continue to refer to the original pre-splice channel
@@ -571,10 +612,32 @@ pub struct ChannelDetails {
 	pub inbound_htlc_maximum_msat: Option<u64>,
 	/// Set of configurable parameters that affect channel operation.
 	pub config: ChannelConfig,
+	/// The type of on-chain reserve maintained for this channel.
+	///
+	/// See [`ReserveType`] for details on how reserves differ between anchor and legacy channels.
+	pub reserve_type: ReserveType,
 }
 
-impl From<LdkChannelDetails> for ChannelDetails {
-	fn from(value: LdkChannelDetails) -> Self {
+impl ChannelDetails {
+	pub(crate) fn from_ldk(
+		value: LdkChannelDetails, anchor_channels_config: Option<&AnchorChannelsConfig>,
+	) -> Self {
+		let reserve_type =
+			if value.channel_type.as_ref().is_some_and(|ct| ct.supports_anchors_zero_fee_htlc_tx())
+			{
+				if let Some(config) = anchor_channels_config {
+					if config.trusted_peers_no_reserve.contains(&value.counterparty.node_id) {
+						ReserveType::TrustedPeersNoReserve
+					} else {
+						ReserveType::Adaptive
+					}
+				} else {
+					ReserveType::Adaptive
+				}
+			} else {
+				ReserveType::Legacy
+			};
+
 		ChannelDetails {
 			channel_id: value.channel_id,
 			counterparty: ChannelCounterparty {
@@ -615,6 +678,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
 			// unwrap safety: `config` is only `None` for LDK objects serialized prior to 0.0.109.
 			config: value.config.map(|c| c.into()).unwrap(),
+			reserve_type,
 		}
 	}
 }
