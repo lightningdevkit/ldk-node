@@ -25,7 +25,7 @@ pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
 use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
-use lightning::ln::channel_state::ChannelShutdownState;
+use lightning::ln::channel_state::{ChannelShutdownState, CounterpartyForwardingInfo};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 pub use lightning::ln::types::ChannelId;
@@ -44,6 +44,7 @@ pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
 pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
+use lightning_types::features::InitFeatures as LdkInitFeatures;
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
 use vss_client::headers::{
@@ -1517,6 +1518,114 @@ pub enum ClosureReason {
 		/// The required feerate we enforce.
 		required_feerate_sat_per_kw: u32,
 	},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct InitFeatures {
+	pub(crate) inner: LdkInitFeatures,
+}
+
+impl InitFeatures {
+	/// Constructs init features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkInitFeatures::from_be_bytes(bytes.to_vec()).into() }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation of these features.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.encode()
+	}
+
+	/// Whether the peer supports `option_static_remotekey` (bit 13).
+	///
+	/// This ensures the non-broadcaster's output pays directly to their specified key,
+	/// simplifying recovery if a channel is force-closed.
+	pub fn supports_static_remote_key(&self) -> bool {
+		self.inner.supports_static_remote_key()
+	}
+
+	/// Whether the peer supports `option_anchors_zero_fee_htlc_tx` (bit 23).
+	///
+	/// Anchor channels allow fee-bumping commitment transactions after broadcast,
+	/// improving on-chain fee management.
+	pub fn supports_anchors_zero_fee_htlc_tx(&self) -> bool {
+		self.inner.supports_anchors_zero_fee_htlc_tx()
+	}
+
+	/// Whether the peer supports `option_support_large_channel` (bit 19).
+	///
+	/// When supported, channels larger than 2^24 satoshis (≈0.168 BTC) may be opened.
+	pub fn supports_wumbo(&self) -> bool {
+		self.inner.supports_wumbo()
+	}
+
+	/// Whether the peer supports `option_route_blinding` (bit 25).
+	///
+	/// Route blinding allows the recipient to hide their node identity and
+	/// last-hop channel from the sender.
+	pub fn supports_route_blinding(&self) -> bool {
+		self.inner.supports_route_blinding()
+	}
+
+	/// Whether the peer supports `option_onion_messages` (bit 39).
+	///
+	/// Onion messages enable communication over the Lightning Network without
+	/// requiring a payment, used by BOLT 12 offers and async payments.
+	pub fn supports_onion_messages(&self) -> bool {
+		self.inner.supports_onion_messages()
+	}
+
+	/// Whether the peer supports `option_scid_alias` (bit 47).
+	///
+	/// When supported, the peer will only forward using short channel ID aliases,
+	/// preventing the real channel UTXO from being revealed during routing.
+	pub fn supports_scid_privacy(&self) -> bool {
+		self.inner.supports_scid_privacy()
+	}
+
+	/// Whether the peer supports `option_zeroconf` (bit 51).
+	///
+	/// Zero-conf channels can be used immediately without waiting for
+	/// on-chain funding confirmations.
+	pub fn supports_zero_conf(&self) -> bool {
+		self.inner.requires_zero_conf()
+	}
+
+	/// Whether the peer supports `option_dual_fund` (bit 29).
+	///
+	/// Dual-funded channels allow both parties to contribute funds
+	/// to the channel opening transaction.
+	pub fn supports_dual_fund(&self) -> bool {
+		self.inner.supports_dual_fund()
+	}
+
+	/// Whether the peer supports `option_quiesce` (bit 35).
+	///
+	/// Quiescence is a prerequisite for splicing, allowing both sides to
+	/// pause HTLC activity before modifying the funding transaction.
+	pub fn supports_quiescence(&self) -> bool {
+		self.inner.supports_quiescence()
+	}
+}
+
+impl From<LdkInitFeatures> for InitFeatures {
+	fn from(ldk_init: LdkInitFeatures) -> Self {
+		Self { inner: ldk_init }
+	}
+}
+
+/// Information needed for constructing an invoice route hint for this channel.
+#[uniffi::remote(Record)]
+pub struct CounterpartyForwardingInfo {
+	/// Base routing fee in millisatoshis.
+	pub fee_base_msat: u32,
+	/// Amount in millionths of a satoshi the channel will charge per transferred satoshi.
+	pub fee_proportional_millionths: u32,
+	/// The minimum difference in cltv_expiry between an ingoing HTLC and its outgoing counterpart,
+	/// such that the outgoing HTLC is forwardable to this counterparty.
+	pub cltv_expiry_delta: u16,
 }
 
 #[cfg(test)]
