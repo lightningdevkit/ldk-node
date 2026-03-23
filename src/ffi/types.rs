@@ -43,12 +43,12 @@ pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
 pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
-pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
-pub use lightning_types::string::UntrustedString;
-use vss_client::headers::{
+use lightning_persister::vss_client::headers::{
 	VssHeaderProvider as VssClientHeaderProvider,
 	VssHeaderProviderError as VssClientHeaderProviderError,
 };
+pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
+pub use lightning_types::string::UntrustedString;
 
 /// Errors around providing headers for each VSS request.
 #[derive(Debug, uniffi::Error)]

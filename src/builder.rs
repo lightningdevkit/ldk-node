@@ -40,7 +40,8 @@ use lightning::util::persist::{
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
 use lightning_persister::fs_store::v1::FilesystemStore;
-use vss_client::headers::VssHeaderProvider;
+use lightning_persister::vss_client::headers::VssHeaderProvider;
+use lightning_persister::vss_store::VssStoreBuilder;
 
 use crate::chain::ChainSource;
 use crate::config::{
@@ -59,7 +60,6 @@ use crate::io::utils::{
 	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
 	read_scorer, write_node_metrics,
 };
-use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -84,6 +84,7 @@ use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics};
 
+const VSS_HARDENED_CHILD_INDEX: u32 = 877;
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
 
@@ -663,7 +664,8 @@ impl NodeBuilder {
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
-		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_xprv = derive_vss_xprv(&node_entropy, self.config.network)?;
+		let builder = VssStoreBuilder::new(vss_xprv, vss_url, store_id);
 		let vss_store = builder.build_with_sigs_auth(fixed_headers).map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
@@ -699,7 +701,8 @@ impl NodeBuilder {
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
-		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_xprv = derive_vss_xprv(&node_entropy, self.config.network)?;
+		let builder = VssStoreBuilder::new(vss_xprv, vss_url, store_id);
 		let vss_store =
 			builder.build_with_lnurl(lnurl_auth_server_url, fixed_headers).map_err(|e| {
 				log_error!(logger, "Failed to setup VSS store: {}", e);
@@ -721,13 +724,14 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	/// [`FixedHeaders`]: vss_client::headers::FixedHeaders
+	/// [`FixedHeaders`]: lightning_persister::vss_client::headers::FixedHeaders
 	pub fn build_with_vss_store_and_fixed_headers(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
-		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_xprv = derive_vss_xprv(&node_entropy, self.config.network)?;
+		let builder = VssStoreBuilder::new(vss_xprv, vss_url, store_id);
 		let vss_store = builder.build_with_fixed_headers(fixed_headers).map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
@@ -752,7 +756,8 @@ impl NodeBuilder {
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
-		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_xprv = derive_vss_xprv(&node_entropy, self.config.network)?;
+		let builder = VssStoreBuilder::new(vss_xprv, vss_url, store_id);
 		let vss_store = builder.build_with_header_provider(header_provider).map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
@@ -2021,6 +2026,19 @@ fn optionally_install_rustls_cryptoprovider() {
 			"We need to have a CryptoProvider"
 		);
 	});
+}
+
+fn derive_vss_xprv(node_entropy: &NodeEntropy, network: Network) -> Result<Xpriv, BuildError> {
+	let seed_bytes = node_entropy.to_seed_bytes();
+	let secp_ctx = Secp256k1::new();
+	Xpriv::new_master(network, &seed_bytes)
+		.and_then(|master| {
+			master.derive_priv(
+				&secp_ctx,
+				&[ChildNumber::Hardened { index: VSS_HARDENED_CHILD_INDEX }],
+			)
+		})
+		.map_err(|_| BuildError::KVStoreSetupFailed)
 }
 
 /// Sets up the node logger.
