@@ -39,7 +39,6 @@ use lightning_types::payment::PaymentHash;
 use tokio::sync::oneshot;
 
 use crate::builder::BuildError;
-use crate::chain::ChainSource;
 use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
@@ -155,7 +154,6 @@ where
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
-	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
@@ -168,8 +166,7 @@ where
 {
 	pub(crate) fn new(
 		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		chain_source: Arc<ChainSource>, tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>,
-		config: Arc<Config>, logger: L,
+		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>, logger: L,
 	) -> Self {
 		let lsps1_client = None;
 		let lsps2_client = None;
@@ -181,7 +178,6 @@ where
 			wallet,
 			channel_manager,
 			keys_manager,
-			chain_source,
 			tx_broadcaster,
 			kv_store,
 			config,
@@ -239,7 +235,12 @@ where
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
 			let lsps5_service_config = None;
 			let advertise_service = s.service_config.advertise_service;
-			LiquidityServiceConfig { lsps2_service_config, lsps5_service_config, advertise_service }
+			LiquidityServiceConfig {
+				lsps1_service_config: None,
+				lsps2_service_config,
+				lsps5_service_config,
+				advertise_service,
+			}
 		});
 
 		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.ldk_client_config.clone());
@@ -256,8 +257,6 @@ where
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.channel_manager),
-				Some(Arc::clone(&self.chain_source)),
-				None,
 				Arc::clone(&self.kv_store),
 				Arc::clone(&self.tx_broadcaster),
 				liquidity_service_config,
