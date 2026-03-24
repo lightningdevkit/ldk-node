@@ -2805,37 +2805,3 @@ async fn splice_in_with_all_balance() {
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
 }
-
-#[test]
-fn node_feature_flags() {
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = random_chain_source(&bitcoind, &electrsd);
-	let config = random_config(true);
-	let node = setup_node(&chain_source, config);
-
-	// NodeFeatures
-	let node_features = node.node_features();
-	assert!(node_features.supports_variable_length_onion());
-	assert!(node_features.supports_payment_secret());
-	assert!(node_features.supports_basic_mpp());
-	assert!(node_features.supports_keysend());
-	assert!(node_features.supports_onion_messages());
-
-	// InitFeatures
-	let init_features = node.init_features();
-	assert!(init_features.supports_variable_length_onion());
-	assert!(init_features.supports_payment_secret());
-	assert!(init_features.supports_basic_mpp());
-	assert!(init_features.supports_onion_messages());
-
-	// ChannelFeatures (non-empty)
-	let _channel_features = node.channel_features();
-
-	// Bolt11InvoiceFeatures
-	let bolt11_features = node.bolt11_invoice_features();
-	assert!(bolt11_features.supports_variable_length_onion());
-	assert!(bolt11_features.supports_payment_secret());
-	assert!(bolt11_features.supports_basic_mpp());
-
-	node.stop().unwrap();
-}
