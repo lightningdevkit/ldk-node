@@ -29,6 +29,7 @@ use lightning::util::persist::{
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
+use lightning_liquidity::lsps2::router::LSPS2BOLT12Router;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
@@ -231,7 +232,6 @@ pub(crate) type LiquidityManager = lightning_liquidity::LiquidityManager<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<ChannelManager>,
-	Arc<ChainSource>,
 	Arc<DynStore>,
 	DefaultTimeProvider,
 	Arc<Broadcaster>,
@@ -254,7 +254,7 @@ pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<
 pub(crate) type Wallet = crate::wallet::Wallet;
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
-pub(crate) type Router = DefaultRouter<
+pub(crate) type InnerRouter = DefaultRouter<
 	Arc<Graph>,
 	Arc<Logger>,
 	Arc<KeysManager>,
@@ -262,6 +262,7 @@ pub(crate) type Router = DefaultRouter<
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
+pub(crate) type Router = LSPS2BOLT12Router<InnerRouter, InnerMessageRouter, Arc<KeysManager>>;
 pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
@@ -295,11 +296,12 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 
 pub(crate) type HRNResolver = LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>;
 
-pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
+pub(crate) type InnerMessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
 	Arc<Logger>,
 	Arc<KeysManager>,
 >;
+pub(crate) type MessageRouter = Router;
 
 pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,

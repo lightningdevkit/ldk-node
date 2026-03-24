@@ -19,6 +19,8 @@ use lightning::events::HTLCHandlingFailureType;
 use lightning::ln::channelmanager::{InterceptId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
+use lightning::offers::offer::OfferId;
+use lightning::onion_message::messenger::OnionMessageInterceptor;
 use lightning::routing::router::{RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
@@ -32,6 +34,7 @@ use lightning_liquidity::lsps1::msgs::{
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
 use lightning_liquidity::lsps2::msgs::{LSPS2OpeningFeeParams, LSPS2RawOpeningFeeParams};
+use lightning_liquidity::lsps2::router::LSPS2Bolt12InvoiceParameters;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
@@ -44,7 +47,8 @@ use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{
-	Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet,
+	Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Router,
+	Wallet,
 };
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
@@ -154,11 +158,13 @@ where
 	lsps2_service: Option<LSPS2Service>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
+	router: Arc<Router>,
 	keys_manager: Arc<KeysManager>,
 	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
+	onion_message_interceptor: Option<Arc<dyn OnionMessageInterceptor + Send + Sync>>,
 	logger: L,
 }
 
@@ -168,8 +174,10 @@ where
 {
 	pub(crate) fn new(
 		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		chain_source: Arc<ChainSource>, tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>,
-		config: Arc<Config>, logger: L,
+		router: Arc<Router>, chain_source: Arc<ChainSource>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>,
+		onion_message_interceptor: Option<Arc<dyn OnionMessageInterceptor + Send + Sync>>,
+		logger: L,
 	) -> Self {
 		let lsps1_client = None;
 		let lsps2_client = None;
@@ -180,11 +188,13 @@ where
 			lsps2_service,
 			wallet,
 			channel_manager,
+			router,
 			keys_manager,
 			chain_source,
 			tx_broadcaster,
 			kv_store,
 			config,
+			onion_message_interceptor,
 			logger,
 		}
 	}
@@ -239,7 +249,12 @@ where
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
 			let lsps5_service_config = None;
 			let advertise_service = s.service_config.advertise_service;
-			LiquidityServiceConfig { lsps2_service_config, lsps5_service_config, advertise_service }
+			LiquidityServiceConfig {
+				lsps1_service_config: None,
+				lsps2_service_config,
+				lsps5_service_config,
+				advertise_service,
+			}
 		});
 
 		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.ldk_client_config.clone());
@@ -256,12 +271,11 @@ where
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.channel_manager),
-				Some(Arc::clone(&self.chain_source)),
-				None,
 				Arc::clone(&self.kv_store),
 				Arc::clone(&self.tx_broadcaster),
 				liquidity_service_config,
 				liquidity_client_config,
+				self.onion_message_interceptor,
 			)
 			.await
 			.map_err(|_| BuildError::ReadFailed)?,
@@ -273,6 +287,7 @@ where
 			lsps2_service: self.lsps2_service,
 			wallet: self.wallet,
 			channel_manager: self.channel_manager,
+			router: self.router,
 			peer_manager: RwLock::new(None),
 			keys_manager: self.keys_manager,
 			liquidity_manager,
@@ -291,6 +306,7 @@ where
 	lsps2_service: Option<LSPS2Service>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
+	router: Arc<Router>,
 	peer_manager: RwLock<Option<Weak<PeerManager>>>,
 	keys_manager: Arc<KeysManager>,
 	liquidity_manager: Arc<LiquidityManager>,
@@ -1191,6 +1207,104 @@ where
 		Ok((invoice, min_prop_fee_ppm_msat))
 	}
 
+	pub(crate) async fn lsps2_register_bolt12_payment_paths(
+		&self, offer_id: OfferId, amount_msat: u64, max_total_lsp_fee_limit_msat: Option<u64>,
+	) -> Result<u64, Error> {
+		let fee_response = self.lsps2_request_opening_fee_params().await?;
+
+		let (min_total_fee_msat, min_opening_params) = fee_response
+			.opening_fee_params_menu
+			.into_iter()
+			.filter_map(|params| {
+				if amount_msat < params.min_payment_size_msat
+					|| amount_msat > params.max_payment_size_msat
+				{
+					log_debug!(self.logger,
+						"Skipping LSP-offered JIT parameters as the payment of {}msat doesn't meet LSP limits (min: {}msat, max: {}msat)",
+						amount_msat,
+						params.min_payment_size_msat,
+						params.max_payment_size_msat
+					);
+					None
+				} else {
+					compute_opening_fee(amount_msat, params.min_fee_msat, params.proportional as u64)
+						.map(|fee| (fee, params))
+				}
+			})
+			.min_by_key(|p| p.0)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to handle response from liquidity service",);
+				Error::LiquidityRequestFailed
+			})?;
+
+		if let Some(max_total_lsp_fee_limit_msat) = max_total_lsp_fee_limit_msat {
+			if min_total_fee_msat > max_total_lsp_fee_limit_msat {
+				log_error!(self.logger,
+					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
+					min_total_fee_msat, max_total_lsp_fee_limit_msat
+				);
+				return Err(Error::LiquidityFeeTooHigh);
+			}
+		}
+
+		let buy_response =
+			self.lsps2_send_buy_request(Some(amount_msat), min_opening_params).await?;
+		self.register_lsps2_bolt12_payment_paths(offer_id, buy_response)?;
+
+		Ok(min_total_fee_msat)
+	}
+
+	pub(crate) async fn lsps2_register_variable_amount_bolt12_payment_paths(
+		&self, offer_id: OfferId, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<u64, Error> {
+		let fee_response = self.lsps2_request_opening_fee_params().await?;
+
+		let (min_prop_fee_ppm_msat, min_opening_params) = fee_response
+			.opening_fee_params_menu
+			.into_iter()
+			.map(|params| (params.proportional as u64, params))
+			.min_by_key(|p| p.0)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to handle response from liquidity service",);
+				Error::LiquidityRequestFailed
+			})?;
+
+		if let Some(max_proportional_lsp_fee_limit_ppm_msat) =
+			max_proportional_lsp_fee_limit_ppm_msat
+		{
+			if min_prop_fee_ppm_msat > max_proportional_lsp_fee_limit_ppm_msat {
+				log_error!(self.logger,
+					"Failed to request inbound JIT channel as LSP's requested proportional opening fee of {} ppm msat exceeds our fee limit of {} ppm msat",
+					min_prop_fee_ppm_msat,
+					max_proportional_lsp_fee_limit_ppm_msat
+				);
+				return Err(Error::LiquidityFeeTooHigh);
+			}
+		}
+
+		let buy_response = self.lsps2_send_buy_request(None, min_opening_params).await?;
+		self.register_lsps2_bolt12_payment_paths(offer_id, buy_response)?;
+
+		Ok(min_prop_fee_ppm_msat)
+	}
+
+	fn register_lsps2_bolt12_payment_paths(
+		&self, offer_id: OfferId, buy_response: LSPS2BuyResponse,
+	) -> Result<(), Error> {
+		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		self.router.register_offer(
+			offer_id,
+			LSPS2Bolt12InvoiceParameters {
+				counterparty_node_id: lsps2_client.lsp_node_id,
+				intercept_scid: buy_response.intercept_scid,
+				cltv_expiry_delta: buy_response.cltv_expiry_delta,
+			},
+		);
+
+		Ok(())
+	}
+
 	async fn lsps2_request_opening_fee_params(&self) -> Result<LSPS2FeeResponse, Error> {
 		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -1303,7 +1417,14 @@ where
 			src_node_id: lsps2_client.lsp_node_id,
 			short_channel_id: buy_response.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
-			cltv_expiry_delta: buy_response.cltv_expiry_delta as u16,
+			cltv_expiry_delta: u16::try_from(buy_response.cltv_expiry_delta).map_err(|_| {
+				log_error!(
+					self.logger,
+					"Failed to create JIT invoice as LSPS2 CLTV delta {} exceeds supported range",
+					buy_response.cltv_expiry_delta
+				);
+				Error::LiquidityRequestFailed
+			})?,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]);
