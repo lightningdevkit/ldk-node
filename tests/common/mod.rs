@@ -272,6 +272,10 @@ pub(crate) fn random_chain_source<'a>(
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
 		},
+		4 => {
+			println!("Randomly setting up CBF compact block filter syncing...");
+			TestChainSource::Cbf(bitcoind)
+		},
 		_ => unreachable!(),
 	}
 }
