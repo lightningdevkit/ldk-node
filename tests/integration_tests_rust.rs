@@ -23,8 +23,9 @@ use common::{
 	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
 	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
+	setup_two_nodes, splice_in_with_all, wait_for_cbf_sync, wait_for_tx,
+	TestChainSource, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
@@ -2953,6 +2954,341 @@ async fn splice_in_with_all_balance() {
 		remaining_balance < anchor_reserve_sat + 500,
 		"Remaining balance {remaining_balance} should be close to the anchor reserve {anchor_reserve_sat}"
 	);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn start_stop_cbf() {
+	let (bitcoind, _electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	assert!(node.status().is_running);
+	node.stop().unwrap();
+	assert_eq!(node.stop(), Err(NodeError::NotRunning));
+
+	node.start().unwrap();
+	assert_eq!(node.start(), Err(NodeError::AlreadyRunning));
+	assert!(node.status().is_running);
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn fee_rate_estimation_after_manual_sync_cbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	let addr = node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(100_000),
+	)
+	.await;
+
+	wait_for_cbf_sync(&node).await;
+	let first_fee_update = node.status().latest_fee_rate_cache_update_timestamp;
+	assert!(first_fee_update.is_some());
+
+	// Subsequent manual syncs should keep the fee cache populated.
+	node.sync_wallets().unwrap();
+	let second_fee_update = node.status().latest_fee_rate_cache_update_timestamp;
+	assert!(second_fee_update.is_some());
+	assert!(second_fee_update >= first_fee_update);
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn repeated_manual_sync_cbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let node = setup_node(&chain_source, random_config(true));
+
+	let addr = node.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 100_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	wait_for_cbf_sync(&node).await;
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	// Regression: the second manual sync must not block forever.
+	node.sync_wallets().unwrap();
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn start_stop_reinit_cbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let config = random_config(true);
+
+	let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
+	let peer_addr = format!("{}", p2p_socket);
+	let sync_config = ldk_node::config::CbfSyncConfig {
+		background_sync_config: None,
+		..Default::default()
+	};
+
+	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
+
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_cbf(vec![peer_addr.clone()], Some(sync_config.clone()));
+
+	let node = builder
+		.build_with_store(config.node_entropy.clone().into(), test_sync_store.clone())
+		.unwrap();
+	node.start().unwrap();
+
+	let expected_node_id = node.node_id();
+	assert_eq!(node.start(), Err(NodeError::AlreadyRunning));
+
+	let funding_address = node.onchain_payment().new_address().unwrap();
+	assert_eq!(node.list_balances().total_onchain_balance_sats, 0);
+
+	let expected_amount = Amount::from_sat(100_000);
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![funding_address],
+		expected_amount,
+	)
+	.await;
+
+	wait_for_cbf_sync(&node).await;
+	assert_eq!(node.list_balances().spendable_onchain_balance_sats, expected_amount.to_sat());
+
+	node.stop().unwrap();
+	assert_eq!(node.stop(), Err(NodeError::NotRunning));
+
+	node.start().unwrap();
+	assert_eq!(node.start(), Err(NodeError::AlreadyRunning));
+
+	node.stop().unwrap();
+	assert_eq!(node.stop(), Err(NodeError::NotRunning));
+	drop(node);
+
+	// Reinitialize from the same config and store.
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config));
+
+	let reinitialized_node =
+		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+	reinitialized_node.start().unwrap();
+	assert_eq!(reinitialized_node.node_id(), expected_node_id);
+
+	// Balance should be persisted from the previous run.
+	assert_eq!(
+		reinitialized_node.list_balances().spendable_onchain_balance_sats,
+		expected_amount.to_sat()
+	);
+
+	wait_for_cbf_sync(&reinitialized_node).await;
+	assert_eq!(
+		reinitialized_node.list_balances().spendable_onchain_balance_sats,
+		expected_amount.to_sat()
+	);
+
+	reinitialized_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_wallet_recovery_cbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+
+	let original_config = random_config(true);
+	let original_node_entropy = original_config.node_entropy.clone();
+	let original_node = setup_node(&chain_source, original_config);
+
+	let premine_amount_sat = 100_000;
+
+	let addr_1 = original_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_1],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	wait_for_cbf_sync(&original_node).await;
+	assert_eq!(original_node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let addr_2 = original_node.onchain_payment().new_address().unwrap();
+
+	let txid = bitcoind
+		.client
+		.send_to_address(&addr_2, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+
+	wait_for_cbf_sync(&original_node).await;
+	assert_eq!(
+		original_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2
+	);
+
+	original_node.stop().unwrap();
+	drop(original_node);
+
+	// Now we start from scratch, only the seed remains the same.
+	let mut recovered_config = random_config(true);
+	recovered_config.node_entropy = original_node_entropy;
+	recovered_config.recovery_mode = true;
+	let recovered_node = setup_node(&chain_source, recovered_config);
+
+	wait_for_cbf_sync(&recovered_node).await;
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2
+	);
+
+	// Check we sync even when skipping some addresses.
+	let _addr_3 = recovered_node.onchain_payment().new_address().unwrap();
+	let _addr_4 = recovered_node.onchain_payment().new_address().unwrap();
+	let _addr_5 = recovered_node.onchain_payment().new_address().unwrap();
+	let addr_6 = recovered_node.onchain_payment().new_address().unwrap();
+
+	let txid = bitcoind
+		.client
+		.send_to_address(&addr_6, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+
+	wait_for_cbf_sync(&recovered_node).await;
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 3
+	);
+
+	recovered_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_send_receive_cbf() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Cbf(&bitcoind);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 1_100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b.clone()],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	wait_for_cbf_sync(&node_a).await;
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	// Check on-chain payment tracking after premine.
+	let node_a_payments = node_a.list_payments();
+	let node_b_payments = node_b.list_payments();
+	for payments in [&node_a_payments, &node_b_payments] {
+		assert_eq!(payments.len(), 1);
+	}
+	for p in [node_a_payments.first().unwrap(), node_b_payments.first().unwrap()] {
+		assert_eq!(p.amount_msat, Some(premine_amount_sat * 1000));
+		assert_eq!(p.direction, PaymentDirection::Inbound);
+		assert_eq!(p.status, PaymentStatus::Pending);
+		match p.kind {
+			PaymentKind::Onchain { status, .. } => {
+				assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			},
+			_ => panic!("Unexpected payment kind"),
+		}
+	}
+
+	// Send from B to A.
+	let amount_to_send_sats = 54_321;
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+
+	// Mine the transaction so CBF can see it.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	wait_for_cbf_sync(&node_a).await;
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(txid.to_byte_array());
+	let payment_a = node_a.payment(&payment_id).unwrap();
+	match payment_a.kind {
+		PaymentKind::Onchain { txid: tx, status } => {
+			assert_eq!(tx, txid);
+			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+	assert!(payment_a.fee_paid_msat > Some(0));
+	assert_eq!(payment_a.amount_msat, Some(amount_to_send_sats * 1000));
+
+	let payment_b = node_b.payment(&payment_id).unwrap();
+	match payment_b.kind {
+		PaymentKind::Onchain { txid: tx, status } => {
+			assert_eq!(tx, txid);
+			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+	assert!(payment_b.fee_paid_msat > Some(0));
+	assert_eq!(payment_b.amount_msat, Some(amount_to_send_sats * 1000));
+	assert_eq!(payment_a.fee_paid_msat, payment_b.fee_paid_msat);
+
+	let onchain_fee_buffer_sat = 1000;
+	let expected_node_a_balance = premine_amount_sat + amount_to_send_sats;
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, expected_node_a_balance);
+	assert!(
+		node_b.list_balances().spendable_onchain_balance_sats
+			> premine_amount_sat - amount_to_send_sats - onchain_fee_buffer_sat
+	);
+	assert!(
+		node_b.list_balances().spendable_onchain_balance_sats
+			< premine_amount_sat - amount_to_send_sats
+	);
+
+	// Test send_all_to_address.
+	let addr_b2 = node_b.onchain_payment().new_address().unwrap();
+	let txid = node_a.onchain_payment().send_all_to_address(&addr_b2, false, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	wait_for_cbf_sync(&node_a).await;
+	node_b.sync_wallets().unwrap();
+
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
+	assert_eq!(node_a.list_balances().total_onchain_balance_sats, 0);
+	assert!(node_b.list_balances().spendable_onchain_balance_sats > premine_amount_sat);
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
