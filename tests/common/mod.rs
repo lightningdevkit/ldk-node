@@ -330,7 +330,16 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..3);
+	// Allow forcing a specific backend via LDK_TEST_CHAIN_SOURCE env var.
+	// Valid values: "esplora", "electrum", "bitcoind-rpc", "bitcoind-rest", "cbf"
+	let r = match std::env::var("LDK_TEST_CHAIN_SOURCE").ok().as_deref() {
+		Some("esplora") => 0,
+		Some("electrum") => 1,
+		Some("bitcoind-rpc") => 2,
+		Some("bitcoind-rest") => 3,
+		Some("cbf") => 4,
+		_ => rand::random_range(0..5),
+	};
 	match r {
 		0 => {
 			println!("Randomly setting up Esplora chain syncing...");
@@ -347,6 +356,10 @@ pub(crate) fn random_chain_source<'a>(
 		3 => {
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
+		},
+		4 => {
+			println!("Randomly setting up CBF compact block filter syncing...");
+			TestChainSource::Cbf(bitcoind)
 		},
 		_ => unreachable!(),
 	}
