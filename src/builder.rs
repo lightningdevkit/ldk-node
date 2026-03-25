@@ -78,7 +78,7 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph,
-	InnerMessageRouter, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	InnerMessageRouter, KeysManager, OnionMessenger, PaymentStore, PeerManager,
 	PendingPaymentStore, Persister, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
