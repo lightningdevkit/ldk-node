@@ -300,6 +300,7 @@ dictionary LSPS1ChannelInfo {
 [Remote]
 enum LSPS1PaymentState {
 	"ExpectPayment",
+	"Hold",
 	"Paid",
 	"Refunded",
 };
