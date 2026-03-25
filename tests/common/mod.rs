@@ -966,6 +966,41 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			manual_payment_hash,
 		)
 		.unwrap();
+	let min_cltv_expiry_delta = 100;
+	let manual_preimage_with_min_cltv = PaymentPreimage([44u8; 32]);
+	let manual_payment_hash_with_min_cltv =
+		PaymentHash(Sha256::hash(&manual_preimage_with_min_cltv.0).to_byte_array());
+	let manual_invoice_with_min_cltv = node_b
+		.bolt11_payment()
+		.receive_for_hash_with_min_cltv_expiry_delta(
+			invoice_amount_3_msat,
+			&invoice_description.clone().into(),
+			9217,
+			manual_payment_hash_with_min_cltv,
+			min_cltv_expiry_delta,
+		)
+		.unwrap();
+	let expected_min_final_cltv_expiry_delta = u64::from(min_cltv_expiry_delta) + 3;
+	assert_eq!(
+		manual_invoice_with_min_cltv.min_final_cltv_expiry_delta(),
+		expected_min_final_cltv_expiry_delta
+	);
+	let manual_variable_preimage_with_min_cltv = PaymentPreimage([45u8; 32]);
+	let manual_variable_payment_hash_with_min_cltv =
+		PaymentHash(Sha256::hash(&manual_variable_preimage_with_min_cltv.0).to_byte_array());
+	let manual_variable_invoice_with_min_cltv = node_b
+		.bolt11_payment()
+		.receive_variable_amount_for_hash_with_min_cltv_expiry_delta(
+			&invoice_description.clone().into(),
+			9217,
+			manual_variable_payment_hash_with_min_cltv,
+			min_cltv_expiry_delta,
+		)
+		.unwrap();
+	assert_eq!(
+		manual_variable_invoice_with_min_cltv.min_final_cltv_expiry_delta(),
+		expected_min_final_cltv_expiry_delta
+	);
 	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).unwrap();
 
 	let claimable_amount_msat = expect_payment_claimable_event!(
