@@ -28,6 +28,7 @@ const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
+const DEFAULT_MIN_FUNDING_SATS: u64 = 1_000;
 
 // The default timeout after which we abort a wallet syncing operation.
 const DEFAULT_BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 60;
@@ -125,6 +126,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `node_alias`                           | None               |
 /// | `trusted_peers_0conf`                  | []                 |
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
+/// | `min_funding_sats`                     | 1000               |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                     | None               |
 /// | `tor_config`                           | None               |
@@ -167,6 +169,15 @@ pub struct Config {
 	/// Channels with available liquidity less than the required amount times this value won't be
 	/// used to send pre-flight probes.
 	pub probing_liquidity_limit_multiplier: u64,
+	/// The minimum funding amount in satoshis that we require from channel counterparties when
+	/// they open inbound channels to us.
+	///
+	/// Channels with funding below this value will be rejected.
+	///
+	/// Please refer to [`ChannelHandshakeLimits::min_funding_satoshis`] for further details.
+	///
+	/// [`ChannelHandshakeLimits::min_funding_satoshis`]: lightning::util::config::ChannelHandshakeLimits::min_funding_satoshis
+	pub min_funding_sats: u64,
 	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
 	/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
 	///
@@ -210,6 +221,7 @@ impl Default for Config {
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
+			min_funding_sats: DEFAULT_MIN_FUNDING_SATS,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			tor_config: None,
 			route_parameters: None,
@@ -339,6 +351,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// will mostly be relevant for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_limits.min_funding_satoshis = config.min_funding_sats;
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 	user_config.reject_inbound_splices = false;
@@ -637,7 +650,9 @@ pub enum AsyncPaymentsRole {
 mod tests {
 	use std::str::FromStr;
 
-	use super::{may_announce_channel, AnnounceError, Config, NodeAlias, SocketAddress};
+	use super::{
+		default_user_config, may_announce_channel, AnnounceError, Config, NodeAlias, SocketAddress,
+	};
 
 	#[test]
 	fn node_announce_channel() {
@@ -683,5 +698,19 @@ mod tests {
 			addresses.push(socket_address);
 		}
 		assert!(may_announce_channel(&node_config).is_ok());
+	}
+
+	#[test]
+	fn min_funding_sats_configures_user_config() {
+		let mut node_config = Config::default();
+		let user_config = default_user_config(&node_config);
+		assert_eq!(
+			user_config.channel_handshake_limits.min_funding_satoshis,
+			node_config.min_funding_sats
+		);
+
+		node_config.min_funding_sats = 42_000;
+		let user_config = default_user_config(&node_config);
+		assert_eq!(user_config.channel_handshake_limits.min_funding_satoshis, 42_000);
 	}
 }
