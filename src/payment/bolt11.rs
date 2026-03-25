@@ -555,6 +555,40 @@ impl Bolt11Payment {
 		Ok(())
 	}
 
+	/// Allows to cancel a previously created invoice identified by the given payment hash.
+	///
+	/// This will mark the corresponding payment as failed and cause any incoming HTLCs for this
+	/// invoice to be automatically failed back.
+	///
+	/// Will check that the payment is known and has not already been claimed, and will return an
+	/// error otherwise.
+	pub fn cancel_invoice(&self, payment_hash: PaymentHash) -> Result<(), Error> {
+		let payment_id = PaymentId(payment_hash.0);
+
+		if let Some(info) = self.payment_store.get(&payment_id) {
+			if info.direction != PaymentDirection::Inbound {
+				log_error!(
+					self.logger,
+					"Failed to cancel invoice for non-inbound payment with hash {payment_hash}"
+				);
+				return Err(Error::InvalidPaymentHash);
+			}
+
+			if info.status == PaymentStatus::Succeeded {
+				log_error!(
+					self.logger,
+					"Failed to cancel invoice with hash {payment_hash}: payment has already been claimed",
+				);
+				return Err(Error::InvalidPaymentHash);
+			}
+		} else {
+			log_error!(self.logger, "Failed to cancel unknown invoice with hash {payment_hash}");
+			return Err(Error::InvalidPaymentHash);
+		}
+
+		self.fail_for_hash(payment_hash)
+	}
+
 	/// Returns a payable invoice that can be used to request and receive a payment of the amount
 	/// given.
 	///
