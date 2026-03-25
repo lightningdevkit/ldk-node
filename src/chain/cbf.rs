@@ -19,11 +19,12 @@ use bip157::{
 };
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::{Amount, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
+use electrum_client::ElectrumApi;
 use lightning::chain::{Confirm, WatchedOutput};
 use lightning::util::ser::Writeable;
 use tokio::sync::{mpsc, oneshot};
 
-use super::WalletSyncStatus;
+use super::{FeeSourceConfig, WalletSyncStatus};
 use crate::config::{CbfSyncConfig, Config, BDK_CLIENT_STOP_GAP};
 use crate::error::Error;
 use crate::fee_estimator::{
@@ -42,11 +43,29 @@ const MIN_FEERATE_SAT_PER_KWU: u64 = 250;
 /// Number of recent blocks to look back for per-target fee rate estimation.
 const FEE_RATE_LOOKBACK_BLOCKS: usize = 6;
 
+/// The fee estimation back-end used by the CBF chain source.
+enum FeeSource {
+	/// Derive fee rates from the coinbase reward of recent blocks.
+	///
+	/// Provides a per-target rate using percentile selection across multiple blocks.
+	/// Less accurate than a mempool-aware source but requires no extra connectivity.
+	Cbf,
+	/// Delegate fee estimation to an Esplora HTTP server.
+	Esplora { client: esplora_client::AsyncClient },
+	/// Delegate fee estimation to an Electrum server.
+	///
+	/// A fresh connection is opened for each estimation cycle because `ElectrumClient`
+	/// is not `Sync`.
+	Electrum { server_url: String },
+}
+
 pub(super) struct CbfChainSource {
 	/// Peer addresses for sourcing compact block filters via P2P.
 	peers: Vec<String>,
 	/// User-provided sync configuration (timeouts, background sync intervals).
 	pub(super) sync_config: CbfSyncConfig,
+	/// Fee estimation back-end.
+	fee_source: FeeSource,
 	/// Tracks whether the bip157 node is running and holds the command handle.
 	cbf_runtime_status: Mutex<CbfRuntimeStatus>,
 	/// Latest chain tip hash, updated by the background event processing task.
@@ -101,10 +120,22 @@ struct CbfEventState {
 
 impl CbfChainSource {
 	pub(crate) fn new(
-		peers: Vec<String>, sync_config: CbfSyncConfig, fee_estimator: Arc<OnchainFeeEstimator>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		peers: Vec<String>, sync_config: CbfSyncConfig, fee_source_config: Option<FeeSourceConfig>,
+		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> Self {
+		let fee_source = match fee_source_config {
+			Some(FeeSourceConfig::Esplora(server_url)) => {
+				let timeout = sync_config.timeouts_config.per_request_timeout_secs;
+				let mut builder = esplora_client::Builder::new(&server_url);
+				builder = builder.timeout(timeout as u64);
+				let client = builder.build_async().unwrap();
+				FeeSource::Esplora { client }
+			},
+			Some(FeeSourceConfig::Electrum(server_url)) => FeeSource::Electrum { server_url },
+			None => FeeSource::Cbf,
+		};
+
 		let cbf_runtime_status = Mutex::new(CbfRuntimeStatus::Stopped);
 		let latest_tip = Arc::new(Mutex::new(None));
 		let watched_scripts = Arc::new(RwLock::new(Vec::new()));
@@ -121,6 +152,7 @@ impl CbfChainSource {
 		Self {
 			peers,
 			sync_config,
+			fee_source,
 			cbf_runtime_status,
 			latest_tip,
 			watched_scripts,
@@ -451,8 +483,24 @@ impl CbfChainSource {
 	async fn sync_onchain_wallet_op(
 		&self, requester: Requester, scripts: Vec<ScriptBuf>,
 	) -> Result<(TxUpdate<ConfirmationBlockTime>, SyncUpdate), Error> {
-		let skip_height = *self.last_onchain_synced_height.lock().unwrap();
-		let (sync_update, matched) = self.run_filter_scan(scripts, skip_height).await?;
+		// Always do a full scan (skip_height=None) for the on-chain wallet.
+		// Unlike the Lightning wallet which can rely on reorg_queue events,
+		// the on-chain wallet needs to see all blocks to correctly detect
+		// reorgs via checkpoint comparison in the caller.
+		//
+		// We include LDK-registered scripts (e.g., channel funding output
+		// scripts) alongside the wallet scripts. This ensures the on-chain
+		// wallet scan also fetches blocks containing channel funding
+		// transactions, whose outputs are needed by BDK's TxGraph to
+		// calculate fees for subsequent spends such as splice transactions.
+		// Without these, BDK's `calculate_fee` would fail with
+		// `MissingTxOut` because the parent transaction's outputs are
+		// unknown. This mirrors what the Bitcoind chain source does in
+		// `Wallet::block_connected` by inserting registered tx outputs.
+		let mut all_scripts = scripts;
+		// we query all registered scripts, not only BDK-related
+		all_scripts.extend(self.registered_scripts.lock().unwrap().iter().cloned());
+		let (sync_update, matched) = self.run_filter_scan(all_scripts, None).await?;
 
 		log_debug!(
 			self.logger,
@@ -608,13 +656,45 @@ impl CbfChainSource {
 	}
 
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
+		let new_fee_rate_cache = match &self.fee_source {
+			FeeSource::Cbf => self.fee_rate_cache_from_cbf().await?,
+			FeeSource::Esplora { client } => Some(self.fee_rate_cache_from_esplora(client).await?),
+			FeeSource::Electrum { server_url } => {
+				Some(self.fee_rate_cache_from_electrum(server_url).await?)
+			},
+		};
+
+		let Some(new_fee_rate_cache) = new_fee_rate_cache else {
+			return Ok(());
+		};
+
+		self.fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
+
+		update_node_metrics_timestamp(
+			&self.node_metrics,
+			&*self.kv_store,
+			&*self.logger,
+			|m, t| {
+				m.latest_fee_rate_cache_update_timestamp = t;
+			},
+		)?;
+
+		Ok(())
+	}
+
+	/// Derive per-target fee rates from recent blocks' coinbase outputs.
+	///
+	/// Returns `Ok(None)` when no chain tip is available yet (first startup before sync).
+	async fn fee_rate_cache_from_cbf(
+		&self,
+	) -> Result<Option<HashMap<crate::fee_estimator::ConfirmationTarget, FeeRate>>, Error> {
 		let requester = self.requester()?;
 
 		let tip_hash = match *self.latest_tip.lock().unwrap() {
 			Some(hash) => hash,
 			None => {
 				log_debug!(self.logger, "No tip available yet for fee rate estimation, skipping.");
-				return Ok(());
+				return Ok(None);
 			},
 		};
 
@@ -656,7 +736,7 @@ impl CbfChainSource {
 							e
 						);
 						*self.latest_tip.lock().unwrap() = None;
-						return Ok(());
+						return Ok(None);
 					},
 					Ok(Err(e)) => {
 						log_error!(
@@ -675,7 +755,7 @@ impl CbfChainSource {
 							e
 						);
 						*self.latest_tip.lock().unwrap() = None;
-						return Ok(());
+						return Ok(None);
 					},
 					Err(e) => {
 						log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
@@ -743,25 +823,130 @@ impl CbfChainSource {
 			);
 		}
 
-		self.fee_estimator.set_fee_rate_cache(new_fee_rate_cache);
-
 		log_debug!(
 			self.logger,
-			"Fee rate cache update finished in {}ms ({} blocks sampled).",
+			"CBF fee rate estimation finished in {}ms ({} blocks sampled).",
 			now.elapsed().as_millis(),
 			block_fee_rates.len(),
 		);
 
-		update_node_metrics_timestamp(
-			&self.node_metrics,
-			&*self.kv_store,
-			&*self.logger,
-			|m, t| {
-				m.latest_fee_rate_cache_update_timestamp = t;
-			},
-		)?;
+		Ok(Some(new_fee_rate_cache))
+	}
 
-		Ok(())
+	/// Fetch per-target fee rates from an Esplora server.
+	async fn fee_rate_cache_from_esplora(
+		&self, client: &esplora_client::AsyncClient,
+	) -> Result<HashMap<crate::fee_estimator::ConfirmationTarget, FeeRate>, Error> {
+		let timeout = Duration::from_secs(
+			self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
+		);
+		let estimates = tokio::time::timeout(timeout, client.get_fee_estimates())
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
+				Error::FeerateEstimationUpdateTimeout
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
+				Error::FeerateEstimationUpdateFailed
+			})?;
+
+		if estimates.is_empty() && self.config.network == Network::Bitcoin {
+			log_error!(
+				self.logger,
+				"Failed to retrieve fee rate estimates: empty estimates are disallowed on Mainnet.",
+			);
+			return Err(Error::FeerateEstimationUpdateFailed);
+		}
+
+		let confirmation_targets = get_all_conf_targets();
+		let mut new_fee_rate_cache = HashMap::with_capacity(confirmation_targets.len());
+		for target in confirmation_targets {
+			let num_blocks = get_num_block_defaults_for_target(target);
+			let converted_estimate_sat_vb =
+				esplora_client::convert_fee_rate(num_blocks, estimates.clone())
+					.map_or(1.0, |converted| converted.max(1.0));
+			let fee_rate = FeeRate::from_sat_per_kwu((converted_estimate_sat_vb * 250.0) as u64);
+			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+			new_fee_rate_cache.insert(target, adjusted_fee_rate);
+
+			log_trace!(
+				self.logger,
+				"Fee rate estimation updated for {:?}: {} sats/kwu",
+				target,
+				adjusted_fee_rate.to_sat_per_kwu(),
+			);
+		}
+		Ok(new_fee_rate_cache)
+	}
+
+	/// Fetch per-target fee rates from an Electrum server.
+	///
+	/// Opens a fresh connection for each call because `ElectrumClient` is not `Sync`.
+	async fn fee_rate_cache_from_electrum(
+		&self, server_url: &str,
+	) -> Result<HashMap<crate::fee_estimator::ConfirmationTarget, FeeRate>, Error> {
+		let server_url = server_url.to_owned();
+		let confirmation_targets = get_all_conf_targets();
+		let per_request_timeout = self.sync_config.timeouts_config.per_request_timeout_secs;
+
+		let raw_estimates: Vec<serde_json::Value> = tokio::time::timeout(
+			Duration::from_secs(
+				self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
+			),
+			tokio::task::spawn_blocking(move || {
+				let electrum_config = electrum_client::ConfigBuilder::new()
+					.retry(3)
+					.timeout(Some(per_request_timeout))
+					.build();
+				let client = electrum_client::Client::from_config(&server_url, electrum_config)
+					.map_err(|_| Error::FeerateEstimationUpdateFailed)?;
+				let mut batch = electrum_client::Batch::default();
+				for target in confirmation_targets {
+					batch.estimate_fee(get_num_block_defaults_for_target(target));
+				}
+				client.batch_call(&batch).map_err(|_| Error::FeerateEstimationUpdateFailed)
+			}),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
+			Error::FeerateEstimationUpdateTimeout
+		})?
+		.map_err(|_| Error::FeerateEstimationUpdateFailed)? // JoinError
+		?; // inner Result
+
+		let confirmation_targets = get_all_conf_targets();
+
+		if raw_estimates.len() != confirmation_targets.len()
+			&& self.config.network == Network::Bitcoin
+		{
+			log_error!(
+				self.logger,
+				"Failed to retrieve fee rate estimates: Electrum server didn't return all expected results.",
+			);
+			return Err(Error::FeerateEstimationUpdateFailed);
+		}
+
+		let mut new_fee_rate_cache = HashMap::with_capacity(confirmation_targets.len());
+		for (target, raw_rate) in confirmation_targets.into_iter().zip(raw_estimates.into_iter()) {
+			// Electrum returns BTC/KvB; fall back to 1 sat/vb (= 0.00001 BTC/KvB) on failure.
+			let fee_rate_btc_per_kvb =
+				raw_rate.as_f64().map_or(0.00001_f64, |v: f64| v.max(0.00001));
+			// Convert BTC/KvB → sat/kwu: multiply by 25_000_000 (= 10^8 / 4).
+			let fee_rate =
+				FeeRate::from_sat_per_kwu((fee_rate_btc_per_kvb * 25_000_000.0).round() as u64);
+			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+			new_fee_rate_cache.insert(target, adjusted_fee_rate);
+
+			log_trace!(
+				self.logger,
+				"Fee rate estimation updated for {:?}: {} sats/kwu",
+				target,
+				adjusted_fee_rate.to_sat_per_kwu(),
+			);
+		}
+		Ok(new_fee_rate_cache)
 	}
 
 	/// Broadcast a package of transactions via the P2P network.
