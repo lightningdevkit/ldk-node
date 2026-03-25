@@ -482,6 +482,41 @@ impl Default for ElectrumSyncConfig {
 	}
 }
 
+/// Configuration for syncing via BIP 157 compact block filters.
+///
+/// Background syncing is enabled by default, using the default values specified in
+/// [`BackgroundSyncConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CbfSyncConfig {
+	/// Background sync configuration.
+	///
+	/// If set to `None`, background syncing will be disabled. Users will need to manually
+	/// sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+	///
+	/// [`Node::sync_wallets`]: crate::Node::sync_wallets
+	pub background_sync_config: Option<BackgroundSyncConfig>,
+	/// Sync timeouts configuration.
+	pub timeouts_config: SyncTimeoutsConfig,
+	/// Peer response timeout in seconds for the bip157 P2P node.
+	///
+	/// If a peer does not respond within this duration, the connection may be dropped.
+	/// Higher values are recommended for slow peers or when downloading many blocks.
+	///
+	/// Defaults to 30 seconds.
+	pub response_timeout_secs: u64,
+}
+
+impl Default for CbfSyncConfig {
+	fn default() -> Self {
+		Self {
+			background_sync_config: Some(BackgroundSyncConfig::default()),
+			timeouts_config: SyncTimeoutsConfig::default(),
+			response_timeout_secs: 30,
+		}
+	}
+}
+
 /// Configuration for syncing with Bitcoin Core backend via REST.
 #[derive(Debug, Clone)]
 pub struct BitcoindRestClientConfig {

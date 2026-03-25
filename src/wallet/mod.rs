@@ -122,6 +122,28 @@ impl Wallet {
 		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
 	}
 
+	pub(crate) fn get_spks_for_cbf_sync(&self, stop_gap: usize) -> Vec<ScriptBuf> {
+		let wallet = self.inner.lock().unwrap();
+		let mut scripts: Vec<ScriptBuf> =
+			wallet.spk_index().revealed_spks(..).map(|((_, _), spk)| spk).collect();
+
+		// For first sync when no scripts have been revealed yet, generate
+		// lookahead scripts up to the stop gap for both keychains.
+		if scripts.is_empty() {
+			for keychain in [KeychainKind::External, KeychainKind::Internal] {
+				for idx in 0..stop_gap as u32 {
+					scripts.push(wallet.peek_address(keychain, idx).address.script_pubkey());
+				}
+			}
+		}
+
+		scripts
+	}
+
+	pub(crate) fn latest_checkpoint(&self) -> bdk_chain::CheckPoint {
+		self.inner.lock().unwrap().latest_checkpoint()
+	}
+
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
 		self.inner.lock().unwrap().tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
 	}

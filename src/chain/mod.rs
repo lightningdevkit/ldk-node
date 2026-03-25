@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 pub(crate) mod bitcoind;
+mod cbf;
 mod electrum;
 mod esplora;
 
@@ -17,11 +18,12 @@ use bitcoin::{Script, Txid};
 use lightning::chain::{BestBlock, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
+use crate::chain::cbf::CbfChainSource;
 use crate::chain::electrum::ElectrumChainSource;
 use crate::chain::esplora::EsploraChainSource;
 use crate::config::{
-	BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
+	BackgroundSyncConfig, BitcoindRestClientConfig, CbfSyncConfig, Config, ElectrumSyncConfig,
+	EsploraSyncConfig, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
@@ -93,6 +95,7 @@ enum ChainSourceKind {
 	Esplora(EsploraChainSource),
 	Electrum(ElectrumChainSource),
 	Bitcoind(BitcoindChainSource),
+	Cbf(CbfChainSource),
 }
 
 impl ChainSource {
@@ -184,10 +187,32 @@ impl ChainSource {
 		(Self { kind, registered_txids, tx_broadcaster, logger }, best_block)
 	}
 
+	pub(crate) fn new_cbf(
+		peers: Vec<String>, sync_config: CbfSyncConfig, fee_estimator: Arc<OnchainFeeEstimator>,
+		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+	) -> (Self, Option<BestBlock>) {
+		let cbf_chain_source = CbfChainSource::new(
+			peers,
+			sync_config,
+			fee_estimator,
+			kv_store,
+			config,
+			Arc::clone(&logger),
+			node_metrics,
+		);
+		let kind = ChainSourceKind::Cbf(cbf_chain_source);
+		let registered_txids = Mutex::new(Vec::new());
+		(Self { kind, registered_txids, tx_broadcaster, logger }, None)
+	}
+
 	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.start(runtime)?
+			},
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				cbf_chain_source.start(runtime);
 			},
 			_ => {
 				// Nothing to do for other chain sources.
@@ -199,6 +224,9 @@ impl ChainSource {
 	pub(crate) fn stop(&self) {
 		match &self.kind {
 			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.stop(),
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				cbf_chain_source.stop();
+			},
 			_ => {
 				// Nothing to do for other chain sources.
 			},
@@ -210,6 +238,7 @@ impl ChainSource {
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				Some(bitcoind_chain_source.as_utxo_source())
 			},
+			ChainSourceKind::Cbf { .. } => None,
 			_ => None,
 		}
 	}
@@ -223,6 +252,7 @@ impl ChainSource {
 			ChainSourceKind::Esplora(_) => true,
 			ChainSourceKind::Electrum { .. } => true,
 			ChainSourceKind::Bitcoind { .. } => false,
+			ChainSourceKind::Cbf { .. } => true,
 		}
 	}
 
@@ -288,6 +318,28 @@ impl ChainSource {
 						output_sweeper,
 					)
 					.await
+			},
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				if let Some(background_sync_config) =
+					cbf_chain_source.sync_config.background_sync_config.as_ref()
+				{
+					self.start_tx_based_sync_loop(
+						stop_sync_receiver,
+						onchain_wallet,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+						background_sync_config,
+						Arc::clone(&self.logger),
+					)
+					.await
+				} else {
+					log_info!(
+						self.logger,
+						"Background syncing is disabled. Manual syncing required for onchain wallet, lightning wallet, and fee rate updates.",
+					);
+					return;
+				}
 			},
 		}
 	}
@@ -368,6 +420,9 @@ impl ChainSource {
 				// `ChainPoller`. So nothing to do here.
 				unreachable!("Onchain wallet will be synced via chain polling")
 			},
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				cbf_chain_source.sync_onchain_wallet(onchain_wallet).await
+			},
 		}
 	}
 
@@ -392,6 +447,11 @@ impl ChainSource {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
 				// `ChainPoller`. So nothing to do here.
 				unreachable!("Lightning wallet will be synced via chain polling")
+			},
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				cbf_chain_source
+					.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper)
+					.await
 			},
 		}
 	}
@@ -421,6 +481,10 @@ impl ChainSource {
 					)
 					.await
 			},
+			ChainSourceKind::Cbf { .. } => {
+				// In CBF mode we sync wallets via compact block filters.
+				unreachable!("Listeners will be synced via compact block filter syncing")
+			},
 		}
 	}
 
@@ -434,6 +498,9 @@ impl ChainSource {
 			},
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source.update_fee_rate_estimates().await
+			},
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				cbf_chain_source.update_fee_rate_estimates().await
 			},
 		}
 	}
@@ -463,6 +530,9 @@ impl ChainSource {
 						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 							bitcoind_chain_source.process_broadcast_package(next_package).await
 						},
+						ChainSourceKind::Cbf(cbf_chain_source) => {
+							cbf_chain_source.process_broadcast_package(next_package).await
+						},
 					}
 				}
 			}
@@ -481,6 +551,9 @@ impl Filter for ChainSource {
 				electrum_chain_source.register_tx(txid, script_pubkey)
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				cbf_chain_source.register_tx(txid, script_pubkey)
+			},
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
@@ -492,6 +565,7 @@ impl Filter for ChainSource {
 				electrum_chain_source.register_output(output)
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
+			ChainSourceKind::Cbf(cbf_chain_source) => cbf_chain_source.register_output(output),
 		}
 	}
 }
