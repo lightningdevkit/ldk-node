@@ -84,6 +84,19 @@ impl WalletSyncStatus {
 	}
 }
 
+/// Optional external fee estimation backend for the CBF chain source.
+///
+/// By default CBF derives fee rates from recent blocks' coinbase outputs.
+/// Setting an external source provides more accurate, per-target estimates
+/// from a mempool-aware server.
+#[derive(Debug, Clone)]
+pub enum FeeSourceConfig {
+	/// Use an Esplora HTTP server for fee rate estimation.
+	Esplora(String),
+	/// Use an Electrum server for fee rate estimation.
+	Electrum(String),
+}
+
 pub(crate) struct ChainSource {
 	kind: ChainSourceKind,
 	registered_txids: Mutex<Vec<Txid>>,
@@ -188,13 +201,15 @@ impl ChainSource {
 	}
 
 	pub(crate) fn new_cbf(
-		peers: Vec<String>, sync_config: CbfSyncConfig, fee_estimator: Arc<OnchainFeeEstimator>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		peers: Vec<String>, sync_config: CbfSyncConfig, fee_source_config: Option<FeeSourceConfig>,
+		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
+		node_metrics: Arc<RwLock<NodeMetrics>>,
 	) -> (Self, Option<BestBlock>) {
 		let cbf_chain_source = CbfChainSource::new(
 			peers,
 			sync_config,
+			fee_source_config,
 			fee_estimator,
 			kv_store,
 			config,

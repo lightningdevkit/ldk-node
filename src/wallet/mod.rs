@@ -1183,9 +1183,15 @@ impl Wallet {
 
 		let kind = PaymentKind::Onchain { txid, status: confirmation_status };
 
-		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
+		let fee = match locked_wallet.calculate_fee(tx) {
+			Ok(fee) => Some(fee),
+			Err(e) => {
+				log_error!(self.logger, "Failed to calculate fee for tx {}: {:?}", txid, e);
+				None
+			},
+		};
 		let (sent, received) = locked_wallet.sent_and_received(tx);
-		let fee_sat = fee.to_sat();
+		let fee_sat = fee.map_or(0, |f| f.to_sat());
 
 		let (direction, amount_msat) = if sent > received {
 			(
@@ -1208,7 +1214,7 @@ impl Wallet {
 			payment_id,
 			kind,
 			amount_msat,
-			Some(fee_sat * 1000),
+			fee.map(|f| f.to_sat() * 1000),
 			direction,
 			payment_status,
 		)
