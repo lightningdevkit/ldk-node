@@ -46,7 +46,7 @@ use lightning_dns_resolver::OMDomainResolver;
 use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 
-use crate::chain::ChainSource;
+use crate::chain::{ChainSource, FeeSourceConfig};
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, CbfSyncConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
@@ -113,6 +113,7 @@ enum ChainDataSourceConfig {
 	Cbf {
 		peers: Vec<String>,
 		sync_config: Option<CbfSyncConfig>,
+		fee_source_config: Option<FeeSourceConfig>,
 	},
 }
 
@@ -397,8 +398,10 @@ impl NodeBuilder {
 	/// target selection partially mitigates this.
 	pub fn set_chain_source_cbf(
 		&mut self, peers: Vec<String>, sync_config: Option<CbfSyncConfig>,
+		fee_source_config: Option<FeeSourceConfig>,
 	) -> &mut Self {
-		self.chain_data_source_config = Some(ChainDataSourceConfig::Cbf { peers, sync_config });
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::Cbf { peers, sync_config, fee_source_config });
 		self
 	}
 
@@ -942,8 +945,11 @@ impl ArcedNodeBuilder {
 	/// divided by block weight) rather than per-transaction fee rates. This can underestimate
 	/// next-block inclusion rates during periods of high mempool congestion. Percentile-based
 	/// target selection partially mitigates this.
-	pub fn set_chain_source_cbf(&self, peers: Vec<String>, sync_config: Option<CbfSyncConfig>) {
-		self.inner.write().unwrap().set_chain_source_cbf(peers, sync_config);
+	pub fn set_chain_source_cbf(
+		&self, peers: Vec<String>, sync_config: Option<CbfSyncConfig>,
+		fee_source_config: Option<FeeSourceConfig>,
+	) {
+		self.inner.write().unwrap().set_chain_source_cbf(peers, sync_config, fee_source_config);
 	}
 
 	/// Configures the [`Node`] instance to connect to a Bitcoin Core node via RPC.
@@ -1423,11 +1429,12 @@ fn build_with_store_internal(
 			}),
 		},
 
-		Some(ChainDataSourceConfig::Cbf { peers, sync_config }) => {
+		Some(ChainDataSourceConfig::Cbf { peers, sync_config, fee_source_config }) => {
 			let sync_config = sync_config.clone().unwrap_or(CbfSyncConfig::default());
 			ChainSource::new_cbf(
 				peers.clone(),
 				sync_config,
+				fee_source_config.clone(),
 				Arc::clone(&fee_estimator),
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&kv_store),
@@ -2252,7 +2259,7 @@ mod tests {
 		let sync_config = CbfSyncConfig::default();
 
 		let peers = vec!["127.0.0.1:8333".to_string()];
-		builder.set_chain_source_cbf(peers.clone(), Some(sync_config.clone()));
+		builder.set_chain_source_cbf(peers.clone(), Some(sync_config.clone()), None);
 
 		let guard = builder.inner.read().unwrap();
 		assert!(matches!(
@@ -2260,6 +2267,7 @@ mod tests {
 			Some(super::ChainDataSourceConfig::Cbf {
 				peers: p,
 				sync_config: Some(config),
+				..
 			}) if config == &sync_config && p == &peers
 		));
 	}

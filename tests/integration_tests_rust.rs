@@ -24,7 +24,7 @@ use common::{
 	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_two_nodes, splice_in_with_all, wait_for_cbf_sync, wait_for_tx,
+	setup_two_nodes, splice_in_with_all, skip_if_cbf, wait_for_cbf_sync, wait_for_tx,
 	TestChainSource, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
@@ -102,6 +102,7 @@ async fn channel_full_cycle_force_close_trusted_no_reserve() {
 async fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	skip_if_cbf!(chain_source);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
 	do_channel_full_cycle(
 		node_a,
@@ -1059,6 +1060,7 @@ async fn splice_channel() {
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -1102,6 +1104,7 @@ async fn splice_channel() {
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -2639,6 +2642,7 @@ async fn persistence_backwards_compatibility() {
 async fn onchain_fee_bump_rbf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	skip_if_cbf!(chain_source);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
 
 	// Fund both nodes
@@ -3038,15 +3042,13 @@ async fn start_stop_reinit_cbf() {
 
 	let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
 	let peer_addr = format!("{}", p2p_socket);
-	let sync_config = ldk_node::config::CbfSyncConfig {
-		background_sync_config: None,
-		..Default::default()
-	};
+	let sync_config =
+		ldk_node::config::CbfSyncConfig { background_sync_config: None, ..Default::default() };
 
 	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
 
 	setup_builder!(builder, config.node_config);
-	builder.set_chain_source_cbf(vec![peer_addr.clone()], Some(sync_config.clone()));
+	builder.set_chain_source_cbf(vec![peer_addr.clone()], Some(sync_config.clone()), None);
 
 	let node = builder
 		.build_with_store(config.node_entropy.clone().into(), test_sync_store.clone())
@@ -3083,7 +3085,7 @@ async fn start_stop_reinit_cbf() {
 
 	// Reinitialize from the same config and store.
 	setup_builder!(builder, config.node_config);
-	builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config));
+	builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config), None);
 
 	let reinitialized_node =
 		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();

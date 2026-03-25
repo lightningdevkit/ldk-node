@@ -52,6 +52,17 @@ use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 use serde_json::{json, Value};
 
+macro_rules! skip_if_cbf {
+	($chain_source:expr) => {
+		if matches!($chain_source, TestChainSource::Cbf(_)) {
+			println!("Skipping test: not compatible with CBF chain source");
+			return;
+		}
+	};
+}
+
+pub(crate) use skip_if_cbf;
+
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
 		match $node.next_event_async().await {
@@ -504,7 +515,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
 			let peer_addr = format!("{}", p2p_socket);
 			let sync_config = CbfSyncConfig { background_sync_config: None, ..Default::default() };
-			builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config));
+			builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config), None);
 		},
 	}
 
@@ -617,7 +628,9 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
 
-	let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+	// An output's script will have at least 1 history entry (the tx that created it).
+	// When the output is spent, there will be at least 2 entries (creating + spending tx).
+	let is_spent = electrs.script_get_history(&txout_script).unwrap().len() >= 2;
 	if is_spent {
 		return;
 	}
@@ -625,10 +638,35 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	exponential_backoff_poll(|| {
 		electrs.ping().unwrap();
 
-		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+		let is_spent = electrs.script_get_history(&txout_script).unwrap().len() >= 2;
 		is_spent.then_some(())
 	})
 	.await;
+}
+
+/// Wait until a transaction spending the given outpoint appears in bitcoind's mempool.
+///
+/// This is more reliable than the electrum-based `wait_for_outpoint_spend` for CBF nodes,
+/// where the close tx is broadcast via P2P and electrs may not index it immediately.
+pub(crate) async fn wait_for_outpoint_spend_in_mempool(
+	bitcoind: &BitcoindClient, outpoint: OutPoint,
+) {
+	let check = || {
+		let mempool = bitcoind.get_raw_mempool().unwrap().into_model().unwrap();
+		for txid in mempool.0 {
+			let tx = bitcoind.get_raw_transaction(txid).unwrap().into_model().unwrap().0;
+			if tx.input.iter().any(|inp| inp.previous_output == outpoint) {
+				return Some(());
+			}
+		}
+		None
+	};
+
+	if check().is_some() {
+		return;
+	}
+
+	exponential_backoff_poll(check).await;
 }
 
 pub(crate) async fn wait_for_cbf_sync(node: &TestNode) {
@@ -1321,8 +1359,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_out_sat = funding_amount_sat / 2;
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
+	let splice_out_txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(electrsd, splice_out_txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
@@ -1343,8 +1382,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_in_sat = splice_out_sat;
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
+	let splice_in_txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(electrsd, splice_in_txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
@@ -1419,9 +1459,21 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(electrsd, funding_txo_b).await;
+	// After splices, the latest funding outpoint is from the last splice.
+	// We must wait for the close tx (which spends the latest funding output)
+	// to reach bitcoind's mempool before mining. For CBF nodes the close tx
+	// is broadcast via P2P so we poll bitcoind directly rather than relying
+	// on electrs indexing.
+	wait_for_outpoint_spend_in_mempool(bitcoind, splice_in_txo).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// CBF needs a second sync: the first sync confirms the close tx in the
+	// Lightning wallet, which may trigger new script registrations. The
+	// second sync picks up blocks matching those new scripts for the
+	// on-chain wallet.
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
