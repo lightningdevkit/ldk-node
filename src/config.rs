@@ -199,6 +199,20 @@ pub struct Config {
 	///
 	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
 	pub tor_config: Option<TorConfig>,
+	/// If set to `true`, BOLT12 invoices will not be paid automatically when received. Instead, an
+	/// [`Event::Bolt12InvoiceReceived`] event will be emitted, allowing inspection of the invoice
+	/// before explicitly paying via [`Bolt12Payment::send_payment_for_bolt12_invoice`] or
+	/// abandoning via [`Bolt12Payment::abandon_bolt12_invoice`].
+	///
+	/// **Note:** If the invoice is not paid or abandoned before the next LDK timer tick, the
+	/// payment will be timed out automatically.
+	///
+	/// Default value: `false`
+	///
+	/// [`Event::Bolt12InvoiceReceived`]: crate::Event::Bolt12InvoiceReceived
+	/// [`Bolt12Payment::send_payment_for_bolt12_invoice`]: crate::payment::Bolt12Payment::send_payment_for_bolt12_invoice
+	/// [`Bolt12Payment::abandon_bolt12_invoice`]: crate::payment::Bolt12Payment::abandon_bolt12_invoice
+	pub manually_handle_bolt12_invoices: bool,
 }
 
 impl Default for Config {
@@ -214,6 +228,7 @@ impl Default for Config {
 			tor_config: None,
 			route_parameters: None,
 			node_alias: None,
+			manually_handle_bolt12_invoices: false,
 		}
 	}
 }
@@ -342,6 +357,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
 		config.anchor_channels_config.is_some();
 	user_config.reject_inbound_splices = false;
+	user_config.manually_handle_bolt12_invoices = config.manually_handle_bolt12_invoices;
 
 	if may_announce_channel(config).is_err() {
 		user_config.accept_forwards_to_priv_channels = false;

@@ -2873,3 +2873,100 @@ async fn splice_in_with_all_balance() {
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn bolt12_manual_invoice_handling() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	// Node A: sender, with manually_handle_bolt12_invoices enabled
+	let mut config_a = random_config(true);
+	config_a.node_config.manually_handle_bolt12_invoices = true;
+	let node_a = setup_node(&chain_source, config_a);
+
+	// Node B: receiver, normal config
+	let config_b = random_config(true);
+	let node_b = setup_node(&chain_source, config_b);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Wait for node announcement propagation
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+	// Test 1: Manual pay flow
+	let expected_amount_msat = 100_000_000;
+	let offer =
+		node_b.bolt12_payment().receive(expected_amount_msat, "manual test", None, None).unwrap();
+
+	let payment_id = node_a.bolt12_payment().send(&offer, None, None, None).unwrap();
+
+	// Should get Bolt12InvoiceReceived instead of PaymentSuccessful
+	let event = node_a.next_event_async().await;
+	match event {
+		Event::Bolt12InvoiceReceived { payment_id: evt_id, payment_hash, amount_msat } => {
+			assert_eq!(evt_id, payment_id);
+			assert_eq!(amount_msat, expected_amount_msat);
+			assert_ne!(payment_hash, PaymentHash([0u8; 32]));
+			node_a.event_handled().unwrap();
+		},
+		ref e => panic!("Expected Bolt12InvoiceReceived, got: {:?}", e),
+	}
+
+	// Now explicitly pay the invoice
+	node_a.bolt12_payment().send_payment_for_bolt12_invoice(payment_id).unwrap();
+
+	// Should now get PaymentSuccessful
+	expect_payment_successful_event!(node_a, Some(payment_id), None);
+
+	// Receiver should get the payment
+	expect_payment_received_event!(node_b, expected_amount_msat);
+
+	// Test 2: Abandon flow
+	let offer2 =
+		node_b.bolt12_payment().receive(expected_amount_msat, "abandon test", None, None).unwrap();
+	let payment_id2 = node_a.bolt12_payment().send(&offer2, None, None, None).unwrap();
+
+	let event = node_a.next_event_async().await;
+	match event {
+		Event::Bolt12InvoiceReceived { payment_id: evt_id, .. } => {
+			assert_eq!(evt_id, payment_id2);
+			node_a.event_handled().unwrap();
+		},
+		ref e => panic!("Expected Bolt12InvoiceReceived, got: {:?}", e),
+	}
+
+	// Abandon instead of paying
+	node_a.bolt12_payment().abandon_bolt12_invoice(payment_id2).unwrap();
+
+	// Should get PaymentFailed
+	let event = node_a.next_event_async().await;
+	match event {
+		Event::PaymentFailed { payment_id: ref evt_id, .. } => {
+			assert_eq!(*evt_id, Some(payment_id2));
+			node_a.event_handled().unwrap();
+		},
+		ref e => panic!("Expected PaymentFailed, got: {:?}", e),
+	}
+}
