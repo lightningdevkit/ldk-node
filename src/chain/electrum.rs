@@ -89,6 +89,28 @@ impl ElectrumChainSource {
 		self.electrum_runtime_status.write().unwrap().stop();
 	}
 
+	pub(super) async fn get_block_hash_by_height(
+		&self, height: u32,
+	) -> Result<bitcoin::BlockHash, ()> {
+		// Try the runtime client if started, otherwise create a temporary connection.
+		let status = self.electrum_runtime_status.read().unwrap();
+		if let Some(client) = status.client() {
+			drop(status);
+			return client.get_block_hash_by_height(height);
+		}
+		drop(status);
+
+		// Runtime not started yet (called during build). Use a temporary client.
+		let config = ElectrumConfigBuilder::new()
+			.timeout(Some(self.sync_config.timeouts_config.per_request_timeout_secs))
+			.build();
+		let client = ElectrumClient::from_config(&self.server_url, config).map_err(|_| ())?;
+		let header_bytes = client.block_header_raw(height as usize).map_err(|_| ())?;
+		let header: bitcoin::block::Header =
+			bitcoin::consensus::deserialize(&header_bytes).map_err(|_| ())?;
+		Ok(header.block_hash())
+	}
+
 	pub(crate) async fn sync_onchain_wallet(
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
@@ -418,6 +440,14 @@ impl ElectrumRuntimeClient {
 			config,
 			logger,
 		})
+	}
+
+	fn get_block_hash_by_height(&self, height: u32) -> Result<bitcoin::BlockHash, ()> {
+		let header_bytes =
+			self.electrum_client.block_header_raw(height as usize).map_err(|_| ())?;
+		let header: bitcoin::block::Header =
+			bitcoin::consensus::deserialize(&header_bytes).map_err(|_| ())?;
+		Ok(header.block_hash())
 	}
 
 	async fn sync_confirmables(
