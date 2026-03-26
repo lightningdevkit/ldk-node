@@ -45,6 +45,7 @@ interface Builder {
 	void set_pathfinding_scores_source(string url);
 	void set_liquidity_source_lsps1(PublicKey node_id, SocketAddress address, string? token);
 	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
+	void add_lsp(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(string? log_file_path, LogLevel? max_log_level);
 	void set_log_facade_logger();
@@ -138,6 +139,8 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
 	bytes export_pathfinding_scores();
+	[Throws=NodeError]
+	void add_lsp(PublicKey node_id, SocketAddress address, string? token);
 };
 
 typedef interface Bolt11Payment;
