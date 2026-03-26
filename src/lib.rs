@@ -151,7 +151,8 @@ use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::msgs::SocketAddress;
+use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
+use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStoreSync;
@@ -160,6 +161,7 @@ use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
+use lightning_types::features::NodeFeatures;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -762,6 +764,7 @@ impl Node {
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp;
 		let latest_node_announcement_broadcast_timestamp =
 			locked_node_metrics.latest_node_announcement_broadcast_timestamp;
+		let node_features = self.node_features();
 
 		NodeStatus {
 			is_running,
@@ -772,6 +775,7 @@ impl Node {
 			latest_rgs_snapshot_timestamp,
 			latest_pathfinding_scores_sync_timestamp,
 			latest_node_announcement_broadcast_timestamp,
+			node_features,
 		}
 	}
 
@@ -1949,6 +1953,28 @@ impl Node {
 			Error::PersistenceFailed
 		})
 	}
+
+	/// Return the features used in node announcement.
+	fn node_features(&self) -> NodeFeatures {
+		let gossip_features = match self.gossip_source.as_gossip_sync() {
+			lightning_background_processor::GossipSync::P2P(p2p_gossip_sync) => {
+				p2p_gossip_sync.provided_node_features()
+			},
+			lightning_background_processor::GossipSync::Rapid(_) => NodeFeatures::empty(),
+			lightning_background_processor::GossipSync::None => {
+				unreachable!("We must always have a gossip sync!")
+			},
+		};
+		self.channel_manager.node_features()
+			| self.chain_monitor.provided_node_features()
+			| self.onion_messenger.provided_node_features()
+			| gossip_features
+			| self
+				.liquidity_source
+				.as_ref()
+				.map(|ls| ls.liquidity_manager().provided_node_features())
+				.unwrap_or_else(NodeFeatures::empty)
+	}
 }
 
 impl Drop for Node {
@@ -1992,6 +2018,8 @@ pub struct NodeStatus {
 	///
 	/// Will be `None` if we have no public channels or we haven't broadcasted yet.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
+	/// The features used within a node_announcement message.
+	pub node_features: NodeFeatures,
 }
 
 /// Status fields that are persisted across restarts.
