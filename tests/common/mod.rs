@@ -232,7 +232,12 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut electrsd_conf = electrsd::Conf::default();
 	electrsd_conf.http_enabled = true;
 	electrsd_conf.network = "regtest";
+	electrsd_conf.view_stderr = true;
 	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	println!(
+		"Electrs started with electrum_url={}, esplora_url={:?}",
+		electrsd.electrum_url, electrsd.esplora_url
+	);
 	(bitcoind, electrsd)
 }
 
@@ -510,6 +515,9 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
+	if let Err(ref e) = _block_hashes_res {
+		eprintln!("generate_to_address({}) failed: {:?}", num, e);
+	}
 	wait_for_block(electrs, cur_height as usize + num).await;
 	print!(" Done!");
 	println!("\n");
@@ -533,10 +541,14 @@ pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
 pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 	let mut header = match electrs.block_headers_subscribe() {
 		Ok(header) => header,
-		Err(_) => {
+		Err(e) => {
 			// While subscribing should succeed the first time around, we ran into some cases where
 			// it didn't. Since we can't proceed without subscribing, we try again after a delay
 			// and panic if it still fails.
+			eprintln!("block_headers_subscribe failed (will retry in 3s): {:?}", e);
+			if let Err(ping_err) = electrs.ping() {
+				eprintln!("electrs ping also failed: {:?}", ping_err);
+			}
 			tokio::time::sleep(Duration::from_secs(3)).await;
 			electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
 		},
@@ -546,8 +558,10 @@ pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usiz
 			break;
 		}
 		header = exponential_backoff_poll(|| {
-			electrs.ping().expect("failed to ping electrs");
-			electrs.block_headers_pop().expect("failed to pop block header")
+			electrs.ping().unwrap_or_else(|e| panic!("failed to ping electrs: {:?}", e));
+			electrs
+				.block_headers_pop()
+				.unwrap_or_else(|e| panic!("failed to pop block header: {:?}", e))
 		})
 		.await;
 	}
@@ -559,7 +573,7 @@ pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	}
 
 	exponential_backoff_poll(|| {
-		electrs.ping().unwrap();
+		electrs.ping().unwrap_or_else(|e| panic!("failed to ping electrs: {:?}", e));
 		electrs.transaction_get(&txid).ok()
 	})
 	.await;
@@ -575,7 +589,7 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	}
 
 	exponential_backoff_poll(|| {
-		electrs.ping().unwrap();
+		electrs.ping().unwrap_or_else(|e| panic!("failed to ping electrs: {:?}", e));
 
 		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
 		is_spent.then_some(())
