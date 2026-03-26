@@ -41,6 +41,7 @@ use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
 use log::LevelFilter;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -2872,4 +2873,104 @@ async fn splice_in_with_all_balance() {
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_fee_bump_cpfp() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	// Fund both nodes
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 500_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b.clone()],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Send a transaction from node_b to node_a that we'll later bump
+	let amount_to_send_sats = 100_000;
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(txid.to_byte_array());
+	let original_payment = node_b.payment(&payment_id).unwrap();
+	let original_fee = original_payment.fee_paid_msat.unwrap();
+
+	// Non-existent payment id
+	let fake_txid =
+		Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
+	let invalid_payment_id = PaymentId(fake_txid.to_byte_array());
+	assert_eq!(
+		Err(NodeError::InvalidPaymentId),
+		node_b.onchain_payment().bump_fee_cpfp(invalid_payment_id, None)
+	);
+
+	// Successful fee bump via CPFP
+	let new_txid = node_a.onchain_payment().bump_fee_cpfp(payment_id, None).unwrap();
+	wait_for_tx(&electrsd.client, new_txid).await;
+
+	// Sleep to allow for transaction propagation
+	std::thread::sleep(std::time::Duration::from_secs(5));
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let new_payment_id = PaymentId(new_txid.to_byte_array());
+	let new_payment = node_a.payment(&new_payment_id).unwrap();
+
+	// Verify payment properties
+	assert_eq!(new_payment.direction, PaymentDirection::Outbound);
+	assert_eq!(new_payment.status, PaymentStatus::Pending);
+
+	// Verify fee increased
+	assert!(
+		new_payment.fee_paid_msat > Some(original_fee),
+		"Fee should increase after CPFP bump. Original: {}, New: {}",
+		original_fee,
+		new_payment.fee_paid_msat.unwrap()
+	);
+
+	// Confirm the transaction and try to bump again (should fail)
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	assert_eq!(
+		Err(NodeError::InvalidPaymentId),
+		node_a.onchain_payment().bump_fee_cpfp(payment_id, None)
+	);
+
+	// Verify final payment is confirmed
+	let final_payment = node_b.payment(&payment_id).unwrap();
+	assert_eq!(final_payment.status, PaymentStatus::Succeeded);
+	match final_payment.kind {
+		PaymentKind::Onchain { status, .. } => {
+			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	// Verify the inbound payment (parent tx) is confirmed with the original amount.
+	let inbound_payment = node_a.payment(&payment_id).unwrap();
+	assert_eq!(inbound_payment.amount_msat, Some(amount_to_send_sats * 1000));
+	assert_eq!(inbound_payment.direction, PaymentDirection::Inbound);
+	assert_eq!(inbound_payment.status, PaymentStatus::Succeeded);
+
+	// Verify the CPFP child tx (self-spend) is also confirmed.
+	let cpfp_payment = node_a.payment(&new_payment_id).unwrap();
+	assert_eq!(cpfp_payment.direction, PaymentDirection::Outbound);
+	assert_eq!(cpfp_payment.status, PaymentStatus::Succeeded);
 }
