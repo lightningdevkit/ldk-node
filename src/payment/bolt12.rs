@@ -19,8 +19,10 @@ use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
+#[cfg(not(feature = "uniffi"))]
+use lightning::offers::payer_proof::PayerProof as LdkPayerProof;
 use lightning::routing::router::RouteParametersConfig;
-use lightning::sign::EntropySource;
+use lightning::sign::{EntropySource, NodeSigner};
 #[cfg(feature = "uniffi")]
 use lightning::util::ser::{Readable, Writeable};
 use lightning_types::string::UntrustedString;
@@ -29,8 +31,9 @@ use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
+use crate::payment::payer_proof_store::PayerProofContext;
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use crate::types::{ChannelManager, KeysManager, PaymentStore};
+use crate::types::{ChannelManager, KeysManager, PayerProofContextStore, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt12Invoice = lightning::offers::invoice::Bolt12Invoice;
@@ -52,6 +55,11 @@ type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadable
 #[cfg(feature = "uniffi")]
 type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 
+#[cfg(not(feature = "uniffi"))]
+type PayerProof = LdkPayerProof;
+#[cfg(feature = "uniffi")]
+type PayerProof = Arc<crate::ffi::PayerProof>;
+
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
 /// Should be retrieved by calling [`Node::bolt12_payment`].
@@ -63,22 +71,43 @@ pub struct Bolt12Payment {
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
+	payer_proof_context_store: Arc<PayerProofContextStore>,
 	config: Arc<Config>,
 	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 }
 
+/// Options controlling which optional fields are disclosed in a BOLT12 payer proof.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PayerProofOptions {
+	/// An optional note attached to the payer proof itself.
+	pub note: Option<String>,
+	/// Whether to include the offer description in the proof.
+	pub include_offer_description: bool,
+	/// Whether to include the offer issuer in the proof.
+	pub include_offer_issuer: bool,
+	/// Whether to include the invoice amount in the proof.
+	pub include_invoice_amount: bool,
+	/// Whether to include the invoice creation timestamp in the proof.
+	pub include_invoice_created_at: bool,
+	/// Additional TLV types to include in the selective disclosure set.
+	pub extra_tlv_types: Vec<u64>,
+}
+
 impl Bolt12Payment {
 	pub(crate) fn new(
 		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
-		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
+		payment_store: Arc<PaymentStore>, payer_proof_context_store: Arc<PayerProofContextStore>,
+		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
 		Self {
 			channel_manager,
 			keys_manager,
 			payment_store,
+			payer_proof_context_store,
 			config,
 			is_running,
 			logger,
@@ -248,6 +277,21 @@ impl Bolt12Payment {
 			.blinded_paths_for_async_recipient(recipient_id, None)
 			.or(Err(Error::InvalidBlindedPaths))
 	}
+
+	fn payer_proof_context(
+		&self, payment_id: &PaymentId,
+	) -> Result<(PaymentDetails, PayerProofContext), Error> {
+		let payment = self.payment_store.get(payment_id).ok_or(Error::PayerProofUnavailable)?;
+		if payment.direction != PaymentDirection::Outbound
+			|| payment.status != PaymentStatus::Succeeded
+		{
+			return Err(Error::PayerProofUnavailable);
+		}
+
+		let context =
+			self.payer_proof_context_store.get(payment_id).ok_or(Error::PayerProofUnavailable)?;
+		Ok((payment, context))
+	}
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -386,6 +430,73 @@ impl Bolt12Payment {
 			None,
 		)?;
 		Ok(payment_id)
+	}
+
+	/// Create a payer proof for a previously succeeded outbound BOLT12 payment.
+	///
+	/// This requires a standard BOLT12 invoice response that carried payer proof context.
+	/// Payments that completed via static invoices do not support payer proofs.
+	pub fn create_payer_proof(
+		&self, payment_id: &PaymentId, options: Option<PayerProofOptions>,
+	) -> Result<PayerProof, Error> {
+		let (payment, context) = self.payer_proof_context(payment_id)?;
+		let preimage = match payment.kind {
+			PaymentKind::Bolt12Offer { preimage: Some(preimage), .. }
+			| PaymentKind::Bolt12Refund { preimage: Some(preimage), .. } => preimage,
+			_ => return Err(Error::PayerProofUnavailable),
+		};
+
+		let options = options.unwrap_or_default();
+		let mut builder = context.invoice.payer_proof_builder(preimage).map_err(|e| {
+			log_error!(
+				self.logger,
+				"Failed to initialize payer proof builder for {}: {:?}",
+				payment_id,
+				e
+			);
+			Error::PayerProofCreationFailed
+		})?;
+
+		for tlv_type in options.extra_tlv_types {
+			builder = builder.include_type(tlv_type).map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to include TLV {} in payer proof for {}: {:?}",
+					tlv_type,
+					payment_id,
+					e
+				);
+				Error::PayerProofCreationFailed
+			})?;
+		}
+
+		if options.include_offer_description {
+			builder = builder.include_offer_description();
+		}
+		if options.include_offer_issuer {
+			builder = builder.include_offer_issuer();
+		}
+		if options.include_invoice_amount {
+			builder = builder.include_invoice_amount();
+		}
+		if options.include_invoice_created_at {
+			builder = builder.include_invoice_created_at();
+		}
+
+		let expanded_key = self.keys_manager.get_expanded_key();
+		let proof = builder
+			.build_with_derived_key(
+				&expanded_key,
+				context.nonce,
+				*payment_id,
+				options.note.as_deref(),
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to build payer proof for {}: {:?}", payment_id, e);
+				Error::PayerProofCreationFailed
+			})?;
+
+		Ok(maybe_wrap(proof))
 	}
 
 	/// Returns a payable offer that can be used to request and receive a payment of the amount
