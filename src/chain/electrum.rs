@@ -18,13 +18,16 @@ use bdk_wallet::{KeychainKind as BdkKeyChainKind, Update as BdkUpdate};
 use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{
 	Batch, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
+	Error as ElectrumError,
 };
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
 
 use super::WalletSyncStatus;
-use crate::config::{Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP};
+use crate::config::{
+	Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP, DEFAULT_TX_LOOKUP_TIMEOUT_SECS,
+};
 use crate::error::Error;
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
@@ -287,6 +290,21 @@ impl ElectrumChainSource {
 		for tx in package {
 			electrum_client.broadcast(tx).await;
 		}
+	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> =
+			if let Some(client) = self.electrum_runtime_status.read().unwrap().client().as_ref() {
+				Arc::clone(client)
+			} else {
+				debug_assert!(
+					false,
+					"We should have started the chain source before getting transactions"
+				);
+				return Err(Error::TxLookupTimeout);
+			};
+
+		electrum_client.get_transaction(txid).await
 	}
 }
 
@@ -651,6 +669,37 @@ impl ElectrumRuntimeClient {
 		}
 
 		Ok(new_fee_rate_cache)
+	}
+
+	async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		let electrum_client = Arc::clone(&self.electrum_client);
+		let txid_copy = *txid;
+
+		let spawn_fut =
+			self.runtime.spawn_blocking(move || electrum_client.transaction_get(&txid_copy));
+		let timeout_fut =
+			tokio::time::timeout(Duration::from_secs(DEFAULT_TX_LOOKUP_TIMEOUT_SECS), spawn_fut);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(inner_res) => match inner_res {
+					Ok(tx) => Ok(Some(tx)),
+					Err(ElectrumError::Protocol(_)) => Ok(None),
+					Err(e) => {
+						log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+						Err(Error::TxLookupFailed)
+					},
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to get transaction {}: {}", txid, e);
+					Err(Error::TxLookupFailed)
+				},
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to get transaction {} due to timeout: {}", txid, e);
+				Err(Error::TxLookupTimeout)
+			},
+		}
 	}
 }
 

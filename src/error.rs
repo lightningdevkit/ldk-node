@@ -63,6 +63,10 @@ pub enum Error {
 	TxSyncFailed,
 	/// A transaction sync operation timed out.
 	TxSyncTimeout,
+	/// A transaction lookup operation failed.
+	TxLookupFailed,
+	/// A transaction lookup operation timed out.
+	TxLookupTimeout,
 	/// A gossip updating operation failed.
 	GossipUpdateFailed,
 	/// A gossip updating operation timed out.
@@ -137,6 +141,14 @@ pub enum Error {
 	LnurlAuthTimeout,
 	/// The provided lnurl is invalid.
 	InvalidLnurl,
+	/// Payjoin is not configured.
+	PayjoinNotConfigured,
+	/// Payjoin session creation failed.
+	PayjoinSessionCreationFailed,
+	/// Payjoin session failed.
+	PayjoinSessionFailed,
+	/// The operation is not supported by the current chain source.
+	UnsupportedChainSource,
 }
 
 impl fmt::Display for Error {
@@ -171,6 +183,8 @@ impl fmt::Display for Error {
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::TxSyncTimeout => write!(f, "Syncing transactions timed out."),
+			Self::TxLookupFailed => write!(f, "Failed to look up transaction."),
+			Self::TxLookupTimeout => write!(f, "Transaction lookup timed out."),
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::GossipUpdateTimeout => write!(f, "Updating gossip data timed out."),
 			Self::LiquidityRequestFailed => write!(f, "Failed to request inbound liquidity."),
@@ -222,6 +236,12 @@ impl fmt::Display for Error {
 			Self::LnurlAuthFailed => write!(f, "LNURL-auth authentication failed."),
 			Self::LnurlAuthTimeout => write!(f, "LNURL-auth authentication timed out."),
 			Self::InvalidLnurl => write!(f, "The provided lnurl is invalid."),
+			Self::PayjoinNotConfigured => write!(f, "Payjoin is not configured."),
+			Self::PayjoinSessionCreationFailed => write!(f, "Payjoin session creation failed."),
+			Self::PayjoinSessionFailed => write!(f, "Payjoin session failed."),
+			Self::UnsupportedChainSource => {
+				write!(f, "The operation is not supported by the current chain source.")
+			},
 		}
 	}
 }
