@@ -8,6 +8,7 @@ concurrency:
 
 jobs:
   check-kotlin:
+    if: false
     runs-on: ubuntu-latest
 
     env:

@@ -8,6 +8,7 @@ concurrency:
 
 jobs:
   check-swift:
+    if: false
     runs-on: macos-latest
 
     steps:

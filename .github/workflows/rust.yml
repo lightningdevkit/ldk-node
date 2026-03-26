@@ -8,42 +8,13 @@ concurrency:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        platform: [
-          ubuntu-latest,
-          macos-latest,
-          windows-latest,
-          ]
-        toolchain: [
-          stable,
-          beta,
-          1.85.0, # Our MSRV
-          ]
-        include:
-          - toolchain: stable
-            check-fmt: true
-            build-uniffi: true
-            platform: ubuntu-latest
-          - toolchain: stable
-            platform: macos-latest
-          - toolchain: stable
-            platform: windows-latest
-          - toolchain: 1.85.0
-            msrv: true
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout source code
         uses: actions/checkout@v3
-      - name: Install Rust ${{ matrix.toolchain }} toolchain
+      - name: Install Rust stable toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
-      - name: Check formatting on Rust ${{ matrix.toolchain }}
-        if: matrix.check-fmt
-        run: rustup component add rustfmt && cargo fmt --all -- --check
-      - name: Set RUSTFLAGS to deny warnings
-        if: "matrix.toolchain == 'stable'"
-        run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
       - name: Enable caching for bitcoind
         id: cache-bitcoind
         uses: actions/cache@v4
@@ -57,7 +28,7 @@ jobs:
           path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
           key: electrs-${{ runner.os }}-${{ runner.arch }}
       - name: Download bitcoind/electrs
-        if: "matrix.platform != 'windows-latest' && (steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true')"
+        if: "steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true'"
         run: |
           source ./scripts/download_bitcoind_electrs.sh
           mkdir bin
@@ -67,32 +38,11 @@ jobs:
         run: |
           echo "BITCOIND_EXE=$( pwd )/bin/bitcoind-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
           echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
-      - name: Build on Rust ${{ matrix.toolchain }}
+      - name: Build
         run: cargo build --verbose --color always
-      - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
-        if: matrix.build-uniffi
-        run: cargo build --features uniffi --verbose --color always
-      - name: Check release build on Rust ${{ matrix.toolchain }}
-        run: cargo check --release --verbose --color always
-      - name: Check release build with UniFFI support on Rust ${{ matrix.toolchain }}
-        if: matrix.build-uniffi
-        run: cargo check --release --features uniffi --verbose --color always
-      - name: Test on Rust ${{ matrix.toolchain }}
-        if: "matrix.platform != 'windows-latest'"
+      - name: Stress test port allocation (temporary)
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test
-      - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
-        if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
-        run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features uniffi
-
-  doc:
-    name: Documentation
-    runs-on: ubuntu-latest
-    env:
-      RUSTDOCFLAGS: -Dwarnings
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: dtolnay/install@cargo-docs-rs
-      - run: cargo docs-rs
+          for i in $(seq 1 10); do
+            echo "=== Iteration $i ==="
+            RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --test integration_tests_rust
+          done

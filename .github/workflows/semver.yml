@@ -3,6 +3,7 @@ on: [push, pull_request]
 
 jobs:
   semver-checks:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source code

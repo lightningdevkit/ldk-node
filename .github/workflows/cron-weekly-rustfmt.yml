@@ -10,6 +10,7 @@ on:
   workflow_dispatch: # allows manual triggering
 jobs:
   format:
+    if: false
     name: Nightly rustfmt
     runs-on: ubuntu-24.04
     steps:

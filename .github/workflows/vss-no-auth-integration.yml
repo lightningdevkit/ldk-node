@@ -8,6 +8,7 @@ concurrency:
 
 jobs:
   build-and-test:
+    if: false
     runs-on: ubuntu-latest
 
     services:

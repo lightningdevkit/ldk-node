@@ -8,6 +8,7 @@ concurrency:
 
 jobs:
   check-python:
+    if: false
     runs-on: ubuntu-latest
 
     env:

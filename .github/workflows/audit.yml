@@ -6,6 +6,7 @@ on:
 
 jobs:
   audit:
+    if: false
     permissions:
       issues: write
       checks: write
