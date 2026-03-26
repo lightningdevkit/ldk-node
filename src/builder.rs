@@ -1207,9 +1207,34 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_wallet_recovery_mode();
 	}
 
-	/// Configures a probing strategy for background channel probing.
+	/// Configures background probing toward the highest-degree nodes in the network graph.
+	pub fn set_high_degree_probing_strategy(&self, top_n: usize) {
+		self.inner.write().unwrap().set_high_degree_probing_strategy(top_n);
+	}
+
+	/// Configures background probing via random graph walks of up to `max_hops` hops.
+	pub fn set_random_probing_strategy(&self, max_hops: usize) {
+		self.inner.write().unwrap().set_random_probing_strategy(max_hops);
+	}
+
+	/// Configures a custom probing strategy for background channel probing.
 	pub fn set_custom_probing_strategy(&self, strategy: Arc<dyn probing::ProbingStrategy>) {
 		self.inner.write().unwrap().set_custom_probing_strategy(strategy);
+	}
+
+	/// Overrides the interval between probe attempts.
+	pub fn set_probing_interval(&self, interval: Duration) {
+		self.inner.write().unwrap().set_probing_interval(interval);
+	}
+
+	/// Overrides the maximum millisatoshis that may be locked in in-flight probes at any time.
+	pub fn set_max_probe_locked_msat(&self, max_msat: u64) {
+		self.inner.write().unwrap().set_max_probe_locked_msat(max_msat);
+	}
+
+	/// Sets the probing diversity penalty applied by the probabilistic scorer.
+	pub fn set_probing_diversity_penalty_msat(&self, penalty_msat: u64) {
+		self.inner.write().unwrap().set_probing_diversity_penalty_msat(penalty_msat);
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options

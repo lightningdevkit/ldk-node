@@ -316,9 +316,9 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 }
 
 #[cfg(feature = "uniffi")]
-type TestNode = Arc<Node>;
+pub(crate) type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
-type TestNode = Node;
+pub(crate) type TestNode = Node;
 
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {

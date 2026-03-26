@@ -26,13 +26,13 @@ use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use common::{
 	expect_channel_ready_event, expect_event, generate_blocks_and_wait, open_channel,
 	open_channel_no_electrum_wait, premine_and_distribute_funds, random_config,
-	setup_bitcoind_and_electrsd, setup_node, TestChainSource, TestProbingConfig,
+	setup_bitcoind_and_electrsd, setup_node, TestChainSource, TestNode, TestProbingConfig,
 	TestProbingStrategy,
 };
 
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
-use ldk_node::{Event, Node, Probe, ProbingStrategy};
+use ldk_node::{Event, Probe, ProbingStrategy};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -100,21 +100,21 @@ fn probing_config(
 
 fn build_node_fixed_dest_probing(
 	chain_source: &TestChainSource<'_>, destination_node_id: PublicKey,
-) -> Node {
+) -> TestNode {
 	let mut config = random_config(false);
 	let strategy = FixedDestStrategy::new(destination_node_id, PROBE_AMOUNT_MSAT);
 	config.probing = probing_config(TestProbingStrategy::Custom(strategy), PROBE_AMOUNT_MSAT, None);
 	setup_node(chain_source, config)
 }
 
-fn build_node_random_probing(chain_source: &TestChainSource<'_>, max_hops: usize) -> Node {
+fn build_node_random_probing(chain_source: &TestChainSource<'_>, max_hops: usize) -> TestNode {
 	let mut config = config_with_label("Random");
 	config.probing =
 		probing_config(TestProbingStrategy::Random { max_hops }, MAX_LOCKED_MSAT, None);
 	setup_node(chain_source, config)
 }
 
-fn build_node_highdegree_probing(chain_source: &TestChainSource<'_>, top_n: usize) -> Node {
+fn build_node_highdegree_probing(chain_source: &TestChainSource<'_>, top_n: usize) -> TestNode {
 	let mut config = config_with_label("HiDeg");
 	config.probing =
 		probing_config(TestProbingStrategy::HighDegree { top_n }, MAX_LOCKED_MSAT, None);
@@ -123,7 +123,7 @@ fn build_node_highdegree_probing(chain_source: &TestChainSource<'_>, top_n: usiz
 
 fn build_node_z_highdegree_probing(
 	chain_source: &TestChainSource<'_>, top_n: usize, diversity_penalty_msat: u64,
-) -> Node {
+) -> TestNode {
 	let mut config = config_with_label("HiDeg+P");
 	config.probing = probing_config(
 		TestProbingStrategy::HighDegree { top_n },
@@ -134,7 +134,7 @@ fn build_node_z_highdegree_probing(
 }
 
 // helpers, formatting
-fn node_label(node: &Node) -> String {
+fn node_label(node: &TestNode) -> String {
 	node.node_alias()
 		.map(|alias| {
 			let end = alias.0.iter().position(|&b| b == 0).unwrap_or(32);
@@ -143,7 +143,7 @@ fn node_label(node: &Node) -> String {
 		.unwrap_or_else(|| format!("{:.8}", node.node_id()))
 }
 
-fn print_topology(all_nodes: &[&Node]) {
+fn print_topology(all_nodes: &[&TestNode]) {
 	let labels: HashMap<PublicKey, String> =
 		all_nodes.iter().map(|n| (n.node_id(), node_label(n))).collect();
 	let label_of = |pk: PublicKey| labels.get(&pk).cloned().unwrap_or_else(|| format!("{:.8}", pk));
@@ -195,7 +195,7 @@ fn fmt_est(est: Option<(u64, u64)>) -> String {
 	}
 }
 
-fn print_probing_perfomance(observers: &[&Node], all_nodes: &[&Node]) {
+fn print_probing_perfomance(observers: &[&TestNode], all_nodes: &[&TestNode]) {
 	let labels: HashMap<PublicKey, String> =
 		all_nodes.iter().chain(observers.iter()).map(|n| (n.node_id(), node_label(n))).collect();
 	let label_of = |pk: PublicKey| {
@@ -443,7 +443,7 @@ async fn probing_strategies_perfomance() {
 	let utxos_per_node = num_nodes;
 	let utxo_per_channel = Amount::from_sat(channel_capacity_sat + 50_000);
 
-	let mut nodes: Vec<Node> = Vec::new();
+	let mut nodes: Vec<TestNode> = Vec::new();
 	for i in 0..num_nodes {
 		let label = char::from(b'B' + i as u8).to_string();
 		let mut config = random_config(false);
@@ -467,7 +467,7 @@ async fn probing_strategies_perfomance() {
 	let channels_per_nodes: Vec<usize> =
 		(0..num_nodes).map(|_| rng.random_range(1..=channels_per_node)).collect();
 
-	let observer_nodes: [&Node; 4] = [&node_a, &node_y, &node_z, &node_x];
+	let observer_nodes: [&TestNode; 4] = [&node_a, &node_y, &node_z, &node_x];
 
 	let mut addresses = Vec::new();
 	for node in observer_nodes {
@@ -489,7 +489,7 @@ async fn probing_strategies_perfomance() {
 		node.sync_wallets().unwrap();
 	}
 
-	fn drain_events(node: &Node) {
+	fn drain_events(node: &TestNode) {
 		while let Some(_) = node.next_event() {
 			node.event_handled().unwrap();
 		}
@@ -523,7 +523,7 @@ async fn probing_strategies_perfomance() {
 		node_map.insert(node.node_id(), i);
 	}
 
-	let all_nodes: Vec<&Node> = nodes.iter().chain(observer_nodes).collect();
+	let all_nodes: Vec<&TestNode> = nodes.iter().chain(observer_nodes).collect();
 
 	print_topology(&all_nodes);
 
