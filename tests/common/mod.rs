@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -288,17 +289,14 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
-	let num_addresses = 2;
-	let mut listening_addresses = HashSet::new();
+static NEXT_PORT: AtomicU16 = AtomicU16::new(20000);
 
-	while listening_addresses.len() < num_addresses {
-		let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-		let address: SocketAddress = socket.local_addr().unwrap().into();
-		listening_addresses.insert(address);
-	}
-
-	listening_addresses.into_iter().collect()
+pub(crate) fn generate_listening_addresses() -> Vec<SocketAddress> {
+	let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
+	vec![
+		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port },
+		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: port + 1 },
+	]
 }
 
 pub(crate) fn random_node_alias() -> Option<NodeAlias> {
@@ -324,9 +322,9 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 	println!("Setting random LDK storage dir: {}", rand_dir.display());
 	node_config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
 
-	let rand_listening_addresses = random_listening_addresses();
-	println!("Setting random LDK listening addresses: {:?}", rand_listening_addresses);
-	node_config.listening_addresses = Some(rand_listening_addresses);
+	let listening_addresses = generate_listening_addresses();
+	println!("Setting LDK listening addresses: {:?}", listening_addresses);
+	node_config.listening_addresses = Some(listening_addresses);
 
 	let alias = random_node_alias();
 	println!("Setting random LDK node alias: {:?}", alias);
@@ -1312,8 +1310,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	println!("\nB close_channel (force: {})", force_close);
+	tokio::time::sleep(Duration::from_secs(1)).await;
 	if force_close {
-		tokio::time::sleep(Duration::from_secs(1)).await;
 		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	} else {
 		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();

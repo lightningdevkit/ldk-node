@@ -21,11 +21,13 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
 	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
-	open_channel, open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds,
-	premine_blocks, prepare_rbf, random_chain_source, random_config, random_listening_addresses,
+	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
 	wait_for_cbf_sync, wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
 };
+use electrsd::corepc_node::Node as BitcoinD;
+use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -1429,9 +1431,9 @@ async fn test_node_announcement_propagation() {
 	node_a_alias_bytes[..node_a_alias_string.as_bytes().len()]
 		.copy_from_slice(node_a_alias_string.as_bytes());
 	let node_a_node_alias = Some(NodeAlias(node_a_alias_bytes));
-	let node_a_announcement_addresses = random_listening_addresses();
+	let node_a_announcement_addresses = generate_listening_addresses();
 	config_a.node_config.node_alias = node_a_node_alias.clone();
-	config_a.node_config.listening_addresses = Some(random_listening_addresses());
+	config_a.node_config.listening_addresses = Some(generate_listening_addresses());
 	config_a.node_config.announcement_addresses = Some(node_a_announcement_addresses.clone());
 
 	// Node B will only use listening addresses
@@ -1441,7 +1443,7 @@ async fn test_node_announcement_propagation() {
 	node_b_alias_bytes[..node_b_alias_string.as_bytes().len()]
 		.copy_from_slice(node_b_alias_string.as_bytes());
 	let node_b_node_alias = Some(NodeAlias(node_b_alias_bytes));
-	let node_b_listening_addresses = random_listening_addresses();
+	let node_b_listening_addresses = generate_listening_addresses();
 	config_b.node_config.node_alias = node_b_node_alias.clone();
 	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
 	config_b.node_config.announcement_addresses = None;
@@ -2418,41 +2420,101 @@ async fn payment_persistence_after_restart() {
 	restarted_node_a.stop().unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn persistence_backwards_compatibility() {
+enum OldLdkVersion {
+	V0_6_2,
+	V0_7_0,
+}
+
+async fn build_0_6_2_node(
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, storage_path: String, esplora_url: String,
+	seed_bytes: [u8; 64],
+) -> (u64, bitcoin::secp256k1::PublicKey) {
+	let mut builder_old = ldk_node_062::Builder::new();
+	builder_old.set_network(bitcoin::Network::Regtest);
+	builder_old.set_storage_dir_path(storage_path);
+	builder_old.set_entropy_seed_bytes(seed_bytes);
+	builder_old.set_chain_source_esplora(esplora_url, None);
+	let node_old = builder_old.build().unwrap();
+
+	node_old.start().unwrap();
+	let addr_old = node_old.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_old],
+		Amount::from_sat(100_000),
+	)
+	.await;
+	node_old.sync_wallets().unwrap();
+
+	let balance = node_old.list_balances().spendable_onchain_balance_sats;
+	assert!(balance > 0);
+	let node_id = node_old.node_id();
+
+	node_old.stop().unwrap();
+
+	(balance, node_id)
+}
+
+async fn build_0_7_0_node(
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, storage_path: String, esplora_url: String,
+	seed_bytes: [u8; 64],
+) -> (u64, bitcoin::secp256k1::PublicKey) {
+	let mut builder_old = ldk_node_070::Builder::new();
+	builder_old.set_network(bitcoin::Network::Regtest);
+	builder_old.set_storage_dir_path(storage_path);
+	builder_old.set_entropy_seed_bytes(seed_bytes);
+	builder_old.set_chain_source_esplora(esplora_url, None);
+	let node_old = builder_old.build().unwrap();
+
+	node_old.start().unwrap();
+	let addr_old = node_old.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_old],
+		Amount::from_sat(100_000),
+	)
+	.await;
+	node_old.sync_wallets().unwrap();
+
+	let balance = node_old.list_balances().spendable_onchain_balance_sats;
+	assert!(balance > 0);
+	let node_id = node_old.node_id();
+
+	node_old.stop().unwrap();
+
+	(balance, node_id)
+}
+
+async fn do_persistence_backwards_compatibility(version: OldLdkVersion) {
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
 	let seed_bytes = [42u8; 64];
 
-	// Setup a v0.6.2 `Node`
-	let (old_balance, old_node_id) = {
-		let mut builder_old = ldk_node_062::Builder::new();
-		builder_old.set_network(bitcoin::Network::Regtest);
-		builder_old.set_storage_dir_path(storage_path.clone());
-		builder_old.set_entropy_seed_bytes(seed_bytes);
-		builder_old.set_chain_source_esplora(esplora_url.clone(), None);
-		let node_old = builder_old.build().unwrap();
-
-		node_old.start().unwrap();
-		let addr_old = node_old.onchain_payment().new_address().unwrap();
-		common::premine_and_distribute_funds(
-			&bitcoind.client,
-			&electrsd.client,
-			vec![addr_old],
-			bitcoin::Amount::from_sat(100_000),
-		)
-		.await;
-		node_old.sync_wallets().unwrap();
-
-		let balance = node_old.list_balances().spendable_onchain_balance_sats;
-		assert!(balance > 0);
-		let node_id = node_old.node_id();
-
-		node_old.stop().unwrap();
-
-		(balance, node_id)
+	let (old_balance, old_node_id) = match version {
+		OldLdkVersion::V0_6_2 => {
+			build_0_6_2_node(
+				&bitcoind,
+				&electrsd,
+				storage_path.clone(),
+				esplora_url.clone(),
+				seed_bytes,
+			)
+			.await
+		},
+		OldLdkVersion::V0_7_0 => {
+			build_0_7_0_node(
+				&bitcoind,
+				&electrsd,
+				storage_path.clone(),
+				esplora_url.clone(),
+				seed_bytes,
+			)
+			.await
+		},
 	};
 
 	// Now ensure we can still reinit from the same backend.
@@ -2480,6 +2542,12 @@ async fn persistence_backwards_compatibility() {
 	assert_eq!(old_balance, new_balance);
 
 	node_new.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn persistence_backwards_compatibility() {
+	do_persistence_backwards_compatibility(OldLdkVersion::V0_6_2).await;
+	do_persistence_backwards_compatibility(OldLdkVersion::V0_7_0).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
