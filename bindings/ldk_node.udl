@@ -185,6 +185,8 @@ enum NodeError {
 	"FeerateEstimationUpdateTimeout",
 	"WalletOperationFailed",
 	"WalletOperationTimeout",
+	"PayerProofCreationFailed",
+	"PayerProofUnavailable",
 	"OnchainTxSigningFailed",
 	"TxSyncFailed",
 	"TxSyncTimeout",
@@ -225,6 +227,7 @@ enum NodeError {
 	"LnurlAuthFailed",
 	"LnurlAuthTimeout",
 	"InvalidLnurl",
+	"InvalidPayerProof",
 };
 
 typedef dictionary NodeStatus;

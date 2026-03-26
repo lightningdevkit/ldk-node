@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
+use lightning::blinded_path::message::OffersContext;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
@@ -23,7 +24,13 @@ use lightning::events::{
 };
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::outbound_payment::Bolt12PaymentError;
 use lightning::ln::types::ChannelId;
+use lightning::offers::invoice::Bolt12Invoice;
+use lightning::offers::invoice_error::InvoiceError;
+use lightning::offers::parse::Bolt12SemanticError;
+use lightning::onion_message::messenger::Responder;
+use lightning::onion_message::offers::OffersMessage;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
 use lightning::util::config::{
@@ -49,12 +56,14 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::payer_proof_store::PayerProofContext;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PayerProofContextStore, PaymentStore,
+	Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -507,6 +516,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
+	payer_proof_context_store: Arc<PayerProofContextStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	runtime: Arc<Runtime>,
@@ -527,10 +537,11 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
-		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
-		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		payment_store: Arc<PaymentStore>, payer_proof_context_store: Arc<PayerProofContextStore>,
+		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
+		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
+		config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -542,6 +553,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			payer_proof_context_store,
 			peer_store,
 			keys_manager,
 			logger,
@@ -550,6 +562,66 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+		}
+	}
+
+	fn persist_payer_proof_context(
+		&self, payment_id: PaymentId, invoice: &Bolt12Invoice, context: Option<&OffersContext>,
+	) -> Result<(), ReplayEvent> {
+		if let Some(context) =
+			PayerProofContext::from_invoice_received(payment_id, invoice, context)
+		{
+			match self.payer_proof_context_store.insert_or_update(context) {
+				Ok(_) => {},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to persist payer proof context for {}: {}",
+						payment_id,
+						e
+					);
+					return Err(ReplayEvent());
+				},
+			}
+		}
+
+		Ok(())
+	}
+
+	fn remove_payer_proof_context(&self, payment_id: &PaymentId) -> Result<(), ReplayEvent> {
+		self.payer_proof_context_store.remove(payment_id).map_err(|e| {
+			log_error!(
+				self.logger,
+				"Failed to remove payer proof context for {}: {}",
+				payment_id,
+				e
+			);
+			ReplayEvent()
+		})
+	}
+
+	fn respond_to_invoice_error(&self, error: Bolt12PaymentError, responder: Option<Responder>) {
+		let error = match error {
+			Bolt12PaymentError::UnknownRequiredFeatures => {
+				InvoiceError::from(Bolt12SemanticError::UnknownRequiredFeatures)
+			},
+			Bolt12PaymentError::SendingFailed(e) => InvoiceError::from_string(format!("{:?}", e)),
+			Bolt12PaymentError::BlindedPathCreationFailed => InvoiceError::from_string(
+				"Failed to create a blinded path back to ourselves".to_string(),
+			),
+			Bolt12PaymentError::UnexpectedInvoice | Bolt12PaymentError::DuplicateInvoice => return,
+		};
+
+		let Some(responder) = responder else {
+			log_trace!(self.logger, "No reply path available for invoice_error response");
+			return;
+		};
+
+		if let Err(e) = self
+			.onion_messenger
+			.handle_onion_message_response(OffersMessage::InvoiceError(error), responder.respond())
+		{
+			log_error!(self.logger, "Failed to send invoice_error response: {:?}", e);
 		}
 	}
 
@@ -1144,6 +1216,7 @@ where
 						return Err(ReplayEvent());
 					},
 				};
+				self.remove_payer_proof_context(&payment_id)?;
 
 				let event =
 					Event::PaymentFailed { payment_id: Some(payment_id), payment_hash, reason };
@@ -1565,20 +1638,14 @@ where
 				};
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
-				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
+				if let FundingInfo::Tx { transaction } = funding_info {
 					log_info!(
 						self.logger,
 						"Reclaiming unused addresses from channel {} funding",
 						channel_id,
 					);
 
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: outputs,
-					};
-					if let Err(e) = self.wallet.cancel_tx(&tx) {
+					if let Err(e) = self.wallet.cancel_tx(&transaction) {
 						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
 						return Err(ReplayEvent());
 					}
@@ -1602,8 +1669,25 @@ where
 						.await;
 				}
 			},
-			LdkEvent::InvoiceReceived { .. } => {
-				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
+			LdkEvent::InvoiceReceived { payment_id, invoice, context, responder } => {
+				self.persist_payer_proof_context(payment_id, &invoice, context.as_ref())?;
+
+				match self
+					.channel_manager
+					.send_payment_for_bolt12_invoice(&invoice, context.as_ref())
+				{
+					Ok(()) => {},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Failed to initiate payment for BOLT12 invoice {}: {:?}",
+							payment_id,
+							e
+						);
+						self.remove_payer_proof_context(&payment_id)?;
+						self.respond_to_invoice_error(e, responder);
+					},
+				}
 			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
 				let spawn_logger = self.logger.clone();
