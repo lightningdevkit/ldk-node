@@ -15,7 +15,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
-use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::routing::router::RouteParametersConfig;
@@ -24,7 +23,7 @@ use lightning::sign::EntropySource;
 use lightning::util::ser::{Readable, Writeable};
 use lightning_types::string::UntrustedString;
 
-use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::{AsyncPaymentsRole, Config};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
@@ -96,7 +95,7 @@ impl Bolt12Payment {
 		let offer = maybe_deref(offer);
 
 		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = self.config.payment_retry_strategy.into();
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
@@ -269,7 +268,7 @@ impl Bolt12Payment {
 		let offer = maybe_deref(offer);
 
 		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = self.config.payment_retry_strategy.into();
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
@@ -475,7 +474,7 @@ impl Bolt12Payment {
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = self.config.payment_retry_strategy.into();
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 

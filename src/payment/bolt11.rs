@@ -16,14 +16,14 @@ use bitcoin::hashes::Hash;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, OptionalBolt11PaymentParams, PaymentId,
 };
-use lightning::ln::outbound_payment::{Bolt11PaymentError, Retry, RetryableSendFailure};
+use lightning::ln::outbound_payment::{Bolt11PaymentError, RetryableSendFailure};
 use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::Config;
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::error::Error;
@@ -259,7 +259,7 @@ impl Bolt11Payment {
 
 		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = self.config.payment_retry_strategy.into();
 		let payment_secret = Some(*invoice.payment_secret());
 
 		let optional_params = OptionalBolt11PaymentParams {
@@ -369,7 +369,7 @@ impl Bolt11Payment {
 
 		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = self.config.payment_retry_strategy.into();
 		let payment_secret = Some(*invoice.payment_secret());
 
 		let optional_params = OptionalBolt11PaymentParams {
