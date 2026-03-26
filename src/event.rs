@@ -1129,6 +1129,7 @@ where
 								offer_id,
 								payer_note,
 								quantity,
+								bolt12_invoice: None,
 							};
 
 							let payment = PaymentDetails::new(
@@ -1178,6 +1179,7 @@ where
 								secret: Some(payment_secret),
 								payer_note: None,
 								quantity: None,
+								bolt12_invoice: None,
 							};
 
 							let payment = PaymentDetails::new(
@@ -1331,6 +1333,7 @@ where
 							offer_id: payment_context.offer_id,
 							payer_note: payment_context.invoice_request.payer_note_truncated,
 							quantity: payment_context.invoice_request.quantity,
+							bolt12_invoice: None,
 						};
 						let update = PaymentDetailsUpdate {
 							preimage: Some(payment_preimage),
@@ -1352,6 +1355,7 @@ where
 							secret: Some(payment_secret),
 							payer_note: None,
 							quantity: None,
+							bolt12_invoice: None,
 						};
 						let update = PaymentDetailsUpdate {
 							preimage: Some(payment_preimage),
@@ -1442,12 +1446,16 @@ where
 					debug_assert!(false, "payment_id should always be set.");
 					return Ok(());
 				};
+				let bolt12_invoice = bolt12_invoice.map(Into::into);
 
+				// Only set the field if the event actually carried an invoice, to avoid
+				// overriding any previously-stored invoice with `None`.
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
 					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
+					bolt12_invoice: bolt12_invoice.clone().map(Some),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
@@ -1480,7 +1488,7 @@ where
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
-					bolt12_invoice: bolt12_invoice.map(Into::into),
+					bolt12_invoice,
 				};
 
 				match self.event_queue.add_event(event).await {
