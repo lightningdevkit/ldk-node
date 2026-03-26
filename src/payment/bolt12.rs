@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
@@ -154,6 +155,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					bolt12_invoice: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -179,6 +181,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							bolt12_invoice: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -314,6 +317,7 @@ impl Bolt12Payment {
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
+					bolt12_invoice: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -339,6 +343,7 @@ impl Bolt12Payment {
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
+							bolt12_invoice: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -444,6 +449,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
 			quantity: refund.quantity(),
+			bolt12_invoice: Some(LdkPaidBolt12Invoice::Bolt12Invoice(invoice.clone()).into()),
 		};
 
 		let payment = PaymentDetails::new(
@@ -514,6 +520,7 @@ impl Bolt12Payment {
 			secret: None,
 			payer_note: payer_note.map(|note| UntrustedString(note)),
 			quantity,
+			bolt12_invoice: None,
 		};
 		let payment = PaymentDetails::new(
 			payment_id,
