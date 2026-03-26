@@ -70,7 +70,7 @@ async fn test_lnd() {
 	// Open the channel
 	let funding_amount_sat = 1_000_000;
 
-	node.open_channel(lnd_node_id, lnd_address, funding_amount_sat, Some(500_000_000), None)
+	node.open_channel(lnd_node_id, Some(lnd_address), funding_amount_sat, Some(500_000_000), None)
 		.unwrap();
 
 	let funding_txo = common::expect_channel_pending_event!(node, lnd_node_id);
