@@ -15,7 +15,7 @@ use std::env;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
 use bitcoin::hashes::hex::FromHex;
@@ -274,7 +274,10 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-static NEXT_PORT: AtomicU16 = AtomicU16::new(20000);
+static BASE_PORT: LazyLock<u16> = LazyLock::new(|| {
+	env::var("LDK_NODE_TEST_BASE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(20000)
+});
+static NEXT_PORT: LazyLock<AtomicU16> = LazyLock::new(|| AtomicU16::new(*BASE_PORT));
 
 pub(crate) fn generate_listening_addresses() -> Vec<SocketAddress> {
 	let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
