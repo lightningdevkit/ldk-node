@@ -860,6 +860,7 @@ where
 							offer_id,
 							payer_note,
 							quantity,
+							bolt12_invoice: None,
 						};
 
 						let payment = PaymentDetails::new(
@@ -1073,12 +1074,14 @@ where
 					debug_assert!(false, "payment_id should always be set.");
 					return Ok(());
 				};
+				let bolt12_invoice = bolt12_invoice.map(Into::into);
 
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
 					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
+					bolt12_invoice: Some(bolt12_invoice.clone()),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
@@ -1110,7 +1113,7 @@ where
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
-					bolt12_invoice: bolt12_invoice.map(Into::into),
+					bolt12_invoice,
 				};
 
 				match self.event_queue.add_event(event).await {
