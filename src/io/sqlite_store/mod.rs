@@ -10,11 +10,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lightning::io;
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::{
+	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
+};
 use lightning_types::string::PrintableString;
 use rusqlite::{named_params, Connection};
 
@@ -34,7 +36,10 @@ pub const DEFAULT_SQLITE_DB_FILE_NAME: &str = "ldk_data.sqlite";
 pub const DEFAULT_KV_TABLE_NAME: &str = "ldk_data";
 
 // The current SQLite `user_version`, which we can use if we'd ever need to do a schema migration.
-const SCHEMA_USER_VERSION: u16 = 2;
+const SCHEMA_USER_VERSION: u16 = 3;
+
+// The number of entries returned per page in paginated list operations.
+const PAGE_SIZE: usize = 50;
 
 /// A [`KVStoreSync`] implementation that writes to and reads from an [SQLite] database.
 ///
@@ -58,6 +63,7 @@ impl SqliteStore {
 		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
 	) -> io::Result<Self> {
 		let inner = Arc::new(SqliteStoreInner::new(data_dir, db_file_name, kv_table_name)?);
+
 		let next_write_version = AtomicU64::new(1);
 		Ok(Self { inner, next_write_version })
 	}
@@ -222,11 +228,39 @@ impl KVStoreSync for SqliteStore {
 	}
 }
 
+impl PaginatedKVStoreSync for SqliteStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> io::Result<PaginatedListResponse> {
+		self.inner.list_paginated_internal(primary_namespace, secondary_namespace, page_token)
+	}
+}
+
+impl PaginatedKVStore for SqliteStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let inner = Arc::clone(&self.inner);
+		let fut = tokio::task::spawn_blocking(move || {
+			inner.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
+		});
+		async move {
+			fut.await.unwrap_or_else(|e| {
+				let msg = format!("Failed to IO operation due join error: {}", e);
+				Err(io::Error::new(io::ErrorKind::Other, msg))
+			})
+		}
+	}
+}
+
 struct SqliteStoreInner {
 	connection: Arc<Mutex<Connection>>,
 	data_dir: PathBuf,
 	kv_table_name: String,
 	write_version_locks: Mutex<HashMap<String, Arc<Mutex<u64>>>>,
+	next_sort_order: AtomicI64,
 }
 
 impl SqliteStoreInner {
@@ -289,7 +323,9 @@ impl SqliteStoreInner {
 			primary_namespace TEXT NOT NULL,
 			secondary_namespace TEXT DEFAULT \"\" NOT NULL,
 			key TEXT NOT NULL CHECK (key <> ''),
-			value BLOB, PRIMARY KEY ( primary_namespace, secondary_namespace, key )
+			value BLOB,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY ( primary_namespace, secondary_namespace, key )
 			);",
 			kv_table_name
 		);
@@ -299,9 +335,32 @@ impl SqliteStoreInner {
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
+		// Create composite index for paginated listing (IF NOT EXISTS for idempotency)
+		let sql = format!(
+			"CREATE INDEX IF NOT EXISTS idx_{}_paginated ON {} (primary_namespace, secondary_namespace, sort_order DESC, key ASC)",
+			kv_table_name, kv_table_name
+		);
+
+		connection.execute(&sql, []).map_err(|e| {
+			let msg = format!("Failed to create index on table {}: {}", kv_table_name, e);
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
+
+		let max_sort_order: i64 = connection
+			.query_row(
+				&format!("SELECT COALESCE(MAX(sort_order), 0) FROM {}", kv_table_name),
+				[],
+				|row| row.get(0),
+			)
+			.map_err(|e| {
+				let msg = format!("Failed to read max sort_order from {}: {}", kv_table_name, e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+		let next_sort_order = AtomicI64::new(max_sort_order + 1);
+
 		let connection = Arc::new(Mutex::new(connection));
 		let write_version_locks = Mutex::new(HashMap::new());
-		Ok(Self { connection, data_dir, kv_table_name, write_version_locks })
+		Ok(Self { connection, data_dir, kv_table_name, write_version_locks, next_sort_order })
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<Mutex<u64>> {
@@ -366,8 +425,12 @@ impl SqliteStoreInner {
 		self.execute_locked_write(inner_lock_ref, locking_key, version, || {
 			let locked_conn = self.connection.lock().unwrap();
 
+			let sort_order = self.next_sort_order.fetch_add(1, Ordering::Relaxed);
+
 			let sql = format!(
-				"INSERT OR REPLACE INTO {} (primary_namespace, secondary_namespace, key, value) VALUES (:primary_namespace, :secondary_namespace, :key, :value);",
+				"INSERT INTO {} (primary_namespace, secondary_namespace, key, value, sort_order) \
+				 VALUES (:primary_namespace, :secondary_namespace, :key, :value, :sort_order) \
+				 ON CONFLICT(primary_namespace, secondary_namespace, key) DO UPDATE SET value = excluded.value;",
 				self.kv_table_name
 			);
 
@@ -381,6 +444,7 @@ impl SqliteStoreInner {
 				":secondary_namespace": secondary_namespace,
 				":key": key,
 				":value": buf,
+				":sort_order": sort_order,
 			})
 			.map(|_| ())
 			.map_err(|e| {
@@ -472,6 +536,110 @@ impl SqliteStoreInner {
 		Ok(keys)
 	}
 
+	fn list_paginated_internal(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> io::Result<PaginatedListResponse> {
+		check_namespace_key_validity(
+			primary_namespace,
+			secondary_namespace,
+			None,
+			"list_paginated",
+		)?;
+
+		let locked_conn = self.connection.lock().unwrap();
+
+		// Fetch one extra row beyond PAGE_SIZE to determine whether a next page exists.
+		let fetch_limit = (PAGE_SIZE + 1) as i64;
+
+		let mut entries: Vec<(String, i64)> = match page_token {
+			Some(ref token) => {
+				let token_sort_order: i64 = token.as_str().parse().map_err(|_| {
+					let msg = format!("Invalid page token: {}", token.as_str());
+					io::Error::new(io::ErrorKind::InvalidInput, msg)
+				})?;
+				let sql = format!(
+					"SELECT key, sort_order FROM {} \
+					 WHERE primary_namespace=:primary_namespace \
+					 AND secondary_namespace=:secondary_namespace \
+					 AND sort_order < :token_sort_order \
+					 ORDER BY sort_order DESC, key ASC \
+					 LIMIT :limit",
+					self.kv_table_name
+				);
+				let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
+					let msg = format!("Failed to prepare statement: {}", e);
+					io::Error::new(io::ErrorKind::Other, msg)
+				})?;
+
+				let rows = stmt
+					.query_map(
+						named_params! {
+							":primary_namespace": primary_namespace,
+							":secondary_namespace": secondary_namespace,
+							":token_sort_order": token_sort_order,
+							":limit": fetch_limit,
+						},
+						|row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+					)
+					.map_err(|e| {
+						let msg = format!("Failed to retrieve queried rows: {}", e);
+						io::Error::new(io::ErrorKind::Other, msg)
+					})?;
+
+				rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+					let msg = format!("Failed to retrieve queried rows: {}", e);
+					io::Error::new(io::ErrorKind::Other, msg)
+				})?
+			},
+			None => {
+				let sql = format!(
+					"SELECT key, sort_order FROM {} \
+					 WHERE primary_namespace=:primary_namespace \
+					 AND secondary_namespace=:secondary_namespace \
+					 ORDER BY sort_order DESC, key ASC \
+					 LIMIT :limit",
+					self.kv_table_name
+				);
+				let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
+					let msg = format!("Failed to prepare statement: {}", e);
+					io::Error::new(io::ErrorKind::Other, msg)
+				})?;
+
+				let rows = stmt
+					.query_map(
+						named_params! {
+							":primary_namespace": primary_namespace,
+							":secondary_namespace": secondary_namespace,
+							":limit": fetch_limit,
+						},
+						|row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+					)
+					.map_err(|e| {
+						let msg = format!("Failed to retrieve queried rows: {}", e);
+						io::Error::new(io::ErrorKind::Other, msg)
+					})?;
+
+				rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+					let msg = format!("Failed to retrieve queried rows: {}", e);
+					io::Error::new(io::ErrorKind::Other, msg)
+				})?
+			},
+		};
+
+		let has_more = entries.len() > PAGE_SIZE;
+		entries.truncate(PAGE_SIZE);
+
+		let next_page_token = if has_more {
+			let (_, last_sort_order) = *entries.last().expect("must be non-empty");
+			Some(PageToken::new(last_sort_order.to_string()))
+		} else {
+			None
+		};
+
+		let keys = entries.into_iter().map(|(k, _)| k).collect();
+		Ok(PaginatedListResponse { keys, next_page_token })
+	}
+
 	fn execute_locked_write<F: FnOnce() -> Result<(), lightning::io::Error>>(
 		&self, inner_lock_ref: Arc<Mutex<u64>>, locking_key: String, version: u64, callback: F,
 	) -> Result<(), lightning::io::Error> {
@@ -516,6 +684,7 @@ impl SqliteStoreInner {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
 	use crate::io::test_utils::{
 		do_read_write_remove_list_persist, do_test_store, random_storage_path,
 	};
@@ -559,6 +728,320 @@ mod tests {
 		)
 		.unwrap();
 		do_test_store(&store_0, &store_1)
+	}
+
+	#[test]
+	fn test_sqlite_store_paginated_listing() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_paginated_listing");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		let primary_namespace = "test_ns";
+		let secondary_namespace = "test_sub";
+		let num_entries = 225;
+
+		for i in 0..num_entries {
+			let key = format!("key_{:04}", i);
+			let data = vec![i as u8; 32];
+			KVStoreSync::write(&store, primary_namespace, secondary_namespace, &key, data).unwrap();
+		}
+
+		// Paginate through all entries and collect them
+		let mut all_keys = Vec::new();
+		let mut page_token = None;
+		let mut page_count = 0;
+
+		loop {
+			let response = PaginatedKVStoreSync::list_paginated(
+				&store,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+			.unwrap();
+
+			all_keys.extend(response.keys.clone());
+			page_count += 1;
+
+			match response.next_page_token {
+				Some(token) => page_token = Some(token),
+				None => break,
+			}
+		}
+
+		// Verify we got exactly the right number of entries
+		assert_eq!(all_keys.len(), num_entries);
+
+		// Verify correct number of pages (225 entries at 50 per page = 5 pages)
+		assert_eq!(page_count, 5);
+
+		// Verify no duplicates
+		let mut unique_keys = all_keys.clone();
+		unique_keys.sort();
+		unique_keys.dedup();
+		assert_eq!(unique_keys.len(), num_entries);
+
+		// Verify ordering: newest first (highest sort_order first).
+		// Since we wrote key_0000 first and key_0249 last, key_0249 should appear first
+		// in the paginated results.
+		assert_eq!(all_keys[0], format!("key_{:04}", num_entries - 1));
+		assert_eq!(all_keys[num_entries - 1], "key_0000");
+	}
+
+	#[test]
+	fn test_sqlite_store_paginated_update_preserves_order() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_paginated_update");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		let primary_namespace = "test_ns";
+		let secondary_namespace = "test_sub";
+
+		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "first", vec![1u8; 8])
+			.unwrap();
+		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "second", vec![2u8; 8])
+			.unwrap();
+		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "third", vec![3u8; 8])
+			.unwrap();
+
+		// Update the first entry
+		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "first", vec![99u8; 8])
+			.unwrap();
+
+		// Paginated listing should still show "first" with its original creation order
+		let response = PaginatedKVStoreSync::list_paginated(
+			&store,
+			primary_namespace,
+			secondary_namespace,
+			None,
+		)
+		.unwrap();
+
+		// Newest first: third, second, first
+		assert_eq!(response.keys, vec!["third", "second", "first"]);
+
+		// Verify the updated value was persisted
+		let data =
+			KVStoreSync::read(&store, primary_namespace, secondary_namespace, "first").unwrap();
+		assert_eq!(data, vec![99u8; 8]);
+	}
+
+	#[test]
+	fn test_sqlite_store_paginated_empty_namespace() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_paginated_empty");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		// Paginating an empty or unknown namespace returns an empty result with no token.
+		let response =
+			PaginatedKVStoreSync::list_paginated(&store, "nonexistent", "ns", None).unwrap();
+		assert!(response.keys.is_empty());
+		assert!(response.next_page_token.is_none());
+	}
+
+	#[test]
+	fn test_sqlite_store_paginated_namespace_isolation() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_paginated_isolation");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		KVStoreSync::write(&store, "ns_a", "sub", "key_1", vec![1u8; 8]).unwrap();
+		KVStoreSync::write(&store, "ns_a", "sub", "key_2", vec![2u8; 8]).unwrap();
+		KVStoreSync::write(&store, "ns_b", "sub", "key_3", vec![3u8; 8]).unwrap();
+		KVStoreSync::write(&store, "ns_a", "other", "key_4", vec![4u8; 8]).unwrap();
+
+		// ns_a/sub should only contain key_1 and key_2 (newest first).
+		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_a", "sub", None).unwrap();
+		assert_eq!(response.keys, vec!["key_2", "key_1"]);
+		assert!(response.next_page_token.is_none());
+
+		// ns_b/sub should only contain key_3.
+		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_b", "sub", None).unwrap();
+		assert_eq!(response.keys, vec!["key_3"]);
+
+		// ns_a/other should only contain key_4.
+		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_a", "other", None).unwrap();
+		assert_eq!(response.keys, vec!["key_4"]);
+	}
+
+	#[test]
+	fn test_sqlite_store_paginated_removal() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_paginated_removal");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		let ns = "test_ns";
+		let sub = "test_sub";
+
+		KVStoreSync::write(&store, ns, sub, "a", vec![1u8; 8]).unwrap();
+		KVStoreSync::write(&store, ns, sub, "b", vec![2u8; 8]).unwrap();
+		KVStoreSync::write(&store, ns, sub, "c", vec![3u8; 8]).unwrap();
+
+		KVStoreSync::remove(&store, ns, sub, "b", false).unwrap();
+
+		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		assert_eq!(response.keys, vec!["c", "a"]);
+		assert!(response.next_page_token.is_none());
+	}
+
+	#[test]
+	fn test_sqlite_store_paginated_exact_page_boundary() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_paginated_boundary");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		let ns = "test_ns";
+		let sub = "test_sub";
+
+		// Write exactly PAGE_SIZE entries (50).
+		for i in 0..PAGE_SIZE {
+			let key = format!("key_{:04}", i);
+			KVStoreSync::write(&store, ns, sub, &key, vec![i as u8; 8]).unwrap();
+		}
+
+		// Exactly PAGE_SIZE entries: all returned in one page with no next-page token.
+		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		assert_eq!(response.keys.len(), PAGE_SIZE);
+		assert!(response.next_page_token.is_none());
+
+		// Add one more entry (PAGE_SIZE + 1 total). First page should now have a token.
+		KVStoreSync::write(&store, ns, sub, "key_extra", vec![0u8; 8]).unwrap();
+		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		assert_eq!(response.keys.len(), PAGE_SIZE);
+		assert!(response.next_page_token.is_some());
+
+		// Second page should have exactly 1 entry and no token.
+		let response =
+			PaginatedKVStoreSync::list_paginated(&store, ns, sub, response.next_page_token)
+				.unwrap();
+		assert_eq!(response.keys.len(), 1);
+		assert!(response.next_page_token.is_none());
+	}
+
+	#[test]
+	fn test_sqlite_store_paginated_fewer_than_page_size() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_paginated_few");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		let ns = "test_ns";
+		let sub = "test_sub";
+
+		// Write fewer entries than PAGE_SIZE.
+		for i in 0..5 {
+			let key = format!("key_{}", i);
+			KVStoreSync::write(&store, ns, sub, &key, vec![i as u8; 8]).unwrap();
+		}
+
+		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		assert_eq!(response.keys.len(), 5);
+		// Fewer than PAGE_SIZE means no next page.
+		assert!(response.next_page_token.is_none());
+		// Newest first.
+		assert_eq!(response.keys, vec!["key_4", "key_3", "key_2", "key_1", "key_0"]);
+	}
+
+	#[test]
+	fn test_sqlite_store_write_version_persists_across_restart() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_write_version_restart");
+
+		let primary_namespace = "test_ns";
+		let secondary_namespace = "test_sub";
+
+		{
+			let store = SqliteStore::new(
+				temp_path.clone(),
+				Some("test_db".to_string()),
+				Some("test_table".to_string()),
+			)
+			.unwrap();
+
+			KVStoreSync::write(
+				&store,
+				primary_namespace,
+				secondary_namespace,
+				"key_a",
+				vec![1u8; 8],
+			)
+			.unwrap();
+			KVStoreSync::write(
+				&store,
+				primary_namespace,
+				secondary_namespace,
+				"key_b",
+				vec![2u8; 8],
+			)
+			.unwrap();
+
+			// Don't drop/cleanup since we want to reopen
+			std::mem::forget(store);
+		}
+
+		// Open a new store instance on the same database and write more
+		{
+			let store = SqliteStore::new(
+				temp_path,
+				Some("test_db".to_string()),
+				Some("test_table".to_string()),
+			)
+			.unwrap();
+
+			KVStoreSync::write(
+				&store,
+				primary_namespace,
+				secondary_namespace,
+				"key_c",
+				vec![3u8; 8],
+			)
+			.unwrap();
+
+			// Paginated listing should show newest first: key_c, key_b, key_a
+			let response = PaginatedKVStoreSync::list_paginated(
+				&store,
+				primary_namespace,
+				secondary_namespace,
+				None,
+			)
+			.unwrap();
+
+			assert_eq!(response.keys, vec!["key_c", "key_b", "key_a"]);
+		}
 	}
 }
 

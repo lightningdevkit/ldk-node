@@ -91,6 +91,7 @@ proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
 ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
+ldk-node-070 = { package = "ldk-node", version = "=0.7.0" }
 
 [target.'cfg(not(no_download))'.dev-dependencies]
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
