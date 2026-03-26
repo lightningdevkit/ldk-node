@@ -21,8 +21,8 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
 	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
-	open_channel, open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds,
-	premine_blocks, prepare_rbf, random_chain_source, random_config, random_listening_addresses,
+	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
 	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
 };
@@ -1429,9 +1429,9 @@ async fn test_node_announcement_propagation() {
 	node_a_alias_bytes[..node_a_alias_string.as_bytes().len()]
 		.copy_from_slice(node_a_alias_string.as_bytes());
 	let node_a_node_alias = Some(NodeAlias(node_a_alias_bytes));
-	let node_a_announcement_addresses = random_listening_addresses();
+	let node_a_announcement_addresses = generate_listening_addresses();
 	config_a.node_config.node_alias = node_a_node_alias.clone();
-	config_a.node_config.listening_addresses = Some(random_listening_addresses());
+	config_a.node_config.listening_addresses = Some(generate_listening_addresses());
 	config_a.node_config.announcement_addresses = Some(node_a_announcement_addresses.clone());
 
 	// Node B will only use listening addresses
@@ -1441,7 +1441,7 @@ async fn test_node_announcement_propagation() {
 	node_b_alias_bytes[..node_b_alias_string.as_bytes().len()]
 		.copy_from_slice(node_b_alias_string.as_bytes());
 	let node_b_node_alias = Some(NodeAlias(node_b_alias_bytes));
-	let node_b_listening_addresses = random_listening_addresses();
+	let node_b_listening_addresses = generate_listening_addresses();
 	config_b.node_config.node_alias = node_b_node_alias.clone();
 	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
 	config_b.node_config.announcement_addresses = None;
