@@ -1426,20 +1426,24 @@ where
 					}
 				}
 
-				// We only allow multiple HTLCs in/out for trampoline forwards, which have not yet
-				// been fully implemented in LDK, so we do not lose any information by just
-				// reporting the first HTLC in each vec.
-				debug_assert_eq!(prev_htlcs.len(), 1, "unexpected number of prev_htlcs");
-				debug_assert_eq!(next_htlcs.len(), 1, "unexpected number of next_htlcs");
-				let next_htlc = next_htlcs
-					.first()
-					.expect("we expect at least one next_htlc for PaymentForwarded");
-
+				// We only expect multiple next_htlcs when we have a trampoline forward, and we do
+				// not support JIT channels in combination with trampoline. We're not at risk of
+				// double-reporting a skimmed fee when we have multiple next_htlcs because we
+				// expect our skimmed fee to be zero.
+				if skimmed_fee_msat.is_some() {
+					debug_assert_eq!(
+						next_htlcs.len(),
+						1,
+						"unexpected skimmed fee for trampoline forward, fee may be double counted"
+					);
+				}
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					let skimmed_fee_msat = skimmed_fee_msat.unwrap_or(0);
-					liquidity_source
-						.handle_payment_forwarded(Some(next_htlc.channel_id), skimmed_fee_msat)
-						.await;
+					for next_htlc in next_htlcs.iter() {
+						liquidity_source
+							.handle_payment_forwarded(Some(next_htlc.channel_id), skimmed_fee_msat)
+							.await;
+					}
 				}
 
 				let event = Event::PaymentForwarded {
