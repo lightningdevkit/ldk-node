@@ -361,13 +361,6 @@ pub struct CounterpartyForwardingInfo {
 	pub cltv_expiry_delta: u16,
 }
 
-#[cfg(feature = "uniffi")]
-uniffi::custom_type!(InitFeatures, Vec<u8>, {
-	remote,
-	try_lift: |val| Ok(InitFeatures::from_le_bytes(val)),
-	lower: |obj| obj.le_flags().to_vec(),
-});
-
 /// Channel parameters which apply to our counterparty. These are split out from [`ChannelDetails`]
 /// to better separate parameters.
 #[derive(Clone, Debug, PartialEq)]
