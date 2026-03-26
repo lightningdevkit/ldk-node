@@ -1753,8 +1753,8 @@ async fn unified_send_receive_bip21_uri() {
 		},
 	};
 
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	wait_for_tx(&electrsd.client, txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();

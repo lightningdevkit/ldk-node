@@ -30,7 +30,7 @@ use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 use ldk_node::config::{
 	AsyncPaymentsRole, CbfSyncConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	HRNResolverConfig, HumanReadableNamesConfig,
+	HRNResolverConfig, HumanReadableNamesConfig, SyncTimeoutsConfig,
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
@@ -514,7 +514,18 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		TestChainSource::Cbf(bitcoind) => {
 			let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
 			let peer_addr = format!("{}", p2p_socket);
-			let sync_config = CbfSyncConfig { background_sync_config: None, ..Default::default() };
+			let timeouts_config = SyncTimeoutsConfig {
+				onchain_wallet_sync_timeout_secs: 3,
+				lightning_wallet_sync_timeout_secs: 3,
+				fee_rate_cache_update_timeout_secs: 3,
+				tx_broadcast_timeout_secs: 3,
+				per_request_timeout_secs: 3,
+			};
+			let sync_config = CbfSyncConfig {
+				background_sync_config: None,
+				timeouts_config,
+				..Default::default()
+			};
 			builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config), None);
 		},
 	}
@@ -642,31 +653,6 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 		is_spent.then_some(())
 	})
 	.await;
-}
-
-/// Wait until a transaction spending the given outpoint appears in bitcoind's mempool.
-///
-/// This is more reliable than the electrum-based `wait_for_outpoint_spend` for CBF nodes,
-/// where the close tx is broadcast via P2P and electrs may not index it immediately.
-pub(crate) async fn wait_for_outpoint_spend_in_mempool(
-	bitcoind: &BitcoindClient, outpoint: OutPoint,
-) {
-	let check = || {
-		let mempool = bitcoind.get_raw_mempool().unwrap().into_model().unwrap();
-		for txid in mempool.0 {
-			let tx = bitcoind.get_raw_transaction(txid).unwrap().into_model().unwrap().0;
-			if tx.input.iter().any(|inp| inp.previous_output == outpoint) {
-				return Some(());
-			}
-		}
-		None
-	};
-
-	if check().is_some() {
-		return;
-	}
-
-	exponential_backoff_poll(check).await;
 }
 
 pub(crate) async fn wait_for_cbf_sync(node: &TestNode) {
@@ -1461,10 +1447,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// After splices, the latest funding outpoint is from the last splice.
 	// We must wait for the close tx (which spends the latest funding output)
-	// to reach bitcoind's mempool before mining. For CBF nodes the close tx
-	// is broadcast via P2P so we poll bitcoind directly rather than relying
-	// on electrs indexing.
-	wait_for_outpoint_spend_in_mempool(bitcoind, splice_in_txo).await;
+	// to propagate before mining.
+	wait_for_outpoint_spend(electrsd, splice_in_txo).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 	node_a.sync_wallets().unwrap();
