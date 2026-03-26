@@ -5,7 +5,6 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use lightning::blinded_path::message::OffersContext;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::invoice::Bolt12Invoice;
@@ -18,26 +17,6 @@ pub(crate) struct PayerProofContext {
 	pub payment_id: PaymentId,
 	pub invoice: Bolt12Invoice,
 	pub nonce: Nonce,
-}
-
-impl PayerProofContext {
-	pub(crate) fn from_invoice_received(
-		payment_id: PaymentId, invoice: &Bolt12Invoice, context: Option<&OffersContext>,
-	) -> Option<Self> {
-		match context {
-			Some(OffersContext::OutboundPaymentForOffer {
-				payment_id: context_payment_id,
-				nonce,
-			})
-			| Some(OffersContext::OutboundPaymentForRefund {
-				payment_id: context_payment_id,
-				nonce,
-			}) if *context_payment_id == payment_id => {
-				Some(Self { payment_id, invoice: invoice.clone(), nonce: *nonce })
-			},
-			_ => None,
-		}
-	}
 }
 
 impl_writeable_tlv_based!(PayerProofContext, {

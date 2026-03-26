@@ -150,6 +150,8 @@ impl Bolt12Payment {
 			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config: route_parameters,
+			contact_secrets: None,
+			payer_offer: None,
 		};
 		let res = if let Some(hrn) = hrn {
 			let hrn = maybe_deref(&hrn);
@@ -336,6 +338,8 @@ impl Bolt12Payment {
 			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config: route_parameters,
+			contact_secrets: None,
+			payer_offer: None,
 		};
 		let res = if let Some(quantity) = quantity {
 			self.channel_manager
