@@ -16,6 +16,7 @@ use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECH
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
+pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::types::ChannelId;
@@ -528,6 +529,10 @@ pub struct ChannelDetails {
 	pub inbound_htlc_maximum_msat: Option<u64>,
 	/// Set of configurable parameters that affect channel operation.
 	pub config: ChannelConfig,
+	/// The current shutdown state of the channel, if any.
+	///
+	/// Returns `None` for `ChannelDetails` serialized on LDK versions prior to 0.0.116.
+	pub channel_shutdown_state: Option<ChannelShutdownState>,
 }
 
 impl From<LdkChannelDetails> for ChannelDetails {
@@ -583,6 +588,7 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
 			// unwrap safety: `config` is only `None` for LDK objects serialized prior to 0.0.109.
 			config: value.config.map(|c| c.into()).unwrap(),
+			channel_shutdown_state: value.channel_shutdown_state,
 		}
 	}
 }
