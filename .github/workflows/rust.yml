@@ -128,7 +128,7 @@ jobs:
           for i in $(seq 1 5); do
             echo "=== Iteration $i (shard ${{ matrix.shard }}) ==="
             for j in 1 2 3; do
-              LDK_NODE_TEST_BASE_PORT=$((20000 + (j - 1) * 1000)) RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --test integration_tests_rust -- --nocapture > /tmp/stress-${j}.log 2>&1 &
+              LDK_NODE_TEST_BASE_PORT=$((20000 + (i - 1) * 3000 + (j - 1) * 1000)) RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --test integration_tests_rust -- --nocapture > /tmp/stress-${j}.log 2>&1 &
               pids[${j}]=$!
             done
             for j in 1 2 3; do
