@@ -31,6 +31,7 @@ pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
+use lightning::offers::payer_proof::PayerProof as LdkPayerProof;
 use lightning::offers::refund::Refund as LdkRefund;
 use lightning::offers::static_invoice::StaticInvoice as LdkStaticInvoice;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
@@ -872,6 +873,92 @@ impl Readable for PaidBolt12Invoice {
 	fn read<R: lightning::io::Read>(r: &mut R) -> Result<Self, DecodeError> {
 		let ldk_type = LdkPaidBolt12Invoice::read(r)?;
 		Ok(ldk_type.into())
+	}
+}
+
+/// A cryptographic proof that a BOLT12 invoice was paid by this node.
+#[derive(Debug, Clone, uniffi::Object)]
+#[uniffi::export(Debug, Display)]
+pub struct PayerProof {
+	pub(crate) inner: LdkPayerProof,
+}
+
+#[uniffi::export]
+impl PayerProof {
+	#[uniffi::constructor]
+	pub fn from_bytes(proof_bytes: Vec<u8>) -> Result<Self, Error> {
+		let inner = LdkPayerProof::try_from(proof_bytes).map_err(|_| Error::InvalidPayerProof)?;
+		Ok(Self { inner })
+	}
+
+	/// The payment preimage proving the payment completed.
+	pub fn preimage(&self) -> PaymentPreimage {
+		self.inner.preimage()
+	}
+
+	/// The payment hash committed to by the invoice and proven by the preimage.
+	pub fn payment_hash(&self) -> PaymentHash {
+		self.inner.payment_hash()
+	}
+
+	/// The public key of the payer that authorized the payment.
+	pub fn payer_id(&self) -> PublicKey {
+		self.inner.payer_id()
+	}
+
+	/// The issuer signing public key committed to by the invoice.
+	pub fn issuer_signing_pubkey(&self) -> PublicKey {
+		self.inner.issuer_signing_pubkey()
+	}
+
+	/// The invoice signature bytes.
+	pub fn invoice_signature(&self) -> Vec<u8> {
+		self.inner.invoice_signature().as_ref().to_vec()
+	}
+
+	/// The payer signature bytes.
+	pub fn payer_signature(&self) -> Vec<u8> {
+		self.inner.payer_signature().as_ref().to_vec()
+	}
+
+	/// The optional note attached to the proof.
+	pub fn payer_note(&self) -> Option<String> {
+		self.inner.payer_note().map(|value| value.to_string())
+	}
+
+	/// The Merkle root committed to by the proof.
+	pub fn merkle_root(&self) -> Vec<u8> {
+		self.inner.merkle_root().to_byte_array().to_vec()
+	}
+
+	/// The raw TLV bytes of the proof.
+	pub fn bytes(&self) -> Vec<u8> {
+		self.inner.bytes().to_vec()
+	}
+
+	/// The bech32-encoded string form of the proof.
+	pub fn as_string(&self) -> String {
+		self.inner.to_string()
+	}
+}
+
+impl From<LdkPayerProof> for PayerProof {
+	fn from(inner: LdkPayerProof) -> Self {
+		Self { inner }
+	}
+}
+
+impl Deref for PayerProof {
+	type Target = LdkPayerProof;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl std::fmt::Display for PayerProof {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
 	}
 }
 

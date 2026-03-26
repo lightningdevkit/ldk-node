@@ -24,6 +24,7 @@ use lightning::events::{
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
+use lightning::offers::nonce::Nonce;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
 use lightning::util::config::{
@@ -49,12 +50,14 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::payer_proof_store::PayerProofContext;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PayerProofContextStore, PaymentStore,
+	Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -507,6 +510,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
+	payer_proof_context_store: Arc<PayerProofContextStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	runtime: Arc<Runtime>,
@@ -527,10 +531,11 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
-		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
-		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		payment_store: Arc<PaymentStore>, payer_proof_context_store: Arc<PayerProofContextStore>,
+		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
+		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
+		config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -542,6 +547,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			payer_proof_context_store,
 			peer_store,
 			keys_manager,
 			logger,
@@ -550,6 +556,31 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+		}
+	}
+
+	fn persist_payer_proof_context(
+		&self, payment_id: PaymentId, bolt12_invoice: &Option<PaidBolt12Invoice>,
+		payment_nonce: Option<Nonce>,
+	) {
+		let invoice = match bolt12_invoice {
+			Some(PaidBolt12Invoice::Bolt12Invoice(invoice)) => invoice,
+			_ => return,
+		};
+
+		let nonce = match payment_nonce {
+			Some(nonce) => nonce,
+			None => return,
+		};
+
+		let context = PayerProofContext { payment_id, invoice: invoice.clone(), nonce };
+		if let Err(e) = self.payer_proof_context_store.insert_or_update(context) {
+			log_error!(
+				self.logger,
+				"Failed to persist payer proof context for {}: {}",
+				payment_id,
+				e
+			);
 		}
 	}
 
@@ -860,6 +891,7 @@ where
 							offer_id,
 							payer_note,
 							quantity,
+							bolt12_invoice: None,
 						};
 
 						let payment = PaymentDetails::new(
@@ -1065,6 +1097,7 @@ where
 				payment_hash,
 				fee_paid_msat,
 				bolt12_invoice,
+				payment_nonce,
 				..
 			} => {
 				let payment_id = if let Some(id) = payment_id {
@@ -1073,12 +1106,20 @@ where
 					debug_assert!(false, "payment_id should always be set.");
 					return Ok(());
 				};
+				let bolt12_invoice = bolt12_invoice.map(Into::into);
+
+				self.persist_payer_proof_context(
+					payment_id,
+					&bolt12_invoice,
+					payment_nonce,
+				);
 
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
 					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
+					bolt12_invoice: Some(bolt12_invoice.clone()),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
@@ -1110,7 +1151,7 @@ where
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
-					bolt12_invoice: bolt12_invoice.map(Into::into),
+					bolt12_invoice,
 				};
 
 				match self.event_queue.add_event(event).await {
@@ -1562,20 +1603,14 @@ where
 				};
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
-				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
+				if let FundingInfo::Tx { transaction } = funding_info {
 					log_info!(
 						self.logger,
 						"Reclaiming unused addresses from channel {} funding",
 						channel_id,
 					);
 
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: outputs,
-					};
-					if let Err(e) = self.wallet.cancel_tx(&tx) {
+					if let Err(e) = self.wallet.cancel_tx(&transaction) {
 						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
 						return Err(ReplayEvent());
 					}

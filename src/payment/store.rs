@@ -8,6 +8,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::{BlockHash, Txid};
+#[cfg(not(feature = "uniffi"))]
+use lightning::events::PaidBolt12Invoice;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::offers::offer::OfferId;
@@ -20,6 +22,8 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning_types::string::UntrustedString;
 
 use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
+#[cfg(feature = "uniffi")]
+use crate::ffi::PaidBolt12Invoice;
 use crate::hex_utils;
 
 /// Represents a payment.
@@ -267,6 +271,18 @@ impl StorableObject for PaymentDetails {
 			update_if_necessary!(self.fee_paid_msat, fee_paid_msat_opt);
 		}
 
+		if let Some(ref bolt12_invoice_opt) = update.bolt12_invoice {
+			match self.kind {
+				PaymentKind::Bolt12Offer { ref mut bolt12_invoice, .. } => {
+					update_if_necessary!(*bolt12_invoice, bolt12_invoice_opt.clone());
+				},
+				PaymentKind::Bolt12Refund { ref mut bolt12_invoice, .. } => {
+					update_if_necessary!(*bolt12_invoice, bolt12_invoice_opt.clone());
+				},
+				_ => {},
+			}
+		}
+
 		if let Some(skimmed_fee_msat) = update.counterparty_skimmed_fee_msat {
 			match self.kind {
 				PaymentKind::Bolt11Jit { ref mut counterparty_skimmed_fee_msat, .. } => {
@@ -428,6 +444,8 @@ pub enum PaymentKind {
 		///
 		/// This will always be `None` for payments serialized with version `v0.3.0`.
 		quantity: Option<u64>,
+		/// The BOLT12 invoice associated with the payment, once available.
+		bolt12_invoice: Option<PaidBolt12Invoice>,
 	},
 	/// A [BOLT 12] 'refund' payment, i.e., a payment for a [`Refund`].
 	///
@@ -448,6 +466,8 @@ pub enum PaymentKind {
 		///
 		/// This will always be `None` for payments serialized with version `v0.3.0`.
 		quantity: Option<u64>,
+		/// The BOLT12 invoice associated with the payment, once available.
+		bolt12_invoice: Option<PaidBolt12Invoice>,
 	},
 	/// A spontaneous ("keysend") payment.
 	Spontaneous {
@@ -482,6 +502,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(3, quantity, option),
 		(4, secret, option),
 		(6, offer_id, required),
+		(8, bolt12_invoice, option),
 	},
 	(8, Spontaneous) => {
 		(0, hash, required),
@@ -493,6 +514,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(3, quantity, option),
 		(4, secret, option),
+		(6, bolt12_invoice, option),
 	}
 );
 
@@ -555,6 +577,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
+	pub bolt12_invoice: Option<Option<PaidBolt12Invoice>>,
 	pub txid: Option<Txid>,
 }
 
@@ -571,6 +594,7 @@ impl PaymentDetailsUpdate {
 			direction: None,
 			status: None,
 			confirmation_status: None,
+			bolt12_invoice: None,
 			txid: None,
 		}
 	}
@@ -578,13 +602,21 @@ impl PaymentDetailsUpdate {
 
 impl From<&PaymentDetails> for PaymentDetailsUpdate {
 	fn from(value: &PaymentDetails) -> Self {
-		let (hash, preimage, secret) = match value.kind {
-			PaymentKind::Bolt11 { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
-			PaymentKind::Bolt11Jit { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
-			PaymentKind::Bolt12Offer { hash, preimage, secret, .. } => (hash, preimage, secret),
-			PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => (hash, preimage, secret),
-			PaymentKind::Spontaneous { hash, preimage, .. } => (Some(hash), preimage, None),
-			_ => (None, None, None),
+		let (hash, preimage, secret, bolt12_invoice) = match &value.kind {
+			PaymentKind::Bolt11 { hash, preimage, secret, .. } => {
+				(Some(*hash), *preimage, *secret, None)
+			},
+			PaymentKind::Bolt11Jit { hash, preimage, secret, .. } => {
+				(Some(*hash), *preimage, *secret, None)
+			},
+			PaymentKind::Bolt12Offer { hash, preimage, secret, bolt12_invoice, .. } => {
+				(*hash, *preimage, *secret, Some(bolt12_invoice.clone()))
+			},
+			PaymentKind::Bolt12Refund { hash, preimage, secret, bolt12_invoice, .. } => {
+				(*hash, *preimage, *secret, Some(bolt12_invoice.clone()))
+			},
+			PaymentKind::Spontaneous { hash, preimage, .. } => (Some(*hash), *preimage, None, None),
+			_ => (None, None, None, None),
 		};
 
 		let (confirmation_status, txid) = match &value.kind {
@@ -592,9 +624,9 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			_ => (None, None),
 		};
 
-		let counterparty_skimmed_fee_msat = match value.kind {
+		let counterparty_skimmed_fee_msat = match &value.kind {
 			PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
-				Some(counterparty_skimmed_fee_msat)
+				Some(*counterparty_skimmed_fee_msat)
 			},
 			_ => None,
 		};
@@ -610,6 +642,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 			direction: Some(value.direction),
 			status: Some(value.status),
 			confirmation_status,
+			bolt12_invoice,
 			txid,
 		}
 	}

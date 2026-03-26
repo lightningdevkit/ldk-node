@@ -42,8 +42,11 @@ use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::{
 	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+	PAYER_PROOF_CONTEXT_PERSISTENCE_PRIMARY_NAMESPACE,
+	PAYER_PROOF_CONTEXT_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
+use crate::payment::payer_proof_store::PayerProofContext;
 use crate::payment::PendingPaymentDetails;
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
@@ -290,6 +293,79 @@ where
 			)
 		})?;
 		res.push(payment);
+	}
+
+	debug_assert!(set.is_empty());
+	debug_assert!(stored_keys.is_empty());
+
+	Ok(res)
+}
+
+/// Read previously persisted payer proof contexts from the store.
+pub(crate) async fn read_payer_proof_contexts<L: Deref>(
+	kv_store: &DynStore, logger: L,
+) -> Result<Vec<PayerProofContext>, std::io::Error>
+where
+	L::Target: LdkLogger,
+{
+	let mut res = Vec::new();
+
+	let mut stored_keys = KVStore::list(
+		&*kv_store,
+		PAYER_PROOF_CONTEXT_PERSISTENCE_PRIMARY_NAMESPACE,
+		PAYER_PROOF_CONTEXT_PERSISTENCE_SECONDARY_NAMESPACE,
+	)
+	.await?;
+
+	const BATCH_SIZE: usize = 50;
+
+	let mut set = tokio::task::JoinSet::new();
+
+	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
+				&*kv_store,
+				PAYER_PROOF_CONTEXT_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYER_PROOF_CONTEXT_PERSISTENCE_SECONDARY_NAMESPACE,
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+	}
+
+	while let Some(read_res) = set.join_next().await {
+		let reader = read_res
+			.map_err(|e| {
+				log_error!(logger, "Failed to read PayerProofContext: {}", e);
+				set.abort_all();
+				e
+			})?
+			.map_err(|e| {
+				log_error!(logger, "Failed to read PayerProofContext: {}", e);
+				set.abort_all();
+				e
+			})?;
+
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
+				&*kv_store,
+				PAYER_PROOF_CONTEXT_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYER_PROOF_CONTEXT_PERSISTENCE_SECONDARY_NAMESPACE,
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+
+		let context = PayerProofContext::read(&mut &*reader).map_err(|e| {
+			log_error!(logger, "Failed to deserialize PayerProofContext: {}", e);
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"Failed to deserialize PayerProofContext",
+			)
+		})?;
+		res.push(context);
 	}
 
 	debug_assert!(set.is_empty());
