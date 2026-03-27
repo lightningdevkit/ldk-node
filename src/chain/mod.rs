@@ -90,6 +90,7 @@ impl WalletSyncStatus {
 /// Setting an external source provides more accurate, per-target estimates
 /// from a mempool-aware server.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum FeeSourceConfig {
 	/// Use an Esplora HTTP server for fee rate estimation.
 	Esplora(String),
@@ -205,7 +206,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> (Self, Option<BestBlock>) {
+	) -> Result<(Self, Option<BestBlock>), Error> {
 		let cbf_chain_source = CbfChainSource::new(
 			peers,
 			sync_config,
@@ -215,10 +216,10 @@ impl ChainSource {
 			config,
 			Arc::clone(&logger),
 			node_metrics,
-		);
+		)?;
 		let kind = ChainSourceKind::Cbf(cbf_chain_source);
 		let registered_txids = Mutex::new(Vec::new());
-		(Self { kind, registered_txids, tx_broadcaster, logger }, None)
+		Ok((Self { kind, registered_txids, tx_broadcaster, logger }, None))
 	}
 
 	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {

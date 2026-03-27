@@ -126,13 +126,16 @@ impl CbfChainSource {
 		peers: Vec<String>, sync_config: CbfSyncConfig, fee_source_config: Option<FeeSourceConfig>,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Self {
+	) -> Result<Self, Error> {
 		let fee_source = match fee_source_config {
 			Some(FeeSourceConfig::Esplora(server_url)) => {
 				let timeout = sync_config.timeouts_config.per_request_timeout_secs;
 				let mut builder = esplora_client::Builder::new(&server_url);
 				builder = builder.timeout(timeout as u64);
-				let client = builder.build_async().unwrap();
+				let client = builder.build_async().map_err(|e| {
+					log_error!(logger, "Failed to build esplora client: {}", e);
+					Error::ConnectionFailed
+				})?;
 				FeeSource::Esplora { client }
 			},
 			Some(FeeSourceConfig::Electrum(server_url)) => FeeSource::Electrum { server_url },
@@ -152,7 +155,7 @@ impl CbfChainSource {
 		let last_lightning_synced_height = Arc::new(Mutex::new(None));
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
-		Self {
+		Ok(Self {
 			peers,
 			sync_config,
 			fee_source,
@@ -174,7 +177,7 @@ impl CbfChainSource {
 			config,
 			logger,
 			node_metrics,
-		}
+		})
 	}
 
 	/// Start the bip157 node and spawn background tasks for event processing.

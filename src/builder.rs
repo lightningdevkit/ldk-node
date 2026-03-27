@@ -198,6 +198,8 @@ pub enum BuildError {
 	NetworkMismatch,
 	/// The role of the node in an asynchronous payments context is not compatible with the current configuration.
 	AsyncPaymentsConfigMismatch,
+	/// We failed to setup the chain source.
+	ChainSourceSetupFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -231,6 +233,7 @@ impl fmt::Display for BuildError {
 					"The async payments role is not compatible with the current configuration."
 				)
 			},
+			Self::ChainSourceSetupFailed => write!(f, "Failed to setup chain source."),
 		}
 	}
 }
@@ -1424,6 +1427,10 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 				Arc::clone(&node_metrics),
 			)
+			.map_err(|e| {
+				log_error!(logger, "Failed to initialize CBF chain source: {}", e);
+				BuildError::ChainSourceSetupFailed
+			})?
 		},
 
 		None => {
