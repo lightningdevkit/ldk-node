@@ -278,7 +278,9 @@ static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
 
 fn init_base_port() {
 	// Initialize once with a random base port. compare_exchange ensures only one thread wins.
-	let base = rng().random_range(10000..50000u16);
+	// Use a range below the Linux ephemeral port range (32768-60999) to avoid
+	// collisions with OS-assigned ports used by electrsd/bitcoind.
+	let base = rng().random_range(10000..30000u16);
 	let _ = NEXT_PORT.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed);
 }
 
