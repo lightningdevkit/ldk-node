@@ -81,6 +81,13 @@ jobs:
         if: "matrix.platform != 'windows-latest'"
         run: |
           RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test
+      - name: Dump kernel OOM messages on failure
+        if: "failure() && matrix.platform == 'ubuntu-latest'"
+        run: |
+          echo "=== dmesg OOM/kill messages ==="
+          sudo dmesg | grep -iE 'oom|kill|out of memory|invoked oom' || echo "No OOM messages found"
+          echo "=== dmesg last 50 lines ==="
+          sudo dmesg | tail -50
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
@@ -131,13 +138,21 @@ jobs:
               LDK_NODE_TEST_BASE_PORT=$((20000 + (i - 1) * 3000 + (j - 1) * 1000)) RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --test integration_tests_rust -- --nocapture > /tmp/stress-${j}.log 2>&1 &
               pids[${j}]=$!
             done
+            failed=0
             for j in 1 2 3; do
               if ! wait ${pids[${j}]}; then
                 echo "FAILED: process $j on iteration $i (shard ${{ matrix.shard }})"
                 cat /tmp/stress-${j}.log
-                exit 1
+                failed=1
               fi
             done
+            if [ $failed -eq 1 ]; then
+              echo "=== dmesg OOM/kill messages ==="
+              sudo dmesg | grep -iE 'oom|kill|out of memory|invoked oom' || echo "No OOM messages found"
+              echo "=== dmesg last 50 lines ==="
+              sudo dmesg | tail -50
+              exit 1
+            fi
           done
 
   doc:
