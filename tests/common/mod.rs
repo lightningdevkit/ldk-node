@@ -14,8 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bitcoin::hashes::hex::FromHex;
@@ -274,13 +273,9 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-static BASE_PORT: LazyLock<u16> = LazyLock::new(|| {
-	env::var("LDK_NODE_TEST_BASE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(20000)
-});
-static NEXT_PORT: LazyLock<AtomicU16> = LazyLock::new(|| AtomicU16::new(*BASE_PORT));
-
-pub(crate) fn generate_listening_addresses() -> Vec<SocketAddress> {
-	let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
+pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
+	let mut rng = rng();
+	let port = rng.random_range(10000..65000u16);
 	vec![
 		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port },
 		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: port + 1 },
@@ -310,8 +305,8 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 	println!("Setting random LDK storage dir: {}", rand_dir.display());
 	node_config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
 
-	let listening_addresses = generate_listening_addresses();
-	println!("Setting LDK listening addresses: {:?}", listening_addresses);
+	let listening_addresses = random_listening_addresses();
+	println!("Setting random LDK listening addresses: {:?}", listening_addresses);
 	node_config.listening_addresses = Some(listening_addresses);
 
 	let alias = random_node_alias();
@@ -430,81 +425,99 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
-	setup_builder!(builder, config.node_config);
-	match chain_source {
-		TestChainSource::Esplora(electrsd) => {
-			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let mut sync_config = EsploraSyncConfig::default();
-			sync_config.background_sync_config = None;
-			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-		},
-		TestChainSource::Electrum(electrsd) => {
-			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
-			let mut sync_config = ElectrumSyncConfig::default();
-			sync_config.background_sync_config = None;
-			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
-		},
-		TestChainSource::BitcoindRpcSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
-		},
-		TestChainSource::BitcoindRestSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rest_port = bitcoind.params.rpc_socket.port();
-			builder.set_chain_source_bitcoind_rest(
-				rest_host,
-				rest_port,
-				rpc_host,
-				rpc_port,
-				rpc_user,
-				rpc_password,
+	for attempt in 0..5 {
+		let mut node_config = config.node_config.clone();
+		if attempt > 0 {
+			let new_addrs = random_listening_addresses();
+			println!(
+				"Retrying with new listening addresses (attempt {}): {:?}",
+				attempt + 1,
+				new_addrs
 			);
-		},
+			node_config.listening_addresses = Some(new_addrs);
+		}
+
+		setup_builder!(builder, node_config);
+		match chain_source {
+			TestChainSource::Esplora(electrsd) => {
+				let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+				let mut sync_config = EsploraSyncConfig::default();
+				sync_config.background_sync_config = None;
+				builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+			},
+			TestChainSource::Electrum(electrsd) => {
+				let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+				let mut sync_config = ElectrumSyncConfig::default();
+				sync_config.background_sync_config = None;
+				builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
+			},
+			TestChainSource::BitcoindRpcSync(bitcoind) => {
+				let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+				let rpc_port = bitcoind.params.rpc_socket.port();
+				let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+				let rpc_user = values.user;
+				let rpc_password = values.password;
+				builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
+			},
+			TestChainSource::BitcoindRestSync(bitcoind) => {
+				let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+				let rpc_port = bitcoind.params.rpc_socket.port();
+				let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+				let rpc_user = values.user;
+				let rpc_password = values.password;
+				let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+				let rest_port = bitcoind.params.rpc_socket.port();
+				builder.set_chain_source_bitcoind_rest(
+					rest_host,
+					rest_port,
+					rpc_host,
+					rpc_port,
+					rpc_user,
+					rpc_password,
+				);
+			},
+		}
+
+		match &config.log_writer {
+			TestLogWriter::FileWriter => {
+				builder.set_filesystem_logger(None, None);
+			},
+			TestLogWriter::LogFacade => {
+				builder.set_log_facade_logger();
+			},
+			TestLogWriter::Custom(custom_log_writer) => {
+				builder.set_custom_logger(Arc::clone(custom_log_writer));
+			},
+		}
+
+		builder.set_async_payments_role(config.async_payments_role).unwrap();
+
+		if config.recovery_mode {
+			builder.set_wallet_recovery_mode();
+		}
+
+		let node = match config.store_type {
+			TestStoreType::TestSyncStore => {
+				let kv_store = TestSyncStore::new(node_config.storage_dir_path.into());
+				builder.build_with_store(config.node_entropy.clone().into(), kv_store).unwrap()
+			},
+			TestStoreType::Sqlite => builder.build(config.node_entropy.clone().into()).unwrap(),
+		};
+
+		match node.start() {
+			Ok(()) => {
+				assert!(node.status().is_running);
+				assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+				return node;
+			},
+			Err(NodeError::InvalidSocketAddress) => {
+				eprintln!("node.start() failed with InvalidSocketAddress, retrying...");
+				continue;
+			},
+			Err(e) => panic!("node.start() failed: {:?}", e),
+		}
 	}
-
-	match &config.log_writer {
-		TestLogWriter::FileWriter => {
-			builder.set_filesystem_logger(None, None);
-		},
-		TestLogWriter::LogFacade => {
-			builder.set_log_facade_logger();
-		},
-		TestLogWriter::Custom(custom_log_writer) => {
-			builder.set_custom_logger(Arc::clone(custom_log_writer));
-		},
-	}
-
-	builder.set_async_payments_role(config.async_payments_role).unwrap();
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
-
-	let node = match config.store_type {
-		TestStoreType::TestSyncStore => {
-			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
-			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
-		},
-		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
-	};
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
-
-	node.start().unwrap();
-	assert!(node.status().is_running);
-	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
-	node
+	panic!("Failed to start node after 5 attempts due to port collisions")
 }
 
 pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
