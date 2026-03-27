@@ -1501,8 +1501,12 @@ pub enum ClosureReason {
 #[cfg(feature = "uniffi")]
 uniffi::custom_type!(InitFeatures, Vec<u8>, {
 	remote,
-	try_lift: |val| Ok(InitFeatures::from_le_bytes(val)),
-	lower: |obj| obj.le_flags().to_vec(),
+	try_lift: |val| Ok(InitFeatures::from_be_bytes(val)),
+	lower: |obj| {
+		let mut flags = obj.le_flags().to_vec();
+		flags.reverse();
+		flags
+	},
 });
 
 #[cfg(test)]
