@@ -130,29 +130,18 @@ jobs:
           echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
       - name: Build integration tests
         run: RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --test integration_tests_rust --no-run
-      - name: Stress-test integration tests (5 iterations, 3 concurrent processes)
+      - name: Stress-test integration tests (10 iterations)
         run: |
-          for i in $(seq 1 5); do
+          for i in $(seq 1 10); do
             echo "=== Iteration $i (shard ${{ matrix.shard }}) ==="
-            for j in 1 2 3; do
-              RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --test integration_tests_rust -- --nocapture > /tmp/stress-${j}.log 2>&1 &
-              pids[${j}]=$!
-            done
-            failed=0
-            for j in 1 2 3; do
-              if ! wait ${pids[${j}]}; then
-                echo "FAILED: process $j on iteration $i (shard ${{ matrix.shard }})"
-                cat /tmp/stress-${j}.log
-                failed=1
-              fi
-            done
-            if [ $failed -eq 1 ]; then
+            RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --test integration_tests_rust -- --nocapture 2>&1 || {
+              echo "FAILED on iteration $i (shard ${{ matrix.shard }})"
               echo "=== dmesg OOM/kill messages ==="
               sudo dmesg | grep -iE 'oom|kill|out of memory|invoked oom' || echo "No OOM messages found"
               echo "=== dmesg last 50 lines ==="
               sudo dmesg | tail -50
               exit 1
-            fi
+            }
           done
 
   doc:

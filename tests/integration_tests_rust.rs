@@ -1443,13 +1443,12 @@ async fn test_node_announcement_propagation() {
 	node_b_alias_bytes[..node_b_alias_string.as_bytes().len()]
 		.copy_from_slice(node_b_alias_string.as_bytes());
 	let node_b_node_alias = Some(NodeAlias(node_b_alias_bytes));
-	let node_b_listening_addresses = random_listening_addresses();
 	config_b.node_config.node_alias = node_b_node_alias.clone();
-	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
 	config_b.node_config.announcement_addresses = None;
 
 	let node_a = setup_node(&chain_source, config_a);
 	let node_b = setup_node(&chain_source, config_b);
+	let node_b_listening_addresses = node_b.listening_addresses().unwrap();
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premine_amount_sat = 5_000_000;
