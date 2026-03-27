@@ -429,12 +429,15 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		let mut node_config = config.node_config.clone();
 		if attempt > 0 {
 			let new_addrs = random_listening_addresses();
+			let new_dir = random_storage_path();
 			println!(
-				"Retrying with new listening addresses (attempt {}): {:?}",
+				"Retrying with new listening addresses and storage dir (attempt {}): {:?}, {}",
 				attempt + 1,
-				new_addrs
+				new_addrs,
+				new_dir.display()
 			);
 			node_config.listening_addresses = Some(new_addrs);
+			node_config.storage_dir_path = new_dir.to_str().unwrap().to_owned();
 		}
 
 		setup_builder!(builder, node_config);
