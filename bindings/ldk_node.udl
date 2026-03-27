@@ -40,7 +40,7 @@ interface Builder {
 	constructor(Config config);
 	void set_chain_source_esplora(string server_url, EsploraSyncConfig? config);
 	void set_chain_source_electrum(string server_url, ElectrumSyncConfig? config);
-	void set_chain_source_cbf(sequence<string> peers, CbfSyncConfig? sync_config);
+	void set_chain_source_cbf(sequence<string> peers, CbfSyncConfig? sync_config, FeeSourceConfig? fee_source_config);
 	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
 	void set_chain_source_bitcoind_rest(string rest_host, u16 rest_port, string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
 	void set_gossip_source_p2p();
@@ -360,6 +360,8 @@ enum Currency {
 };
 
 typedef enum AsyncPaymentsRole;
+
+typedef enum FeeSourceConfig;
 
 [Custom]
 typedef string Txid;
