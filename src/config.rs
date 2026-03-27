@@ -16,7 +16,8 @@ use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::RouteParametersConfig;
 use lightning::util::config::{
-	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
+	ChannelConfig as LdkChannelConfig, ChannelHandshakeLimits,
+	MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
 };
 
 use crate::logger::LogLevel;
@@ -28,7 +29,6 @@ const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
-const DEFAULT_MIN_FUNDING_SATS: u64 = 1_000;
 
 // The default timeout after which we abort a wallet syncing operation.
 const DEFAULT_BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 60;
@@ -126,7 +126,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `node_alias`                           | None               |
 /// | `trusted_peers_0conf`                  | []                 |
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
-/// | `min_funding_sats`                     | 1000               |
+/// | `min_funding_sats`                     | LDK default        |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                     | None               |
 /// | `tor_config`                           | None               |
@@ -174,7 +174,8 @@ pub struct Config {
 	///
 	/// Channels with funding below this value will be rejected.
 	///
-	/// Please refer to [`ChannelHandshakeLimits::min_funding_satoshis`] for further details.
+	/// Defaults to the `rust-lightning` value of
+	/// [`ChannelHandshakeLimits::min_funding_satoshis`].
 	///
 	/// [`ChannelHandshakeLimits::min_funding_satoshis`]: lightning::util::config::ChannelHandshakeLimits::min_funding_satoshis
 	pub min_funding_sats: u64,
@@ -221,7 +222,7 @@ impl Default for Config {
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
-			min_funding_sats: DEFAULT_MIN_FUNDING_SATS,
+			min_funding_sats: ChannelHandshakeLimits::default().min_funding_satoshis,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			tor_config: None,
 			route_parameters: None,
