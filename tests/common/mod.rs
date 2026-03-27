@@ -514,6 +514,29 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 				return node;
 			},
 			Err(NodeError::InvalidSocketAddress) => {
+				if let Some(ref addrs) = node_config.listening_addresses {
+					for addr in addrs {
+						if let SocketAddress::TcpIpV4 { port, .. }
+						| SocketAddress::TcpIpV6 { port, .. } = addr
+						{
+							let output = std::process::Command::new("lsof")
+								.args(["-i", &format!(":{}", port), "-P", "-n"])
+								.output();
+							match output {
+								Ok(o) if !o.stdout.is_empty() => {
+									eprintln!(
+										"Port {} is in use:\n{}",
+										port,
+										String::from_utf8_lossy(&o.stdout)
+									);
+								},
+								_ => {
+									eprintln!("Port {} appears unavailable (no lsof info)", port);
+								},
+							}
+						}
+					}
+				}
 				eprintln!("node.start() failed with InvalidSocketAddress, retrying...");
 				continue;
 			},
