@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -273,9 +274,21 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
+static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
+
 pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
-	let mut rng = rng();
-	let port = rng.random_range(10000..65000u16);
+	// Use an atomic counter to avoid intra-process collisions between parallel tests.
+	// The base port is randomized once per process to avoid inter-process collisions.
+	let port = NEXT_PORT
+		.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {
+			if p == 0 {
+				let base = rng().random_range(10000..50000u16);
+				Some(base + 2)
+			} else {
+				Some(p + 2)
+			}
+		})
+		.unwrap_or_else(|p| p);
 	vec![
 		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port },
 		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: port + 1 },
