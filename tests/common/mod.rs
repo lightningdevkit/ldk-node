@@ -7,6 +7,8 @@
 
 #![cfg(any(test, cln_test, lnd_test, eclair_test, vss_test))]
 #![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_macros)]
 
 pub(crate) mod external_node;
 pub(crate) mod logging;
