@@ -101,10 +101,12 @@ pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
+mod probing;
 mod runtime;
 mod scoring;
 mod tx_broadcaster;
 mod types;
+mod util;
 mod wallet;
 
 use std::default::Default;
@@ -170,6 +172,10 @@ use payment::{
 	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
+pub use probing::{
+	HighDegreeStrategy, Probe, Prober, ProbingConfig, ProbingConfigBuilder, ProbingStrategy,
+	RandomStrategy,
+};
 use runtime::Runtime;
 pub use tokio;
 use types::{
@@ -239,6 +245,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
+	prober: Option<Arc<probing::Prober>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -593,7 +600,15 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
+			self.prober.clone(),
 		));
+
+		if let Some(prober) = self.prober.clone() {
+			let stop_rx = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				probing::run_prober(prober, stop_rx).await;
+			});
+		}
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
@@ -1065,6 +1080,41 @@ impl Node {
 			self.liquidity_source.clone(),
 			Arc::clone(&self.logger),
 		))
+	}
+
+	/// Returns a reference to the [`Prober`], or `None` if no probing strategy is configured.
+	pub fn prober(&self) -> Option<&Prober> {
+		self.prober.as_deref()
+	}
+
+	/// Returns the scorer's estimated `(min, max)` liquidity range for the given channel in the
+	/// direction toward `target`, or `None` if the scorer has no data for that channel.
+	///
+	/// Works by serializing the `CombinedScorer` (which writes `local_only_scorer`) and
+	/// deserializing it as a plain `ProbabilisticScorer` to call `estimated_channel_liquidity_range`.
+	pub fn scorer_channel_liquidity(&self, scid: u64, target: PublicKey) -> Option<(u64, u64)> {
+		use lightning::routing::scoring::{
+			ProbabilisticScorer, ProbabilisticScoringDecayParameters,
+		};
+		use lightning::util::ser::{ReadableArgs, Writeable};
+
+		let target_node_id = lightning::routing::gossip::NodeId::from_pubkey(&target);
+
+		let bytes = {
+			let scorer = self.scorer.lock().unwrap();
+			let mut buf = Vec::new();
+			scorer.write(&mut buf).ok()?;
+			buf
+		};
+
+		let decay_params = ProbabilisticScoringDecayParameters::default();
+		let prob_scorer = ProbabilisticScorer::read(
+			&mut &bytes[..],
+			(decay_params, Arc::clone(&self.network_graph), Arc::clone(&self.logger)),
+		)
+		.ok()?;
+
+		prob_scorer.estimated_channel_liquidity_range(scid, &target_node_id)
 	}
 
 	/// Retrieve a list of known channels.
