@@ -11,6 +11,7 @@ mod common;
 
 use std::str::FromStr;
 
+use base64::prelude::{Engine as _, BASE64_STANDARD};
 use common::eclair::TestEclairNode;
 use common::external_node::ExternalNode;
 use common::scenarios::channel::{
@@ -31,13 +32,17 @@ use electrsd::corepc_node::Client as BitcoindClient;
 use electrum_client::Client as ElectrumClient;
 use ldk_node::{Builder, Event};
 
-/// Run a shell command via `spawn_blocking` to avoid blocking the tokio runtime.
-async fn run_cmd(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
-	let program = program.to_string();
-	let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-	tokio::task::spawn_blocking(move || std::process::Command::new(&program).args(&args).output())
-		.await
-		.expect("spawn_blocking panicked")
+/// Unlock all UTXOs in the given bitcoind wallet via JSON-RPC.
+async fn unlock_utxos(wallet_url: &str, user: &str, pass: &str) {
+	let auth = BASE64_STANDARD.encode(format!("{}:{}", user, pass));
+	let body = r#"{"jsonrpc":"1.0","method":"lockunspent","params":[true]}"#;
+	let _ = bitreq::post(wallet_url)
+		.with_header("Authorization", format!("Basic {}", auth))
+		.with_header("Content-Type", "text/plain")
+		.with_body(body)
+		.with_timeout(5)
+		.send_async()
+		.await;
 }
 
 async fn setup_clients() -> (BitcoindClient, ElectrumClient, TestEclairNode) {
@@ -53,99 +58,8 @@ async fn setup_clients() -> (BitcoindClient, ElectrumClient, TestEclairNode) {
 	.unwrap();
 	let electrs = ElectrumClient::new("tcp://127.0.0.1:50001").unwrap();
 
-	// Recreate the Eclair container between tests to give a fresh /data
-	// directory, a new seed, and a clean initialization against the current
-	// chain tip.
-	let container_name =
-		std::env::var("ECLAIR_CONTAINER_NAME").unwrap_or_else(|_| "ldk-node-eclair-1".to_string());
-	run_cmd("docker", &["rm", "-f", &container_name]).await.ok();
-
-	// Unlock UTXOs and start Eclair, retrying if locked UTXOs remain.
-	// Force-close transactions can lock new UTXOs between the unlock call
-	// and Eclair startup, so we may need multiple attempts.
-	let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-	let mut attempt = 0;
-	loop {
-		// Unlock any UTXOs left locked in the Eclair wallet.
-		run_cmd(
-			"curl",
-			&[
-				"-s",
-				"--max-time",
-				"5",
-				"--user",
-				"user:pass",
-				"--data-binary",
-				r#"{"jsonrpc":"1.0","method":"lockunspent","params":[true]}"#,
-				"-H",
-				"content-type: text/plain;",
-				"http://127.0.0.1:18443/wallet/eclair",
-			],
-		)
-		.await
-		.ok();
-
-		if attempt > 0 {
-			// On retry, recreate the container since Eclair exited.
-			run_cmd("docker", &["rm", "-f", &container_name]).await.ok();
-		}
-		let output = run_cmd(
-			"docker",
-			&["compose", "-f", "docker-compose-eclair.yml", "up", "-d", "eclair"],
-		)
-		.await
-		.expect("failed to spawn docker compose");
-		assert!(
-			output.status.success(),
-			"docker compose up failed (exit {}): {}",
-			output.status,
-			String::from_utf8_lossy(&output.stderr),
-		);
-
-		// Wait for Eclair to become ready.
-		let mut ready = false;
-		for _ in 0..30 {
-			if std::time::Instant::now() >= deadline {
-				let logs = run_cmd("docker", &["logs", "--tail", "50", &container_name]).await.ok();
-				if let Some(l) = logs {
-					eprintln!(
-						"=== Eclair container logs ===\n{}{}",
-						String::from_utf8_lossy(&l.stdout),
-						String::from_utf8_lossy(&l.stderr)
-					);
-				}
-				panic!("Eclair did not start within 90s (after {} attempts)", attempt + 1);
-			}
-			tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-			ready = run_cmd(
-				"curl",
-				&[
-					"-s",
-					"--max-time",
-					"2",
-					"-u",
-					":eclairpassword",
-					"-X",
-					"POST",
-					"http://127.0.0.1:8080/getinfo",
-				],
-			)
-			.await
-			.map(|o| o.status.success() && !o.stdout.is_empty())
-			.unwrap_or(false);
-			if ready {
-				break;
-			}
-		}
-
-		if ready {
-			break;
-		}
-
-		// Eclair likely failed due to locked UTXOs — retry.
-		attempt += 1;
-		eprintln!("Eclair failed to start (attempt {}), retrying after lockunspent...", attempt);
-	}
+	// Unlock any UTXOs left locked by previous force-close tests.
+	unlock_utxos("http://127.0.0.1:18443/wallet/eclair", "user", "pass").await;
 
 	let eclair = TestEclairNode::from_env();
 	(bitcoind, electrs, eclair)

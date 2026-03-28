@@ -8,26 +8,25 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use base64::prelude::{Engine as _, BASE64_STANDARD};
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
-use reqwest::Client;
 use serde_json::Value;
 
 use super::external_node::{ExternalChannel, ExternalNode, TestFailure};
 
 pub(crate) struct TestEclairNode {
-	client: Client,
 	base_url: String,
-	password: String,
+	auth_header: String,
 	listen_addr: SocketAddress,
 }
 
 impl TestEclairNode {
 	pub(crate) fn new(base_url: &str, password: &str, listen_addr: SocketAddress) -> Self {
+		let credentials = BASE64_STANDARD.encode(format!(":{}", password));
 		Self {
-			client: Client::new(),
 			base_url: base_url.to_string(),
-			password: password.to_string(),
+			auth_header: format!("Basic {}", credentials),
 			listen_addr,
 		}
 	}
@@ -46,27 +45,36 @@ impl TestEclairNode {
 
 	async fn post(&self, endpoint: &str, params: &[(&str, &str)]) -> Result<Value, TestFailure> {
 		let url = format!("{}{}", self.base_url, endpoint);
-		let response = self
-			.client
-			.post(&url)
-			.basic_auth("", Some(&self.password))
-			.form(params)
-			.send()
+		let body = params.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("&");
+
+		let request = bitreq::post(&url)
+			.with_header("Authorization", &self.auth_header)
+			.with_header("Content-Type", "application/x-www-form-urlencoded")
+			.with_body(body)
+			.with_timeout(30);
+
+		let response = request
+			.send_async()
 			.await
 			.map_err(|e| self.make_error(format!("request to {} failed: {}", endpoint, e)))?;
 
-		let status = response.status();
-		let body = response
-			.text()
-			.await
-			.map_err(|e| self.make_error(format!("reading response from {}: {}", endpoint, e)))?;
-
-		if !status.is_success() {
-			return Err(self.make_error(format!("{} returned {}: {}", endpoint, status, body)));
+		if response.status_code < 200 || response.status_code >= 300 {
+			let body_str = response.as_str().unwrap_or("(non-utf8 body)");
+			return Err(self.make_error(format!(
+				"{} returned {}: {}",
+				endpoint, response.status_code, body_str
+			)));
 		}
 
-		serde_json::from_str(&body).map_err(|e| {
-			self.make_error(format!("parsing response from {}: {} (body: {})", endpoint, e, body))
+		let body_str = response
+			.as_str()
+			.map_err(|e| self.make_error(format!("reading response from {}: {}", endpoint, e)))?;
+
+		serde_json::from_str(body_str).map_err(|e| {
+			self.make_error(format!(
+				"parsing response from {}: {} (body: {})",
+				endpoint, e, body_str
+			))
 		})
 	}
 
@@ -297,13 +305,11 @@ impl ExternalNode for TestEclairNode {
 			let commitments = &ch["data"]["commitments"];
 
 			// Eclair 0.10+ uses commitments.active[] array (splice support).
-			let active_commitment =
-				commitments["active"].as_array().and_then(|a| a.first()).ok_or_else(|| {
-					self.make_error(format!(
-						"list_channels: missing commitments.active[] for channel {}",
-						channel_id
-					))
-				})?;
+			// Closed/closing channels may lack active commitments — skip them.
+			let active_commitment = match commitments["active"].as_array().and_then(|a| a.first()) {
+				Some(c) => c,
+				None => continue,
+			};
 
 			let capacity_sat =
 				active_commitment["fundingTx"]["amountSatoshis"].as_u64().unwrap_or(0);

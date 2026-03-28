@@ -54,7 +54,7 @@ jobs:
           }
 
       - name: Set permissions for LND data directory
-        run: sudo chmod -R 755 $LND_DATA_DIR
+        run: sudo chmod -R u+rwX,go+rX $LND_DATA_DIR
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
 

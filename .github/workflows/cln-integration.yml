@@ -65,7 +65,7 @@ jobs:
       - name: Set permissions for CLN data directory
         run: |
           sudo chown -R $(id -u):$(id -g) $CLN_DATA_DIR
-          sudo chmod -R 755 $CLN_DATA_DIR
+          sudo chmod -R u+rwX,go+rX $CLN_DATA_DIR
         env:
           CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
 

@@ -41,7 +41,7 @@ jobs:
       - name: Wait for Eclair to be ready
         run: |
           for i in $(seq 1 60); do
-            if curl -s -u :eclairpassword -X POST http://127.0.0.1:8080/getinfo > /dev/null 2>&1; then
+            if curl -sf -u :eclairpassword -X POST http://127.0.0.1:8080/getinfo > /dev/null 2>&1; then
               echo "Eclair is ready"
               exit 0
             fi
