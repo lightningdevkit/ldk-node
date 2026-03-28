@@ -71,7 +71,7 @@ async fn channel_full_cycle_force_close_trusted_no_reserve() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn channel_full_cycle_0conf() {
+async fn channel_full_cycle_0conf_0reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
