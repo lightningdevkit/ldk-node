@@ -25,14 +25,13 @@ use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
 use common::{
 	expect_channel_ready_event, expect_event, generate_blocks_and_wait, open_channel,
-	open_channel_no_electrum_wait, premine_and_distribute_funds, random_config,
-	setup_bitcoind_and_electrsd, setup_node, TestChainSource, TestNode, TestProbingConfig,
-	TestProbingStrategy,
+	open_channel_no_wait, premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd,
+	setup_node, TestChainSource, TestNode,
 };
 
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
-use ldk_node::{Event, Probe, ProbingStrategy};
+use ldk_node::{Event, Probe, ProbingConfig, ProbingStrategy};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -64,18 +63,17 @@ impl ProbingStrategy for FixedDestStrategy {
 	}
 }
 
-// helpers
 async fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
-	let deadline = tokio::time::Instant::now() + timeout;
-	loop {
-		if predicate() {
-			return true;
+	tokio::time::timeout(timeout, async {
+		loop {
+			if predicate() {
+				return;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
 		}
-		if tokio::time::Instant::now() >= deadline {
-			return false;
-		}
-		tokio::time::sleep(Duration::from_millis(100)).await;
-	}
+	})
+	.await
+	.is_ok()
 }
 
 fn config_with_label(label: &str) -> common::TestConfig {
@@ -87,48 +85,54 @@ fn config_with_label(label: &str) -> common::TestConfig {
 	config
 }
 
-fn probing_config(
-	strategy: TestProbingStrategy, max_locked_msat: u64, diversity_penalty_msat: Option<u64>,
-) -> Option<TestProbingConfig> {
-	Some(TestProbingConfig {
-		strategy,
-		interval: Duration::from_millis(PROBING_INTERVAL_MILLISECONDS),
-		max_locked_msat,
-		diversity_penalty_msat,
-	})
-}
-
 fn build_node_fixed_dest_probing(
 	chain_source: &TestChainSource<'_>, destination_node_id: PublicKey,
 ) -> TestNode {
 	let mut config = random_config(false);
 	let strategy = FixedDestStrategy::new(destination_node_id, PROBE_AMOUNT_MSAT);
-	config.probing = probing_config(TestProbingStrategy::Custom(strategy), PROBE_AMOUNT_MSAT, None);
+	config.probing = Some(
+		ProbingConfig::custom(strategy)
+			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+			.max_locked_msat(PROBE_AMOUNT_MSAT)
+			.build(),
+	);
 	setup_node(chain_source, config)
 }
 
 fn build_node_random_probing(chain_source: &TestChainSource<'_>, max_hops: usize) -> TestNode {
 	let mut config = config_with_label("Random");
-	config.probing =
-		probing_config(TestProbingStrategy::Random { max_hops }, MAX_LOCKED_MSAT, None);
+	config.probing = Some(
+		ProbingConfig::random_walk(max_hops)
+			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+			.max_locked_msat(MAX_LOCKED_MSAT)
+			.build(),
+	);
 	setup_node(chain_source, config)
 }
 
-fn build_node_highdegree_probing(chain_source: &TestChainSource<'_>, top_n: usize) -> TestNode {
+fn build_node_highdegree_probing(
+	chain_source: &TestChainSource<'_>, top_node_count: usize,
+) -> TestNode {
 	let mut config = config_with_label("HiDeg");
-	config.probing =
-		probing_config(TestProbingStrategy::HighDegree { top_n }, MAX_LOCKED_MSAT, None);
+	config.probing = Some(
+		ProbingConfig::high_degree(top_node_count)
+			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+			.max_locked_msat(MAX_LOCKED_MSAT)
+			.build(),
+	);
 	setup_node(chain_source, config)
 }
 
 fn build_node_z_highdegree_probing(
-	chain_source: &TestChainSource<'_>, top_n: usize, diversity_penalty_msat: u64,
+	chain_source: &TestChainSource<'_>, top_node_count: usize, diversity_penalty: u64,
 ) -> TestNode {
 	let mut config = config_with_label("HiDeg+P");
-	config.probing = probing_config(
-		TestProbingStrategy::HighDegree { top_n },
-		MAX_LOCKED_MSAT,
-		Some(diversity_penalty_msat),
+	config.probing = Some(
+		ProbingConfig::high_degree(top_node_count)
+			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+			.max_locked_msat(MAX_LOCKED_MSAT)
+			.diversity_penalty_msat(diversity_penalty)
+			.build(),
 	);
 	setup_node(chain_source, config)
 }
@@ -295,12 +299,14 @@ async fn probe_budget_increments_and_decrements() {
 	tokio::time::sleep(Duration::from_secs(3)).await;
 
 	let went_up =
-		wait_until(Duration::from_secs(10), || node_a.probe_locked_msat().unwrap_or(0) > 0).await;
+		wait_until(Duration::from_secs(10), || node_a.prober().map_or(0, |p| p.locked_msat()) > 0)
+			.await;
 	assert!(went_up, "locked_msat never increased — no probe was dispatched");
-	println!("First probe dispatched; locked_msat = {}", node_a.probe_locked_msat().unwrap());
+	println!("First probe dispatched; locked_msat = {}", node_a.prober().unwrap().locked_msat());
 
 	let cleared =
-		wait_until(Duration::from_secs(20), || node_a.probe_locked_msat().unwrap_or(1) == 0).await;
+		wait_until(Duration::from_secs(20), || node_a.prober().map_or(1, |p| p.locked_msat()) == 0)
+			.await;
 	assert!(cleared, "locked_msat never returned to zero after probe resolved");
 	println!("Probe resolved; locked_msat = 0");
 
@@ -325,12 +331,12 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	// Use a slow probing interval so we can read capacity before the first probe fires.
 	let mut config_a = random_config(false);
 	let strategy = FixedDestStrategy::new(node_c.node_id(), PROBE_AMOUNT_MSAT);
-	config_a.probing = Some(TestProbingConfig {
-		strategy: TestProbingStrategy::Custom(strategy),
-		interval: Duration::from_secs(3),
-		max_locked_msat: PROBE_AMOUNT_MSAT,
-		diversity_penalty_msat: None,
-	});
+	config_a.probing = Some(
+		ProbingConfig::custom(strategy)
+			.interval(Duration::from_secs(3))
+			.max_locked_msat(PROBE_AMOUNT_MSAT)
+			.build(),
+	);
 	let node_a = setup_node(&chain_source, config_a);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -370,7 +376,8 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 
 	// Give gossip time to propagate to A, then wait for the first probe.
 	let locked =
-		wait_until(Duration::from_secs(15), || node_a.probe_locked_msat().unwrap_or(0) > 0).await;
+		wait_until(Duration::from_secs(15), || node_a.prober().map_or(0, |p| p.locked_msat()) > 0)
+			.await;
 	assert!(locked, "no probe dispatched within 15 s");
 
 	// Capacity should have decreased due to the in-flight probe HTLC.
@@ -392,7 +399,7 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	// they must be skipped. Wait, then check both conditions at once.
 	tokio::time::sleep(Duration::from_secs(5)).await;
 	assert!(
-		node_a.probe_locked_msat().unwrap_or(0) > 0,
+		node_a.prober().map_or(0, |p| p.locked_msat()) > 0,
 		"probe resolved unexpectedly while B was offline"
 	);
 	let capacity_after_wait = node_a
@@ -415,12 +422,14 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	node_b.connect(node_c.node_id(), node_c_addr, false).unwrap();
 
 	let cleared =
-		wait_until(Duration::from_secs(15), || node_a.probe_locked_msat().unwrap_or(1) == 0).await;
+		wait_until(Duration::from_secs(15), || node_a.prober().map_or(1, |p| p.locked_msat()) == 0)
+			.await;
 	assert!(cleared, "locked_msat never cleared after B came back online");
 
 	// Once the budget is freed, a new probe should be dispatched within a few ticks.
 	let new_probe =
-		wait_until(Duration::from_secs(10), || node_a.probe_locked_msat().unwrap_or(0) > 0).await;
+		wait_until(Duration::from_secs(10), || node_a.prober().map_or(0, |p| p.locked_msat()) > 0)
+			.await;
 	assert!(new_probe, "no new probe dispatched after budget was freed");
 
 	node_a.stop().unwrap();
@@ -498,12 +507,12 @@ async fn probing_strategies_perfomance() {
 	println!("opening channels");
 	for node in observer_nodes {
 		let idx = rng.random_range(0..num_nodes);
-		open_channel_no_electrum_wait(node, &nodes[idx], channel_capacity_sat, true).await;
+		open_channel_no_wait(node, &nodes[idx], channel_capacity_sat, None, true).await;
 	}
 	for (i, &count) in channels_per_nodes.iter().enumerate() {
 		let targets: Vec<usize> = (0..num_nodes).filter(|&j| j != i).take(count).collect();
 		for j in targets {
-			open_channel_no_electrum_wait(&nodes[i], &nodes[j], channel_capacity_sat, true).await;
+			open_channel_no_wait(&nodes[i], &nodes[j], channel_capacity_sat, None, true).await;
 		}
 	}
 

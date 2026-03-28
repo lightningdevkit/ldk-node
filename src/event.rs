@@ -9,7 +9,6 @@ use core::future::Future;
 use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -53,6 +52,7 @@ use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
+use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
 	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
@@ -516,7 +516,7 @@ where
 	static_invoice_store: Option<StaticInvoiceStore>,
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
-	probe_locked_msat: Option<Arc<AtomicU64>>,
+	prober: Option<Arc<Prober>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -532,8 +532,7 @@ where
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
 		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
 		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
-		probe_locked_msat: Option<Arc<AtomicU64>>,
+		runtime: Arc<Runtime>, logger: L, config: Arc<Config>, prober: Option<Arc<Prober>>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -553,7 +552,7 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
-			probe_locked_msat,
+			prober,
 		}
 	}
 
@@ -1163,19 +1162,13 @@ where
 			LdkEvent::PaymentPathSuccessful { .. } => {},
 			LdkEvent::PaymentPathFailed { .. } => {},
 			LdkEvent::ProbeSuccessful { path, .. } => {
-				if let Some(counter) = &self.probe_locked_msat {
-					let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-					let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-						Some(v.saturating_sub(amount))
-					});
+				if let Some(prober) = &self.prober {
+					prober.handle_probe_successful(&path);
 				}
 			},
 			LdkEvent::ProbeFailed { path, .. } => {
-				if let Some(counter) = &self.probe_locked_msat {
-					let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-					let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-						Some(v.saturating_sub(amount))
-					});
+				if let Some(prober) = &self.prober {
+					prober.handle_probe_failed(&path);
 				}
 			},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {

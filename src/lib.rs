@@ -106,6 +106,7 @@ mod runtime;
 mod scoring;
 mod tx_broadcaster;
 mod types;
+mod util;
 mod wallet;
 
 use std::default::Default;
@@ -171,7 +172,10 @@ use payment::{
 	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
-pub use probing::{HighDegreeStrategy, Probe, ProbingStrategy, RandomStrategy};
+pub use probing::{
+	HighDegreeStrategy, Probe, Prober, ProbingConfig, ProbingConfigBuilder, ProbingStrategy,
+	RandomStrategy,
+};
 use runtime::Runtime;
 pub use tokio;
 use types::{
@@ -584,7 +588,6 @@ impl Node {
 			None
 		};
 
-		let probe_locked_msat = self.prober.as_ref().map(|p| Arc::clone(&p.locked_msat));
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
@@ -603,7 +606,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
-			probe_locked_msat,
+			self.prober.clone(),
 		));
 
 		if let Some(prober) = self.prober.clone() {
@@ -1091,10 +1094,9 @@ impl Node {
 		))
 	}
 
-	/// Returns the total millisatoshis currently locked in in-flight probes, or `None` if no
-	/// probing strategy is configured.
-	pub fn probe_locked_msat(&self) -> Option<u64> {
-		self.prober.as_ref().map(|p| p.locked_msat.load(std::sync::atomic::Ordering::Relaxed))
+	/// Returns a reference to the [`Prober`], or `None` if no probing strategy is configured.
+	pub fn prober(&self) -> Option<&Prober> {
+		self.prober.as_deref()
 	}
 
 	/// Returns the scorer's estimated `(min, max)` liquidity range for the given channel in the

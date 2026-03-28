@@ -37,7 +37,7 @@ use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
-	PendingSweepBalance, ProbingStrategy, UserChannelId,
+	PendingSweepBalance, ProbingConfig, UserChannelId,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -343,21 +343,6 @@ impl Default for TestStoreType {
 }
 
 #[derive(Clone)]
-pub(crate) enum TestProbingStrategy {
-	Random { max_hops: usize },
-	HighDegree { top_n: usize },
-	Custom(Arc<dyn ProbingStrategy>),
-}
-
-#[derive(Clone)]
-pub(crate) struct TestProbingConfig {
-	pub strategy: TestProbingStrategy,
-	pub interval: Duration,
-	pub max_locked_msat: u64,
-	pub diversity_penalty_msat: Option<u64>,
-}
-
-#[derive(Clone)]
 pub(crate) struct TestConfig {
 	pub node_config: Config,
 	pub log_writer: TestLogWriter,
@@ -365,7 +350,7 @@ pub(crate) struct TestConfig {
 	pub node_entropy: NodeEntropy,
 	pub async_payments_role: Option<AsyncPaymentsRole>,
 	pub recovery_mode: bool,
-	pub probing: Option<TestProbingConfig>,
+	pub probing: Option<ProbingConfig>,
 }
 
 impl Default for TestConfig {
@@ -519,22 +504,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 	}
 
 	if let Some(probing) = config.probing {
-		match probing.strategy {
-			TestProbingStrategy::Random { max_hops } => {
-				builder.set_random_probing_strategy(max_hops);
-			},
-			TestProbingStrategy::HighDegree { top_n } => {
-				builder.set_high_degree_probing_strategy(top_n);
-			},
-			TestProbingStrategy::Custom(strategy) => {
-				builder.set_custom_probing_strategy(strategy);
-			},
-		}
-		builder.set_probing_interval(probing.interval);
-		builder.set_max_probe_locked_msat(probing.max_locked_msat);
-		if let Some(penalty) = probing.diversity_penalty_msat {
-			builder.set_probing_diversity_penalty_msat(penalty);
-		}
+		builder.set_probing_config(probing);
 	}
 
 	let node = match config.store_type {
@@ -764,14 +734,18 @@ pub async fn open_channel(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
 ) -> OutPoint {
-	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd).await
+	let funding_txo =
+		open_channel_no_wait(node_a, node_b, funding_amount_sat, None, should_announce).await;
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	funding_txo
 }
 
 /// Like [`open_channel`] but skips the `wait_for_tx` electrum check so that
 /// multiple channels can be opened back-to-back before any blocks are mined.
 /// The caller is responsible for mining blocks and confirming the funding txs.
-pub async fn open_channel_no_electrum_wait(
-	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
+pub async fn open_channel_no_wait(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
+	should_announce: bool,
 ) -> OutPoint {
 	if should_announce {
 		node_a
@@ -779,7 +753,7 @@ pub async fn open_channel_no_electrum_wait(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();
@@ -789,7 +763,7 @@ pub async fn open_channel_no_electrum_wait(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
-				None,
+				push_amount_msat,
 				None,
 			)
 			.unwrap();
@@ -806,35 +780,11 @@ pub async fn open_channel_push_amt(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
 	should_announce: bool, electrsd: &ElectrsD,
 ) -> OutPoint {
-	if should_announce {
-		node_a
-			.open_announced_channel(
-				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
-				funding_amount_sat,
-				push_amount_msat,
-				None,
-			)
-			.unwrap();
-	} else {
-		node_a
-			.open_channel(
-				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
-				funding_amount_sat,
-				push_amount_msat,
-				None,
-			)
-			.unwrap();
-	}
-	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
-
-	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
-	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
-	assert_eq!(funding_txo_a, funding_txo_b);
-	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
-
-	funding_txo_a
+	let funding_txo =
+		open_channel_no_wait(node_a, node_b, funding_amount_sat, push_amount_msat, should_announce)
+			.await;
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	funding_txo
 }
 
 pub async fn open_channel_with_all(
