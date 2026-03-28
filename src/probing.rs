@@ -269,8 +269,8 @@ impl ProbingStrategy for HighDegreeStrategy {
 
 		let mut probed = self.recently_probed.lock().unwrap();
 
-        // We could check staleness when we use the entry, but that way we'd not clear cache at
-        // all. For hundreds of top nodes it's okay to call retain each tick.
+		// We could check staleness when we use the entry, but that way we'd not clear cache at
+		// all. For hundreds of top nodes it's okay to call retain each tick.
 		probed.retain(|_, probed_at| now.duration_since(*probed_at) < self.cooldown);
 
 		// If all top nodes are on cooldown, reset and start a new cycle.
