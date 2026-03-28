@@ -9,119 +9,249 @@
 
 mod common;
 
-use std::default::Default;
 use std::str::FromStr;
 
-use clightningrpc::lightningrpc::LightningRPC;
-use clightningrpc::responses::NetworkAddress;
+use common::cln::TestClnNode;
+use common::external_node::ExternalNode;
+use common::scenarios::channel::{
+	cooperative_close_after_fee_change, cooperative_close_by_ldk, force_close_after_fee_change,
+	force_close_by_external, force_close_by_ldk, open_channel_to_external,
+	run_inbound_channel_test,
+};
+use common::scenarios::combo::run_interop_combo_test;
+use common::scenarios::disconnect::disconnect_reconnect_idle;
+use common::scenarios::payment::{
+	bidirectional_payments, concurrent_payments, pay_expired_invoice, receive_bolt11_payment,
+	receive_keysend_payment,
+};
+use common::scenarios::splice::{splice_from_external, splice_then_payment};
+use common::scenarios::{setup_interop_test, CloseType, PayType, Phase, Side};
 use electrsd::corepc_client::client_sync::Auth;
 use electrsd::corepc_node::Client as BitcoindClient;
 use electrum_client::Client as ElectrumClient;
-use ldk_node::bitcoin::secp256k1::PublicKey;
-use ldk_node::bitcoin::Amount;
-use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event};
-use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
-use rand::distr::Alphanumeric;
-use rand::{rng, Rng};
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn test_cln() {
-	// Setup bitcoind / electrs clients
-	let bitcoind_client = BitcoindClient::new_with_auth(
+async fn setup_clients() -> (BitcoindClient, ElectrumClient, TestClnNode) {
+	let bitcoind = BitcoindClient::new_with_auth(
 		"http://127.0.0.1:18443",
 		Auth::UserPass("user".to_string(), "pass".to_string()),
 	)
 	.unwrap();
-	let electrs_client = ElectrumClient::new("tcp://127.0.0.1:50001").unwrap();
+	let electrs = ElectrumClient::new("tcp://127.0.0.1:50001").unwrap();
 
-	// Give electrs a kick.
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 1).await;
+	let cln = TestClnNode::from_env();
+	(bitcoind, electrs, cln)
+}
 
-	// Setup LDK Node
+fn setup_ldk_node() -> ldk_node::Node {
 	let config = common::random_config(true);
 	let mut builder = Builder::from_config(config.node_config);
-	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
-
+	builder.set_chain_source_electrum("tcp://127.0.0.1:50001".to_string(), None);
 	let node = builder.build(config.node_entropy).unwrap();
 	node.start().unwrap();
+	node
+}
 
-	// Premine some funds and distribute
-	let address = node.onchain_payment().new_address().unwrap();
-	let premine_amount = Amount::from_sat(5_000_000);
-	common::premine_and_distribute_funds(
-		&bitcoind_client,
-		&electrs_client,
-		vec![address],
-		premine_amount,
-	)
-	.await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_basic_channel_cycle() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
 
-	// Setup CLN
-	let sock = "/tmp/lightning-rpc";
-	let cln_client = LightningRPC::new(&sock);
-	let cln_info = {
-		loop {
-			let info = cln_client.getinfo().unwrap();
-			// Wait for CLN to sync block height before channel open.
-			// Prevents crash due to unset blockheight (see LDK Node issue #527).
-			if info.blockheight > 0 {
-				break info;
-			}
-			tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-		}
-	};
-	let cln_node_id = PublicKey::from_str(&cln_info.id).unwrap();
-	let cln_address: SocketAddress = match cln_info.binding.first().unwrap() {
-		NetworkAddress::Ipv4 { address, port } => {
-			std::net::SocketAddrV4::new(*address, *port).into()
-		},
-		NetworkAddress::Ipv6 { address, port } => {
-			std::net::SocketAddrV6::new(*address, *port, 0, 0).into()
-		},
-		_ => {
-			panic!()
-		},
-	};
+	let (user_channel_id, _ext_channel_id) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
 
-	node.sync_wallets().unwrap();
-
-	// Open the channel
-	let funding_amount_sat = 1_000_000;
-
-	node.open_channel(cln_node_id, cln_address, funding_amount_sat, Some(500_000_000), None)
-		.unwrap();
-
-	let funding_txo = common::expect_channel_pending_event!(node, cln_node_id);
-	common::wait_for_tx(&electrs_client, funding_txo.txid).await;
-	common::generate_blocks_and_wait(&bitcoind_client, &electrs_client, 6).await;
-	node.sync_wallets().unwrap();
-	let user_channel_id = common::expect_channel_ready_event!(node, cln_node_id);
-
-	// Send a payment to CLN
-	let mut rng = rng();
-	let rand_label: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-	let cln_invoice =
-		cln_client.invoice(Some(10_000_000), &rand_label, &rand_label, None, None, None).unwrap();
-	let parsed_invoice = Bolt11Invoice::from_str(&cln_invoice.bolt11).unwrap();
-
-	node.bolt11_payment().send(&parsed_invoice, None).unwrap();
+	// LDK -> CLN payment
+	let invoice = cln.create_invoice(10_000_000, "cln-test-send").await.unwrap();
+	let parsed = lightning_invoice::Bolt11Invoice::from_str(&invoice).unwrap();
+	node.bolt11_payment().send(&parsed, None).unwrap();
 	common::expect_event!(node, PaymentSuccessful);
-	let cln_listed_invoices =
-		cln_client.listinvoices(Some(&rand_label), None, None, None).unwrap().invoices;
-	assert_eq!(cln_listed_invoices.len(), 1);
-	assert_eq!(cln_listed_invoices.first().unwrap().status, "paid");
 
-	// Send a payment to LDK
-	let rand_label: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-	let invoice_description =
-		Bolt11InvoiceDescription::Direct(Description::new(rand_label).unwrap());
-	let ldk_invoice =
-		node.bolt11_payment().receive(10_000_000, &invoice_description, 3600).unwrap();
-	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
-	common::expect_event!(node, PaymentReceived);
+	// CLN -> LDK payment
+	receive_bolt11_payment(&node, &cln, 10_000_000).await;
 
-	node.close_channel(&user_channel_id, cln_node_id).unwrap();
-	common::expect_event!(node, ChannelClosed);
+	cooperative_close_by_ldk(&node, &cln, &bitcoind, &electrs, &user_channel_id).await;
 	node.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_disconnect_reconnect() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, _ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	disconnect_reconnect_idle(&node, &cln, &bitcoind, &electrs, &Side::Ldk).await;
+	disconnect_reconnect_idle(&node, &cln, &bitcoind, &electrs, &Side::External).await;
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_force_close_by_ldk() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (user_ch, _ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	force_close_by_ldk(&node, &cln, &bitcoind, &electrs, &user_ch).await;
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_force_close_by_external() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	force_close_by_external(&node, &cln, &bitcoind, &electrs, &ext_ch).await;
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "CLN splicing requires --experimental-splicing flag and CLN v25+"]
+async fn test_cln_splice() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	splice_from_external(&node, &cln, &bitcoind, &electrs, &ext_ch).await;
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "CLN splicing requires --experimental-splicing flag and CLN v25+"]
+async fn test_cln_splice_then_payment() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	splice_then_payment(&node, &cln, &bitcoind, &electrs, &ext_ch).await;
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_inbound_channel() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	run_inbound_channel_test(
+		&node,
+		&cln,
+		&bitcoind,
+		&electrs,
+		CloseType::Cooperative,
+		Side::External,
+	)
+	.await;
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_receive_payments() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, _ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	receive_bolt11_payment(&node, &cln, 5_000_000).await;
+
+	node.stop().unwrap();
+}
+
+/// CLN v24.08+ includes a `payment_secret` in outbound keysend HTLCs.
+/// LDK treats any inbound HTLC with `payment_secret` as a BOLT11 payment and
+/// verifies it against a stored invoice — which fails for spontaneous payments.
+/// Upstream LDK fix needed: skip payment_secret verification when a valid
+/// `keysend_preimage` TLV is present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "CLN v24.08+ sends payment_secret in keysend — LDK rejects (upstream fix needed)"]
+async fn test_cln_receive_keysend() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, _ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	receive_keysend_payment(&node, &cln, 5_000_000).await;
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_bidirectional_payments() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	bidirectional_payments(&node, &cln, &ext_ch, 5_000_000).await;
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_pay_expired_invoice() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, _ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	pay_expired_invoice(&node, &cln).await;
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_concurrent_payments() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	setup_interop_test(&node, &cln, &bitcoind, &electrs).await;
+	let (_user_ch, _ext_ch) =
+		open_channel_to_external(&node, &cln, &bitcoind, &electrs, 1_000_000, Some(500_000_000))
+			.await;
+
+	concurrent_payments(&node, &cln, 5, 1_000_000).await;
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_cooperative_close_after_fee_change() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	cooperative_close_after_fee_change(&node, &cln, &bitcoind, &electrs).await;
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cln_force_close_after_fee_change() {
+	let (bitcoind, electrs, cln) = setup_clients().await;
+	let node = setup_ldk_node();
+	force_close_after_fee_change(&node, &cln, &bitcoind, &electrs).await;
+	node.stop().unwrap();
+}
+
+interop_combo_tests!(test_cln, setup_clients, setup_ldk_node);
