@@ -24,7 +24,6 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::types::features::InitFeatures;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, MonitorUpdatingPersister, MonitorUpdatingPersisterAsync,
 };
@@ -39,10 +38,16 @@ use crate::chain::ChainSource;
 use crate::config::{AnchorChannelsConfig, ChannelConfig};
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
+use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
+
+#[cfg(not(feature = "uniffi"))]
+type InitFeatures = lightning::types::features::InitFeatures;
+#[cfg(feature = "uniffi")]
+type InitFeatures = Arc<crate::ffi::InitFeatures>;
 
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the
 /// same time.
@@ -622,7 +627,7 @@ impl ChannelDetails {
 			channel_id: value.channel_id,
 			counterparty: ChannelCounterparty {
 				node_id: value.counterparty.node_id,
-				features: value.counterparty.features,
+				features: maybe_wrap(value.counterparty.features),
 				unspendable_punishment_reserve: value.counterparty.unspendable_punishment_reserve,
 				forwarding_info: value.counterparty.forwarding_info,
 				outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat,
