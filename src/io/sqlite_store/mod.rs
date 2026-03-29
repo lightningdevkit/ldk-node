@@ -684,7 +684,6 @@ impl SqliteStoreInner {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
 	use crate::io::test_utils::{
 		do_read_write_remove_list_persist, do_test_store, random_storage_path,
 	};
