@@ -605,21 +605,21 @@ impl ChannelDetails {
 	pub(crate) fn from_ldk(
 		value: LdkChannelDetails, anchor_channels_config: Option<&AnchorChannelsConfig>,
 	) -> Self {
-		let is_anchor_channel =
-			value.channel_type.as_ref().map_or(false, |ct| ct.supports_anchors_zero_fee_htlc_tx());
-
-		let reserve_type = if is_anchor_channel {
-			let is_trusted = anchor_channels_config.map_or(false, |c| {
-				c.trusted_peers_no_reserve.contains(&value.counterparty.node_id)
-			});
-			if is_trusted {
-				ReserveType::TrustedPeersNoReserve
+		let reserve_type =
+			if value.channel_type.as_ref().is_some_and(|ct| ct.supports_anchors_zero_fee_htlc_tx())
+			{
+				if let Some(config) = anchor_channels_config {
+					if config.trusted_peers_no_reserve.contains(&value.counterparty.node_id) {
+						ReserveType::TrustedPeersNoReserve
+					} else {
+						ReserveType::Adaptive
+					}
+				} else {
+					ReserveType::Adaptive
+				}
 			} else {
-				ReserveType::Adaptive
-			}
-		} else {
-			ReserveType::Legacy
-		};
+				ReserveType::Legacy
+			};
 
 		ChannelDetails {
 			channel_id: value.channel_id,
