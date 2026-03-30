@@ -57,6 +57,14 @@ where
 	pub(crate) async fn do_connect_peer(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
+		let res = self.do_connect_peer_internal(node_id, addr).await;
+		self.propagate_result_to_subscribers(&node_id, res);
+		res
+	}
+
+	async fn do_connect_peer_internal(
+		&self, node_id: PublicKey, addr: SocketAddress,
+	) -> Result<(), Error> {
 		// First, we check if there is already an outbound connection in flight, if so, we just
 		// await on the corresponding watch channel. The task driving the connection future will
 		// send us the result..
@@ -71,15 +79,14 @@ where
 
 		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
 
-		let res = match addr {
+		match addr {
 			SocketAddress::OnionV2(old_onion_addr) => {
 				log_error!(
-				self.logger,
-				"Failed to resolve network address {:?}: Resolution of OnionV2 addresses is currently unsupported.",
-				old_onion_addr
-			);
-				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
-				return Err(Error::InvalidSocketAddress);
+					self.logger,
+					"Failed to resolve network address {:?}: Resolution of OnionV2 addresses is currently unsupported.",
+					old_onion_addr
+				);
+				Err(Error::InvalidSocketAddress)
 			},
 			SocketAddress::OnionV3 { .. } => {
 				let proxy_config = self.tor_proxy_config.as_ref().ok_or_else(|| {
@@ -87,10 +94,6 @@ where
 						self.logger,
 						"Failed to resolve network address {:?}: Tor usage is not configured.",
 						addr
-					);
-					self.propagate_result_to_subscribers(
-						&node_id,
-						Err(Error::InvalidSocketAddress),
 					);
 					Error::InvalidSocketAddress
 				})?;
@@ -104,10 +107,6 @@ where
 							proxy_config.proxy_address,
 							e
 						);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
-						);
 						Error::InvalidSocketAddress
 					})?
 					.next()
@@ -116,10 +115,6 @@ where
 							self.logger,
 							"Failed to resolve Tor proxy network address {}",
 							proxy_config.proxy_address
-						);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
 						);
 						Error::InvalidSocketAddress
 					})?;
@@ -142,19 +137,11 @@ where
 							addr,
 							e
 						);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
-						);
 						Error::InvalidSocketAddress
 					})?
 					.next()
 					.ok_or_else(|| {
 						log_error!(self.logger, "Failed to resolve network address {}", addr);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
-						);
 						Error::InvalidSocketAddress
 					})?;
 				let connection_future = lightning_net_tokio::connect_outbound(
@@ -164,11 +151,7 @@ where
 				);
 				self.await_connection(connection_future, node_id, addr).await
 			},
-		};
-
-		self.propagate_result_to_subscribers(&node_id, res);
-
-		res
+		}
 	}
 
 	async fn await_connection<F, CF>(
