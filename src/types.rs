@@ -388,10 +388,8 @@ pub struct ChannelCounterparty {
 	/// Information on the fees and requirements that the counterparty requires when forwarding
 	/// payments to us through this channel.
 	pub forwarding_info: Option<CounterpartyForwardingInfo>,
-	/// The smallest value HTLC (in msat) the remote peer will accept, for this channel. This field
-	/// is only `None` before we have received either the `OpenChannel` or `AcceptChannel` message
-	/// from the remote peer, or for `ChannelCounterparty` objects serialized prior to LDK 0.0.107.
-	pub outbound_htlc_minimum_msat: Option<u64>,
+	/// The smallest value HTLC (in msat) the remote peer will accept, for this channel.
+	pub outbound_htlc_minimum_msat: u64,
 	/// The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
 	pub outbound_htlc_maximum_msat: Option<u64>,
 }
@@ -630,7 +628,9 @@ impl ChannelDetails {
 				features: maybe_wrap(value.counterparty.features),
 				unspendable_punishment_reserve: value.counterparty.unspendable_punishment_reserve,
 				forwarding_info: value.counterparty.forwarding_info,
-				outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat,
+				// unwrap safety: This value will be `None` for objects serialized with LDK versions
+				// prior to 0.0.115.
+				outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat.unwrap(),
 				outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
 			},
 			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
