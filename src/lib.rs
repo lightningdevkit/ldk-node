@@ -108,7 +108,6 @@ mod types;
 mod wallet;
 
 use std::default::Default;
-use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(cycle_tests)]
@@ -361,28 +360,29 @@ impl Node {
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
 			let listening_logger = Arc::clone(&self.logger);
 
-			let mut bind_addrs = Vec::with_capacity(listening_addresses.len());
-
-			for listening_addr in listening_addresses {
-				let resolved_address = listening_addr.to_socket_addrs().map_err(|e| {
-					log_error!(
-						self.logger,
-						"Unable to resolve listening address: {:?}. Error details: {}",
-						listening_addr,
-						e,
-					);
-					Error::InvalidSocketAddress
-				})?;
-
-				bind_addrs.extend(resolved_address);
-			}
-
 			let logger = Arc::clone(&listening_logger);
+			let listening_addrs = listening_addresses.clone();
 			let listeners = self.runtime.block_on(async move {
+				let mut bind_addrs = Vec::with_capacity(listening_addrs.len());
+
+				for listening_addr in &listening_addrs {
+					let resolved =
+						tokio::net::lookup_host(listening_addr.to_string()).await.map_err(|e| {
+							log_error!(
+								logger,
+								"Unable to resolve listening address: {:?}. Error details: {}",
+								listening_addr,
+								e,
+							);
+							Error::InvalidSocketAddress
+						})?;
+					bind_addrs.extend(resolved);
+				}
+
 				let mut listeners = Vec::new();
 
 				// Try to bind to all addresses
-				for addr in &*bind_addrs {
+				for addr in &bind_addrs {
 					match tokio::net::TcpListener::bind(addr).await {
 						Ok(listener) => {
 							log_trace!(logger, "Listener bound to {}", addr);
