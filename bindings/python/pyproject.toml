@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "ldk_node"
 version = "0.7.0"
@@ -6,7 +10,7 @@ authors = [
 ]
 description = "A ready-to-go Lightning node library built using LDK and BDK."
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.8"
 classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Security :: Cryptography",
@@ -19,3 +23,6 @@ classifiers = [
 "Homepage" = "https://lightningdevkit.org/"
 "Github" = "https://github.com/lightningdevkit/ldk-node"
 "Bug Tracker" = "https://github.com/lightningdevkit/ldk-node/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ldk_node"]
