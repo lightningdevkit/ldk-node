@@ -22,7 +22,7 @@ use lightning::events::{
 	ReplayEvent,
 };
 use lightning::impl_writeable_tlv_based_enum;
-use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
@@ -1258,7 +1258,6 @@ where
 				let user_channel_id: u128 = u128::from_ne_bytes(
 					self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
 				);
-				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
 				if let Some((lsp_node_id, _)) = self
 					.liquidity_source
@@ -1284,11 +1283,14 @@ where
 						});
 					}
 				}
-				let res = if allow_0conf {
-					self.channel_manager.accept_inbound_channel_from_trusted_peer_0conf(
+				let is_trusted_peer =
+					self.config.trusted_peers_0conf_0reserve.contains(&counterparty_node_id);
+				let res = if is_trusted_peer {
+					self.channel_manager.accept_inbound_channel_from_trusted_peer(
 						&temporary_channel_id,
 						&counterparty_node_id,
 						user_channel_id,
+						TrustedChannelFeatures::ZeroConfZeroReserve,
 						channel_override_config,
 					)
 				} else {
@@ -1305,10 +1307,10 @@ where
 						log_info!(
 							self.logger,
 							"Accepting inbound{}{} channel of {}sats from{} peer {}",
-							if allow_0conf { " 0conf" } else { "" },
+							if is_trusted_peer { " 0conf, 0reserve" } else { "" },
 							if anchor_channel { " Anchor" } else { "" },
 							funding_satoshis,
-							if allow_0conf { " trusted" } else { "" },
+							if is_trusted_peer { " trusted" } else { "" },
 							counterparty_node_id,
 						);
 					},
@@ -1316,10 +1318,10 @@ where
 						log_error!(
 							self.logger,
 							"Error while accepting inbound{}{} channel from{} peer {}: {:?}",
-							if allow_0conf { " 0conf" } else { "" },
+							if is_trusted_peer { " 0conf, 0reserve" } else { "" },
 							if anchor_channel { " Anchor" } else { "" },
 							counterparty_node_id,
-							if allow_0conf { " trusted" } else { "" },
+							if is_trusted_peer { " trusted" } else { "" },
 							e,
 						);
 					},
