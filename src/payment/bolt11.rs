@@ -154,47 +154,35 @@ impl Bolt11Payment {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
-		let (node_id, address) =
-			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let peer_info = PeerInfo { node_id, address };
-
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
-
-		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
-
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
+		let connection_manager = Arc::clone(&self.connection_manager);
+		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee, chosen_lsp) =
 			self.runtime.block_on(async move {
 				if let Some(amount_msat) = amount_msat {
 					liquidity_source
+						.lsps2_client()
 						.lsps2_receive_to_jit_channel(
 							amount_msat,
 							description,
 							expiry_secs,
 							max_total_lsp_fee_limit_msat,
 							payment_hash,
+							&connection_manager,
 						)
 						.await
-						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
+						.map(|(invoice, total_fee, lsp)| (invoice, Some(total_fee), None, lsp))
 				} else {
 					liquidity_source
+						.lsps2_client()
 						.lsps2_receive_variable_amount_to_jit_channel(
 							description,
 							expiry_secs,
 							max_proportional_lsp_fee_limit_ppm_msat,
 							payment_hash,
+							&connection_manager,
 						)
 						.await
-						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
+						.map(|(invoice, prop_fee, lsp)| (invoice, None, Some(prop_fee), lsp))
 				}
 			})?;
 
@@ -225,7 +213,8 @@ impl Bolt11Payment {
 		);
 		self.payment_store.insert(payment)?;
 
-		// Persist LSP peer to make sure we reconnect on restart.
+		// Persist the chosen LSP peer to make sure we reconnect on restart.
+		let peer_info = PeerInfo { node_id: chosen_lsp.node_id, address: chosen_lsp.address };
 		self.peer_store.add_peer(peer_info)?;
 
 		Ok(invoice)
