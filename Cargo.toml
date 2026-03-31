@@ -79,7 +79,7 @@ async-trait = { version = "0.1", default-features = false }
 vss-client = { package = "vss-client-ng", version = "0.5" }
 prost = { version = "0.11.6", default-features = false}
 #bitcoin-payment-instructions = { version = "0.6" }
-bitcoin-payment-instructions = { git = "https://github.com/tankyleo/bitcoin-payment-instructions", branch = "ldk-688544da72cb348e4405d39a75e4d81102c1278a" }
+bitcoin-payment-instructions = { git = "https://github.com/tankyleo/bitcoin-payment-instructions", rev = "654c25c2c1234fadf01adec1554497610f554f09" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
