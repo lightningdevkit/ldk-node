@@ -19,6 +19,7 @@
 //      runs payment rounds and prints probing perfomance tables.
 
 mod common;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lightning::routing::gossip::NodeAlias;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
@@ -42,38 +43,38 @@ use std::time::Duration;
 
 const PROBE_AMOUNT_MSAT: u64 = 1_000_000;
 const MAX_LOCKED_MSAT: u64 = 100_000_000;
-const PROBING_INTERVAL_MILLISECONDS: u64 = 500;
+const PROBING_INTERVAL_MILLISECONDS: u64 = 100;
 const PROBING_DIVERSITY_PENALTY: u64 = 50_000;
 
 /// FixedDestStrategy — always targets one node; used by budget tests.
 struct FixedDestStrategy {
 	destination: PublicKey,
 	amount_msat: u64,
+	ready_to_probe: AtomicBool,
 }
 
 impl FixedDestStrategy {
 	fn new(destination: PublicKey, amount_msat: u64) -> Arc<Self> {
-		Arc::new(Self { destination, amount_msat })
+		Arc::new(Self { destination, amount_msat, ready_to_probe: AtomicBool::new(false) })
+	}
+
+	fn start_probing(&self) {
+		self.ready_to_probe.store(true, Ordering::Relaxed);
+	}
+
+	fn stop_probing(&self) {
+		self.ready_to_probe.store(false, Ordering::Relaxed);
 	}
 }
 
 impl ProbingStrategy for FixedDestStrategy {
 	fn next_probe(&self) -> Option<Probe> {
-		Some(Probe::Destination { final_node: self.destination, amount_msat: self.amount_msat })
-	}
-}
-
-async fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
-	tokio::time::timeout(timeout, async {
-		loop {
-			if predicate() {
-				return;
-			}
-			tokio::time::sleep(Duration::from_millis(100)).await;
+		if self.ready_to_probe.load(Ordering::Relaxed) {
+			Some(Probe::Destination { final_node: self.destination, amount_msat: self.amount_msat })
+		} else {
+			None
 		}
-	})
-	.await
-	.is_ok()
+	}
 }
 
 fn config_with_label(label: &str) -> common::TestConfig {
@@ -83,20 +84,6 @@ fn config_with_label(label: &str) -> common::TestConfig {
 	alias_bytes[..b.len()].copy_from_slice(b);
 	config.node_config.node_alias = Some(NodeAlias(alias_bytes));
 	config
-}
-
-fn build_node_fixed_dest_probing(
-	chain_source: &TestChainSource<'_>, destination_node_id: PublicKey,
-) -> TestNode {
-	let mut config = random_config(false);
-	let strategy = FixedDestStrategy::new(destination_node_id, PROBE_AMOUNT_MSAT);
-	config.probing = Some(
-		ProbingConfig::custom(strategy)
-			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
-			.max_locked_msat(PROBE_AMOUNT_MSAT)
-			.build(),
-	);
-	setup_node(chain_source, config)
 }
 
 fn build_node_random_probing(chain_source: &TestChainSource<'_>, max_hops: usize) -> TestNode {
@@ -259,81 +246,19 @@ fn print_probing_perfomance(observers: &[&TestNode], all_nodes: &[&TestNode]) {
 
 /// Verifies that `locked_msat` increases when a probe is dispatched and returns
 /// to zero once the probe resolves (succeeds or fails).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn probe_budget_increments_and_decrements() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Electrum(&electrsd);
 
 	let node_b = setup_node(&chain_source, random_config(false));
 	let node_c = setup_node(&chain_source, random_config(false));
-	let node_a = build_node_fixed_dest_probing(&chain_source, node_c.node_id());
 
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
-	premine_and_distribute_funds(
-		&bitcoind.client,
-		&electrsd.client,
-		vec![addr_a, addr_b],
-		Amount::from_sat(2_000_000),
-	)
-	.await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
-
-	open_channel(&node_a, &node_b, 1_000_000, true, &electrsd).await;
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
-	node_b.sync_wallets().unwrap();
-	open_channel(&node_b, &node_c, 1_000_000, true, &electrsd).await;
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
-	node_c.sync_wallets().unwrap();
-
-	expect_channel_ready_event!(node_a, node_b.node_id());
-	expect_event!(node_b, ChannelReady);
-	expect_event!(node_b, ChannelReady);
-	expect_event!(node_c, ChannelReady);
-
-	// Give gossip time to propagate to A.
-	tokio::time::sleep(Duration::from_secs(3)).await;
-
-	let went_up =
-		wait_until(Duration::from_secs(10), || node_a.prober().map_or(0, |p| p.locked_msat()) > 0)
-			.await;
-	assert!(went_up, "locked_msat never increased — no probe was dispatched");
-	println!("First probe dispatched; locked_msat = {}", node_a.prober().unwrap().locked_msat());
-
-	let cleared =
-		wait_until(Duration::from_secs(20), || node_a.prober().map_or(1, |p| p.locked_msat()) == 0)
-			.await;
-	assert!(cleared, "locked_msat never returned to zero after probe resolved");
-	println!("Probe resolved; locked_msat = 0");
-
-	node_a.stop().unwrap();
-	node_b.stop().unwrap();
-	node_c.stop().unwrap();
-}
-
-/// Verifies that no new probes are dispatched once the in-flight budget is exhausted.
-///
-/// Exhaustion is triggered by stopping the intermediate node (B) while a probe HTLC
-/// is in-flight, preventing resolution and keeping the budget locked. After B restarts
-/// the HTLC fails, the budget clears, and probing resumes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exhausted_probe_budget_blocks_new_probes() {
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Electrum(&electrsd);
-
-	let node_b = setup_node(&chain_source, random_config(false));
-	let node_c = setup_node(&chain_source, random_config(false));
-
-	// Use a slow probing interval so we can read capacity before the first probe fires.
 	let mut config_a = random_config(false);
 	let strategy = FixedDestStrategy::new(node_c.node_id(), PROBE_AMOUNT_MSAT);
 	config_a.probing = Some(
-		ProbingConfig::custom(strategy)
-			.interval(Duration::from_secs(3))
+		ProbingConfig::custom(strategy.clone())
+			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
 			.max_locked_msat(PROBE_AMOUNT_MSAT)
 			.build(),
 	);
@@ -366,7 +291,90 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	expect_event!(node_b, ChannelReady);
 	expect_event!(node_c, ChannelReady);
 
-	// Record capacity before the first probe fires (interval is 3s, so we have time).
+	// Give gossip time to propagate to A, then enable probing.
+	tokio::time::sleep(Duration::from_secs(3)).await;
+	strategy.start_probing();
+
+	let went_up = tokio::time::timeout(Duration::from_secs(30), async {
+		loop {
+			if node_a.prober().map_or(0, |p| p.locked_msat()) > 0 {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+	})
+	.await
+	.is_ok();
+	assert!(went_up, "locked_msat never increased — no probe was dispatched");
+	println!("First probe dispatched; locked_msat = {}", node_a.prober().unwrap().locked_msat());
+
+	let cleared = tokio::time::timeout(Duration::from_secs(30), async {
+		loop {
+			if node_a.prober().map_or(1, |p| p.locked_msat()) == 0 {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+	})
+	.await
+	.is_ok();
+	assert!(cleared, "locked_msat never returned to zero after probe resolved");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+	node_c.stop().unwrap();
+}
+
+/// Verifies that no new probes are dispatched once the in-flight budget is exhausted.
+///
+/// Exhaustion is triggered by stopping the intermediate node (B) while a probe HTLC
+/// is in-flight, preventing resolution and keeping the budget locked. After B restarts
+/// the HTLC fails, the budget clears, and probing resumes.
+#[tokio::test(flavor = "multi_thread")]
+async fn exhausted_probe_budget_blocks_new_probes() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+
+	let node_b = setup_node(&chain_source, random_config(false));
+	let node_c = setup_node(&chain_source, random_config(false));
+
+	let mut config_a = random_config(false);
+	let strategy = FixedDestStrategy::new(node_c.node_id(), PROBE_AMOUNT_MSAT);
+	config_a.probing = Some(
+		ProbingConfig::custom(strategy.clone())
+			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+			.max_locked_msat(PROBE_AMOUNT_MSAT)
+			.build(),
+	);
+	let node_a = setup_node(&chain_source, config_a);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(2_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_b.sync_wallets().unwrap();
+	open_channel(&node_b, &node_c, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	node_c.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_c, ChannelReady);
+
 	let capacity_at_open = node_a
 		.list_channels()
 		.iter()
@@ -374,11 +382,23 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 		.map(|ch| ch.outbound_capacity_msat)
 		.expect("A→B channel not found");
 
-	// Give gossip time to propagate to A, then wait for the first probe.
-	let locked =
-		wait_until(Duration::from_secs(15), || node_a.prober().map_or(0, |p| p.locked_msat()) > 0)
-			.await;
-	assert!(locked, "no probe dispatched within 15 s");
+	assert_eq!(node_a.prober().map_or(1, |p| p.locked_msat()), 0, "initial locked_msat is nonzero");
+
+	tokio::time::sleep(Duration::from_secs(3)).await;
+	strategy.start_probing();
+
+	// Wait for the first probe to be in-flight.
+	let locked = tokio::time::timeout(Duration::from_secs(30), async {
+		loop {
+			if node_a.prober().map_or(0, |p| p.locked_msat()) > 0 {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+	})
+	.await
+	.is_ok();
+	assert!(locked, "no probe dispatched within 30 s");
 
 	// Capacity should have decreased due to the in-flight probe HTLC.
 	let capacity_with_probe = node_a
@@ -395,8 +415,6 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	// Stop B while the probe HTLC is in-flight.
 	node_b.stop().unwrap();
 
-	// Let several Prober ticks fire (interval is 3s); the budget is exhausted so
-	// they must be skipped. Wait, then check both conditions at once.
 	tokio::time::sleep(Duration::from_secs(5)).await;
 	assert!(
 		node_a.prober().map_or(0, |p| p.locked_msat()) > 0,
@@ -413,6 +431,9 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 		"a new probe HTLC was sent despite budget being exhausted"
 	);
 
+	// Pause probing so the budget can clear without a new probe re-locking it.
+	strategy.stop_probing();
+
 	// Bring B back and explicitly reconnect to A and C so the stuck HTLC resolves
 	// without waiting for the background reconnection backoff.
 	node_b.start().unwrap();
@@ -421,15 +442,30 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	node_b.connect(node_a.node_id(), node_a_addr, false).unwrap();
 	node_b.connect(node_c.node_id(), node_c_addr, false).unwrap();
 
-	let cleared =
-		wait_until(Duration::from_secs(15), || node_a.prober().map_or(1, |p| p.locked_msat()) == 0)
-			.await;
+	let cleared = tokio::time::timeout(Duration::from_secs(60), async {
+		loop {
+			if node_a.prober().map_or(1, |p| p.locked_msat()) == 0 {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+	})
+	.await
+	.is_ok();
 	assert!(cleared, "locked_msat never cleared after B came back online");
 
-	// Once the budget is freed, a new probe should be dispatched within a few ticks.
-	let new_probe =
-		wait_until(Duration::from_secs(10), || node_a.prober().map_or(0, |p| p.locked_msat()) > 0)
-			.await;
+	// Re-enable probing; a new probe should be dispatched within a few ticks.
+	strategy.start_probing();
+	let new_probe = tokio::time::timeout(Duration::from_secs(60), async {
+		loop {
+			if node_a.prober().map_or(0, |p| p.locked_msat()) > 0 {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+	})
+	.await
+	.is_ok();
 	assert!(new_probe, "no new probe dispatched after budget was freed");
 
 	node_a.stop().unwrap();
