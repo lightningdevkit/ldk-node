@@ -1423,6 +1423,82 @@ impl Node {
 		)
 	}
 
+	/// Connect to a node and open a new unannounced, zero-reserve channel.
+	///
+	/// Zero-reserve channels allow the channel counterparty to try to steal your funds with
+	/// no financial penalty, so zero-reserve channels should only be opened to parties you
+	/// trust.
+	///
+	/// Note that this only allows *the counterparty* to spend *their* entire balance in the
+	/// the channel; whether *you* are allowed to spend your own full balance is the
+	/// counterparty's decision. See [`Config::trusted_peers_0conf_0reserve`] if the
+	/// counterparty would like to set zero-reserve on your own balance as well.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`Config::trusted_peers_0conf_0reserve`]: crate::config::Config::trusted_peers_0conf_0reserve
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_0reserve_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			FundingAmount::Exact { amount_sats: channel_amount_sats },
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+			true,
+		)
+	}
+
+	/// Connect to a node and open a new unannounced, zero-reserve channel, using all available
+	/// on-chain funds minus fees and anchor reserves.
+	///
+	/// Zero-reserve channels allow the channel counterparty to try to steal your funds with
+	/// no financial penalty, so zero-reserve channels should only be opened to parties you
+	/// trust.
+	///
+	/// Note that this only allows *the counterparty* to spend *their* entire balance in the
+	/// the channel; whether *you* are allowed to spend your own full balance is the
+	/// counterparty's decision. See [`Config::trusted_peers_0conf_0reserve`] if the
+	/// counterparty would like to set zero-reserve on your own balance as well.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`Config::trusted_peers_0conf_0reserve`]: crate::config::Config::trusted_peers_0conf_0reserve
+	pub fn open_0reserve_channel_with_all(
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			FundingAmount::Max,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+			true,
+		)
+	}
+
 	fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: FundingAmount,
