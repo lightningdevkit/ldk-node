@@ -156,18 +156,17 @@ pub struct Config {
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub node_alias: Option<NodeAlias>,
-	/// A list of peers that we trust. If a peer on this list opens a channel to us, we will
-	/// forward their HTLCs before any confirmations of the funding transaction (zero-conf), and
-	/// allow them to spend their entire balance (zero-reserve). If we open a channel to a peer
-	/// on this list, we will allow them to spend their entire channel balance (note that for
-	/// channels *we* open, the decision of whether to accept HTLC forwards with no
-	/// confirmations of the funding transaction is *the peer's* decision).
+	/// A list of peers that we trust; these are peers that you've had some interaction with
+	/// out-of-band before clearing them to be on this list.
 	///
-	/// **Note:** Allowing payments via zero-confirmation channels is potentially insecure if
-	/// the funding transaction never gets confirmed on-chain. Zero-reserve channels
-	/// allow the counterparty to make cheating attempts with no financial penalty.
-	/// Zero-confirmation, and zero-reserve channels should therefore only be accepted from and
-	/// opened to trusted peers.
+	/// If a trusted peer opens a channel to us, we will forward their HTLCs before any
+	/// confirmations of the funding transaction (zero-conf), and allow them to spend their
+	/// entire balance (zero-reserve).
+	///
+	/// **Note:** Allowing payments via zero-confirmation channels is insecure if the funding
+	/// transaction never gets confirmed on-chain. Zero-reserve channels allow the peer to try
+	/// to steal your funds with no financial penalty. Zero-confirmation, and zero-reserve
+	/// channels should therefore only be accepted from trusted peers.
 	pub trusted_peers_0conf_0reserve: Vec<PublicKey>,
 	/// The liquidity factor by which we filter the outgoing channels used for sending probes.
 	///

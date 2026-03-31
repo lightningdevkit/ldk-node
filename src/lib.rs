@@ -1196,57 +1196,27 @@ impl Node {
 			self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
 		);
 
-		let is_trusted_peer = self.config.trusted_peers_0conf_0reserve.contains(&node_id);
-		if is_trusted_peer {
-			match self.channel_manager.create_channel_to_trusted_peer_0reserve(
-				peer_info.node_id,
-				channel_amount_sats,
-				push_msat,
-				user_channel_id,
-				None,
-				Some(user_config),
-			) {
-				Ok(_) => {
-					log_info!(
-						self.logger,
-						"Initiated 0reserve channel creation with peer {}. ",
-						peer_info.node_id
-					);
-					self.peer_store.add_peer(peer_info)?;
-					Ok(UserChannelId(user_channel_id))
-				},
-				Err(e) => {
-					log_error!(
-						self.logger,
-						"Failed to initiate 0reserve channel creation: {:?}",
-						e
-					);
-					Err(Error::ChannelCreationFailed)
-				},
-			}
-		} else {
-			match self.channel_manager.create_channel(
-				peer_info.node_id,
-				channel_amount_sats,
-				push_msat,
-				user_channel_id,
-				None,
-				Some(user_config),
-			) {
-				Ok(_) => {
-					log_info!(
-						self.logger,
-						"Initiated channel creation with peer {}. ",
-						peer_info.node_id
-					);
-					self.peer_store.add_peer(peer_info)?;
-					Ok(UserChannelId(user_channel_id))
-				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
-					Err(Error::ChannelCreationFailed)
-				},
-			}
+		match self.channel_manager.create_channel(
+			peer_info.node_id,
+			channel_amount_sats,
+			push_msat,
+			user_channel_id,
+			None,
+			Some(user_config),
+		) {
+			Ok(_) => {
+				log_info!(
+					self.logger,
+					"Initiated channel creation with peer {}. ",
+					peer_info.node_id
+				);
+				self.peer_store.add_peer(peer_info)?;
+				Ok(UserChannelId(user_channel_id))
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
+				Err(Error::ChannelCreationFailed)
+			},
 		}
 	}
 
