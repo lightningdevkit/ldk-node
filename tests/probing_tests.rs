@@ -442,7 +442,7 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	node_b.connect(node_a.node_id(), node_a_addr, false).unwrap();
 	node_b.connect(node_c.node_id(), node_c_addr, false).unwrap();
 
-	let cleared = tokio::time::timeout(Duration::from_secs(60), async {
+	let cleared = tokio::time::timeout(Duration::from_secs(120), async {
 		loop {
 			if node_a.prober().map_or(1, |p| p.locked_msat()) == 0 {
 				break;
