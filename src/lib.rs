@@ -1128,7 +1128,7 @@ impl Node {
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: FundingAmount,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_for_forwarding: bool,
+		announce_for_forwarding: bool, set_0reserve: bool,
 	) -> Result<UserChannelId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -1196,25 +1196,46 @@ impl Node {
 			self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
 		);
 
-		match self.channel_manager.create_channel(
-			peer_info.node_id,
-			channel_amount_sats,
-			push_msat,
-			user_channel_id,
-			None,
-			Some(user_config),
-		) {
+		let result = if set_0reserve {
+			self.channel_manager.create_channel_to_trusted_peer_0reserve(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			)
+		} else {
+			self.channel_manager.create_channel(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			)
+		};
+
+		let zero_reserve_string = if set_0reserve { "0reserve " } else { "" };
+
+		match result {
 			Ok(_) => {
 				log_info!(
 					self.logger,
-					"Initiated channel creation with peer {}. ",
+					"Initiated {}channel creation with peer {}. ",
+					zero_reserve_string,
 					peer_info.node_id
 				);
 				self.peer_store.add_peer(peer_info)?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
-				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
+				log_error!(
+					self.logger,
+					"Failed to initiate {}channel creation: {:?}",
+					zero_reserve_string,
+					e
+				);
 				Err(Error::ChannelCreationFailed)
 			},
 		}
@@ -1290,6 +1311,7 @@ impl Node {
 			push_to_counterparty_msat,
 			channel_config,
 			false,
+			false,
 		)
 	}
 
@@ -1330,6 +1352,7 @@ impl Node {
 			push_to_counterparty_msat,
 			channel_config,
 			true,
+			false,
 		)
 	}
 
@@ -1357,6 +1380,7 @@ impl Node {
 			FundingAmount::Max,
 			push_to_counterparty_msat,
 			channel_config,
+			false,
 			false,
 		)
 	}
@@ -1395,6 +1419,7 @@ impl Node {
 			push_to_counterparty_msat,
 			channel_config,
 			true,
+			false,
 		)
 	}
 
