@@ -513,6 +513,14 @@ pub struct Prober {
 	pub(crate) locked_msat: Arc<AtomicU64>,
 }
 
+fn fmt_path(path: &lightning::routing::router::Path) -> String {
+	path.hops
+		.iter()
+		.map(|h| format!("{}(scid={})", h.pubkey, h.short_channel_id))
+		.collect::<Vec<_>>()
+		.join(" -> ")
+}
+
 impl Prober {
 	/// Returns the total millisatoshis currently locked in in-flight probes.
 	pub fn locked_msat(&self) -> u64 {
@@ -521,16 +529,34 @@ impl Prober {
 
 	pub(crate) fn handle_probe_successful(&self, path: &lightning::routing::router::Path) {
 		let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-		let _ = self
+		let prev = self
 			.locked_msat
-			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)));
+			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
+			.unwrap_or(0);
+		log_debug!(
+			self.logger,
+			"Probe successful: released {} msat (locked_msat {} -> {}), path: {}",
+			amount,
+			prev,
+			prev.saturating_sub(amount),
+			fmt_path(path)
+		);
 	}
 
 	pub(crate) fn handle_probe_failed(&self, path: &lightning::routing::router::Path) {
 		let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-		let _ = self
+		let prev = self
 			.locked_msat
-			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)));
+			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
+			.unwrap_or(0);
+		log_debug!(
+			self.logger,
+			"Probe failed: released {} msat (locked_msat {} -> {}), path: {}",
+			amount,
+			prev,
+			prev.saturating_sub(amount),
+			fmt_path(path)
+		);
 	}
 }
 
