@@ -96,6 +96,13 @@ impl LnurlAuth {
 
 		let domain = url.base_url();
 
+		// Enforce HTTPS for non-localhost URLs per LNURL spec.
+		let is_localhost = domain == "localhost" || domain == "127.0.0.1" || domain == "[::1]";
+		if url.scheme() != "https" && !is_localhost {
+			log_error!(self.logger, "LNURL-auth URL must use HTTPS for non-localhost domains");
+			return Err(Error::InvalidLnurl);
+		}
+
 		// get query parameters for k1 and tag
 		let query_params: std::collections::HashMap<_, _> = url.query_pairs().collect();
 
@@ -135,7 +142,7 @@ impl LnurlAuth {
 		let auth_url = format!("{lnurl_auth_url}&sig={signature}&key={linking_public_key}");
 
 		log_debug!(self.logger, "Submitting LNURL-auth response");
-		let request = bitreq::get(&auth_url);
+		let request = bitreq::get(&auth_url).with_max_redirects(0);
 		let auth_response = self.client.send_async(request).await.map_err(|e| {
 			log_error!(self.logger, "Failed to submit LNURL-auth response: {e}");
 			Error::LnurlAuthFailed
