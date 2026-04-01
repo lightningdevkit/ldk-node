@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check and install CMake if needed
         # lnd_grpc_rust (via prost-build v0.10.4) requires CMake >= 3.5 but is incompatible with CMake >= 4.0.
