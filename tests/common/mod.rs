@@ -509,6 +509,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			let sync_config = CbfSyncConfig {
 				background_sync_config: None,
 				timeouts_config,
+				required_peers: 1,
 				..Default::default()
 			};
 			builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config), None);
