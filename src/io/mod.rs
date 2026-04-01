@@ -7,6 +7,8 @@
 
 //! Objects and traits for data persistence.
 
+#[cfg(feature = "postgres")]
+pub mod postgres_store;
 pub mod sqlite_store;
 #[cfg(test)]
 pub(crate) mod test_utils;

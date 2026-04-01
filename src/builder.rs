@@ -644,6 +644,50 @@ impl NodeBuilder {
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
 	}
 
+	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
+	/// previously configured.
+	///
+	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
+	/// `"postgres://user:password@localhost/ldk_db"`.
+	///
+	/// The given `db_name` will be used or default to
+	/// [`DEFAULT_DB_NAME`](io::postgres_store::DEFAULT_DB_NAME). The `connection_string` must
+	/// not include a `dbname` when `db_name` is set, providing both is an error. The database
+	/// will be created automatically if it doesn't already exist. The initial connection is
+	/// made to the target database, and if it fails we fall back to the default `postgres`
+	/// database to create it.
+	///
+	/// The given `kv_table_name` will be used or default to
+	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
+	///
+	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
+	/// provided PEM-encoded CA certificate will be added to the system's default root
+	/// certificates (it does not replace them). If `certificate_pem` is `None`, connections
+	/// will be unencrypted.
+	///
+	/// [PostgreSQL]: https://www.postgresql.org
+	#[cfg(feature = "postgres")]
+	pub fn build_with_postgres_store(
+		&self, node_entropy: NodeEntropy, connection_string: String, db_name: Option<String>,
+		kv_table_name: Option<String>, certificate_pem: Option<String>,
+	) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
+		let kv_store = runtime
+			.block_on(io::postgres_store::PostgresStore::new_with_logger(
+				connection_string,
+				db_name,
+				kv_table_name,
+				certificate_pem,
+				Some(Arc::clone(&logger)),
+			))
+			.map_err(|e| {
+				log_error!(logger, "Failed to set up Postgres store: {e}");
+				BuildError::KVStoreSetupFailed
+			})?;
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+	}
+
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
 	/// previously configured.
 	///
@@ -789,18 +833,27 @@ impl NodeBuilder {
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
 	}
 
+	fn setup_runtime(&self, logger: &Arc<Logger>) -> Result<Arc<Runtime>, BuildError> {
+		if let Some(handle) = self.runtime_handle.as_ref() {
+			Ok(Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(logger))))
+		} else {
+			Ok(Arc::new(Runtime::new(Arc::clone(logger)).map_err(|e| {
+				log_error!(logger, "Failed to setup tokio runtime: {}", e);
+				BuildError::RuntimeSetupFailed
+			})?))
+		}
+	}
+
 	fn build_with_store_and_logger<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
-		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
-			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(&logger)))
-		} else {
-			Arc::new(Runtime::new(Arc::clone(&logger)).map_err(|e| {
-				log_error!(logger, "Failed to setup tokio runtime: {}", e);
-				BuildError::RuntimeSetupFailed
-			})?)
-		};
+		let runtime = self.setup_runtime(&logger)?;
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+	}
 
+	fn build_with_store_runtime_and_logger<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
+	) -> Result<Node, BuildError> {
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
 
@@ -1114,6 +1167,58 @@ impl ArcedNodeBuilder {
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build(*node_entropy).map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
+	/// previously configured.
+	///
+	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
+	/// `"postgres://user:password@localhost/ldk_db"`.
+	///
+	/// The given `db_name` will be used or default to
+	/// [`DEFAULT_DB_NAME`](io::postgres_store::DEFAULT_DB_NAME). The `connection_string` must
+	/// not include a `dbname` when `db_name` is set, providing both is an error. The database
+	/// will be created automatically if it doesn't already exist. The initial connection is
+	/// made to the target database, and if it fails we fall back to the default `postgres`
+	/// database to create it.
+	///
+	/// The given `kv_table_name` will be used or default to
+	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
+	///
+	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
+	/// provided PEM-encoded CA certificate will be added to the system's default root
+	/// certificates (it does not replace them). If `certificate_pem` is `None`, connections
+	/// will be unencrypted.
+	///
+	/// [PostgreSQL]: https://www.postgresql.org
+	#[cfg(feature = "postgres")]
+	pub fn build_with_postgres_store(
+		&self, node_entropy: Arc<NodeEntropy>, connection_string: String, db_name: Option<String>,
+		kv_table_name: Option<String>, certificate_pem: Option<String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_postgres_store(
+				*node_entropy,
+				connection_string,
+				db_name,
+				kv_table_name,
+				certificate_pem,
+			)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
+	/// previously configured.
+	///
+	/// This requires the `postgres` crate feature.
+	#[cfg(not(feature = "postgres"))]
+	pub fn build_with_postgres_store(
+		&self, _node_entropy: Arc<NodeEntropy>, _connection_string: String,
+		_db_name: Option<String>, _kv_table_name: Option<String>, _certificate_pem: Option<String>,
+	) -> Result<Arc<Node>, BuildError> {
+		Err(BuildError::KVStoreSetupFailed)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
