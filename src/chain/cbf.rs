@@ -1395,4 +1395,78 @@ mod tests {
 			}
 		}
 	}
+
+	/// Test that checkpoint building from `recent_history` handles reorgs.
+	///
+	/// Scenario: wallet synced to height 103. A 3-block reorg replaces blocks
+	/// 101-103 with new ones, and `recent_history` returns {97..=106} with
+	/// new hashes at heights 101-103.
+	///
+	/// The checkpoint must reflect the reorged chain: new hashes at 101-103,
+	/// pre-reorg blocks at ≤100 preserved, new blocks 104-106 present.
+	#[test]
+	fn checkpoint_building_handles_reorg() {
+		use bdk_chain::local_chain::LocalChain;
+		use bdk_chain::{BlockId, CheckPoint};
+		use bitcoin::BlockHash;
+		use std::collections::BTreeMap;
+
+		fn hash(seed: u32) -> BlockHash {
+			use bitcoin::hashes::{sha256d, Hash, HashEngine};
+			let mut engine = sha256d::Hash::engine();
+			engine.input(&seed.to_le_bytes());
+			BlockHash::from_raw_hash(sha256d::Hash::from_engine(engine))
+		}
+
+		let genesis = BlockId { height: 0, hash: hash(0) };
+
+		// Wallet checkpoint: 0 → 100 → 101 → 102 → 103
+		let wallet_cp = CheckPoint::from_block_ids([
+			genesis,
+			BlockId { height: 100, hash: hash(100) },
+			BlockId { height: 101, hash: hash(101) },
+			BlockId { height: 102, hash: hash(102) },
+			BlockId { height: 103, hash: hash(103) },
+		])
+		.unwrap();
+
+		// recent_history after reorg: 97-106, heights 101-103 have NEW hashes.
+		let recent_history: BTreeMap<u32, BlockHash> = (97..=106)
+			.map(|h| {
+				let seed = if (101..=103).contains(&h) { h + 1000 } else { h };
+				(h, hash(seed))
+			})
+			.collect();
+
+		// Build checkpoint using the same logic as sync_onchain_wallet.
+		let mut cp = wallet_cp;
+		for (height, block_hash) in &recent_history {
+			if *height > cp.height() {
+				let block_id = BlockId { height: *height, hash: *block_hash };
+				cp = cp.push(block_id).unwrap_or_else(|old| old);
+			}
+		}
+
+		// Reorged blocks must have the NEW hashes.
+		assert_eq!(cp.height(), 106);
+		assert_eq!(
+			cp.get(101).expect("height 101 must exist").hash(),
+			hash(1101),
+			"block 101 must have the reorged hash"
+		);
+		assert_eq!(cp.get(102).expect("height 102 must exist").hash(), hash(1102));
+		assert_eq!(cp.get(103).expect("height 103 must exist").hash(), hash(1103));
+
+		// Pre-reorg blocks are preserved.
+		assert_eq!(cp.get(100).expect("height 100 must exist").hash(), hash(100));
+
+		// New blocks above the reorg are present.
+		assert!(cp.get(104).is_some());
+		assert!(cp.get(105).is_some());
+		assert!(cp.get(106).is_some());
+
+		// The checkpoint must connect cleanly to a LocalChain.
+		let (mut chain, _) = LocalChain::from_genesis_hash(genesis.hash);
+		chain.apply_update(cp).expect("checkpoint must connect to chain");
+	}
 }
