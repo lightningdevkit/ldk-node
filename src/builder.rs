@@ -629,6 +629,24 @@ impl NodeBuilder {
 		self.build_with_store(node_entropy, kv_store)
 	}
 
+	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
+	/// previously configured.
+	///
+	/// Connects to the PostgreSQL database at the given `connection_string`.
+	/// The given `kv_table_name` will be used or default to
+	/// [`DEFAULT_KV_TABLE_NAME`](crate::io::postgres_store::DEFAULT_KV_TABLE_NAME).
+	///
+	/// [PostgreSQL]: https://www.postgresql.org
+	#[cfg(feature = "postgres")]
+	pub fn build_with_postgres_store(
+		&self, node_entropy: NodeEntropy, connection_string: &str, kv_table_name: Option<String>,
+	) -> Result<Node, BuildError> {
+		let kv_store =
+			crate::io::postgres_store::PostgresStore::new(connection_string, kv_table_name)
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+		self.build_with_store(node_entropy, kv_store)
+	}
+
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
 	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -1085,6 +1103,22 @@ impl ArcedNodeBuilder {
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build(*node_entropy).map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
+	/// previously configured.
+	///
+	/// [PostgreSQL]: https://www.postgresql.org
+	#[cfg(feature = "postgres")]
+	pub fn build_with_postgres_store(
+		&self, node_entropy: Arc<NodeEntropy>, connection_string: String,
+		kv_table_name: Option<String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_postgres_store(*node_entropy, &connection_string, kv_table_name)
+			.map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
