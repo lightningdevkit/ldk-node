@@ -331,6 +331,17 @@ pub(crate) fn may_announce_channel(config: &Config) -> Result<(), AnnounceError>
 	}
 }
 
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn has_port_zero(addr: &SocketAddress) -> bool {
+	match addr {
+		SocketAddress::TcpIpV4 { port, .. }
+		| SocketAddress::TcpIpV6 { port, .. }
+		| SocketAddress::OnionV3 { port, .. }
+		| SocketAddress::Hostname { port, .. } => *port == 0,
+		_ => false,
+	}
+}
+
 pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// Initialize the default config values.
 	//
