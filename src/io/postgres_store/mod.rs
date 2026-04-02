@@ -53,6 +53,7 @@ pub struct PostgresStore {
 // RefUnwindSafe. std::sync::Mutex (used by SqliteStore) doesn't have this issue because
 // it poisons on panic. This impl is needed for do_read_write_remove_list_persist which
 // requires K: KVStoreSync + RefUnwindSafe.
+#[cfg(test)]
 impl std::panic::RefUnwindSafe for PostgresStore {}
 
 impl PostgresStore {
@@ -61,7 +62,7 @@ impl PostgresStore {
 	/// Connects to the PostgreSQL database at the given `connection_string`.
 	///
 	/// The given `kv_table_name` will be used or default to [`DEFAULT_KV_TABLE_NAME`].
-	pub fn new(connection_string: &str, kv_table_name: Option<String>) -> io::Result<Self> {
+	pub fn new(connection_string: String, kv_table_name: Option<String>) -> io::Result<Self> {
 		let internal_runtime = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
 			.thread_name_fn(|| {
@@ -74,7 +75,6 @@ impl PostgresStore {
 			.build()
 			.unwrap();
 
-		let connection_string = connection_string.to_string();
 		let inner = tokio::task::block_in_place(|| {
 			internal_runtime.block_on(async {
 				PostgresStoreInner::new(&connection_string, kv_table_name).await
@@ -686,7 +686,7 @@ mod tests {
 	}
 
 	fn create_test_store(table_name: &str) -> PostgresStore {
-		PostgresStore::new(&test_connection_string(), Some(table_name.to_string())).unwrap()
+		PostgresStore::new(test_connection_string(), Some(table_name.to_string())).unwrap()
 	}
 
 	fn cleanup_store(store: &PostgresStore) {

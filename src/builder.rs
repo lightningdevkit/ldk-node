@@ -639,7 +639,7 @@ impl NodeBuilder {
 	/// [PostgreSQL]: https://www.postgresql.org
 	#[cfg(feature = "postgres")]
 	pub fn build_with_postgres_store(
-		&self, node_entropy: NodeEntropy, connection_string: &str, kv_table_name: Option<String>,
+		&self, node_entropy: NodeEntropy, connection_string: String, kv_table_name: Option<String>,
 	) -> Result<Node, BuildError> {
 		let kv_store =
 			crate::io::postgres_store::PostgresStore::new(connection_string, kv_table_name)
@@ -1117,7 +1117,7 @@ impl ArcedNodeBuilder {
 		self.inner
 			.read()
 			.unwrap()
-			.build_with_postgres_store(*node_entropy, &connection_string, kv_table_name)
+			.build_with_postgres_store(*node_entropy, connection_string, kv_table_name)
 			.map(Arc::new)
 	}
 

@@ -29,7 +29,7 @@ async fn channel_full_cycle_with_postgres_store() {
 	let node_a = builder_a
 		.build_with_postgres_store(
 			config_a.node_entropy,
-			&test_connection_string(),
+			test_connection_string(),
 			Some("channel_cycle_a".to_string()),
 		)
 		.unwrap();
@@ -42,7 +42,7 @@ async fn channel_full_cycle_with_postgres_store() {
 	let node_b = builder_b
 		.build_with_postgres_store(
 			config_b.node_entropy,
-			&test_connection_string(),
+			test_connection_string(),
 			Some("channel_cycle_b".to_string()),
 		)
 		.unwrap();
@@ -80,7 +80,7 @@ async fn postgres_node_restart() {
 		let node = builder
 			.build_with_postgres_store(
 				node_entropy,
-				&connection_string,
+				connection_string.clone(),
 				Some("restart_test".to_string()),
 			)
 			.unwrap();
@@ -113,7 +113,7 @@ async fn postgres_node_restart() {
 	let node = builder
 		.build_with_postgres_store(
 			node_entropy,
-			&connection_string,
+			connection_string.clone(),
 			Some("restart_test".to_string()),
 		)
 		.unwrap();
