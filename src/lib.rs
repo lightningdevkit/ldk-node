@@ -1780,7 +1780,7 @@ impl Node {
 
 	/// Remove the payment with the given id from the store.
 	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
-		self.payer_proof_context_store.remove(&payment_id)?;
+		self.payer_proof_context_store.remove(&payment_id);
 		self.payment_store.remove(&payment_id)
 	}
 

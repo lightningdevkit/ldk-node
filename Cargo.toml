@@ -39,17 +39,17 @@ default = []
 #lightning-liquidity = { version = "0.2.0", features = ["std"] }
 #lightning-macros = { version = "0.2.0" }
 
-lightning = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d", features = ["std"] }
-lightning-types = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-invoice = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d", features = ["std"] }
-lightning-net-tokio = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-persister = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d", features = ["tokio"] }
-lightning-background-processor = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-rapid-gossip-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-block-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
-lightning-liquidity = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d", features = ["std"] }
-lightning-macros = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
+lightning = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085", features = ["std"] }
+lightning-types = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-invoice = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085", features = ["std"] }
+lightning-net-tokio = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-persister = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085", features = ["tokio"] }
+lightning-background-processor = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-rapid-gossip-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-block-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085", features = ["rest-client", "rpc-client", "tokio"] }
+lightning-transaction-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
+lightning-liquidity = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085", features = ["std"] }
+lightning-macros = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
 
 bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
@@ -85,7 +85,7 @@ bitcoin-payment-instructions = { git = "https://github.com/joostjager/bitcoin-pa
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d", features = ["std", "_test_utils"] }
+lightning = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085", features = ["std", "_test_utils"] }
 rand = { version = "0.9.2", default-features = false, features = ["std", "thread_rng", "os_rng"] }
 proptest = "1.0.0"
 regex = "1.5.6"
@@ -173,14 +173,14 @@ harness = false
 #vss-client-ng = { git = "https://github.com/lightningdevkit/vss-client", branch = "main" }
 #
 [patch."https://github.com/lightningdevkit/rust-lightning"]
-lightning = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-types = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-invoice = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-net-tokio = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-persister = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-background-processor = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-rapid-gossip-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-block-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-transaction-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-liquidity = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
-lightning-macros = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "f5c24c6ba870784b3d038c17ef4e4418d6a24f1d" }
+lightning = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-types = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-invoice = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-net-tokio = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-persister = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-background-processor = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-rapid-gossip-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-block-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-transaction-sync = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-liquidity = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }
+lightning-macros = { git = "https://github.com/vincenzopalazzo/rust-lightning", rev = "c8363950d753f954b47d2bf4aaff07928c86b085" }

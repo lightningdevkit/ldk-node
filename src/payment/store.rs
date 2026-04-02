@@ -8,11 +8,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::{BlockHash, Txid};
-#[cfg(not(feature = "uniffi"))]
-use lightning::events::PaidBolt12Invoice;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::offers::offer::OfferId;
+#[cfg(not(feature = "uniffi"))]
+use lightning::offers::payer_proof::Bolt12InvoiceType;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
 	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
@@ -25,6 +25,11 @@ use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
 #[cfg(feature = "uniffi")]
 use crate::ffi::PaidBolt12Invoice;
 use crate::hex_utils;
+
+#[cfg(not(feature = "uniffi"))]
+pub(crate) type Bolt12InvoiceInfo = Bolt12InvoiceType;
+#[cfg(feature = "uniffi")]
+pub(crate) type Bolt12InvoiceInfo = PaidBolt12Invoice;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -445,7 +450,7 @@ pub enum PaymentKind {
 		/// This will always be `None` for payments serialized with version `v0.3.0`.
 		quantity: Option<u64>,
 		/// The BOLT12 invoice associated with the payment, once available.
-		bolt12_invoice: Option<PaidBolt12Invoice>,
+		bolt12_invoice: Option<Bolt12InvoiceInfo>,
 	},
 	/// A [BOLT 12] 'refund' payment, i.e., a payment for a [`Refund`].
 	///
@@ -467,7 +472,7 @@ pub enum PaymentKind {
 		/// This will always be `None` for payments serialized with version `v0.3.0`.
 		quantity: Option<u64>,
 		/// The BOLT12 invoice associated with the payment, once available.
-		bolt12_invoice: Option<PaidBolt12Invoice>,
+		bolt12_invoice: Option<Bolt12InvoiceInfo>,
 	},
 	/// A spontaneous ("keysend") payment.
 	Spontaneous {
@@ -577,7 +582,7 @@ pub(crate) struct PaymentDetailsUpdate {
 	pub direction: Option<PaymentDirection>,
 	pub status: Option<PaymentStatus>,
 	pub confirmation_status: Option<ConfirmationStatus>,
-	pub bolt12_invoice: Option<Option<PaidBolt12Invoice>>,
+	pub bolt12_invoice: Option<Option<Bolt12InvoiceInfo>>,
 	pub txid: Option<Txid>,
 }
 

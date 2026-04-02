@@ -15,8 +15,6 @@ use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
 use lightning::events::bump_transaction::BumpTransactionEvent;
-#[cfg(not(feature = "uniffi"))]
-use lightning::events::PaidBolt12Invoice;
 use lightning::events::{
 	ClosureReason, Event as LdkEvent, FundingInfo, PaymentFailureReason, PaymentPurpose,
 	ReplayEvent,
@@ -24,7 +22,9 @@ use lightning::events::{
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
-use lightning::offers::nonce::Nonce;
+#[cfg(not(feature = "uniffi"))]
+use lightning::offers::payer_proof::Bolt12InvoiceType;
+use lightning::offers::payer_proof::PaidBolt12Invoice;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
 use lightning::util::config::{
@@ -41,7 +41,7 @@ use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::fee_estimator::ConfirmationTarget;
 #[cfg(feature = "uniffi")]
-use crate::ffi::PaidBolt12Invoice;
+use crate::ffi::PaidBolt12Invoice as FfiPaidBolt12Invoice;
 use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -50,7 +50,6 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
-use crate::payment::payer_proof_store::PayerProofContext;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
@@ -63,6 +62,11 @@ use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
 };
+
+#[cfg(not(feature = "uniffi"))]
+type Bolt12InvoiceInfo = Bolt12InvoiceType;
+#[cfg(feature = "uniffi")]
+type Bolt12InvoiceInfo = FfiPaidBolt12Invoice;
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -86,17 +90,16 @@ pub enum Event {
 		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
-		/// The BOLT12 invoice that was paid.
+		/// The BOLT12 invoice type that was paid.
 		///
 		/// This is useful for proof of payment. A third party can verify that the payment was made
 		/// by checking that the `payment_hash` in the invoice matches `sha256(payment_preimage)`.
 		///
 		/// Will be `None` for non-BOLT12 payments.
 		///
-		/// Note that static invoices (indicated by [`PaidBolt12Invoice::StaticInvoice`], used for
-		/// async payments) do not support proof of payment as the payment hash is not derived
-		/// from a preimage known only to the recipient.
-		bolt12_invoice: Option<PaidBolt12Invoice>,
+		/// Note that static invoices (via [`Bolt12InvoiceType::StaticInvoice`], used for
+		/// async payments) do not support payer proofs.
+		bolt12_invoice: Option<Bolt12InvoiceInfo>,
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
@@ -560,33 +563,12 @@ where
 	}
 
 	fn persist_payer_proof_context(
-		&self, payment_id: PaymentId, bolt12_invoice: &Option<PaidBolt12Invoice>,
-		payment_nonce: Option<Nonce>,
+		&self, payment_id: PaymentId, paid_invoice: &Option<PaidBolt12Invoice>,
 	) {
-		#[cfg(not(feature = "uniffi"))]
-		let invoice = match bolt12_invoice {
-			Some(PaidBolt12Invoice::Bolt12Invoice(invoice)) => invoice.clone(),
-			_ => return,
-		};
-		#[cfg(feature = "uniffi")]
-		let invoice = match bolt12_invoice {
-			Some(PaidBolt12Invoice::Bolt12(invoice)) => invoice.inner.clone(),
-			_ => return,
-		};
-
-		let nonce = match payment_nonce {
-			Some(nonce) => nonce,
-			None => return,
-		};
-
-		let context = PayerProofContext { payment_id, invoice, nonce };
-		if let Err(e) = self.payer_proof_context_store.insert_or_update(context) {
-			log_error!(
-				self.logger,
-				"Failed to persist payer proof context for {}: {}",
-				payment_id,
-				e
-			);
+		if let Some(paid_invoice) = paid_invoice {
+			if paid_invoice.bolt12_invoice().is_some() {
+				self.payer_proof_context_store.insert_or_update(payment_id, paid_invoice.clone());
+			}
 		}
 	}
 
@@ -1103,7 +1085,6 @@ where
 				payment_hash,
 				fee_paid_msat,
 				bolt12_invoice,
-				payment_nonce,
 				..
 			} => {
 				let payment_id = if let Some(id) = payment_id {
@@ -1112,16 +1093,29 @@ where
 					debug_assert!(false, "payment_id should always be set.");
 					return Ok(());
 				};
-				let bolt12_invoice = bolt12_invoice.map(Into::into);
 
-				self.persist_payer_proof_context(payment_id, &bolt12_invoice, payment_nonce);
+				self.persist_payer_proof_context(payment_id, &bolt12_invoice);
+
+				#[cfg(not(feature = "uniffi"))]
+				let bolt12_invoice_info: Option<Bolt12InvoiceInfo> = bolt12_invoice
+					.as_ref()
+					.and_then(|p| {
+						p.bolt12_invoice().map(|i| Bolt12InvoiceType::Bolt12Invoice(i.clone()))
+					})
+					.or_else(|| {
+						bolt12_invoice.as_ref().and_then(|p| {
+							p.static_invoice().map(|i| Bolt12InvoiceType::StaticInvoice(i.clone()))
+						})
+					});
+				#[cfg(feature = "uniffi")]
+				let bolt12_invoice_info: Option<Bolt12InvoiceInfo> = bolt12_invoice.map(|p| p.into());
 
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
 					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
-					bolt12_invoice: Some(bolt12_invoice.clone()),
+					bolt12_invoice: Some(bolt12_invoice_info.clone()),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
@@ -1153,7 +1147,7 @@ where
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
-					bolt12_invoice,
+					bolt12_invoice: bolt12_invoice_info,
 				};
 
 				match self.event_queue.add_event(event).await {

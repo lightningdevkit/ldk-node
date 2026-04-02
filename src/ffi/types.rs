@@ -23,7 +23,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
-use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
@@ -31,7 +30,10 @@ pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
-use lightning::offers::payer_proof::PayerProof as LdkPayerProof;
+use lightning::offers::payer_proof::{
+	Bolt12InvoiceType as LdkBolt12InvoiceType, PaidBolt12Invoice as LdkPaidBolt12Invoice,
+	PayerProof as LdkPayerProof,
+};
 use lightning::offers::refund::Refund as LdkRefund;
 use lightning::offers::static_invoice::StaticInvoice as LdkStaticInvoice;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
@@ -837,42 +839,41 @@ pub enum PaidBolt12Invoice {
 
 impl From<LdkPaidBolt12Invoice> for PaidBolt12Invoice {
 	fn from(ldk: LdkPaidBolt12Invoice) -> Self {
-		match ldk {
-			LdkPaidBolt12Invoice::Bolt12Invoice(invoice) => {
-				PaidBolt12Invoice::Bolt12(Arc::new(Bolt12Invoice::from(invoice)))
-			},
-			LdkPaidBolt12Invoice::StaticInvoice(invoice) => {
-				PaidBolt12Invoice::Static(Arc::new(StaticInvoice::from(invoice)))
-			},
-		}
-	}
-}
-
-impl From<PaidBolt12Invoice> for LdkPaidBolt12Invoice {
-	fn from(wrapper: PaidBolt12Invoice) -> Self {
-		match wrapper {
-			PaidBolt12Invoice::Bolt12(invoice) => {
-				LdkPaidBolt12Invoice::Bolt12Invoice(invoice.inner.clone())
-			},
-			PaidBolt12Invoice::Static(invoice) => {
-				LdkPaidBolt12Invoice::StaticInvoice(invoice.inner.clone())
-			},
+		if let Some(invoice) = ldk.bolt12_invoice() {
+			PaidBolt12Invoice::Bolt12(Arc::new(Bolt12Invoice::from(invoice.clone())))
+		} else if let Some(invoice) = ldk.static_invoice() {
+			PaidBolt12Invoice::Static(Arc::new(StaticInvoice::from(invoice.clone())))
+		} else {
+			panic!("PaidBolt12Invoice must contain either a Bolt12Invoice or StaticInvoice")
 		}
 	}
 }
 
 impl Writeable for PaidBolt12Invoice {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), lightning::io::Error> {
-		// TODO: Find way to avoid cloning invoice data.
-		let ldk_type: LdkPaidBolt12Invoice = self.clone().into();
-		ldk_type.write(w)
+		let invoice_type = match self {
+			PaidBolt12Invoice::Bolt12(invoice) => {
+				LdkBolt12InvoiceType::Bolt12Invoice(invoice.inner.clone())
+			},
+			PaidBolt12Invoice::Static(invoice) => {
+				LdkBolt12InvoiceType::StaticInvoice(invoice.inner.clone())
+			},
+		};
+		invoice_type.write(w)
 	}
 }
 
 impl Readable for PaidBolt12Invoice {
 	fn read<R: lightning::io::Read>(r: &mut R) -> Result<Self, DecodeError> {
-		let ldk_type = LdkPaidBolt12Invoice::read(r)?;
-		Ok(ldk_type.into())
+		let invoice_type = LdkBolt12InvoiceType::read(r)?;
+		Ok(match invoice_type {
+			LdkBolt12InvoiceType::Bolt12Invoice(invoice) => {
+				PaidBolt12Invoice::Bolt12(Arc::new(Bolt12Invoice::from(invoice)))
+			},
+			LdkBolt12InvoiceType::StaticInvoice(invoice) => {
+				PaidBolt12Invoice::Static(Arc::new(StaticInvoice::from(invoice)))
+			},
+		})
 	}
 }
 

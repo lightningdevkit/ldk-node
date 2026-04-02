@@ -14,11 +14,13 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
+#[cfg(not(feature = "uniffi"))]
+use lightning::offers::payer_proof::Bolt12InvoiceType;
+use lightning::offers::payer_proof::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 #[cfg(not(feature = "uniffi"))]
 use lightning::offers::payer_proof::PayerProof as LdkPayerProof;
 use lightning::routing::router::RouteParametersConfig;
@@ -31,9 +33,11 @@ use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
-use crate::payment::payer_proof_store::PayerProofContext;
-use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use crate::types::{ChannelManager, KeysManager, PayerProofContextStore, PaymentStore};
+use crate::payment::payer_proof_store::PayerProofContextStore;
+use crate::payment::store::{
+	Bolt12InvoiceInfo, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
+};
+use crate::types::{ChannelManager, KeysManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt12Invoice = lightning::offers::invoice::Bolt12Invoice;
@@ -150,8 +154,6 @@ impl Bolt12Payment {
 			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config: route_parameters,
-			contact_secrets: None,
-			payer_offer: None,
 		};
 		let res = if let Some(hrn) = hrn {
 			let hrn = maybe_deref(&hrn);
@@ -282,7 +284,7 @@ impl Bolt12Payment {
 
 	fn payer_proof_context(
 		&self, payment_id: &PaymentId,
-	) -> Result<(PaymentDetails, PayerProofContext), Error> {
+	) -> Result<(PaymentDetails, LdkPaidBolt12Invoice), Error> {
 		let payment = self.payment_store.get(payment_id).ok_or(Error::PayerProofUnavailable)?;
 		if payment.direction != PaymentDirection::Outbound
 			|| payment.status != PaymentStatus::Succeeded
@@ -290,9 +292,9 @@ impl Bolt12Payment {
 			return Err(Error::PayerProofUnavailable);
 		}
 
-		let context =
+		let paid_invoice =
 			self.payer_proof_context_store.get(payment_id).ok_or(Error::PayerProofUnavailable)?;
-		Ok((payment, context))
+		Ok((payment, paid_invoice))
 	}
 }
 
@@ -338,8 +340,6 @@ impl Bolt12Payment {
 			payer_note: payer_note.clone(),
 			retry_strategy,
 			route_params_config: route_parameters,
-			contact_secrets: None,
-			payer_offer: None,
 		};
 		let res = if let Some(quantity) = quantity {
 			self.channel_manager
@@ -443,15 +443,20 @@ impl Bolt12Payment {
 	pub fn create_payer_proof(
 		&self, payment_id: &PaymentId, options: Option<PayerProofOptions>,
 	) -> Result<PayerProof, Error> {
-		let (payment, context) = self.payer_proof_context(payment_id)?;
-		let preimage = match payment.kind {
+		let (payment, paid_invoice) = self.payer_proof_context(payment_id)?;
+		let _preimage = match payment.kind {
 			PaymentKind::Bolt12Offer { preimage: Some(preimage), .. }
 			| PaymentKind::Bolt12Refund { preimage: Some(preimage), .. } => preimage,
 			_ => return Err(Error::PayerProofUnavailable),
 		};
 
 		let options = options.unwrap_or_default();
-		let mut builder = context.invoice.payer_proof_builder(preimage).map_err(|e| {
+		let expanded_key = self.keys_manager.get_expanded_key();
+		let secp_ctx = bitcoin::secp256k1::Secp256k1::new();
+
+		let mut builder = paid_invoice
+			.prove_payer_derived(&expanded_key, *payment_id, &secp_ctx)
+			.map_err(|e| {
 			log_error!(
 				self.logger,
 				"Failed to initialize payer proof builder for {}: {:?}",
@@ -487,18 +492,10 @@ impl Bolt12Payment {
 			builder = builder.include_invoice_created_at();
 		}
 
-		let expanded_key = self.keys_manager.get_expanded_key();
-		let proof = builder
-			.build_with_derived_key(
-				&expanded_key,
-				context.nonce,
-				*payment_id,
-				options.note.as_deref(),
-			)
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to build payer proof for {}: {:?}", payment_id, e);
-				Error::PayerProofCreationFailed
-			})?;
+		let proof = builder.build_and_sign(options.note).map_err(|e| {
+			log_error!(self.logger, "Failed to build payer proof for {}: {:?}", payment_id, e);
+			Error::PayerProofCreationFailed
+		})?;
 
 		Ok(maybe_wrap(proof))
 	}
@@ -558,13 +555,21 @@ impl Bolt12Payment {
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(payment_hash.0);
 
+		#[cfg(not(feature = "uniffi"))]
+		let bolt12_invoice_info: Option<Bolt12InvoiceInfo> =
+			Some(Bolt12InvoiceType::Bolt12Invoice(invoice.clone()));
+		#[cfg(feature = "uniffi")]
+		let bolt12_invoice_info: Option<Bolt12InvoiceInfo> = Some(crate::ffi::PaidBolt12Invoice::Bolt12(
+			std::sync::Arc::new(crate::ffi::Bolt12Invoice::from(invoice.clone())),
+		));
+
 		let kind = PaymentKind::Bolt12Refund {
 			hash: Some(payment_hash),
 			preimage: None,
 			secret: None,
 			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
 			quantity: refund.quantity(),
-			bolt12_invoice: Some(LdkPaidBolt12Invoice::Bolt12Invoice(invoice.clone()).into()),
+			bolt12_invoice: bolt12_invoice_info,
 		};
 
 		let payment = PaymentDetails::new(
