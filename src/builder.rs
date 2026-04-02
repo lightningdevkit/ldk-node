@@ -633,6 +633,10 @@ impl NodeBuilder {
 	/// previously configured.
 	///
 	/// Connects to the PostgreSQL database at the given `connection_string`.
+	///
+	/// If the connection string includes a `dbname`, the database will be created automatically
+	/// if it doesn't already exist.
+	///
 	/// The given `kv_table_name` will be used or default to
 	/// [`DEFAULT_KV_TABLE_NAME`](crate::io::postgres_store::DEFAULT_KV_TABLE_NAME).
 	///

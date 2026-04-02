@@ -16,7 +16,7 @@ use lightning::util::persist::{
 	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
 };
 use lightning_types::string::PrintableString;
-use tokio_postgres::NoTls;
+use tokio_postgres::{connect, Client, Config, Error as PgError, NoTls};
 
 use crate::io::utils::check_namespace_key_validity;
 
@@ -60,6 +60,9 @@ impl PostgresStore {
 	/// Constructs a new [`PostgresStore`].
 	///
 	/// Connects to the PostgreSQL database at the given `connection_string`.
+	///
+	/// If the connection string includes a `dbname`, the database will be created automatically
+	/// if it doesn't already exist.
 	///
 	/// The given `kv_table_name` will be used or default to [`DEFAULT_KV_TABLE_NAME`].
 	pub fn new(connection_string: String, kv_table_name: Option<String>) -> io::Result<Self> {
@@ -306,7 +309,7 @@ impl PaginatedKVStore for PostgresStore {
 }
 
 struct PostgresStoreInner {
-	client: tokio::sync::Mutex<tokio_postgres::Client>,
+	client: tokio::sync::Mutex<Client>,
 	kv_table_name: String,
 	write_version_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
 	next_sort_order: AtomicI64,
@@ -316,11 +319,21 @@ impl PostgresStoreInner {
 	async fn new(connection_string: &str, kv_table_name: Option<String>) -> io::Result<Self> {
 		let kv_table_name = kv_table_name.unwrap_or(DEFAULT_KV_TABLE_NAME.to_string());
 
-		let (client, connection) =
-			tokio_postgres::connect(connection_string, NoTls).await.map_err(|e| {
-				let msg = format!("Failed to connect to PostgreSQL: {e}");
-				io::Error::new(io::ErrorKind::Other, msg)
-			})?;
+		// If a dbname is specified in the connection string, ensure the database exists
+		// by first connecting without a dbname and creating it if necessary.
+		let config: Config = connection_string.parse().map_err(|e: PgError| {
+			let msg = format!("Failed to parse PostgreSQL connection string: {e}");
+			io::Error::new(io::ErrorKind::InvalidInput, msg)
+		})?;
+
+		if let Some(db_name) = config.get_dbname() {
+			Self::create_database_if_not_exists(connection_string, db_name).await?;
+		}
+
+		let (client, connection) = connect(connection_string, NoTls).await.map_err(|e| {
+			let msg = format!("Failed to connect to PostgreSQL: {e}");
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
 
 		// Spawn the connection task so it runs in the background.
 		tokio::spawn(async move {
@@ -397,6 +410,47 @@ impl PostgresStoreInner {
 		let client = tokio::sync::Mutex::new(client);
 		let write_version_locks = Mutex::new(HashMap::new());
 		Ok(Self { client, kv_table_name, write_version_locks, next_sort_order })
+	}
+
+	async fn create_database_if_not_exists(
+		connection_string: &str, db_name: &str,
+	) -> io::Result<()> {
+		// Connect without a dbname (to the default database) so we can create the target.
+		let mut config: Config = connection_string.parse().map_err(|e: PgError| {
+			let msg = format!("Failed to parse PostgreSQL connection string: {e}");
+			io::Error::new(io::ErrorKind::InvalidInput, msg)
+		})?;
+		config.dbname("postgres");
+
+		let (client, connection) = config.connect(NoTls).await.map_err(|e| {
+			let msg = format!("Failed to connect to PostgreSQL: {e}");
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
+
+		tokio::spawn(async move {
+			if let Err(e) = connection.await {
+				log::error!("PostgreSQL connection error: {e}");
+			}
+		});
+
+		let row = client
+			.query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&db_name])
+			.await
+			.map_err(|e| {
+				let msg = format!("Failed to check for database {db_name}: {e}");
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+
+		if row.is_none() {
+			let sql = format!("CREATE DATABASE {db_name}");
+			client.execute(&sql, &[]).await.map_err(|e| {
+				let msg = format!("Failed to create database {db_name}: {e}");
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+			log::info!("Created database {db_name}");
+		}
+
+		Ok(())
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
