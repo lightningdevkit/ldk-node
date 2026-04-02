@@ -563,8 +563,14 @@ where
 		&self, payment_id: PaymentId, bolt12_invoice: &Option<PaidBolt12Invoice>,
 		payment_nonce: Option<Nonce>,
 	) {
+		#[cfg(not(feature = "uniffi"))]
 		let invoice = match bolt12_invoice {
-			Some(PaidBolt12Invoice::Bolt12Invoice(invoice)) => invoice,
+			Some(PaidBolt12Invoice::Bolt12Invoice(invoice)) => invoice.clone(),
+			_ => return,
+		};
+		#[cfg(feature = "uniffi")]
+		let invoice = match bolt12_invoice {
+			Some(PaidBolt12Invoice::Bolt12(invoice)) => invoice.inner.clone(),
 			_ => return,
 		};
 
@@ -573,7 +579,7 @@ where
 			None => return,
 		};
 
-		let context = PayerProofContext { payment_id, invoice: invoice.clone(), nonce };
+		let context = PayerProofContext { payment_id, invoice, nonce };
 		if let Err(e) = self.payer_proof_context_store.insert_or_update(context) {
 			log_error!(
 				self.logger,
@@ -1108,11 +1114,7 @@ where
 				};
 				let bolt12_invoice = bolt12_invoice.map(Into::into);
 
-				self.persist_payer_proof_context(
-					payment_id,
-					&bolt12_invoice,
-					payment_nonce,
-				);
+				self.persist_payer_proof_context(payment_id, &bolt12_invoice, payment_nonce);
 
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
