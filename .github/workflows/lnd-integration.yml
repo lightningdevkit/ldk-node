@@ -37,7 +37,7 @@ jobs:
         run: echo "LND_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
 
       - name: Start bitcoind, electrs, and LND
-        run: docker compose -f docker-compose-lnd.yml up -d
+        run: docker compose -p ldk-node -f tests/docker/docker-compose-lnd.yml up -d
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
 

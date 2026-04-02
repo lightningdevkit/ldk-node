@@ -121,7 +121,18 @@ async fn test_cln() {
 	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
 	common::expect_event!(node, PaymentReceived);
 
-	node.close_channel(&user_channel_id, cln_node_id).unwrap();
+	// Retry close until monitor updates settle (avoids flaky sleep).
+	for i in 0..10 {
+		match node.close_channel(&user_channel_id, cln_node_id) {
+			Ok(()) => break,
+			Err(e) => {
+				if i == 9 {
+					panic!("close_channel failed after 10 attempts: {:?}", e);
+				}
+				std::thread::sleep(std::time::Duration::from_secs(1));
+			},
+		}
+	}
 	common::expect_event!(node, ChannelClosed);
 	node.stop().unwrap();
 }
