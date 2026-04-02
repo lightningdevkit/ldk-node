@@ -94,17 +94,17 @@ ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
 ldk-node-070 = { package = "ldk-node", version = "=0.7.0" }
 
 [target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
+electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_29_0"] }
 
 [target.'cfg(no_download)'.dev-dependencies]
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy"] }
-corepc-node = { version = "0.10.0", default-features = false, features = ["27_2"] }
+corepc-node = { version = "0.10.1", default-features = false, features = ["29_0"] }
 
 [target.'cfg(cln_test)'.dev-dependencies]
 clightningrpc = { version = "0.3.0-beta.8", default-features = false }
 
 [target.'cfg(lnd_test)'.dev-dependencies]
-lnd_grpc_rust = { version = "2.10.0", default-features = false }
+lnd_grpc_rust = { version = "2.14.0", default-features = false }
 tokio = { version = "1.37", features = ["fs"] }
 
 [build-dependencies]

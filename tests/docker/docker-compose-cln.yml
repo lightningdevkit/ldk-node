@@ -1,6 +1,6 @@
 services:
   bitcoin:
-    image: blockstream/bitcoind:27.2
+    image: blockstream/bitcoind:29.1
     platform: linux/amd64
     command:
       [
@@ -48,7 +48,7 @@ services:
       - bitcoin-electrs
 
   cln:
-    image: blockstream/lightningd:v23.08
+    image: elementsproject/lightningd:v25.12.1
     platform: linux/amd64
     depends_on:
       bitcoin:
@@ -60,7 +60,6 @@ services:
         "--bitcoin-rpcuser=user",
         "--bitcoin-rpcpassword=pass",
         "--regtest",
-        "--experimental-anchors",
       ]
     ports:
       - "19846:19846"
