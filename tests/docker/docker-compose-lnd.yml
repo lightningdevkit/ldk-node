@@ -12,6 +12,7 @@ services:
         "-rpcuser=user",
         "-rpcpassword=pass",
         "-fallbackfee=0.00001",
+        "-rest",
         "-zmqpubrawblock=tcp://0.0.0.0:28332",
         "-zmqpubrawtx=tcp://0.0.0.0:28333"
       ]
@@ -55,9 +56,10 @@ services:
     image: lightninglabs/lnd:v0.20.1-beta
     container_name: ldk-node-lnd
     depends_on:
-      - bitcoin
+      bitcoin:
+        condition: service_healthy
     volumes:
-      - ${LND_DATA_DIR}:/root/.lnd
+      - ${LND_DATA_DIR:-/tmp/lnd-data}:/root/.lnd
     ports:
       - "8081:8081"
       - "9735:9735"

@@ -1,0 +1,80 @@
+services:
+  # All services use host networking because Eclair subscribes to bitcoind
+  # ZMQ notifications (hashblock/rawtx). ZMQ PUB/SUB over Docker bridge
+  # networking is unreliable -- the subscriber may silently miss messages,
+  # causing Eclair to fall behind the chain tip. Host networking avoids
+  # this by keeping all inter-process communication on localhost.
+  bitcoin:
+    image: blockstream/bitcoind:30.2
+    platform: linux/amd64
+    network_mode: host
+    command:
+      [
+        "bitcoind",
+        "-printtoconsole",
+        "-regtest=1",
+        "-rpcallowip=0.0.0.0/0",
+        "-rpcbind=0.0.0.0",
+        "-rpcuser=user",
+        "-rpcpassword=pass",
+        "-fallbackfee=0.00001",
+        "-rest",
+        "-txindex=1",
+        "-zmqpubhashblock=tcp://0.0.0.0:28332",
+        "-zmqpubrawtx=tcp://0.0.0.0:28333"
+      ]
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=user", "-rpcpassword=pass", "getblockchaininfo"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  electrs:
+    image: mempool/electrs:v3.2.0
+    platform: linux/amd64
+    network_mode: host
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "-vvvv",
+        "--timestamp",
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=127.0.0.1:18443",
+        "--http-addr=0.0.0.0:3002",
+        "--electrum-rpc-addr=0.0.0.0:50001"
+      ]
+
+  eclair:
+    build:
+      context: .
+      dockerfile: Dockerfile.eclair
+    image: ldk-node-eclair:local
+    platform: linux/amd64
+    network_mode: host
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    environment:
+      JAVA_OPTS: >-
+        -Xmx512m
+        -Declair.allow-unsafe-startup=true
+        -Declair.chain=regtest
+        -Declair.server.port=9736
+        -Declair.api.enabled=true
+        -Declair.api.binding-ip=0.0.0.0
+        -Declair.api.port=8080
+        -Declair.api.password=eclairpassword
+        -Declair.bitcoind.host=127.0.0.1
+        -Declair.bitcoind.rpcport=18443
+        -Declair.bitcoind.rpcuser=user
+        -Declair.bitcoind.rpcpassword=pass
+        -Declair.bitcoind.wallet=eclair
+        -Declair.bitcoind.zmqblock=tcp://127.0.0.1:28332
+        -Declair.bitcoind.zmqtx=tcp://127.0.0.1:28333
+        -Declair.features.keysend=optional
+        -Declair.on-chain-fees.confirmation-priority.funding=slow
+        -Declair.printToConsole

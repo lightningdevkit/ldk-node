@@ -13,18 +13,41 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y socat
+      - name: Create temporary directory for CLN data
+        run: echo "CLN_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
 
       - name: Start bitcoind, electrs, and lightningd
         run: docker compose -p ldk-node -f tests/docker/docker-compose-cln.yml up -d
+        env:
+          CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
 
-      - name: Forward lightningd RPC socket
+      - name: Wait for CLN to be ready
         run: |
-          docker exec ldk-node-cln-1 sh -c "socat -d -d TCP-LISTEN:9937,fork,reuseaddr UNIX-CONNECT:/root/.lightning/regtest/lightning-rpc&"
-          socat -d -d UNIX-LISTEN:/tmp/lightning-rpc,reuseaddr,fork TCP:127.0.0.1:9937&
+          for i in $(seq 1 30); do
+            if docker exec ldk-node-cln-1 lightning-cli --regtest getinfo 2>/dev/null | grep -q '"id"'; then
+              echo "CLN is ready"
+              break
+            fi
+            echo "Waiting for CLN... ($i/30)"
+            sleep 2
+          done
+          docker exec ldk-node-cln-1 lightning-cli --regtest getinfo || {
+            echo "ERROR: CLN not responding"
+            docker compose -p ldk-node -f tests/docker/docker-compose-cln.yml logs cln
+            exit 1
+          }
+
+      - name: Set permissions for CLN data directory
+        run: |
+          sudo chown -R $(id -u):$(id -g) $CLN_DATA_DIR
+          sudo chmod 755 $CLN_DATA_DIR
+          sudo find $CLN_DATA_DIR -type d -exec chmod 755 {} +
+          sudo find $CLN_DATA_DIR -type f -exec chmod 644 {} +
+        env:
+          CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
 
       - name: Run CLN integration tests
-        run: RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln
+        run: CLN_SOCKET_PATH=$CLN_DATA_DIR/regtest/lightning-rpc
+          RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln -- --show-output --test-threads=1
+        env:
+          CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}

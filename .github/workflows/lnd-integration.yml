@@ -33,7 +33,6 @@ jobs:
           fi
 
       - name: Create temporary directory for LND data
-        id: create-temp-dir
         run: echo "LND_DATA_DIR=$(mktemp -d)" >> $GITHUB_ENV
 
       - name: Start bitcoind, electrs, and LND
@@ -41,16 +40,24 @@ jobs:
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
 
-      - name: Set permissions for LND data directory
-        # In PR 4622 (https://github.com/lightningnetwork/lnd/pull/4622),
-        # LND sets file permissions to 0700, preventing test code from accessing them.
-        # This step ensures the test suite has the necessary permissions.
-        run: sudo chmod -R 755 $LND_DATA_DIR
+      - name: Wait for LND macaroon and set permissions
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec ldk-node-lnd test -f /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon 2>/dev/null; then
+              echo "LND macaroon found"
+              break
+            fi
+            echo "Waiting for LND macaroon... ($i/30)"
+            sleep 2
+          done
+          sudo chmod 755 $LND_DATA_DIR
+          sudo find $LND_DATA_DIR -type d -exec chmod 755 {} +
+          sudo find $LND_DATA_DIR -type f -exec chmod 644 {} +
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
 
       - name: Run LND integration tests
         run: LND_CERT_PATH=$LND_DATA_DIR/tls.cert LND_MACAROON_PATH=$LND_DATA_DIR/data/chain/bitcoin/regtest/admin.macaroon
-          RUSTFLAGS="--cfg lnd_test" cargo test --test integration_tests_lnd -- --exact --show-output
+          RUSTFLAGS="--cfg lnd_test" cargo test --test integration_tests_lnd -- --show-output --test-threads=1
         env:
           LND_DATA_DIR: ${{ env.LND_DATA_DIR }}
