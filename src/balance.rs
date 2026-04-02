@@ -231,8 +231,14 @@ impl LightningBalance {
 				inbound_claiming_htlc_rounded_msat,
 				inbound_htlc_rounded_msat,
 			} => {
-				// unwrap safety: confirmed_balance_candidate_index is guaranteed to index into balance_candidates
-				let balance = balance_candidates.get(confirmed_balance_candidate_index).unwrap();
+				// When confirmed_balance_candidate_index is 0, no specific alternative
+				// funding has been confirmed yet, so use the last candidate (most current
+				// splice/RBF attempt), matching LDK's claimable_amount_satoshis behavior.
+				let balance = if confirmed_balance_candidate_index != 0 {
+					&balance_candidates[confirmed_balance_candidate_index]
+				} else {
+					balance_candidates.last().unwrap()
+				};
 
 				Self::ClaimableOnChannelClose {
 					channel_id,
