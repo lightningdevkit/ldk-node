@@ -66,7 +66,7 @@ bip21 = { version = "0.5", features = ["std"], default-features = false }
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 getrandom = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros" ] }
+tokio = { version = "1.37", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros", "net" ] }
 esplora-client = { version = "0.12", default-features = false, features = ["tokio", "async-https-rustls"] }
 electrum-client = { version = "0.24.0", default-features = false, features = ["proxy", "use-rustls-ring"] }
 libc = "0.2"

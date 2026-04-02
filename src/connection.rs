@@ -6,7 +6,6 @@
 // accordance with one or both of these licenses.
 
 use std::collections::hash_map::{self, HashMap};
-use std::net::ToSocketAddrs;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,7 +14,7 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
 
 use crate::config::TorConfig;
-use crate::logger::{log_error, log_info, LdkLogger};
+use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::types::{KeysManager, PeerManager};
 use crate::Error;
 
@@ -57,6 +56,14 @@ where
 	pub(crate) async fn do_connect_peer(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
+		let res = self.do_connect_peer_internal(node_id, addr).await;
+		self.propagate_result_to_subscribers(&node_id, res);
+		res
+	}
+
+	async fn do_connect_peer_internal(
+		&self, node_id: PublicKey, addr: SocketAddress,
+	) -> Result<(), Error> {
 		// First, we check if there is already an outbound connection in flight, if so, we just
 		// await on the corresponding watch channel. The task driving the connection future will
 		// send us the result..
@@ -71,15 +78,14 @@ where
 
 		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
 
-		let res = match addr {
+		match addr {
 			SocketAddress::OnionV2(old_onion_addr) => {
 				log_error!(
-				self.logger,
-				"Failed to resolve network address {:?}: Resolution of OnionV2 addresses is currently unsupported.",
-				old_onion_addr
-			);
-				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
-				return Err(Error::InvalidSocketAddress);
+					self.logger,
+					"Failed to resolve network address {:?}: Resolution of OnionV2 addresses is currently unsupported.",
+					old_onion_addr
+				);
+				Err(Error::InvalidSocketAddress)
 			},
 			SocketAddress::OnionV3 { .. } => {
 				let proxy_config = self.tor_proxy_config.as_ref().ok_or_else(|| {
@@ -88,53 +94,66 @@ where
 						"Failed to resolve network address {:?}: Tor usage is not configured.",
 						addr
 					);
-					self.propagate_result_to_subscribers(
-						&node_id,
-						Err(Error::InvalidSocketAddress),
-					);
 					Error::InvalidSocketAddress
 				})?;
-				let proxy_addr = proxy_config
-					.proxy_address
-					.to_socket_addrs()
-					.map_err(|e| {
-						log_error!(
-							self.logger,
-							"Failed to resolve Tor proxy network address {}: {}",
-							proxy_config.proxy_address,
-							e
-						);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
-						);
-						Error::InvalidSocketAddress
-					})?
-					.next()
-					.ok_or_else(|| {
-						log_error!(
-							self.logger,
-							"Failed to resolve Tor proxy network address {}",
-							proxy_config.proxy_address
-						);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
-						);
-						Error::InvalidSocketAddress
-					})?;
-				let connection_future = lightning_net_tokio::tor_connect_outbound(
-					Arc::clone(&self.peer_manager),
-					node_id,
-					addr.clone(),
-					proxy_addr,
-					Arc::clone(&self.keys_manager),
-				);
-				self.await_connection(connection_future, node_id, addr).await
+				let resolved_addrs: Vec<_> =
+					tokio::net::lookup_host(proxy_config.proxy_address.to_string())
+						.await
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to resolve Tor proxy network address {}: {}",
+								proxy_config.proxy_address,
+								e
+							);
+							Error::InvalidSocketAddress
+						})?
+						.collect();
+
+				if resolved_addrs.is_empty() {
+					log_error!(
+						self.logger,
+						"Failed to resolve Tor proxy network address {}",
+						proxy_config.proxy_address
+					);
+					return Err(Error::InvalidSocketAddress);
+				}
+
+				let mut res = Err(Error::ConnectionFailed);
+				let mut had_failures = false;
+				for proxy_addr in resolved_addrs {
+					let connection_future = lightning_net_tokio::tor_connect_outbound(
+						Arc::clone(&self.peer_manager),
+						node_id,
+						addr.clone(),
+						proxy_addr,
+						Arc::clone(&self.keys_manager),
+					);
+					res = self.await_connection(connection_future, node_id, addr.clone()).await;
+					if res.is_ok() {
+						if had_failures {
+							log_info!(
+								self.logger,
+								"Successfully connected to peer {}@{} via resolved proxy address {} after previous attempts failed.",
+								node_id, addr, proxy_addr
+							);
+						}
+						break;
+					}
+					had_failures = true;
+					log_debug!(
+						self.logger,
+						"Failed to connect to peer {}@{} via resolved proxy address {}.",
+						node_id,
+						addr,
+						proxy_addr
+					);
+				}
+				res
 			},
 			_ => {
-				let socket_addr = addr
-					.to_socket_addrs()
+				let resolved_addrs: Vec<_> = tokio::net::lookup_host(addr.to_string())
+					.await
 					.map_err(|e| {
 						log_error!(
 							self.logger,
@@ -142,33 +161,46 @@ where
 							addr,
 							e
 						);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
-						);
 						Error::InvalidSocketAddress
 					})?
-					.next()
-					.ok_or_else(|| {
-						log_error!(self.logger, "Failed to resolve network address {}", addr);
-						self.propagate_result_to_subscribers(
-							&node_id,
-							Err(Error::InvalidSocketAddress),
-						);
-						Error::InvalidSocketAddress
-					})?;
-				let connection_future = lightning_net_tokio::connect_outbound(
-					Arc::clone(&self.peer_manager),
-					node_id,
-					socket_addr,
-				);
-				self.await_connection(connection_future, node_id, addr).await
+					.collect();
+
+				if resolved_addrs.is_empty() {
+					log_error!(self.logger, "Failed to resolve network address {}", addr);
+					return Err(Error::InvalidSocketAddress);
+				}
+
+				let mut res = Err(Error::ConnectionFailed);
+				let mut had_failures = false;
+				for socket_addr in resolved_addrs {
+					let connection_future = lightning_net_tokio::connect_outbound(
+						Arc::clone(&self.peer_manager),
+						node_id,
+						socket_addr,
+					);
+					res = self.await_connection(connection_future, node_id, addr.clone()).await;
+					if res.is_ok() {
+						if had_failures {
+							log_info!(
+								self.logger,
+								"Successfully connected to peer {}@{} via resolved address {} after previous attempts failed.",
+								node_id, addr, socket_addr
+							);
+						}
+						break;
+					}
+					had_failures = true;
+					log_debug!(
+						self.logger,
+						"Failed to connect to peer {}@{} via resolved address {}.",
+						node_id,
+						addr,
+						socket_addr
+					);
+				}
+				res
 			},
-		};
-
-		self.propagate_result_to_subscribers(&node_id, res);
-
-		res
+		}
 	}
 
 	async fn await_connection<F, CF>(
