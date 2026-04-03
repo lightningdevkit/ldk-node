@@ -16,11 +16,16 @@ use lightning::util::persist::{
 	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
 };
 use lightning_types::string::PrintableString;
-use tokio_postgres::{connect, Client, Config, Error as PgError, NoTls};
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
+use tokio_postgres::{Client, Config, Error as PgError, NoTls};
 
 use crate::io::utils::check_namespace_key_validity;
 
 mod migrations;
+
+/// The default database name used when none is specified.
+pub const DEFAULT_DB_NAME: &str = "ldk_node";
 
 /// The default table in which we store all data.
 pub const DEFAULT_KV_TABLE_NAME: &str = "ldk_data";
@@ -61,11 +66,21 @@ impl PostgresStore {
 	///
 	/// Connects to the PostgreSQL database at the given `connection_string`.
 	///
-	/// If the connection string includes a `dbname`, the database will be created automatically
-	/// if it doesn't already exist.
+	/// The given `db_name` will be used or default to [`DEFAULT_DB_NAME`]. The database will be
+	/// created automatically if it doesn't already exist.
 	///
 	/// The given `kv_table_name` will be used or default to [`DEFAULT_KV_TABLE_NAME`].
-	pub fn new(connection_string: String, kv_table_name: Option<String>) -> io::Result<Self> {
+	///
+	/// If `tls_config` is `Some`, TLS will be used for database connections. A custom CA
+	/// certificate can be provided via [`PostgresTlsConfig::certificate_pem`], otherwise the
+	/// system's default root certificates are used. If `tls_config` is `None`, connections
+	/// will be unencrypted.
+	pub fn new(
+		connection_string: String, db_name: Option<String>, kv_table_name: Option<String>,
+		tls_config: Option<PostgresTlsConfig>,
+	) -> io::Result<Self> {
+		let tls = Self::build_tls_connector(tls_config)?;
+
 		let internal_runtime = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
 			.thread_name_fn(|| {
@@ -79,13 +94,39 @@ impl PostgresStore {
 			.unwrap();
 
 		let inner = tokio::task::block_in_place(|| {
-			internal_runtime
-				.block_on(async { PostgresStoreInner::new(connection_string, kv_table_name).await })
+			internal_runtime.block_on(async {
+				PostgresStoreInner::new(connection_string, db_name, kv_table_name, tls).await
+			})
 		})?;
 
 		let inner = Arc::new(inner);
 		let next_write_version = AtomicU64::new(1);
 		Ok(Self { inner, next_write_version, internal_runtime: Some(internal_runtime) })
+	}
+
+	fn build_tls_connector(tls_config: Option<PostgresTlsConfig>) -> io::Result<PgTlsConnector> {
+		match tls_config {
+			Some(config) => {
+				let mut builder = TlsConnector::builder();
+				if let Some(pem) = config.certificate_pem {
+					let crt = native_tls::Certificate::from_pem(pem.as_bytes()).map_err(|e| {
+						io::Error::new(
+							io::ErrorKind::InvalidInput,
+							format!("Failed to parse PEM certificate: {e}"),
+						)
+					})?;
+					builder.add_root_certificate(crt);
+				}
+				let connector = builder.build().map_err(|e| {
+					io::Error::new(
+						io::ErrorKind::Other,
+						format!("Failed to build TLS connector: {e}"),
+					)
+				})?;
+				Ok(PgTlsConnector::NativeTls(MakeTlsConnector::new(connector)))
+			},
+			None => Ok(PgTlsConnector::Plain),
+		}
 	}
 
 	fn build_locking_key(
@@ -309,28 +350,39 @@ impl PaginatedKVStore for PostgresStore {
 
 struct PostgresStoreInner {
 	client: tokio::sync::Mutex<Client>,
-	connection_string: String,
+	config: Config,
 	kv_table_name: String,
+	tls: PgTlsConnector,
 	write_version_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
 	next_sort_order: AtomicI64,
 }
 
 impl PostgresStoreInner {
-	async fn new(connection_string: String, kv_table_name: Option<String>) -> io::Result<Self> {
+	async fn new(
+		connection_string: String, db_name: Option<String>, kv_table_name: Option<String>,
+		tls: PgTlsConnector,
+	) -> io::Result<Self> {
 		let kv_table_name = kv_table_name.unwrap_or(DEFAULT_KV_TABLE_NAME.to_string());
 
-		// If a dbname is specified in the connection string, ensure the database exists
-		// by first connecting without a dbname and creating it if necessary.
-		let config: Config = connection_string.parse().map_err(|e: PgError| {
+		let mut config: Config = connection_string.parse().map_err(|e: PgError| {
 			let msg = format!("Failed to parse PostgreSQL connection string: {e}");
 			io::Error::new(io::ErrorKind::InvalidInput, msg)
 		})?;
 
-		if let Some(db_name) = config.get_dbname() {
-			Self::create_database_if_not_exists(&connection_string, db_name).await?;
+		if db_name.is_some() && config.get_dbname().is_some() {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"db_name must not be set when the connection string already contains a dbname",
+			));
 		}
 
-		let client = Self::make_connection(&connection_string).await?;
+		let db_name = db_name
+			.or_else(|| config.get_dbname().map(|s| s.to_string()))
+			.unwrap_or(DEFAULT_DB_NAME.to_string());
+		config.dbname(&db_name);
+		Self::create_database_if_not_exists(&config, &db_name, &tls).await?;
+
+		let client = Self::make_config_connection(&config, &tls).await?;
 
 		// Create the KV data table if it doesn't exist.
 		let sql = format!(
@@ -399,29 +451,17 @@ impl PostgresStoreInner {
 
 		let client = tokio::sync::Mutex::new(client);
 		let write_version_locks = Mutex::new(HashMap::new());
-		Ok(Self { client, connection_string, kv_table_name, write_version_locks, next_sort_order })
+		Ok(Self { client, config, kv_table_name, tls, write_version_locks, next_sort_order })
 	}
 
 	async fn create_database_if_not_exists(
-		connection_string: &str, db_name: &str,
+		config: &Config, db_name: &str, tls: &PgTlsConnector,
 	) -> io::Result<()> {
 		// Connect without a dbname (to the default database) so we can create the target.
-		let mut config: Config = connection_string.parse().map_err(|e: PgError| {
-			let msg = format!("Failed to parse PostgreSQL connection string: {e}");
-			io::Error::new(io::ErrorKind::InvalidInput, msg)
-		})?;
+		let mut config = config.clone();
 		config.dbname("postgres");
 
-		let (client, connection) = config.connect(NoTls).await.map_err(|e| {
-			let msg = format!("Failed to connect to PostgreSQL: {e}");
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
-
-		tokio::spawn(async move {
-			if let Err(e) = connection.await {
-				log::error!("PostgreSQL connection error: {e}");
-			}
-		});
+		let client = Self::make_config_connection(&config, tls).await?;
 
 		let row = client
 			.query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&db_name])
@@ -443,19 +483,33 @@ impl PostgresStoreInner {
 		Ok(())
 	}
 
-	async fn make_connection(connection_string: &str) -> io::Result<Client> {
-		let (client, connection) = connect(connection_string, NoTls).await.map_err(|e| {
+	async fn make_config_connection(config: &Config, tls: &PgTlsConnector) -> io::Result<Client> {
+		let err_map = |e| {
 			let msg = format!("Failed to connect to PostgreSQL: {e}");
 			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
+		};
 
-		tokio::spawn(async move {
-			if let Err(e) = connection.await {
-				log::error!("PostgreSQL connection error: {e}");
-			}
-		});
-
-		Ok(client)
+		match tls {
+			PgTlsConnector::Plain => {
+				let (client, connection) = config.connect(NoTls).await.map_err(err_map)?;
+				tokio::spawn(async move {
+					if let Err(e) = connection.await {
+						log::error!("PostgreSQL connection error: {e}");
+					}
+				});
+				Ok(client)
+			},
+			PgTlsConnector::NativeTls(tls_connector) => {
+				let (client, connection) =
+					config.connect(tls_connector.clone()).await.map_err(err_map)?;
+				tokio::spawn(async move {
+					if let Err(e) = connection.await {
+						log::error!("PostgreSQL connection error: {e}");
+					}
+				});
+				Ok(client)
+			},
+		}
 	}
 
 	async fn ensure_connected(
@@ -463,7 +517,7 @@ impl PostgresStoreInner {
 	) -> io::Result<()> {
 		if client.is_closed() || client.check_connection().await.is_err() {
 			log::debug!("Reconnecting to PostgreSQL database");
-			let new_client = Self::make_connection(&self.connection_string).await?;
+			let new_client = Self::make_config_connection(&self.config, &self.tls).await?;
 			**client = new_client;
 		}
 		Ok(())
@@ -750,6 +804,19 @@ impl PostgresStoreInner {
 	}
 }
 
+/// TLS configuration for PostgreSQL connections.
+#[derive(Debug, Clone)]
+pub struct PostgresTlsConfig {
+	/// PEM-encoded CA certificate. If `None`, the system's default root certificates are used.
+	pub certificate_pem: Option<String>,
+}
+
+#[derive(Clone)]
+enum PgTlsConnector {
+	Plain,
+	NativeTls(MakeTlsConnector),
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -761,7 +828,8 @@ mod tests {
 	}
 
 	fn create_test_store(table_name: &str) -> PostgresStore {
-		PostgresStore::new(test_connection_string(), Some(table_name.to_string())).unwrap()
+		PostgresStore::new(test_connection_string(), None, Some(table_name.to_string()), None)
+			.unwrap()
 	}
 
 	fn cleanup_store(store: &PostgresStore) {
@@ -1091,5 +1159,26 @@ mod tests {
 
 			cleanup_store(&store);
 		}
+	}
+
+	#[test]
+	fn test_tls_config_none_builds_plain_connector() {
+		let connector = PostgresStore::build_tls_connector(None).unwrap();
+		assert!(matches!(connector, PgTlsConnector::Plain));
+	}
+
+	#[test]
+	fn test_tls_config_system_certs_builds_native_tls_connector() {
+		let config = Some(PostgresTlsConfig { certificate_pem: None });
+		let connector = PostgresStore::build_tls_connector(config).unwrap();
+		assert!(matches!(connector, PgTlsConnector::NativeTls(_)));
+	}
+
+	#[test]
+	fn test_tls_config_invalid_pem_returns_error() {
+		let config =
+			Some(PostgresTlsConfig { certificate_pem: Some("not-a-valid-pem".to_string()) });
+		let result = PostgresStore::build_tls_connector(config);
+		assert!(result.is_err());
 	}
 }

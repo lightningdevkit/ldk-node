@@ -30,7 +30,9 @@ async fn channel_full_cycle_with_postgres_store() {
 		.build_with_postgres_store(
 			config_a.node_entropy,
 			test_connection_string(),
+			None,
 			Some("channel_cycle_a".to_string()),
+			None,
 		)
 		.unwrap();
 	node_a.start().unwrap();
@@ -43,7 +45,9 @@ async fn channel_full_cycle_with_postgres_store() {
 		.build_with_postgres_store(
 			config_b.node_entropy,
 			test_connection_string(),
+			None,
 			Some("channel_cycle_b".to_string()),
+			None,
 		)
 		.unwrap();
 	node_b.start().unwrap();
@@ -81,7 +85,9 @@ async fn postgres_node_restart() {
 			.build_with_postgres_store(
 				node_entropy,
 				connection_string.clone(),
+				None,
 				Some("restart_test".to_string()),
+				None,
 			)
 			.unwrap();
 
@@ -114,7 +120,9 @@ async fn postgres_node_restart() {
 		.build_with_postgres_store(
 			node_entropy,
 			connection_string.clone(),
+			None,
 			Some("restart_test".to_string()),
+			None,
 		)
 		.unwrap();
 
