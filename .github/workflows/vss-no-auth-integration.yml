@@ -27,11 +27,11 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           path: ldk-node
       - name: Checkout VSS
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           repository: lightningdevkit/vss-server
           path: vss-server
