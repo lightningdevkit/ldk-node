@@ -1092,8 +1092,9 @@ where
 				};
 
 				self.payment_store.get(&payment_id).map(|payment| {
-					#[allow(clippy::unwrap_used)]
-					let amount_msat = payment.amount_msat.unwrap();
+					let amount_msat = payment.amount_msat.expect(
+						"outbound payments should record their amount before they can succeed",
+					);
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
