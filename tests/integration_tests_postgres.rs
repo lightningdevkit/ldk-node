@@ -18,8 +18,19 @@ fn test_connection_string() -> String {
 		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
 }
 
+async fn drop_table(table_name: &str) {
+	let connection_string = format!("{} dbname=ldk_node", test_connection_string());
+	let (client, connection) =
+		tokio_postgres::connect(&connection_string, tokio_postgres::NoTls).await.unwrap();
+	tokio::spawn(connection);
+	let _ = client.execute(&format!("DROP TABLE IF EXISTS {table_name}"), &[]).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_with_postgres_store() {
+	drop_table("channel_cycle_a").await;
+	drop_table("channel_cycle_b").await;
+
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
@@ -62,10 +73,15 @@ async fn channel_full_cycle_with_postgres_store() {
 		false,
 	)
 	.await;
+
+	drop_table("channel_cycle_a").await;
+	drop_table("channel_cycle_b").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn postgres_node_restart() {
+	drop_table("restart_test").await;
+
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let connection_string = test_connection_string();
@@ -133,4 +149,6 @@ async fn postgres_node_restart() {
 	assert_eq!(expected_balance_sats, node.list_balances().spendable_onchain_balance_sats);
 
 	node.stop().unwrap();
+
+	drop_table("restart_test").await;
 }
