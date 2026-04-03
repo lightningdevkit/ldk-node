@@ -381,12 +381,12 @@ macro_rules! setup_builder {
 pub(crate) use setup_builder;
 
 pub(crate) fn setup_two_nodes(
-	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
+	chain_source: &TestChainSource, allow_0conf_0reserve: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
 	setup_two_nodes_with_store(
 		chain_source,
-		allow_0conf,
+		allow_0conf_0reserve,
 		anchor_channels,
 		anchors_trusted_no_reserve,
 		TestStoreType::TestSyncStore,
@@ -394,7 +394,7 @@ pub(crate) fn setup_two_nodes(
 }
 
 pub(crate) fn setup_two_nodes_with_store(
-	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
+	chain_source: &TestChainSource, allow_0conf_0reserve: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
@@ -405,8 +405,8 @@ pub(crate) fn setup_two_nodes_with_store(
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
 	config_b.store_type = store_type;
-	if allow_0conf {
-		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
+	if allow_0conf_0reserve {
+		config_b.node_config.inbound_trusted_peers_0conf_0reserve.push(node_a.node_id());
 	}
 	if anchor_channels && anchors_trusted_no_reserve {
 		config_b
@@ -789,8 +789,8 @@ pub async fn splice_in_with_all(
 }
 
 pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
-	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
-	expect_anchor_channel: bool, force_close: bool,
+	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E,
+	allow_0conf_0reserve: bool, expect_anchor_channel: bool, force_close: bool,
 ) {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -864,7 +864,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	wait_for_tx(electrsd, funding_txo_a.txid).await;
 
-	if !allow_0conf {
+	if !allow_0conf_0reserve {
 		generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	}
 
