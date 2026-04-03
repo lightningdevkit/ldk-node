@@ -406,7 +406,7 @@ pub(crate) fn setup_two_nodes_with_store(
 	let mut config_b = random_config(anchor_channels);
 	config_b.store_type = store_type;
 	if allow_0conf_0reserve {
-		config_b.node_config.trusted_peers_0conf_0reserve.push(node_a.node_id());
+		config_b.node_config.inbound_trusted_peers_0conf_0reserve.push(node_a.node_id());
 	}
 	if anchor_channels && anchors_trusted_no_reserve {
 		config_b

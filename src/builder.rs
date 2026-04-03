@@ -435,7 +435,7 @@ impl NodeBuilder {
 	/// Configures the [`Node`] instance to source inbound liquidity from the given
 	/// [bLIP-51 / LSPS1] service.
 	///
-	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::trusted_peers_0conf_0reserve`].
+	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::inbound_trusted_peers_0conf_0reserve`].
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
 	///
@@ -444,7 +444,7 @@ impl NodeBuilder {
 		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 	) -> &mut Self {
 		// Mark the LSP as trusted for 0conf, 0reserve
-		self.config.trusted_peers_0conf_0reserve.push(node_id.clone());
+		self.config.inbound_trusted_peers_0conf_0reserve.push(node_id.clone());
 
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
@@ -456,7 +456,7 @@ impl NodeBuilder {
 	/// Configures the [`Node`] instance to source just-in-time inbound liquidity from the given
 	/// [bLIP-52 / LSPS2] service.
 	///
-	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::trusted_peers_0conf_0reserve`].
+	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::inbound_trusted_peers_0conf_0reserve`].
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
 	///
@@ -465,7 +465,7 @@ impl NodeBuilder {
 		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 	) -> &mut Self {
 		// Mark the LSP as trusted for 0conf, 0reserve
-		self.config.trusted_peers_0conf_0reserve.push(node_id.clone());
+		self.config.inbound_trusted_peers_0conf_0reserve.push(node_id.clone());
 
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
@@ -956,7 +956,7 @@ impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source inbound liquidity from the given
 	/// [bLIP-51 / LSPS1] service.
 	///
-	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::trusted_peers_0conf_0reserve`].
+	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::inbound_trusted_peers_0conf_0reserve`].
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
 	///
@@ -970,7 +970,7 @@ impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source just-in-time inbound liquidity from the given
 	/// [bLIP-52 / LSPS2] service.
 	///
-	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::trusted_peers_0conf_0reserve`].
+	/// Will mark the LSP as trusted for 0-confirmation, 0-reserve channels, see [`Config::inbound_trusted_peers_0conf_0reserve`].
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
 	///

@@ -1283,8 +1283,10 @@ where
 						});
 					}
 				}
-				let is_trusted_peer =
-					self.config.trusted_peers_0conf_0reserve.contains(&counterparty_node_id);
+				let is_trusted_peer = self
+					.config
+					.inbound_trusted_peers_0conf_0reserve
+					.contains(&counterparty_node_id);
 				let res = if is_trusted_peer {
 					self.channel_manager.accept_inbound_channel_from_trusted_peer(
 						&temporary_channel_id,

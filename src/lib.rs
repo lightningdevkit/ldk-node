@@ -1431,7 +1431,7 @@ impl Node {
 	///
 	/// Note that this only allows *the counterparty* to spend *their* entire balance in the
 	/// the channel; whether *you* are allowed to spend your own full balance is the
-	/// counterparty's decision. See [`Config::trusted_peers_0conf_0reserve`] if the
+	/// counterparty's decision. See [`Config::inbound_trusted_peers_0conf_0reserve`] if the
 	/// counterparty would like to set zero-reserve on your own balance as well.
 	///
 	/// Disconnects and reconnects are handled automatically.
@@ -1446,7 +1446,7 @@ impl Node {
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
-	/// [`Config::trusted_peers_0conf_0reserve`]: crate::config::Config::trusted_peers_0conf_0reserve
+	/// [`Config::inbound_trusted_peers_0conf_0reserve`]: crate::config::Config::inbound_trusted_peers_0conf_0reserve
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_0reserve_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
@@ -1472,7 +1472,7 @@ impl Node {
 	///
 	/// Note that this only allows *the counterparty* to spend *their* entire balance in the
 	/// the channel; whether *you* are allowed to spend your own full balance is the
-	/// counterparty's decision. See [`Config::trusted_peers_0conf_0reserve`] if the
+	/// counterparty's decision. See [`Config::inbound_trusted_peers_0conf_0reserve`] if the
 	/// counterparty would like to set zero-reserve on your own balance as well.
 	///
 	/// Disconnects and reconnects are handled automatically.
@@ -1483,7 +1483,7 @@ impl Node {
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
-	/// [`Config::trusted_peers_0conf_0reserve`]: crate::config::Config::trusted_peers_0conf_0reserve
+	/// [`Config::inbound_trusted_peers_0conf_0reserve`]: crate::config::Config::inbound_trusted_peers_0conf_0reserve
 	pub fn open_0reserve_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		channel_config: Option<ChannelConfig>,
