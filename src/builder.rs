@@ -629,6 +629,40 @@ impl NodeBuilder {
 		self.build_with_store(node_entropy, kv_store)
 	}
 
+	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
+	/// previously configured.
+	///
+	/// Connects to the PostgreSQL database at the given `connection_string`.
+	///
+	/// The given `db_name` will be used or default to
+	/// [`DEFAULT_DB_NAME`](io::postgres_store::DEFAULT_DB_NAME). The database will be created
+	/// automatically if it doesn't already exist.
+	///
+	/// The given `kv_table_name` will be used or default to
+	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
+	///
+	/// If `tls_config` is `Some`, TLS will be used for database connections. A custom CA
+	/// certificate can be provided via
+	/// [`PostgresTlsConfig::certificate_pem`](io::postgres_store::PostgresTlsConfig::certificate_pem),
+	/// otherwise the system's default root certificates are used. If `tls_config` is `None`,
+	/// connections will be unencrypted.
+	///
+	/// [PostgreSQL]: https://www.postgresql.org
+	#[cfg(feature = "postgres")]
+	pub fn build_with_postgres_store(
+		&self, node_entropy: NodeEntropy, connection_string: String, db_name: Option<String>,
+		kv_table_name: Option<String>, tls_config: Option<io::postgres_store::PostgresTlsConfig>,
+	) -> Result<Node, BuildError> {
+		let kv_store = io::postgres_store::PostgresStore::new(
+			connection_string,
+			db_name,
+			kv_table_name,
+			tls_config,
+		)
+		.map_err(|_| BuildError::KVStoreSetupFailed)?;
+		self.build_with_store(node_entropy, kv_store)
+	}
+
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
 	/// previously configured.
 	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -1085,6 +1119,28 @@ impl ArcedNodeBuilder {
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().unwrap().build(*node_entropy).map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
+	/// previously configured.
+	///
+	/// [PostgreSQL]: https://www.postgresql.org
+	#[cfg(feature = "postgres")]
+	pub fn build_with_postgres_store(
+		&self, node_entropy: Arc<NodeEntropy>, connection_string: String, db_name: Option<String>,
+		kv_table_name: Option<String>, tls_config: Option<io::postgres_store::PostgresTlsConfig>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_postgres_store(
+				*node_entropy,
+				connection_string,
+				db_name,
+				kv_table_name,
+				tls_config,
+			)
+			.map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
