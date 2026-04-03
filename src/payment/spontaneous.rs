@@ -12,13 +12,13 @@ use std::sync::{Arc, RwLock};
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::outbound_payment::{
-	RecipientCustomTlvs, RecipientOnionFields, Retry, RetryableSendFailure,
+	RecipientCustomTlvs, RecipientOnionFields, RetryableSendFailure,
 };
 use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
 use lightning::sign::EntropySource;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::Config;
 use crate::error::Error;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
@@ -113,7 +113,7 @@ impl SpontaneousPayment {
 			recipient_fields,
 			PaymentId(payment_hash.0),
 			route_params,
-			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
+			self.config.payment_retry_strategy.into(),
 		) {
 			Ok(_hash) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
