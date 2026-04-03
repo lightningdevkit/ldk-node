@@ -1091,11 +1091,14 @@ where
 				};
 
 				self.payment_store.get(&payment_id).map(|payment| {
+					let amount_msat = payment.amount_msat.expect(
+						"outbound payments should record their amount before they can succeed",
+					);
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
 						payment hash {:?} with preimage {:?}",
-						payment.amount_msat.expect("payment amount should be set"),
+						amount_msat,
 						if let Some(fee) = fee_paid_msat {
 							format!(" (fee {} msat)", fee)
 						} else {
