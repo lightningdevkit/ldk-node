@@ -1420,6 +1420,299 @@ async fn async_payment() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn async_payment_via_lsps2_jit_channel() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let mut config_sender = random_config(true);
+	config_sender.node_config.listening_addresses = None;
+	config_sender.node_config.node_alias = None;
+	config_sender.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender      ".to_string())));
+	config_sender.async_payments_role = Some(AsyncPaymentsRole::Client);
+	let node_sender = setup_node(&chain_source, config_sender);
+
+	let mut config_sender_lsp = random_config(true);
+	config_sender_lsp.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("sender_lsp  ".to_string())));
+	config_sender_lsp.async_payments_role = Some(AsyncPaymentsRole::Server);
+	let node_sender_lsp = setup_node(&chain_source, config_sender_lsp);
+
+	let mut config_receiver_lsp = random_config(true);
+	config_receiver_lsp.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver_lsp".to_string())));
+	config_receiver_lsp.async_payments_role = Some(AsyncPaymentsRole::Server);
+
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 10_000,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+	};
+
+	setup_builder!(receiver_lsp_builder, config_receiver_lsp.node_config);
+	match &chain_source {
+		TestChainSource::Esplora(electrsd) => {
+			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+			let mut sync_config = EsploraSyncConfig::default();
+			sync_config.background_sync_config = None;
+			receiver_lsp_builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+		},
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let mut sync_config = ldk_node::config::ElectrumSyncConfig::default();
+			sync_config.background_sync_config = None;
+			receiver_lsp_builder.set_chain_source_electrum(electrum_url, Some(sync_config));
+		},
+		TestChainSource::BitcoindRpcSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			receiver_lsp_builder.set_chain_source_bitcoind_rpc(
+				rpc_host,
+				rpc_port,
+				values.user,
+				values.password,
+			);
+		},
+		TestChainSource::BitcoindRestSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rest_port = bitcoind.params.rpc_socket.port();
+			receiver_lsp_builder.set_chain_source_bitcoind_rest(
+				rest_host,
+				rest_port,
+				rpc_host,
+				rpc_port,
+				values.user,
+				values.password,
+			);
+		},
+	}
+	receiver_lsp_builder.set_custom_logger(Arc::clone(match &config_receiver_lsp.log_writer {
+		TestLogWriter::Custom(logger) => logger,
+		_ => unreachable!(),
+	}));
+	receiver_lsp_builder.set_async_payments_role(config_receiver_lsp.async_payments_role).unwrap();
+	receiver_lsp_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	let node_receiver_lsp =
+		receiver_lsp_builder.build(config_receiver_lsp.node_entropy.into()).unwrap();
+	node_receiver_lsp.start().unwrap();
+
+	let receiver_lsp_node_id = node_receiver_lsp.node_id();
+	let receiver_lsp_addr =
+		node_receiver_lsp.listening_addresses().unwrap().first().unwrap().clone();
+
+	let mut config_receiver = random_config(true);
+	config_receiver.node_config.listening_addresses = None;
+	config_receiver.node_config.node_alias = None;
+	config_receiver.log_writer =
+		TestLogWriter::Custom(Arc::new(MultiNodeLogger::new("receiver    ".to_string())));
+	setup_builder!(receiver_builder, config_receiver.node_config);
+	match &chain_source {
+		TestChainSource::Esplora(electrsd) => {
+			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+			let mut sync_config = EsploraSyncConfig::default();
+			sync_config.background_sync_config = None;
+			receiver_builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+		},
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let mut sync_config = ldk_node::config::ElectrumSyncConfig::default();
+			sync_config.background_sync_config = None;
+			receiver_builder.set_chain_source_electrum(electrum_url, Some(sync_config));
+		},
+		TestChainSource::BitcoindRpcSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			receiver_builder.set_chain_source_bitcoind_rpc(
+				rpc_host,
+				rpc_port,
+				values.user,
+				values.password,
+			);
+		},
+		TestChainSource::BitcoindRestSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rest_port = bitcoind.params.rpc_socket.port();
+			receiver_builder.set_chain_source_bitcoind_rest(
+				rest_host,
+				rest_port,
+				rpc_host,
+				rpc_port,
+				values.user,
+				values.password,
+			);
+		},
+	}
+	receiver_builder.set_custom_logger(Arc::clone(match &config_receiver.log_writer {
+		TestLogWriter::Custom(logger) => logger,
+		_ => unreachable!(),
+	}));
+	receiver_builder.set_async_payments_role(config_receiver.async_payments_role).unwrap();
+	receiver_builder.set_liquidity_source_lsps2(receiver_lsp_node_id, receiver_lsp_addr, None);
+	let node_receiver = receiver_builder.build(config_receiver.node_entropy.into()).unwrap();
+	node_receiver.start().unwrap();
+
+	let addresses = vec![
+		node_sender.onchain_payment().new_address().unwrap(),
+		node_sender_lsp.onchain_payment().new_address().unwrap(),
+		node_receiver_lsp.onchain_payment().new_address().unwrap(),
+		node_receiver.onchain_payment().new_address().unwrap(),
+	];
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		addresses,
+		Amount::from_sat(4_000_000),
+	)
+	.await;
+
+	node_sender.sync_wallets().unwrap();
+	node_sender_lsp.sync_wallets().unwrap();
+	node_receiver_lsp.sync_wallets().unwrap();
+	node_receiver.sync_wallets().unwrap();
+
+	open_channel(&node_sender, &node_sender_lsp, 400_000, false, &electrsd).await;
+	open_channel(&node_sender_lsp, &node_receiver_lsp, 400_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_sender.sync_wallets().unwrap();
+	node_sender_lsp.sync_wallets().unwrap();
+	node_receiver_lsp.sync_wallets().unwrap();
+	node_receiver.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_sender, node_sender_lsp.node_id());
+	expect_channel_ready_events!(
+		node_sender_lsp,
+		node_sender.node_id(),
+		node_receiver_lsp.node_id()
+	);
+	expect_channel_ready_event!(node_receiver_lsp, node_sender_lsp.node_id());
+
+	let has_node_announcements = |node: &ldk_node::Node| {
+		node.network_graph()
+			.list_nodes()
+			.iter()
+			.filter(|n| {
+				node.network_graph().node(n).map_or(false, |info| info.announcement_info.is_some())
+			})
+			.count() >= 2
+	};
+
+	while node_sender.network_graph().list_channels().len() < 1
+		|| node_sender_lsp.network_graph().list_channels().len() < 1
+		|| node_receiver_lsp.network_graph().list_channels().len() < 1
+		|| !has_node_announcements(&node_sender)
+		|| !has_node_announcements(&node_sender_lsp)
+		|| !has_node_announcements(&node_receiver_lsp)
+	{
+		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+	}
+
+	let recipient_id = vec![4, 5, 6];
+	let blinded_paths =
+		node_receiver_lsp.bolt12_payment().blinded_paths_for_async_recipient(recipient_id).unwrap();
+	node_receiver.bolt12_payment().set_paths_to_static_invoice_server(blinded_paths).unwrap();
+
+	let offer = node_receiver.bolt12_payment().receive_async_via_jit_channel(None).unwrap();
+
+	let amount_msat = 5_000_000;
+	let _payment_id = node_sender
+		.bolt12_payment()
+		.send_using_amount(&offer, amount_msat, None, None, None)
+		.unwrap();
+	let receiver_node_id = node_receiver.node_id();
+	let receiver_lsp_node_id = node_receiver_lsp.node_id();
+
+	tokio::time::timeout(std::time::Duration::from_secs(30), async {
+		loop {
+			match node_receiver_lsp.next_event_async().await {
+				ref e @ Event::ChannelPending { counterparty_node_id, .. }
+					if counterparty_node_id == receiver_node_id =>
+				{
+					println!("{} got event {:?}", node_receiver_lsp.node_id(), e);
+					node_receiver_lsp.event_handled().unwrap();
+					break;
+				},
+				Event::ChannelPending { .. } | Event::ChannelReady { .. } => {
+					node_receiver_lsp.event_handled().unwrap();
+				},
+				e => panic!("node_receiver_lsp got unexpected event!: {:?}", e),
+			}
+		}
+		loop {
+			match node_receiver_lsp.next_event_async().await {
+				ref e @ Event::ChannelReady { counterparty_node_id, .. }
+					if counterparty_node_id == Some(receiver_node_id) =>
+				{
+					println!("{} got event {:?}", node_receiver_lsp.node_id(), e);
+					node_receiver_lsp.event_handled().unwrap();
+					break;
+				},
+				Event::ChannelPending { .. } | Event::ChannelReady { .. } => {
+					node_receiver_lsp.event_handled().unwrap();
+				},
+				e => panic!("node_receiver_lsp got unexpected event!: {:?}", e),
+			}
+		}
+		loop {
+			match node_receiver.next_event_async().await {
+				ref e @ Event::ChannelPending { counterparty_node_id, .. }
+					if counterparty_node_id == receiver_lsp_node_id =>
+				{
+					println!("{} got event {:?}", node_receiver.node_id(), e);
+					node_receiver.event_handled().unwrap();
+					break;
+				},
+				Event::ChannelPending { .. } | Event::ChannelReady { .. } => {
+					node_receiver.event_handled().unwrap();
+				},
+				e => panic!("node_receiver got unexpected event!: {:?}", e),
+			}
+		}
+		loop {
+			match node_receiver.next_event_async().await {
+				ref e @ Event::ChannelReady { counterparty_node_id, .. }
+					if counterparty_node_id == Some(receiver_lsp_node_id) =>
+				{
+					println!("{} got event {:?}", node_receiver.node_id(), e);
+					node_receiver.event_handled().unwrap();
+					break;
+				},
+				Event::ChannelPending { .. } | Event::ChannelReady { .. } => {
+					node_receiver.event_handled().unwrap();
+				},
+				e => panic!("node_receiver got unexpected event!: {:?}", e),
+			}
+		}
+	})
+	.await
+	.expect("async LSPS2 payment did not open a receiver-side JIT channel");
+
+	assert!(
+		node_receiver_lsp
+			.list_channels()
+			.iter()
+			.any(|c| c.counterparty_node_id == node_receiver.node_id()),
+		"receiver LSP failed to open a JIT channel for the async payment"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_node_announcement_propagation() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

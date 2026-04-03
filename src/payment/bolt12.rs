@@ -342,6 +342,39 @@ impl Bolt12Payment {
 		Ok(offer)
 	}
 
+	fn receive_async_jit_channel_inner(
+		&self, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<LdkOffer, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let peer_info = self.connect_to_lsps2_peer(Arc::clone(liquidity_source))?;
+		let liquidity_source = Arc::clone(liquidity_source);
+		let lsp_prop_opening_fee = self.runtime.block_on(async move {
+			liquidity_source
+				.lsps2_register_variable_amount_bolt12_payment_paths(
+					max_proportional_lsp_fee_limit_ppm_msat,
+				)
+				.await
+		})?;
+
+		self.peer_store.add_peer(peer_info)?;
+		self.channel_manager.refresh_async_receive_offers().or(Err(Error::OfferCreationFailed))?;
+		let offer = self
+			.channel_manager
+			.await_async_receive_offer(Duration::from_secs(10))
+			.or(Err(Error::OfferCreationFailed))?;
+
+		log_info!(
+			self.logger,
+			"JIT-channel async BOLT12 offer created: {} (max proportional LSP opening fee: {}ppm msat)",
+			offer,
+			lsp_prop_opening_fee
+		);
+
+		Ok(offer)
+	}
+
 	fn blinded_paths_for_async_recipient_internal(
 		&self, recipient_id: Vec<u8>,
 	) -> Result<Vec<BlindedMessagePath>, Error> {
@@ -680,6 +713,21 @@ impl Bolt12Payment {
 			.get_async_receive_offer()
 			.map(maybe_wrap)
 			.or(Err(Error::OfferCreationFailed))
+	}
+
+	/// Retrieve an async [`Offer`] for receiving payments via an LSPS2 just-in-time (JIT) channel.
+	///
+	/// This requires a configured LSPS2 liquidity source as well as paths to a static invoice server
+	/// via [`Bolt12Payment::set_paths_to_static_invoice_server`].
+	///
+	/// Since async offers are variable-amount, the LSP fee limit is expressed as a proportional
+	/// limit in parts-per-million millisatoshis.
+	pub fn receive_async_via_jit_channel(
+		&self, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<Offer, Error> {
+		let offer =
+			self.receive_async_jit_channel_inner(max_proportional_lsp_fee_limit_ppm_msat)?;
+		Ok(maybe_wrap(offer))
 	}
 }
 
