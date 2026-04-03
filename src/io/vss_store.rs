@@ -110,7 +110,9 @@ impl VssStore {
 			.worker_threads(INTERNAL_RUNTIME_WORKERS)
 			.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
 			.build()
-			.expect("tokio runtime build must succeed");
+			.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("Failed to build VSS runtime: {}", e))
+			})?;
 
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
