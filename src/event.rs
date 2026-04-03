@@ -1452,11 +1452,14 @@ where
 					counterparty_node_id,
 				);
 
+				let former_temporary_channel_id = former_temporary_channel_id.expect(
+					"LDK Node has only ever persisted ChannelPending events from rust-lightning 0.0.115 or later",
+				);
+
 				let event = Event::ChannelPending {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
-					former_temporary_channel_id: former_temporary_channel_id
-						.expect("former temporary channel id should be set"),
+					former_temporary_channel_id,
 					counterparty_node_id,
 					funding_txo,
 				};
