@@ -195,8 +195,7 @@ impl BitcoindChainSource {
 			{
 				Ok(chain_tip) => {
 					{
-						#[allow(clippy::unwrap_used)]
-						let elapsed_ms = now.elapsed().unwrap().as_millis();
+						let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 						log_info!(
 							self.logger,
 							"Finished synchronizing listeners in {}ms",
@@ -413,8 +412,7 @@ impl BitcoindChainSource {
 		let now = SystemTime::now();
 		match spv_client.poll_best_tip().await {
 			Ok((ChainTip::Better(tip), true)) => {
-				#[allow(clippy::unwrap_used)]
-				let elapsed_ms = now.elapsed().unwrap().as_millis();
+				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 				log_trace!(self.logger, "Finished polling best tip in {}ms", elapsed_ms);
 				*self.latest_chain_tip.wlck() = Some(tip);
 			},
@@ -435,8 +433,7 @@ impl BitcoindChainSource {
 			.await
 		{
 			Ok((unconfirmed_txs, evicted_txids)) => {
-				#[allow(clippy::unwrap_used)]
-				let elapsed_ms = now.elapsed().unwrap().as_millis();
+				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 				log_trace!(
 					self.logger,
 					"Finished polling mempool of size {} and {} evicted transactions in {}ms",
