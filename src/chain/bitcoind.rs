@@ -194,10 +194,11 @@ impl BitcoindChainSource {
 			{
 				Ok(chain_tip) => {
 					{
+						let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 						log_info!(
 							self.logger,
 							"Finished synchronizing listeners in {}ms",
-							now.elapsed().expect("system time must not go backwards").as_millis()
+							elapsed_ms,
 						);
 						*self.latest_chain_tip.write().expect("lock") = Some(chain_tip);
 						let unix_time_secs_opt =
@@ -410,11 +411,8 @@ impl BitcoindChainSource {
 		let now = SystemTime::now();
 		match spv_client.poll_best_tip().await {
 			Ok((ChainTip::Better(tip), true)) => {
-				log_trace!(
-					self.logger,
-					"Finished polling best tip in {}ms",
-					now.elapsed().expect("system time must not go backwards").as_millis()
-				);
+				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+				log_trace!(self.logger, "Finished polling best tip in {}ms", elapsed_ms);
 				*self.latest_chain_tip.write().expect("lock") = Some(tip);
 			},
 			Ok(_) => {},
@@ -434,12 +432,13 @@ impl BitcoindChainSource {
 			.await
 		{
 			Ok((unconfirmed_txs, evicted_txids)) => {
+				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 				log_trace!(
 					self.logger,
 					"Finished polling mempool of size {} and {} evicted transactions in {}ms",
 					unconfirmed_txs.len(),
 					evicted_txids.len(),
-					now.elapsed().expect("system time must not go backwards").as_millis()
+					elapsed_ms,
 				);
 				onchain_wallet.apply_mempool_txs(unconfirmed_txs, evicted_txids).unwrap_or_else(
 					|e| {
