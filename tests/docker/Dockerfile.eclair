@@ -1,0 +1,22 @@
+# Repackage acinq/eclair:latest onto a glibc-based runtime.
+# The official image uses Alpine (musl libc), which causes SIGSEGV in
+# secp256k1-jni because the native library is compiled against glibc.
+FROM acinq/eclair:latest AS source
+
+FROM eclipse-temurin:21-jre-jammy
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash jq curl unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=source /sbin/eclair-cli /sbin/eclair-cli
+COPY --from=source /app/eclair-node /app/eclair-node
+
+ENV ECLAIR_DATADIR=/data
+ENV JAVA_OPTS=
+
+RUN mkdir -p "$ECLAIR_DATADIR"
+VOLUME [ "/data" ]
+
+ENTRYPOINT JAVA_OPTS="${JAVA_OPTS}" eclair-node/bin/eclair-node.sh "-Declair.datadir=${ECLAIR_DATADIR}"
