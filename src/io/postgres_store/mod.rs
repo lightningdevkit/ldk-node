@@ -79,9 +79,8 @@ impl PostgresStore {
 			.unwrap();
 
 		let inner = tokio::task::block_in_place(|| {
-			internal_runtime.block_on(async {
-				PostgresStoreInner::new(&connection_string, kv_table_name).await
-			})
+			internal_runtime
+				.block_on(async { PostgresStoreInner::new(connection_string, kv_table_name).await })
 		})?;
 
 		let inner = Arc::new(inner);
@@ -310,13 +309,14 @@ impl PaginatedKVStore for PostgresStore {
 
 struct PostgresStoreInner {
 	client: tokio::sync::Mutex<Client>,
+	connection_string: String,
 	kv_table_name: String,
 	write_version_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
 	next_sort_order: AtomicI64,
 }
 
 impl PostgresStoreInner {
-	async fn new(connection_string: &str, kv_table_name: Option<String>) -> io::Result<Self> {
+	async fn new(connection_string: String, kv_table_name: Option<String>) -> io::Result<Self> {
 		let kv_table_name = kv_table_name.unwrap_or(DEFAULT_KV_TABLE_NAME.to_string());
 
 		// If a dbname is specified in the connection string, ensure the database exists
@@ -327,20 +327,10 @@ impl PostgresStoreInner {
 		})?;
 
 		if let Some(db_name) = config.get_dbname() {
-			Self::create_database_if_not_exists(connection_string, db_name).await?;
+			Self::create_database_if_not_exists(&connection_string, db_name).await?;
 		}
 
-		let (client, connection) = connect(connection_string, NoTls).await.map_err(|e| {
-			let msg = format!("Failed to connect to PostgreSQL: {e}");
-			io::Error::new(io::ErrorKind::Other, msg)
-		})?;
-
-		// Spawn the connection task so it runs in the background.
-		tokio::spawn(async move {
-			if let Err(e) = connection.await {
-				log::error!("PostgreSQL connection error: {e}");
-			}
-		});
+		let client = Self::make_connection(&connection_string).await?;
 
 		// Create the KV data table if it doesn't exist.
 		let sql = format!(
@@ -409,7 +399,7 @@ impl PostgresStoreInner {
 
 		let client = tokio::sync::Mutex::new(client);
 		let write_version_locks = Mutex::new(HashMap::new());
-		Ok(Self { client, kv_table_name, write_version_locks, next_sort_order })
+		Ok(Self { client, connection_string, kv_table_name, write_version_locks, next_sort_order })
 	}
 
 	async fn create_database_if_not_exists(
@@ -453,6 +443,32 @@ impl PostgresStoreInner {
 		Ok(())
 	}
 
+	async fn make_connection(connection_string: &str) -> io::Result<Client> {
+		let (client, connection) = connect(connection_string, NoTls).await.map_err(|e| {
+			let msg = format!("Failed to connect to PostgreSQL: {e}");
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
+
+		tokio::spawn(async move {
+			if let Err(e) = connection.await {
+				log::error!("PostgreSQL connection error: {e}");
+			}
+		});
+
+		Ok(client)
+	}
+
+	async fn ensure_connected(
+		&self, client: &mut tokio::sync::MutexGuard<'_, Client>,
+	) -> io::Result<()> {
+		if client.is_closed() || client.check_connection().await.is_err() {
+			log::debug!("Reconnecting to PostgreSQL database");
+			let new_client = Self::make_connection(&self.connection_string).await?;
+			**client = new_client;
+		}
+		Ok(())
+	}
+
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
 		let mut outer_lock = self.write_version_locks.lock().unwrap();
 		Arc::clone(&outer_lock.entry(locking_key).or_default())
@@ -463,7 +479,8 @@ impl PostgresStoreInner {
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
 
-		let locked_client = self.client.lock().await;
+		let mut locked_client = self.client.lock().await;
+		self.ensure_connected(&mut locked_client).await?;
 		let sql = format!(
 			"SELECT value FROM {} WHERE primary_namespace=$1 AND secondary_namespace=$2 AND key=$3",
 			self.kv_table_name
@@ -507,7 +524,8 @@ impl PostgresStoreInner {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
-			let locked_client = self.client.lock().await;
+			let mut locked_client = self.client.lock().await;
+			self.ensure_connected(&mut locked_client).await?;
 
 			let sort_order = self.next_sort_order.fetch_add(1, Ordering::Relaxed);
 
@@ -552,7 +570,8 @@ impl PostgresStoreInner {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
-			let locked_client = self.client.lock().await;
+			let mut locked_client = self.client.lock().await;
+			self.ensure_connected(&mut locked_client).await?;
 
 			let sql = format!(
 				"DELETE FROM {} WHERE primary_namespace=$1 AND secondary_namespace=$2 AND key=$3",
@@ -582,7 +601,8 @@ impl PostgresStoreInner {
 	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
 
-		let locked_client = self.client.lock().await;
+		let mut locked_client = self.client.lock().await;
+		self.ensure_connected(&mut locked_client).await?;
 
 		let sql = format!(
 			"SELECT key FROM {} WHERE primary_namespace=$1 AND secondary_namespace=$2",
@@ -611,7 +631,8 @@ impl PostgresStoreInner {
 			"list_paginated",
 		)?;
 
-		let locked_client = self.client.lock().await;
+		let mut locked_client = self.client.lock().await;
+		self.ensure_connected(&mut locked_client).await?;
 
 		// Fetch one extra row beyond PAGE_SIZE to determine whether a next page exists.
 		let fetch_limit = (PAGE_SIZE + 1) as i64;
@@ -770,6 +791,40 @@ mod tests {
 		do_test_store(&store_0, &store_1);
 		cleanup_store(&store_0);
 		cleanup_store(&store_1);
+	}
+
+	#[test]
+	fn test_postgres_store_auto_reconnect() {
+		let store = create_test_store("test_pg_reconnect");
+
+		let ns = "test_ns";
+		let sub = "test_sub";
+
+		// Write a value before disconnecting.
+		KVStoreSync::write(&store, ns, sub, "key_a", vec![1u8; 8]).unwrap();
+
+		// Terminate the backend connection to simulate a dropped connection.
+		if let Some(ref runtime) = store.internal_runtime {
+			let inner = Arc::clone(&store.inner);
+			tokio::task::block_in_place(|| {
+				runtime.block_on(async {
+					let client = inner.client.lock().await;
+					let _ =
+						client.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]).await;
+				})
+			});
+		}
+
+		// Read should auto-reconnect and return the previously written value.
+		let data = KVStoreSync::read(&store, ns, sub, "key_a").unwrap();
+		assert_eq!(data, vec![1u8; 8]);
+
+		// Write should also work after reconnect.
+		KVStoreSync::write(&store, ns, sub, "key_b", vec![2u8; 8]).unwrap();
+		let data = KVStoreSync::read(&store, ns, sub, "key_b").unwrap();
+		assert_eq!(data, vec![2u8; 8]);
+
+		cleanup_store(&store);
 	}
 
 	#[test]
