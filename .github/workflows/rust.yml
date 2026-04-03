@@ -81,6 +81,14 @@ jobs:
       - name: Check release build with UniFFI support on Rust ${{ matrix.toolchain }}
         if: matrix.build-uniffi
         run: cargo check --release --features uniffi --verbose --color always
+      - name: Ban unwrap in library code on Rust ${{ matrix.toolchain }}
+        if: matrix.build-uniffi
+        env:
+          RUSTFLAGS: ""
+        run: |
+          rustup component add clippy
+          cargo clippy --lib --verbose --color always -- -A warnings -D clippy::unwrap_used -A clippy::tabs_in_doc_comments
+          cargo clippy --lib --features uniffi --verbose --color always -- -A warnings -D clippy::unwrap_used -A clippy::tabs_in_doc_comments
       - name: Test on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest'"
         run: |
