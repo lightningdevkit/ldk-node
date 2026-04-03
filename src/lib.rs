@@ -421,12 +421,23 @@ impl Node {
 								break;
 							}
 							res = listener.accept() => {
-								#[allow(clippy::unwrap_used)]
-								let tcp_stream = res.unwrap().0;
+								let tcp_stream = match res {
+									Ok((tcp_stream, _)) => tcp_stream,
+									Err(e) => {
+										log_error!(logger, "Failed to accept inbound connection: {}", e);
+										continue;
+									},
+								};
 								let peer_mgr = Arc::clone(&peer_mgr);
+								let logger = Arc::clone(&logger);
 								runtime.spawn_cancellable_background_task(async move {
-									#[allow(clippy::unwrap_used)]
-									let tcp_stream = tcp_stream.into_std().unwrap();
+									let tcp_stream = match tcp_stream.into_std() {
+										Ok(tcp_stream) => tcp_stream,
+										Err(e) => {
+											log_error!(logger, "Failed to convert inbound connection: {}", e);
+											return;
+										},
+									};
 									lightning_net_tokio::setup_inbound(
 										Arc::clone(&peer_mgr),
 										tcp_stream,
