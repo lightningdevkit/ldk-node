@@ -90,6 +90,21 @@ jobs:
         run: |
           RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features uniffi
 
+  linting:
+    name: Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+      - name: Install Rust and clippy
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
+          rustup component add clippy
+      - name: Ban `unwrap` in library code
+        run: |
+          cargo clippy --lib --verbose --color always -- -A warnings -D clippy::unwrap_used -A clippy::tabs_in_doc_comments
+          cargo clippy --lib --features uniffi --verbose --color always -- -A warnings -D clippy::unwrap_used -A clippy::tabs_in_doc_comments
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest
