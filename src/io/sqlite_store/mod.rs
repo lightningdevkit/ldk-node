@@ -288,8 +288,10 @@ impl SqliteStoreInner {
 		})?;
 
 		let sql = format!("SELECT user_version FROM pragma_user_version");
-		let version_res: u16 =
-			connection.query_row(&sql, [], |row| row.get(0)).expect("pragma query must succeed");
+		let version_res: u16 = connection.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
+			let msg = format!("Failed to read PRAGMA user_version: {}", e);
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
 
 		if version_res == 0 {
 			// New database, set our SCHEMA_USER_VERSION and continue
