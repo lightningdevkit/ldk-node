@@ -1452,8 +1452,9 @@ where
 					counterparty_node_id,
 				);
 
-				#[allow(clippy::unwrap_used)]
-				let former_temporary_channel_id = former_temporary_channel_id.unwrap();
+				let former_temporary_channel_id = former_temporary_channel_id.expect(
+					"LDK Node has only ever persisted ChannelPending events from rust-lightning 0.0.115 or later",
+				);
 
 				let event = Event::ChannelPending {
 					channel_id,
