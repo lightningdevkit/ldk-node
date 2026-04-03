@@ -42,11 +42,11 @@ use lightning::util::sweep::OutputSweeper;
 use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 
-use crate::chain::ChainSource;
+use crate::chain::{ChainSource, FeeSourceConfig};
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig,
-	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	BitcoindRestClientConfig, CbfSyncConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -104,6 +104,11 @@ enum ChainDataSourceConfig {
 		rpc_user: String,
 		rpc_password: String,
 		rest_client_config: Option<BitcoindRestClientConfig>,
+	},
+	Cbf {
+		peers: Vec<String>,
+		sync_config: Option<CbfSyncConfig>,
+		fee_source_config: Option<FeeSourceConfig>,
 	},
 }
 
@@ -193,6 +198,8 @@ pub enum BuildError {
 	NetworkMismatch,
 	/// The role of the node in an asynchronous payments context is not compatible with the current configuration.
 	AsyncPaymentsConfigMismatch,
+	/// We failed to setup the chain source.
+	ChainSourceSetupFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -226,6 +233,7 @@ impl fmt::Display for BuildError {
 					"The async payments role is not compatible with the current configuration."
 				)
 			},
+			Self::ChainSourceSetupFailed => write!(f, "Failed to setup chain source."),
 		}
 	}
 }
@@ -362,6 +370,28 @@ impl NodeBuilder {
 	) -> &mut Self {
 		self.chain_data_source_config =
 			Some(ChainDataSourceConfig::Electrum { server_url, sync_config });
+		self
+	}
+
+	/// Configures the [`Node`] instance to source its chain data via BIP 157 compact block
+	/// filters.
+	///
+	/// `peers` is an optional list of peer addresses to connect to for sourcing compact block
+	/// filters. If empty, the node will discover peers via DNS seeds.
+	///
+	/// If no `sync_config` is given, default values are used. See [`CbfSyncConfig`] for more
+	/// information.
+	///
+	/// Note: fee rate estimation with this chain source uses block-level averages (total fees
+	/// divided by block weight) rather than per-transaction fee rates. This can underestimate
+	/// next-block inclusion rates during periods of high mempool congestion. Percentile-based
+	/// target selection partially mitigates this.
+	pub fn set_chain_source_cbf(
+		&mut self, peers: Vec<String>, sync_config: Option<CbfSyncConfig>,
+		fee_source_config: Option<FeeSourceConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::Cbf { peers, sync_config, fee_source_config });
 		self
 	}
 
@@ -892,6 +922,26 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_chain_source_electrum(server_url, sync_config);
 	}
 
+	/// Configures the [`Node`] instance to source its chain data via BIP 157 compact block
+	/// filters.
+	///
+	/// `peers` is an optional list of peer addresses to connect to for sourcing compact block
+	/// filters. If empty, the node will discover peers via DNS seeds.
+	///
+	/// If no `sync_config` is given, default values are used. See [`CbfSyncConfig`] for more
+	/// information.
+	///
+	/// Note: fee rate estimation with this chain source uses block-level averages (total fees
+	/// divided by block weight) rather than per-transaction fee rates. This can underestimate
+	/// next-block inclusion rates during periods of high mempool congestion. Percentile-based
+	/// target selection partially mitigates this.
+	pub fn set_chain_source_cbf(
+		&self, peers: Vec<String>, sync_config: Option<CbfSyncConfig>,
+		fee_source_config: Option<FeeSourceConfig>,
+	) {
+		self.inner.write().unwrap().set_chain_source_cbf(peers, sync_config, fee_source_config);
+	}
+
 	/// Configures the [`Node`] instance to connect to a Bitcoin Core node via RPC.
 	///
 	/// This method establishes an RPC connection that enables all essential chain operations including
@@ -1362,6 +1412,25 @@ fn build_with_store_internal(
 				)
 				.await
 			}),
+		},
+
+		Some(ChainDataSourceConfig::Cbf { peers, sync_config, fee_source_config }) => {
+			let sync_config = sync_config.clone().unwrap_or(CbfSyncConfig::default());
+			ChainSource::new_cbf(
+				peers.clone(),
+				sync_config,
+				fee_source_config.clone(),
+				Arc::clone(&fee_estimator),
+				Arc::clone(&tx_broadcaster),
+				Arc::clone(&kv_store),
+				Arc::clone(&config),
+				Arc::clone(&logger),
+				Arc::clone(&node_metrics),
+			)
+			.map_err(|e| {
+				log_error!(logger, "Failed to initialize CBF chain source: {}", e);
+				BuildError::ChainSourceSetupFailed
+			})?
 		},
 
 		None => {
@@ -2079,6 +2148,9 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
+	#[cfg(feature = "uniffi")]
+	use crate::config::CbfSyncConfig;
+
 	use super::{sanitize_alias, BuildError, NodeAlias};
 
 	#[test]
@@ -2115,5 +2187,25 @@ mod tests {
 		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
 		let node = sanitize_alias(alias);
 		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
+	}
+
+	#[cfg(feature = "uniffi")]
+	#[test]
+	fn arced_builder_can_set_cbf_chain_source() {
+		let builder = super::ArcedNodeBuilder::new();
+		let sync_config = CbfSyncConfig::default();
+
+		let peers = vec!["127.0.0.1:8333".to_string()];
+		builder.set_chain_source_cbf(peers.clone(), Some(sync_config.clone()), None);
+
+		let guard = builder.inner.read().unwrap();
+		assert!(matches!(
+			guard.chain_data_source_config.as_ref(),
+			Some(super::ChainDataSourceConfig::Cbf {
+				peers: p,
+				sync_config: Some(config),
+				fee_source_config: None,
+			}) if config == &sync_config && p == &peers
+		));
 	}
 }
