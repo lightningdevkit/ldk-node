@@ -917,7 +917,9 @@ uniffi::custom_type!(PaymentHash, String, {
 		}
 	},
 	lower: |obj| {
-		Sha256::from_slice(&obj.0).unwrap().to_string()
+		Sha256::from_slice(&obj.0)
+			.expect("PaymentHash should always contain exactly 32 bytes")
+			.to_string()
 	},
 });
 

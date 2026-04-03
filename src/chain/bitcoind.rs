@@ -42,6 +42,7 @@ use crate::fee_estimator::{
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::util::locks::{MutexExt, RwLockExt};
 use crate::{Error, NodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
@@ -132,7 +133,7 @@ impl BitcoindChainSource {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
 		{
-			let mut status_lock = self.wallet_polling_status.lock().unwrap();
+			let mut status_lock = self.wallet_polling_status.lck();
 			if status_lock.register_or_subscribe_pending_sync().is_some() {
 				debug_assert!(false, "Sync already in progress. This should never happen.");
 			}
@@ -194,15 +195,16 @@ impl BitcoindChainSource {
 			{
 				Ok(chain_tip) => {
 					{
+						let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 						log_info!(
 							self.logger,
 							"Finished synchronizing listeners in {}ms",
-							now.elapsed().unwrap().as_millis()
+							elapsed_ms
 						);
-						*self.latest_chain_tip.write().unwrap() = Some(chain_tip);
+						*self.latest_chain_tip.wlck() = Some(chain_tip);
 						let unix_time_secs_opt =
 							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-						let mut locked_node_metrics = self.node_metrics.write().unwrap();
+						let mut locked_node_metrics = self.node_metrics.wlck();
 						locked_node_metrics.latest_lightning_wallet_sync_timestamp =
 							unix_time_secs_opt;
 						locked_node_metrics.latest_onchain_wallet_sync_timestamp =
@@ -262,7 +264,7 @@ impl BitcoindChainSource {
 		}
 
 		// Now propagate the initial result to unblock waiting subscribers.
-		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(Ok(()));
+		self.wallet_polling_status.lck().propagate_result_to_subscribers(Ok(()));
 
 		let mut chain_polling_interval =
 			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
@@ -346,7 +348,7 @@ impl BitcoindChainSource {
 
 		match validate_res {
 			Ok(tip) => {
-				*self.latest_chain_tip.write().unwrap() = Some(tip);
+				*self.latest_chain_tip.wlck() = Some(tip);
 				Ok(tip)
 			},
 			Err(e) => {
@@ -361,7 +363,7 @@ impl BitcoindChainSource {
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let receiver_res = {
-			let mut status_lock = self.wallet_polling_status.lock().unwrap();
+			let mut status_lock = self.wallet_polling_status.lck();
 			status_lock.register_or_subscribe_pending_sync()
 		};
 
@@ -383,7 +385,7 @@ impl BitcoindChainSource {
 			)
 			.await;
 
-		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
+		self.wallet_polling_status.lck().propagate_result_to_subscribers(res);
 
 		res
 	}
@@ -392,7 +394,7 @@ impl BitcoindChainSource {
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		let latest_chain_tip_opt = self.latest_chain_tip.read().unwrap().clone();
+		let latest_chain_tip_opt = self.latest_chain_tip.rlck().clone();
 		let chain_tip =
 			if let Some(tip) = latest_chain_tip_opt { tip } else { self.poll_chain_tip().await? };
 
@@ -410,12 +412,9 @@ impl BitcoindChainSource {
 		let now = SystemTime::now();
 		match spv_client.poll_best_tip().await {
 			Ok((ChainTip::Better(tip), true)) => {
-				log_trace!(
-					self.logger,
-					"Finished polling best tip in {}ms",
-					now.elapsed().unwrap().as_millis()
-				);
-				*self.latest_chain_tip.write().unwrap() = Some(tip);
+				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+				log_trace!(self.logger, "Finished polling best tip in {}ms", elapsed_ms);
+				*self.latest_chain_tip.wlck() = Some(tip);
 			},
 			Ok(_) => {},
 			Err(e) => {
@@ -434,12 +433,13 @@ impl BitcoindChainSource {
 			.await
 		{
 			Ok((unconfirmed_txs, evicted_txids)) => {
+				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 				log_trace!(
 					self.logger,
 					"Finished polling mempool of size {} and {} evicted transactions in {}ms",
 					unconfirmed_txs.len(),
 					evicted_txids.len(),
-					now.elapsed().unwrap().as_millis()
+					elapsed_ms
 				);
 				onchain_wallet.apply_mempool_txs(unconfirmed_txs, evicted_txids).unwrap_or_else(
 					|e| {
@@ -455,7 +455,7 @@ impl BitcoindChainSource {
 
 		let unix_time_secs_opt =
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-		let mut locked_node_metrics = self.node_metrics.write().unwrap();
+		let mut locked_node_metrics = self.node_metrics.wlck();
 		locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
 		locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
 
@@ -570,7 +570,7 @@ impl BitcoindChainSource {
 		let unix_time_secs_opt =
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
 		{
-			let mut locked_node_metrics = self.node_metrics.write().unwrap();
+			let mut locked_node_metrics = self.node_metrics.wlck();
 			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
 			write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
 		}

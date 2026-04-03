@@ -573,9 +573,9 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			channel_value_sats: value.channel_value_satoshis,
 			unspendable_punishment_reserve: value.unspendable_punishment_reserve,
 			user_channel_id: UserChannelId(value.user_channel_id),
-			// unwrap safety: This value will be `None` for objects serialized with LDK versions
-			// prior to 0.0.115.
-			feerate_sat_per_1000_weight: value.feerate_sat_per_1000_weight.unwrap(),
+			feerate_sat_per_1000_weight: value
+				.feerate_sat_per_1000_weight
+				.expect("ldk-node v0.1.0 already required rust-lightning 0.0.115 feerate details"),
 			outbound_capacity_msat: value.outbound_capacity_msat,
 			inbound_capacity_msat: value.inbound_capacity_msat,
 			confirmations_required: value.confirmations_required,
@@ -608,11 +608,14 @@ impl From<LdkChannelDetails> for ChannelDetails {
 			next_outbound_htlc_limit_msat: value.next_outbound_htlc_limit_msat,
 			next_outbound_htlc_minimum_msat: value.next_outbound_htlc_minimum_msat,
 			force_close_spend_delay: value.force_close_spend_delay,
-			// unwrap safety: This field is only `None` for objects serialized prior to LDK 0.0.107
-			inbound_htlc_minimum_msat: value.inbound_htlc_minimum_msat.unwrap_or(0),
+			inbound_htlc_minimum_msat: value.inbound_htlc_minimum_msat.expect(
+				"ldk-node v0.1.0 already required rust-lightning 0.0.115 inbound HTLC minimums",
+			),
 			inbound_htlc_maximum_msat: value.inbound_htlc_maximum_msat,
-			// unwrap safety: `config` is only `None` for LDK objects serialized prior to 0.0.109.
-			config: value.config.map(|c| c.into()).unwrap(),
+			config: value
+				.config
+				.map(|c| c.into())
+				.expect("ldk-node v0.1.0 already required rust-lightning 0.0.115 channel config"),
 		}
 	}
 }

@@ -5,8 +5,4 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-fn main() {
-	#[cfg(feature = "uniffi")]
-	uniffi::generate_scaffolding("bindings/ldk_node.udl")
-		.expect("the checked-in UniFFI UDL should always generate scaffolding");
-}
+pub(crate) mod locks;

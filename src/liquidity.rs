@@ -45,6 +45,7 @@ use crate::runtime::Runtime;
 use crate::types::{
 	Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet,
 };
+use crate::util::locks::{MutexExt, RwLockExt};
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -302,7 +303,7 @@ where
 	L::Target: LdkLogger,
 {
 	pub(crate) fn set_peer_manager(&self, peer_manager: Weak<PeerManager>) {
-		*self.peer_manager.write().unwrap() = Some(peer_manager);
+		*self.peer_manager.wlck() = Some(peer_manager);
 	}
 
 	pub(crate) fn liquidity_manager(&self) -> Arc<LiquidityManager> {
@@ -404,11 +405,8 @@ where
 						return;
 					}
 
-					if let Some(sender) = lsps1_client
-						.pending_opening_params_requests
-						.lock()
-						.unwrap()
-						.remove(&request_id)
+					if let Some(sender) =
+						lsps1_client.pending_opening_params_requests.lck().remove(&request_id)
 					{
 						let response = LSPS1OpeningParamsResponse { supported_options };
 
@@ -460,11 +458,8 @@ where
 						return;
 					}
 
-					if let Some(sender) = lsps1_client
-						.pending_create_order_requests
-						.lock()
-						.unwrap()
-						.remove(&request_id)
+					if let Some(sender) =
+						lsps1_client.pending_create_order_requests.lck().remove(&request_id)
 					{
 						let response = LSPS1OrderStatus {
 							order_id,
@@ -518,11 +513,8 @@ where
 						return;
 					}
 
-					if let Some(sender) = lsps1_client
-						.pending_check_order_status_requests
-						.lock()
-						.unwrap()
-						.remove(&request_id)
+					if let Some(sender) =
+						lsps1_client.pending_check_order_status_requests.lck().remove(&request_id)
 					{
 						let response = LSPS1OrderStatus {
 							order_id,
@@ -642,7 +634,9 @@ where
 					};
 
 					let user_channel_id: u128 = u128::from_ne_bytes(
-						self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
+						self.keys_manager.get_secure_random_bytes()[..16]
+							.try_into()
+							.expect("a 16-byte slice should convert into a [u8; 16]"),
 					);
 					let intercept_scid = self.channel_manager.get_intercept_scid();
 
@@ -717,7 +711,7 @@ where
 				};
 
 				let init_features = if let Some(Some(peer_manager)) =
-					self.peer_manager.read().unwrap().as_ref().map(|weak| weak.upgrade())
+					self.peer_manager.rlck().as_ref().map(|weak| weak.upgrade())
 				{
 					// Fail if we're not connected to the prospective channel partner.
 					if let Some(peer) = peer_manager.peer_by_node_id(&their_network_key) {
@@ -828,7 +822,7 @@ where
 					}
 
 					if let Some(sender) =
-						lsps2_client.pending_fee_requests.lock().unwrap().remove(&request_id)
+						lsps2_client.pending_fee_requests.lck().remove(&request_id)
 					{
 						let response = LSPS2FeeResponse { opening_fee_params_menu };
 
@@ -880,7 +874,7 @@ where
 					}
 
 					if let Some(sender) =
-						lsps2_client.pending_buy_requests.lock().unwrap().remove(&request_id)
+						lsps2_client.pending_buy_requests.lck().remove(&request_id)
 					{
 						let response = LSPS2BuyResponse { intercept_scid, cltv_expiry_delta };
 
@@ -930,7 +924,7 @@ where
 		let (request_sender, request_receiver) = oneshot::channel();
 		{
 			let mut pending_opening_params_requests_lock =
-				lsps1_client.pending_opening_params_requests.lock().unwrap();
+				lsps1_client.pending_opening_params_requests.lck();
 			let request_id = client_handler.request_supported_options(lsps1_client.lsp_node_id);
 			pending_opening_params_requests_lock.insert(request_id, request_sender);
 		}
@@ -1013,7 +1007,7 @@ where
 		let request_id;
 		{
 			let mut pending_create_order_requests_lock =
-				lsps1_client.pending_create_order_requests.lock().unwrap();
+				lsps1_client.pending_create_order_requests.lck();
 			request_id = client_handler.create_order(
 				&lsps1_client.lsp_node_id,
 				order_params.clone(),
@@ -1059,7 +1053,7 @@ where
 		let (request_sender, request_receiver) = oneshot::channel();
 		{
 			let mut pending_check_order_status_requests_lock =
-				lsps1_client.pending_check_order_status_requests.lock().unwrap();
+				lsps1_client.pending_check_order_status_requests.lck();
 			let request_id = client_handler.check_order_status(&lsps1_client.lsp_node_id, order_id);
 			pending_check_order_status_requests_lock.insert(request_id, request_sender);
 		}
@@ -1200,7 +1194,7 @@ where
 
 		let (fee_request_sender, fee_request_receiver) = oneshot::channel();
 		{
-			let mut pending_fee_requests_lock = lsps2_client.pending_fee_requests.lock().unwrap();
+			let mut pending_fee_requests_lock = lsps2_client.pending_fee_requests.lck();
 			let request_id = client_handler
 				.request_opening_params(lsps2_client.lsp_node_id, lsps2_client.token.clone());
 			pending_fee_requests_lock.insert(request_id, fee_request_sender);
@@ -1233,7 +1227,7 @@ where
 
 		let (buy_request_sender, buy_request_receiver) = oneshot::channel();
 		{
-			let mut pending_buy_requests_lock = lsps2_client.pending_buy_requests.lock().unwrap();
+			let mut pending_buy_requests_lock = lsps2_client.pending_buy_requests.lck();
 			let request_id = client_handler
 				.select_opening_params(lsps2_client.lsp_node_id, amount_msat, opening_fee_params)
 				.map_err(|e| {

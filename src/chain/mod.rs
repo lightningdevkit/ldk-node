@@ -27,6 +27,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::util::locks::MutexExt;
 use crate::{Error, NodeMetrics};
 
 pub(crate) enum WalletSyncStatus {
@@ -101,7 +102,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> (Self, Option<BestBlock>) {
+	) -> Result<(Self, Option<BestBlock>), ()> {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
@@ -111,10 +112,10 @@ impl ChainSource {
 			config,
 			Arc::clone(&logger),
 			node_metrics,
-		);
+		)?;
 		let kind = ChainSourceKind::Esplora(esplora_chain_source);
 		let registered_txids = Mutex::new(Vec::new());
-		(Self { kind, registered_txids, tx_broadcaster, logger }, None)
+		Ok((Self { kind, registered_txids, tx_broadcaster, logger }, None))
 	}
 
 	pub(crate) fn new_electrum(
@@ -215,7 +216,7 @@ impl ChainSource {
 	}
 
 	pub(crate) fn registered_txids(&self) -> Vec<Txid> {
-		self.registered_txids.lock().unwrap().clone()
+		self.registered_txids.lck().clone()
 	}
 
 	pub(crate) fn is_transaction_based(&self) -> bool {
@@ -472,7 +473,7 @@ impl ChainSource {
 
 impl Filter for ChainSource {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
-		self.registered_txids.lock().unwrap().push(*txid);
+		self.registered_txids.lck().push(*txid);
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source.register_tx(txid, script_pubkey)

@@ -16,6 +16,7 @@ use crate::config::{
 	BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS, LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS,
 };
 use crate::logger::{log_debug, log_error, log_trace, LdkLogger, Logger};
+use crate::util::locks::MutexExt;
 
 pub(crate) struct Runtime {
 	mode: RuntimeMode,
@@ -66,7 +67,7 @@ impl Runtime {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		let mut background_tasks = self.background_tasks.lock().unwrap();
+		let mut background_tasks = self.background_tasks.lck();
 		let runtime_handle = self.handle();
 		// Since it seems to make a difference to `tokio` (see
 		// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
@@ -78,7 +79,7 @@ impl Runtime {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		let mut cancellable_background_tasks = self.cancellable_background_tasks.lock().unwrap();
+		let mut cancellable_background_tasks = self.cancellable_background_tasks.lck();
 		let runtime_handle = self.handle();
 		// Since it seems to make a difference to `tokio` (see
 		// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
@@ -90,7 +91,7 @@ impl Runtime {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		let mut background_processor_task = self.background_processor_task.lock().unwrap();
+		let mut background_processor_task = self.background_processor_task.lck();
 		debug_assert!(background_processor_task.is_none(), "Expected no background processor_task");
 
 		let runtime_handle = self.handle();
@@ -121,14 +122,14 @@ impl Runtime {
 	}
 
 	pub fn abort_cancellable_background_tasks(&self) {
-		let mut tasks = core::mem::take(&mut *self.cancellable_background_tasks.lock().unwrap());
+		let mut tasks = core::mem::take(&mut *self.cancellable_background_tasks.lck());
 		debug_assert!(tasks.len() > 0, "Expected some cancellable background_tasks");
 		tasks.abort_all();
 		self.block_on(async { while let Some(_) = tasks.join_next().await {} })
 	}
 
 	pub fn wait_on_background_tasks(&self) {
-		let mut tasks = core::mem::take(&mut *self.background_tasks.lock().unwrap());
+		let mut tasks = core::mem::take(&mut *self.background_tasks.lck());
 		debug_assert!(tasks.len() > 0, "Expected some background_tasks");
 		self.block_on(async {
 			loop {
@@ -160,9 +161,7 @@ impl Runtime {
 	}
 
 	pub fn wait_on_background_processor_task(&self) {
-		if let Some(background_processor_task) =
-			self.background_processor_task.lock().unwrap().take()
-		{
+		if let Some(background_processor_task) = self.background_processor_task.lck().take() {
 			let abort_handle = background_processor_task.abort_handle();
 			// Since it seems to make a difference to `tokio` (see
 			// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures

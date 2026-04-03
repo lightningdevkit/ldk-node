@@ -4,6 +4,8 @@ use std::sync::Mutex;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::OnionMessage;
 
+use crate::util::locks::MutexExt;
+
 pub(crate) struct OnionMessageMailbox {
 	map: Mutex<HashMap<PublicKey, VecDeque<OnionMessage>>>,
 }
@@ -17,7 +19,7 @@ impl OnionMessageMailbox {
 	}
 
 	pub(crate) fn onion_message_intercepted(&self, peer_node_id: PublicKey, message: OnionMessage) {
-		let mut map = self.map.lock().unwrap();
+		let mut map = self.map.lck();
 
 		let queue = map.entry(peer_node_id).or_insert_with(VecDeque::new);
 		if queue.len() >= Self::MAX_MESSAGES_PER_PEER {
@@ -27,8 +29,11 @@ impl OnionMessageMailbox {
 
 		// Enforce a peers limit. If exceeded, evict the peer with the longest queue.
 		if map.len() > Self::MAX_PEERS {
-			let peer_to_remove =
-				map.iter().max_by_key(|(_, queue)| queue.len()).map(|(peer, _)| *peer).unwrap();
+			let peer_to_remove = map
+				.iter()
+				.max_by_key(|(_, queue)| queue.len())
+				.map(|(peer, _)| *peer)
+				.expect("a peer must exist when the mailbox exceeds its peer limit");
 
 			map.remove(&peer_to_remove);
 		}
@@ -37,7 +42,7 @@ impl OnionMessageMailbox {
 	pub(crate) fn onion_message_peer_connected(
 		&self, peer_node_id: PublicKey,
 	) -> Vec<OnionMessage> {
-		let mut map = self.map.lock().unwrap();
+		let mut map = self.map.lck();
 
 		if let Some(queue) = map.remove(&peer_node_id) {
 			queue.into()
@@ -48,7 +53,7 @@ impl OnionMessageMailbox {
 
 	#[cfg(test)]
 	pub(crate) fn is_empty(&self) -> bool {
-		let map = self.map.lock().unwrap();
+		let map = self.map.lck();
 		map.is_empty()
 	}
 }

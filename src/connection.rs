@@ -16,6 +16,7 @@ use lightning::ln::msgs::SocketAddress;
 use crate::config::TorConfig;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::types::{KeysManager, PeerManager};
+use crate::util::locks::MutexExt;
 use crate::Error;
 
 pub(crate) struct ConnectionManager<L: Deref + Clone + Sync + Send>
@@ -238,7 +239,7 @@ where
 	fn register_or_subscribe_pending_connection(
 		&self, node_id: &PublicKey,
 	) -> Option<tokio::sync::oneshot::Receiver<Result<(), Error>>> {
-		let mut pending_connections_lock = self.pending_connections.lock().unwrap();
+		let mut pending_connections_lock = self.pending_connections.lck();
 		match pending_connections_lock.entry(*node_id) {
 			hash_map::Entry::Occupied(mut entry) => {
 				let (tx, rx) = tokio::sync::oneshot::channel();
@@ -254,7 +255,7 @@ where
 
 	fn propagate_result_to_subscribers(&self, node_id: &PublicKey, res: Result<(), Error>) {
 		// Send the result to any other tasks that might be waiting on it by now.
-		let mut pending_connections_lock = self.pending_connections.lock().unwrap();
+		let mut pending_connections_lock = self.pending_connections.lck();
 		if let Some(connection_ready_senders) = pending_connections_lock.remove(node_id) {
 			for sender in connection_ready_senders {
 				let _ = sender.send(res).map_err(|e| {

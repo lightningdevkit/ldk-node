@@ -45,6 +45,7 @@ use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 use crate::entropy::NodeEntropy;
 use crate::io::utils::check_namespace_key_validity;
 use crate::lnurl_auth::LNURL_AUTH_HARDENED_CHILD_INDEX;
+use crate::util::locks::MutexExt;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
 	JitteredRetryPolicy<
@@ -110,7 +111,9 @@ impl VssStore {
 			.worker_threads(INTERNAL_RUNTIME_WORKERS)
 			.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
 			.build()
-			.unwrap();
+			.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("Failed to build VSS runtime: {}", e))
+			})?;
 
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
@@ -419,7 +422,7 @@ impl VssStoreInner {
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
-		let mut outer_lock = self.locks.lock().unwrap();
+		let mut outer_lock = self.locks.lck();
 		Arc::clone(&outer_lock.entry(locking_key).or_default())
 	}
 
@@ -526,7 +529,10 @@ impl VssStoreInner {
 
 		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
 		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
-		let storable = Storable::decode(&resp.value.unwrap().value[..]).map_err(|e| {
+		let storable = Storable::decode(
+			&resp.value.expect("successful VSS reads should include a value payload").value[..],
+		)
+		.map_err(|e| {
 			let msg = format!(
 				"Failed to decode data read from key {}/{}/{}: {}",
 				primary_namespace, secondary_namespace, key, e
@@ -672,7 +678,7 @@ impl VssStoreInner {
 		// to prevent leaking memory. The two arcs that are expected are the one in the map and the one held here in
 		// inner_lock_ref. The outer lock is obtained first, to avoid a new arc being cloned after we've already
 		// counted.
-		let mut outer_lock = self.locks.lock().unwrap();
+		let mut outer_lock = self.locks.lck();
 
 		let strong_count = Arc::strong_count(&inner_lock_ref);
 		debug_assert!(strong_count >= 2, "Unexpected VssStore strong count");
@@ -739,7 +745,10 @@ async fn determine_and_write_schema_version(
 
 		// unwrap safety: resp.value must be always present for a non-erroneous VSS response, otherwise
 		// it is an API-violation which is converted to [`VssError::InternalServerError`] in [`VssClient`]
-		let storable = Storable::decode(&resp.value.unwrap().value[..]).map_err(|e| {
+		let storable = Storable::decode(
+			&resp.value.expect("successful VSS reads should include a value payload").value[..],
+		)
+		.map_err(|e| {
 			let msg = format!("Failed to decode schema version: {}", e);
 			Error::new(ErrorKind::Other, msg)
 		})?;
