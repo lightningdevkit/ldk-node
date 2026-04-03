@@ -632,6 +632,13 @@ impl ChannelDetails {
 						ReserveType::Adaptive
 					}
 				} else {
+					// Edge case: if `AnchorChannelsConfig` was previously set and later
+					// removed, we can no longer distinguish whether this anchor channel's
+					// reserve was `Adaptive` or `TrustedPeersNoReserve`. We default to
+					// `Adaptive` here, which may incorrectly override a prior
+					// `TrustedPeersNoReserve` designation. This is acceptable since
+					// unsetting `AnchorChannelsConfig` on a node with existing anchor
+					// channels is not an expected operation.
 					ReserveType::Adaptive
 				}
 			} else {
