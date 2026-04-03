@@ -719,7 +719,7 @@ pub async fn open_channel_push_amt(
 		node_a
 			.open_announced_channel(
 				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				node_b.listening_addresses().unwrap().first().cloned(),
 				funding_amount_sat,
 				push_amount_msat,
 				None,
@@ -729,7 +729,7 @@ pub async fn open_channel_push_amt(
 		node_a
 			.open_channel(
 				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				node_b.listening_addresses().unwrap().first().cloned(),
 				funding_amount_sat,
 				push_amount_msat,
 				None,
@@ -753,7 +753,7 @@ pub async fn open_channel_with_all(
 		node_a
 			.open_announced_channel_with_all(
 				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				node_b.listening_addresses().unwrap().first().cloned(),
 				None,
 				None,
 			)
@@ -762,7 +762,7 @@ pub async fn open_channel_with_all(
 		node_a
 			.open_channel_with_all(
 				node_b.node_id(),
-				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				node_b.listening_addresses().unwrap().first().cloned(),
 				None,
 				None,
 			)
@@ -849,7 +849,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a
 		.open_announced_channel(
 			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			node_b.listening_addresses().unwrap().first().cloned(),
 			funding_amount_sat,
 			Some(push_msat),
 			None,
