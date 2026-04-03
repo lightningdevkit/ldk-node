@@ -41,7 +41,7 @@ where
 	}
 
 	pub(crate) fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
-		let mut locked_peers = self.peers.write().unwrap();
+		let mut locked_peers = self.peers.write().expect("lock");
 
 		if locked_peers.contains_key(&peer_info.node_id) {
 			return Ok(());
@@ -52,18 +52,18 @@ where
 	}
 
 	pub(crate) fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
-		let mut locked_peers = self.peers.write().unwrap();
+		let mut locked_peers = self.peers.write().expect("lock");
 
 		locked_peers.remove(node_id);
 		self.persist_peers(&*locked_peers)
 	}
 
 	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
-		self.peers.read().unwrap().values().cloned().collect()
+		self.peers.read().expect("lock").values().cloned().collect()
 	}
 
 	pub(crate) fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
-		self.peers.read().unwrap().get(node_id).cloned()
+		self.peers.read().expect("lock").get(node_id).cloned()
 	}
 
 	fn persist_peers(&self, locked_peers: &HashMap<PublicKey, PeerInfo>) -> Result<(), Error> {

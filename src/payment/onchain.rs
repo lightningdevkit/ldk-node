@@ -80,7 +80,7 @@ impl OnchainPayment {
 	pub fn send_to_address(
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 
@@ -110,7 +110,7 @@ impl OnchainPayment {
 	pub fn send_all_to_address(
 		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 

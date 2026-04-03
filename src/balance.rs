@@ -232,7 +232,9 @@ impl LightningBalance {
 				inbound_htlc_rounded_msat,
 			} => {
 				// unwrap safety: confirmed_balance_candidate_index is guaranteed to index into balance_candidates
-				let balance = balance_candidates.get(confirmed_balance_candidate_index).unwrap();
+				let balance = balance_candidates
+					.get(confirmed_balance_candidate_index)
+					.expect("LDK should provide a valid confirmed balance candidate index");
 
 				Self::ClaimableOnChannelClose {
 					channel_id,

@@ -320,7 +320,7 @@ mod tests {
 		}
 
 		fn log(&self, record: &log::Record) {
-			*self.log.lock().unwrap() = record.args().to_string();
+			*self.log.lock().expect("lock") = record.args().to_string();
 		}
 
 		fn flush(&self) {}
@@ -424,6 +424,6 @@ mod tests {
 
 		writer.log(record);
 
-		assert_eq!(*log.lock().unwrap(), "Test message (ch:abcdef p:02abcd)");
+		assert_eq!(*log.lock().expect("lock"), "Test message (ch:abcdef p:02abcd)");
 	}
 }

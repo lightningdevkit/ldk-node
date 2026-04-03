@@ -56,7 +56,7 @@ impl SpontaneousPayment {
 		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Option<Vec<CustomTlvRecord>>,
 		preimage: Option<PaymentPreimage>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 
@@ -206,7 +206,7 @@ impl SpontaneousPayment {
 	///
 	/// [`Bolt11Payment::send_probes`]: crate::payment::Bolt11Payment
 	pub fn send_probes(&self, amount_msat: u64, node_id: PublicKey) -> Result<(), Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 

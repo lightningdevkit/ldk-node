@@ -254,7 +254,7 @@ impl Node {
 	/// a thread-safe manner.
 	pub fn start(&self) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
-		let mut is_running_lock = self.is_running.write().unwrap();
+		let mut is_running_lock = self.is_running.write().expect("lock");
 		if *is_running_lock {
 			return Err(Error::AlreadyRunning);
 		}
@@ -322,7 +322,7 @@ impl Node {
 										now.elapsed().as_millis()
 										);
 									{
-										let mut locked_node_metrics = gossip_node_metrics.write().unwrap();
+										let mut locked_node_metrics = gossip_node_metrics.write().expect("lock");
 										locked_node_metrics.latest_rgs_snapshot_timestamp = Some(updated_timestamp);
 										write_node_metrics(&*locked_node_metrics, &*gossip_sync_store, Arc::clone(&gossip_sync_logger))
 											.unwrap_or_else(|e| {
@@ -420,13 +420,16 @@ impl Node {
 								break;
 							}
 							res = listener.accept() => {
+								#[allow(clippy::unwrap_used)]
 								let tcp_stream = res.unwrap().0;
 								let peer_mgr = Arc::clone(&peer_mgr);
 								runtime.spawn_cancellable_background_task(async move {
+									#[allow(clippy::unwrap_used)]
+									let tcp_stream = tcp_stream.into_std().unwrap();
 									lightning_net_tokio::setup_inbound(
 										Arc::clone(&peer_mgr),
-										tcp_stream.into_std().unwrap(),
-										)
+										tcp_stream,
+									)
 										.await;
 								});
 							}
@@ -498,7 +501,7 @@ impl Node {
 							return;
 						}
 						_ = interval.tick() => {
-							let skip_broadcast = match bcast_node_metrics.read().unwrap().latest_node_announcement_broadcast_timestamp {
+							let skip_broadcast = match bcast_node_metrics.read().expect("lock").latest_node_announcement_broadcast_timestamp {
 								Some(latest_bcast_time_secs) => {
 									// Skip if the time hasn't elapsed yet.
 									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
@@ -539,7 +542,7 @@ impl Node {
 								let unix_time_secs_opt =
 									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
 								{
-									let mut locked_node_metrics = bcast_node_metrics.write().unwrap();
+									let mut locked_node_metrics = bcast_node_metrics.write().expect("lock");
 									locked_node_metrics.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt;
 									write_node_metrics(&*locked_node_metrics, &*bcast_store, Arc::clone(&bcast_logger))
 										.unwrap_or_else(|e| {
@@ -646,7 +649,13 @@ impl Node {
 				Some(background_scorer),
 				sleeper,
 				true,
-				|| Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap()),
+				|| {
+					Some(
+						SystemTime::now()
+							.duration_since(SystemTime::UNIX_EPOCH)
+							.expect("current time should not be earlier than the Unix epoch"),
+					)
+				},
 			)
 			.await
 			.unwrap_or_else(|e| {
@@ -684,7 +693,7 @@ impl Node {
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
 	pub fn stop(&self) -> Result<(), Error> {
-		let mut is_running_lock = self.is_running.write().unwrap();
+		let mut is_running_lock = self.is_running.write().expect("lock");
 		if !*is_running_lock {
 			return Err(Error::NotRunning);
 		}
@@ -748,9 +757,9 @@ impl Node {
 
 	/// Returns the status of the [`Node`].
 	pub fn status(&self) -> NodeStatus {
-		let is_running = *self.is_running.read().unwrap();
+		let is_running = *self.is_running.read().expect("lock");
 		let current_best_block = self.channel_manager.current_best_block().into();
-		let locked_node_metrics = self.node_metrics.read().unwrap();
+		let locked_node_metrics = self.node_metrics.read().expect("lock");
 		let latest_lightning_wallet_sync_timestamp =
 			locked_node_metrics.latest_lightning_wallet_sync_timestamp;
 		let latest_onchain_wallet_sync_timestamp =
@@ -1079,7 +1088,7 @@ impl Node {
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 
@@ -1109,7 +1118,7 @@ impl Node {
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
 	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 
@@ -1131,7 +1140,7 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool, set_0reserve: bool,
 	) -> Result<UserChannelId, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 
@@ -1194,7 +1203,9 @@ impl Node {
 
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
 		let user_channel_id: u128 = u128::from_ne_bytes(
-			self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
+			self.keys_manager.get_secure_random_bytes()[..16]
+				.try_into()
+				.expect("a 16-byte slice should convert into a [u8; 16]"),
 		);
 
 		let result = if set_0reserve {
@@ -1727,7 +1738,7 @@ impl Node {
 	///
 	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 

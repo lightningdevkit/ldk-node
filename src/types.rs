@@ -565,6 +565,7 @@ pub struct ChannelDetails {
 }
 
 impl From<LdkChannelDetails> for ChannelDetails {
+	#[allow(clippy::unwrap_used)]
 	fn from(value: LdkChannelDetails) -> Self {
 		ChannelDetails {
 			channel_id: value.channel_id,

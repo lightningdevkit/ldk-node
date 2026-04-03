@@ -189,7 +189,9 @@ fn linking_key_path(hashing_key: &[u8; 32], domain_name: &str) -> Vec<ChildNumbe
 	result
 		.chunks_exact(4)
 		.take(4)
-		.map(|i| u32::from_be_bytes(i.try_into().unwrap()))
+		.map(|i| {
+			u32::from_be_bytes(i.try_into().expect("chunks_exact(4) should yield 4-byte slices"))
+		})
 		.map(ChildNumber::from)
 		.collect()
 }

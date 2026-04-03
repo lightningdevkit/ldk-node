@@ -215,7 +215,7 @@ impl ChainSource {
 	}
 
 	pub(crate) fn registered_txids(&self) -> Vec<Txid> {
-		self.registered_txids.lock().unwrap().clone()
+		self.registered_txids.lock().expect("lock").clone()
 	}
 
 	pub(crate) fn is_transaction_based(&self) -> bool {
@@ -472,7 +472,7 @@ impl ChainSource {
 
 impl Filter for ChainSource {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
-		self.registered_txids.lock().unwrap().push(*txid);
+		self.registered_txids.lock().expect("lock").push(*txid);
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source.register_tx(txid, script_pubkey)
