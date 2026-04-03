@@ -101,7 +101,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> (Self, Option<BestBlock>) {
+	) -> Result<(Self, Option<BestBlock>), ()> {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
@@ -111,10 +111,10 @@ impl ChainSource {
 			config,
 			Arc::clone(&logger),
 			node_metrics,
-		);
+		)?;
 		let kind = ChainSourceKind::Esplora(esplora_chain_source);
 		let registered_txids = Mutex::new(Vec::new());
-		(Self { kind, registered_txids, tx_broadcaster, logger }, None)
+		Ok((Self { kind, registered_txids, tx_broadcaster, logger }, None))
 	}
 
 	pub(crate) fn new_electrum(

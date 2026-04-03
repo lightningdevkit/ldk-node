@@ -189,6 +189,8 @@ pub enum BuildError {
 	WalletSetupFailed,
 	/// We failed to setup the logger.
 	LoggerSetupFailed,
+	/// We failed to setup the configured chain source.
+	ChainSourceSetupFailed,
 	/// The given network does not match the node's previously configured network.
 	NetworkMismatch,
 	/// The role of the node in an asynchronous payments context is not compatible with the current configuration.
@@ -216,6 +218,7 @@ impl fmt::Display for BuildError {
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
+			Self::ChainSourceSetupFailed => write!(f, "Failed to setup the chain source."),
 			Self::InvalidNodeAlias => write!(f, "Given node alias is invalid."),
 			Self::NetworkMismatch => {
 				write!(f, "Given network does not match the node's previously configured network.")
@@ -1314,6 +1317,7 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 				Arc::clone(&node_metrics),
 			)
+			.map_err(|()| BuildError::ChainSourceSetupFailed)?
 		},
 		Some(ChainDataSourceConfig::Electrum { server_url, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(ElectrumSyncConfig::default());
@@ -1383,6 +1387,7 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 				Arc::clone(&node_metrics),
 			)
+			.map_err(|()| BuildError::ChainSourceSetupFailed)?
 		},
 	};
 	let chain_source = Arc::new(chain_source);
