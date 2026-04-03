@@ -121,6 +121,9 @@ async fn test_cln() {
 	cln_client.pay(&ldk_invoice.to_string(), Default::default()).unwrap();
 	common::expect_event!(node, PaymentReceived);
 
+	// Allow monitor update to complete before closing (CLN v25+ timing)
+	std::thread::sleep(std::time::Duration::from_secs(2));
+
 	node.close_channel(&user_channel_id, cln_node_id).unwrap();
 	common::expect_event!(node, ChannelClosed);
 	node.stop().unwrap();

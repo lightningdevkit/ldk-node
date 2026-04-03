@@ -1,6 +1,6 @@
 services:
   bitcoin:
-    image: blockstream/bitcoind:27.2
+    image: blockstream/bitcoind:29.1
     platform: linux/amd64
     command:
       [
@@ -52,7 +52,7 @@ services:
       - bitcoin-electrs
 
   lnd:
-    image: lightninglabs/lnd:v0.18.5-beta
+    image: lightninglabs/lnd:v0.20.1-beta
     container_name: ldk-node-lnd
     depends_on:
       - bitcoin
