@@ -101,20 +101,19 @@ impl VssStore {
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> io::Result<Self> {
 		let next_version = AtomicU64::new(1);
-		let internal_runtime = {
-			#[allow(clippy::unwrap_used)]
-			tokio::runtime::Builder::new_multi_thread()
-				.enable_all()
-				.thread_name_fn(|| {
-					static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-					let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-					format!("ldk-node-vss-runtime-{}", id)
-				})
-				.worker_threads(INTERNAL_RUNTIME_WORKERS)
-				.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
-				.build()
-				.unwrap()
-		};
+		let internal_runtime = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.thread_name_fn(|| {
+				static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+				let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+				format!("ldk-node-vss-runtime-{}", id)
+			})
+			.worker_threads(INTERNAL_RUNTIME_WORKERS)
+			.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
+			.build()
+			.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("Failed to build VSS runtime: {}", e))
+			})?;
 
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
