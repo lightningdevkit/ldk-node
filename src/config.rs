@@ -123,7 +123,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `listening_addresses`                  | None               |
 /// | `announcement_addresses`               | None               |
 /// | `node_alias`                           | None               |
-/// | `trusted_peers_0conf`                  | []                 |
+/// | `trusted_peers_0conf_0reserve`         | []                 |
 /// | `probing_liquidity_limit_multiplier`   | 3                  |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                     | None               |
@@ -156,12 +156,19 @@ pub struct Config {
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub node_alias: Option<NodeAlias>,
-	/// A list of peers that we allow to establish zero confirmation channels to us.
+	/// A list of peers that we trust. If a peer on this list opens a channel to us, we will
+	/// forward their HTLCs before any confirmations of the funding transaction (zero-conf), and
+	/// allow them to spend their entire balance (zero-reserve). If we open a channel to a peer
+	/// on this list, we will allow them to spend their entire channel balance (note that for
+	/// channels *we* open, the decision of whether to accept HTLC forwards with no
+	/// confirmations of the funding transaction is *the peer's* decision).
 	///
-	/// **Note:** Allowing payments via zero-confirmation channels is potentially insecure if the
-	/// funding transaction ends up never being confirmed on-chain. Zero-confirmation channels
-	/// should therefore only be accepted from trusted peers.
-	pub trusted_peers_0conf: Vec<PublicKey>,
+	/// **Note:** Allowing payments via zero-confirmation channels is potentially insecure if
+	/// the funding transaction never gets confirmed on-chain. Zero-reserve channels
+	/// allow the counterparty to make cheating attempts with no financial penalty.
+	/// Zero-confirmation, and zero-reserve channels should therefore only be accepted from and
+	/// opened to trusted peers.
+	pub trusted_peers_0conf_0reserve: Vec<PublicKey>,
 	/// The liquidity factor by which we filter the outgoing channels used for sending probes.
 	///
 	/// Channels with available liquidity less than the required amount times this value won't be
@@ -208,7 +215,7 @@ impl Default for Config {
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
 			announcement_addresses: None,
-			trusted_peers_0conf: Vec::new(),
+			trusted_peers_0conf_0reserve: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			tor_config: None,

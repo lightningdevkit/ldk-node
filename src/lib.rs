@@ -1196,27 +1196,57 @@ impl Node {
 			self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
 		);
 
-		match self.channel_manager.create_channel(
-			peer_info.node_id,
-			channel_amount_sats,
-			push_msat,
-			user_channel_id,
-			None,
-			Some(user_config),
-		) {
-			Ok(_) => {
-				log_info!(
-					self.logger,
-					"Initiated channel creation with peer {}. ",
-					peer_info.node_id
-				);
-				self.peer_store.add_peer(peer_info)?;
-				Ok(UserChannelId(user_channel_id))
-			},
-			Err(e) => {
-				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
-				Err(Error::ChannelCreationFailed)
-			},
+		let is_trusted_peer = self.config.trusted_peers_0conf_0reserve.contains(&node_id);
+		if is_trusted_peer {
+			match self.channel_manager.create_channel_to_trusted_peer_0reserve(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			) {
+				Ok(_) => {
+					log_info!(
+						self.logger,
+						"Initiated 0reserve channel creation with peer {}. ",
+						peer_info.node_id
+					);
+					self.peer_store.add_peer(peer_info)?;
+					Ok(UserChannelId(user_channel_id))
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to initiate 0reserve channel creation: {:?}",
+						e
+					);
+					Err(Error::ChannelCreationFailed)
+				},
+			}
+		} else {
+			match self.channel_manager.create_channel(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			) {
+				Ok(_) => {
+					log_info!(
+						self.logger,
+						"Initiated channel creation with peer {}. ",
+						peer_info.node_id
+					);
+					self.peer_store.add_peer(peer_info)?;
+					Ok(UserChannelId(user_channel_id))
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
+					Err(Error::ChannelCreationFailed)
+				},
+			}
 		}
 	}
 
@@ -1469,12 +1499,7 @@ impl Node {
 
 			let funding_template = self
 				.channel_manager
-				.splice_channel(
-					&channel_details.channel_id,
-					&counterparty_node_id,
-					min_feerate,
-					max_feerate,
-				)
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
@@ -1482,12 +1507,14 @@ impl Node {
 
 			let contribution = self
 				.runtime
-				.block_on(
-					funding_template
-						.splice_in(Amount::from_sat(splice_amount_sats), Arc::clone(&self.wallet)),
-				)
-				.map_err(|()| {
-					log_error!(self.logger, "Failed to splice channel: coin selection failed");
+				.block_on(funding_template.splice_in(
+					Amount::from_sat(splice_amount_sats),
+					min_feerate,
+					max_feerate,
+					Arc::clone(&self.wallet),
+				))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
 
@@ -1585,12 +1612,7 @@ impl Node {
 
 			let funding_template = self
 				.channel_manager
-				.splice_channel(
-					&channel_details.channel_id,
-					&counterparty_node_id,
-					min_feerate,
-					max_feerate,
-				)
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
@@ -1602,9 +1624,14 @@ impl Node {
 			}];
 			let contribution = self
 				.runtime
-				.block_on(funding_template.splice_out(outputs, Arc::clone(&self.wallet)))
-				.map_err(|()| {
-					log_error!(self.logger, "Failed to splice channel: coin selection failed");
+				.block_on(funding_template.splice_out(
+					outputs,
+					min_feerate,
+					max_feerate,
+					Arc::clone(&self.wallet),
+				))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
 
