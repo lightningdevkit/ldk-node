@@ -46,7 +46,7 @@ impl EsploraChainSource {
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Self {
+	) -> Result<Self, ()> {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder =
 			client_builder.timeout(sync_config.timeouts_config.per_request_timeout_secs as u64);
@@ -55,14 +55,15 @@ impl EsploraChainSource {
 			client_builder = client_builder.header(header_name, header_value);
 		}
 
-		#[allow(clippy::unwrap_used)]
-		let esplora_client = client_builder.build_async().unwrap();
+		let esplora_client = client_builder.build_async().map_err(|e| {
+			log_error!(logger, "Failed to build Esplora client: {}", e);
+		})?;
 		let tx_sync =
 			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
 
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
-		Self {
+		Ok(Self {
 			sync_config,
 			esplora_client,
 			onchain_wallet_sync_status,
@@ -73,7 +74,7 @@ impl EsploraChainSource {
 			config,
 			logger,
 			node_metrics,
-		}
+		})
 	}
 
 	pub(super) async fn sync_onchain_wallet(
