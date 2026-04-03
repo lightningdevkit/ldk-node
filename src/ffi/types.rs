@@ -25,6 +25,7 @@ pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
 use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
+use lightning::ln::channel_state::CounterpartyForwardingInfo;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 pub use lightning::ln::types::ChannelId;
@@ -43,6 +44,7 @@ pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
 pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
+use lightning_types::features::InitFeatures as LdkInitFeatures;
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
 use vss_client::headers::{
@@ -1494,6 +1496,248 @@ pub enum ClosureReason {
 		/// The required feerate we enforce.
 		required_feerate_sat_per_kw: u32,
 	},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct InitFeatures {
+	pub(crate) inner: LdkInitFeatures,
+}
+
+impl InitFeatures {
+	/// Constructs init features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkInitFeatures::from_be_bytes(bytes.to_vec()).into() }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation of these features.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.encode()
+	}
+
+	/// Whether the peer supports `option_static_remotekey` (bit 13).
+	///
+	/// This ensures the non-broadcaster's output pays directly to their specified key,
+	/// simplifying recovery if a channel is force-closed.
+	pub fn supports_static_remote_key(&self) -> bool {
+		self.inner.supports_static_remote_key()
+	}
+
+	/// Whether the peer supports `option_anchors_zero_fee_htlc_tx` (bit 23).
+	///
+	/// Anchor channels allow fee-bumping commitment transactions after broadcast,
+	/// improving on-chain fee management.
+	pub fn supports_anchors_zero_fee_htlc_tx(&self) -> bool {
+		self.inner.supports_anchors_zero_fee_htlc_tx()
+	}
+
+	/// Whether the peer supports `option_anchors_nonzero_fee_htlc_tx` (bit 21).
+	///
+	/// The initial version of anchor outputs, which was later found to be
+	/// vulnerable and superseded by `option_anchors_zero_fee_htlc_tx`.
+	pub fn supports_anchors_nonzero_fee_htlc_tx(&self) -> bool {
+		self.inner.supports_anchors_nonzero_fee_htlc_tx()
+	}
+
+	/// Whether the peer supports `option_support_large_channel` (bit 19).
+	///
+	/// When supported, channels larger than 2^24 satoshis (≈0.168 BTC) may be opened.
+	pub fn supports_wumbo(&self) -> bool {
+		self.inner.supports_wumbo()
+	}
+
+	/// Whether the peer supports `option_route_blinding` (bit 25).
+	///
+	/// Route blinding allows the recipient to hide their node identity and
+	/// last-hop channel from the sender.
+	pub fn supports_route_blinding(&self) -> bool {
+		self.inner.supports_route_blinding()
+	}
+
+	/// Whether the peer supports `option_onion_messages` (bit 39).
+	///
+	/// Onion messages enable communication over the Lightning Network without
+	/// requiring a payment, used by BOLT 12 offers and async payments.
+	pub fn supports_onion_messages(&self) -> bool {
+		self.inner.supports_onion_messages()
+	}
+
+	/// Whether the peer supports `option_scid_alias` (bit 47).
+	///
+	/// When supported, the peer will only forward using short channel ID aliases,
+	/// preventing the real channel UTXO from being revealed during routing.
+	pub fn supports_scid_privacy(&self) -> bool {
+		self.inner.supports_scid_privacy()
+	}
+
+	/// Whether the peer requires `option_zeroconf` (bit 51).
+	///
+	/// Zero-conf channels can be used immediately without waiting for
+	/// on-chain funding confirmations.
+	pub fn requires_zero_conf(&self) -> bool {
+		self.inner.requires_zero_conf()
+	}
+
+	/// Whether the peer supports `option_dual_fund` (bit 29).
+	///
+	/// Dual-funded channels allow both parties to contribute funds
+	/// to the channel opening transaction.
+	pub fn supports_dual_fund(&self) -> bool {
+		self.inner.supports_dual_fund()
+	}
+
+	/// Whether the peer supports `option_quiesce` (bit 35).
+	///
+	/// Quiescence is a prerequisite for splicing, allowing both sides to
+	/// pause HTLC activity before modifying the funding transaction.
+	pub fn supports_quiescence(&self) -> bool {
+		self.inner.supports_quiescence()
+	}
+
+	/// Whether the peer supports `option_data_loss_protect` (bit 1).
+	///
+	/// Allows a node that has fallen behind (e.g., restored from backup)
+	/// to detect that it is out of date and close the channel safely.
+	pub fn supports_data_loss_protect(&self) -> bool {
+		self.inner.supports_data_loss_protect()
+	}
+
+	/// Whether the peer supports `option_upfront_shutdown_script` (bit 5).
+	///
+	/// Commits to a shutdown scriptpubkey when opening a channel,
+	/// preventing a compromised key from redirecting closing funds.
+	pub fn supports_upfront_shutdown_script(&self) -> bool {
+		self.inner.supports_upfront_shutdown_script()
+	}
+
+	/// Whether the peer supports `gossip_queries` (bit 7).
+	///
+	/// Enables more sophisticated gossip synchronization, allowing
+	/// nodes to request specific ranges of channel announcements.
+	pub fn supports_gossip_queries(&self) -> bool {
+		self.inner.supports_gossip_queries()
+	}
+
+	/// Whether the peer supports `var_onion_optin` (bit 9).
+	///
+	/// Requires variable-length routing onion payloads, which is
+	/// assumed to be supported by all modern Lightning nodes.
+	pub fn supports_variable_length_onion(&self) -> bool {
+		self.inner.supports_variable_length_onion()
+	}
+
+	/// Whether the peer supports `payment_secret` (bit 15).
+	///
+	/// Payment secrets prevent forwarding nodes from probing
+	/// payment recipients. Assumed to be supported by all modern nodes.
+	pub fn supports_payment_secret(&self) -> bool {
+		self.inner.supports_payment_secret()
+	}
+
+	/// Whether the peer supports `basic_mpp` (bit 17).
+	///
+	/// Multi-part payments allow splitting a payment across multiple
+	/// routes for improved reliability and liquidity utilization.
+	pub fn supports_basic_mpp(&self) -> bool {
+		self.inner.supports_basic_mpp()
+	}
+
+	/// Whether the peer supports `opt_shutdown_anysegwit` (bit 27).
+	///
+	/// Allows future segwit versions in the shutdown script,
+	/// enabling closing to Taproot or later output types.
+	pub fn supports_shutdown_anysegwit(&self) -> bool {
+		self.inner.supports_shutdown_anysegwit()
+	}
+
+	/// Whether the peer supports `option_channel_type` (bit 45).
+	///
+	/// Supports explicit channel type negotiation during channel opening.
+	pub fn supports_channel_type(&self) -> bool {
+		self.inner.supports_channel_type()
+	}
+
+	/// Whether the peer supports `option_trampoline` (bit 57).
+	///
+	/// Trampoline routing allows lightweight nodes to delegate
+	/// pathfinding to an intermediate trampoline node.
+	pub fn supports_trampoline_routing(&self) -> bool {
+		self.inner.supports_trampoline_routing()
+	}
+
+	/// Whether the peer supports `option_simple_close` (bit 61).
+	///
+	/// Simplified closing negotiation reduces the number of
+	/// round trips needed for a cooperative channel close.
+	pub fn supports_simple_close(&self) -> bool {
+		self.inner.supports_simple_close()
+	}
+
+	/// Whether the peer supports `option_splice` (bit 63).
+	///
+	/// Splicing allows replacing the funding transaction with a new one,
+	/// enabling on-the-fly capacity changes without closing the channel.
+	pub fn supports_splicing(&self) -> bool {
+		self.inner.supports_splicing()
+	}
+
+	/// Whether the peer supports `option_provide_storage` (bit 43).
+	///
+	/// Indicates the node offers to store encrypted backup data
+	/// on behalf of its peers.
+	pub fn supports_provide_storage(&self) -> bool {
+		self.inner.supports_provide_storage()
+	}
+
+	/// Whether the peer set `initial_routing_sync` (bit 3).
+	///
+	/// Indicates the sending node needs a complete routing information dump.
+	/// Per BOLT #9, this feature has no even (required) bit.
+	pub fn initial_routing_sync(&self) -> bool {
+		self.inner.initial_routing_sync()
+	}
+
+	/// Whether the peer supports `option_taproot` (bit 31).
+	///
+	/// Taproot channels use MuSig2-based multisig for funding outputs,
+	/// improving privacy and efficiency.
+	pub fn supports_taproot(&self) -> bool {
+		self.inner.supports_taproot()
+	}
+
+	/// Whether the peer supports `option_zero_fee_commitments` (bit 141, experimental).
+	///
+	/// A channel type which always uses zero transaction fee on commitment
+	/// transactions, combined with anchor outputs.
+	pub fn supports_anchor_zero_fee_commitments(&self) -> bool {
+		self.inner.supports_anchor_zero_fee_commitments()
+	}
+
+	/// Whether the peer supports HTLC hold (bit 153, experimental).
+	///
+	/// Supports holding HTLCs and forwarding on receipt of an onion message.
+	pub fn supports_htlc_hold(&self) -> bool {
+		self.inner.supports_htlc_hold()
+	}
+}
+
+impl From<LdkInitFeatures> for InitFeatures {
+	fn from(ldk_init: LdkInitFeatures) -> Self {
+		Self { inner: ldk_init }
+	}
+}
+
+/// Information needed for constructing an invoice route hint for this channel.
+#[uniffi::remote(Record)]
+pub struct CounterpartyForwardingInfo {
+	/// Base routing fee in millisatoshis.
+	pub fee_base_msat: u32,
+	/// Amount in millionths of a satoshi the channel will charge per transferred satoshi.
+	pub fee_proportional_millionths: u32,
+	/// The minimum difference in cltv_expiry between an ingoing HTLC and its outgoing counterpart,
+	/// such that the outgoing HTLC is forwardable to this counterparty.
+	pub cltv_expiry_delta: u16,
 }
 
 #[cfg(test)]
