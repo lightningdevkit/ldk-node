@@ -43,8 +43,7 @@ interface Builder {
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
 	void set_pathfinding_scores_source(string url);
-	void set_liquidity_source_lsps1(PublicKey node_id, SocketAddress address, string? token);
-	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
+	void add_lsp(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(string? log_file_path, LogLevel? max_log_level);
 	void set_log_facade_logger();
@@ -97,7 +96,7 @@ interface Node {
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
 	UnifiedPayment unified_payment();
-	LSPS1Liquidity lsps1_liquidity();
+	Liquidity liquidity();
 	[Throws=NodeError]
 	void lnurl_auth(string lnurl);
 	[Throws=NodeError]
@@ -161,7 +160,7 @@ interface FeeRate {
 
 typedef interface UnifiedPayment;
 
-typedef interface LSPS1Liquidity;
+typedef interface Liquidity;
 
 [Error]
 enum NodeError {
