@@ -688,6 +688,19 @@ where
 						};
 					}
 
+					// If the invoice has been canceled, reject the HTLC. We only do this
+					// when the preimage is known to preserve retry behavior for `_for_hash`
+					// manual-claim payments, where `fail_for_hash` may have been a
+					// temporary rejection (e.g., preimage not yet available).
+					if info.status == PaymentStatus::Failed && purpose.preimage().is_some() {
+						log_info!(
+							self.logger,
+							"Refused inbound payment with ID {payment_id}: invoice has been canceled."
+						);
+						self.channel_manager.fail_htlc_backwards(&payment_hash);
+						return Ok(());
+					}
+
 					if info.status == PaymentStatus::Succeeded
 						|| matches!(info.kind, PaymentKind::Spontaneous { .. })
 					{
