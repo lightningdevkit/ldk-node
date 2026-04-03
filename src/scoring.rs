@@ -13,6 +13,7 @@ use crate::io::utils::write_external_pathfinding_scores_to_cache;
 use crate::logger::LdkLogger;
 use crate::runtime::Runtime;
 use crate::types::DynStore;
+use crate::util::locks::{MutexExt, RwLockExt};
 use crate::{write_node_metrics, Logger, NodeMetrics, Scorer};
 
 /// Start a background task that periodically downloads scores via an external url and merges them into the local
@@ -82,10 +83,11 @@ async fn sync_external_scores(
 				log_error!(logger, "Failed to persist external scores to cache: {}", e);
 			}
 
-			let duration_since_epoch =
-				SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-			scorer.lock().unwrap().merge(liquidities, duration_since_epoch);
-			let mut locked_node_metrics = node_metrics.write().unwrap();
+			let duration_since_epoch = SystemTime::now()
+				.duration_since(SystemTime::UNIX_EPOCH)
+				.expect("current time should not be earlier than the Unix epoch");
+			scorer.lck().merge(liquidities, duration_since_epoch);
+			let mut locked_node_metrics = node_metrics.wlck();
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
 				Some(duration_since_epoch.as_secs());
 			write_node_metrics(&*locked_node_metrics, &*kv_store, logger).unwrap_or_else(|e| {

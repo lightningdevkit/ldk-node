@@ -308,6 +308,7 @@ mod tests {
 	use std::sync::Mutex;
 
 	use super::*;
+	use crate::util::locks::MutexExt;
 
 	/// A minimal log facade logger that captures log output for testing.
 	struct TestLogger {
@@ -320,7 +321,7 @@ mod tests {
 		}
 
 		fn log(&self, record: &log::Record) {
-			*self.log.lock().unwrap() = record.args().to_string();
+			*self.log.lck() = record.args().to_string();
 		}
 
 		fn flush(&self) {}

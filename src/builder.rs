@@ -80,6 +80,7 @@ use crate::types::{
 	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
 	PendingPaymentStore, SyncAndAsyncKVStore,
 };
+use crate::util::locks::{MutexExt, RwLockExt};
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics};
@@ -861,7 +862,7 @@ impl ArcedNodeBuilder {
 	pub fn set_chain_source_esplora(
 		&self, server_url: String, sync_config: Option<EsploraSyncConfig>,
 	) {
-		self.inner.write().unwrap().set_chain_source_esplora(server_url, sync_config);
+		self.inner.wlck().set_chain_source_esplora(server_url, sync_config);
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -875,11 +876,7 @@ impl ArcedNodeBuilder {
 		&self, server_url: String, headers: HashMap<String, String>,
 		sync_config: Option<EsploraSyncConfig>,
 	) {
-		self.inner.write().unwrap().set_chain_source_esplora_with_headers(
-			server_url,
-			headers,
-			sync_config,
-		);
+		self.inner.wlck().set_chain_source_esplora_with_headers(server_url, headers, sync_config);
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Electrum server.
@@ -889,7 +886,7 @@ impl ArcedNodeBuilder {
 	pub fn set_chain_source_electrum(
 		&self, server_url: String, sync_config: Option<ElectrumSyncConfig>,
 	) {
-		self.inner.write().unwrap().set_chain_source_electrum(server_url, sync_config);
+		self.inner.wlck().set_chain_source_electrum(server_url, sync_config);
 	}
 
 	/// Configures the [`Node`] instance to connect to a Bitcoin Core node via RPC.
@@ -903,12 +900,7 @@ impl ArcedNodeBuilder {
 	pub fn set_chain_source_bitcoind_rpc(
 		&self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 	) {
-		self.inner.write().unwrap().set_chain_source_bitcoind_rpc(
-			rpc_host,
-			rpc_port,
-			rpc_user,
-			rpc_password,
-		);
+		self.inner.wlck().set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
 	}
 
 	/// Configures the [`Node`] instance to synchronize chain data from a Bitcoin Core REST endpoint.
@@ -924,7 +916,7 @@ impl ArcedNodeBuilder {
 		&self, rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16,
 		rpc_user: String, rpc_password: String,
 	) {
-		self.inner.write().unwrap().set_chain_source_bitcoind_rest(
+		self.inner.wlck().set_chain_source_bitcoind_rest(
 			rest_host,
 			rest_port,
 			rpc_host,
@@ -937,20 +929,20 @@ impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
 	/// network.
 	pub fn set_gossip_source_p2p(&self) {
-		self.inner.write().unwrap().set_gossip_source_p2p();
+		self.inner.wlck().set_gossip_source_p2p();
 	}
 
 	/// Configures the [`Node`] instance to source its gossip data from the given RapidGossipSync
 	/// server.
 	pub fn set_gossip_source_rgs(&self, rgs_server_url: String) {
-		self.inner.write().unwrap().set_gossip_source_rgs(rgs_server_url);
+		self.inner.wlck().set_gossip_source_rgs(rgs_server_url);
 	}
 
 	/// Configures the [`Node`] instance to source its external scores from the given URL.
 	///
 	/// The external scores are merged into the local scoring system to improve routing.
 	pub fn set_pathfinding_scores_source(&self, url: String) {
-		self.inner.write().unwrap().set_pathfinding_scores_source(url);
+		self.inner.wlck().set_pathfinding_scores_source(url);
 	}
 
 	/// Configures the [`Node`] instance to source inbound liquidity from the given
@@ -964,7 +956,7 @@ impl ArcedNodeBuilder {
 	pub fn set_liquidity_source_lsps1(
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 	) {
-		self.inner.write().unwrap().set_liquidity_source_lsps1(node_id, address, token);
+		self.inner.wlck().set_liquidity_source_lsps1(node_id, address, token);
 	}
 
 	/// Configures the [`Node`] instance to source just-in-time inbound liquidity from the given
@@ -978,7 +970,7 @@ impl ArcedNodeBuilder {
 	pub fn set_liquidity_source_lsps2(
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 	) {
-		self.inner.write().unwrap().set_liquidity_source_lsps2(node_id, address, token);
+		self.inner.wlck().set_liquidity_source_lsps2(node_id, address, token);
 	}
 
 	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
@@ -988,12 +980,12 @@ impl ArcedNodeBuilder {
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn set_liquidity_provider_lsps2(&self, service_config: LSPS2ServiceConfig) {
-		self.inner.write().unwrap().set_liquidity_provider_lsps2(service_config);
+		self.inner.wlck().set_liquidity_provider_lsps2(service_config);
 	}
 
 	/// Sets the used storage directory path.
 	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
-		self.inner.write().unwrap().set_storage_dir_path(storage_dir_path);
+		self.inner.wlck().set_storage_dir_path(storage_dir_path);
 	}
 
 	/// Configures the [`Node`] instance to write logs to the filesystem.
@@ -1012,29 +1004,29 @@ impl ArcedNodeBuilder {
 	pub fn set_filesystem_logger(
 		&self, log_file_path: Option<String>, log_level: Option<LogLevel>,
 	) {
-		self.inner.write().unwrap().set_filesystem_logger(log_file_path, log_level);
+		self.inner.wlck().set_filesystem_logger(log_file_path, log_level);
 	}
 
 	/// Configures the [`Node`] instance to write logs to the [`log`](https://crates.io/crates/log) facade.
 	pub fn set_log_facade_logger(&self) {
-		self.inner.write().unwrap().set_log_facade_logger();
+		self.inner.wlck().set_log_facade_logger();
 	}
 
 	/// Configures the [`Node`] instance to write logs to the provided custom [`LogWriter`].
 	pub fn set_custom_logger(&self, log_writer: Arc<dyn LogWriter>) {
-		self.inner.write().unwrap().set_custom_logger(log_writer);
+		self.inner.wlck().set_custom_logger(log_writer);
 	}
 
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&self, network: Network) {
-		self.inner.write().unwrap().set_network(network);
+		self.inner.wlck().set_network(network);
 	}
 
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	pub fn set_listening_addresses(
 		&self, listening_addresses: Vec<SocketAddress>,
 	) -> Result<(), BuildError> {
-		self.inner.write().unwrap().set_listening_addresses(listening_addresses).map(|_| ())
+		self.inner.wlck().set_listening_addresses(listening_addresses).map(|_| ())
 	}
 
 	/// Sets the IP address and TCP port which [`Node`] will announce to the gossip network that it accepts connections on.
@@ -1045,7 +1037,7 @@ impl ArcedNodeBuilder {
 	pub fn set_announcement_addresses(
 		&self, announcement_addresses: Vec<SocketAddress>,
 	) -> Result<(), BuildError> {
-		self.inner.write().unwrap().set_announcement_addresses(announcement_addresses).map(|_| ())
+		self.inner.wlck().set_announcement_addresses(announcement_addresses).map(|_| ())
 	}
 
 	/// Configures the [`Node`] instance to use a Tor SOCKS proxy for outbound connections to peers with OnionV3 addresses.
@@ -1054,7 +1046,7 @@ impl ArcedNodeBuilder {
 	///
 	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
 	pub fn set_tor_config(&self, tor_config: TorConfig) -> Result<(), BuildError> {
-		self.inner.write().unwrap().set_tor_config(tor_config).map(|_| ())
+		self.inner.wlck().set_tor_config(tor_config).map(|_| ())
 	}
 
 	/// Sets the node alias that will be used when broadcasting announcements to the gossip
@@ -1062,14 +1054,14 @@ impl ArcedNodeBuilder {
 	///
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
-		self.inner.write().unwrap().set_node_alias(node_alias).map(|_| ())
+		self.inner.wlck().set_node_alias(node_alias).map(|_| ())
 	}
 
 	/// Sets the role of the node in an asynchronous payments context.
 	pub fn set_async_payments_role(
 		&self, role: Option<AsyncPaymentsRole>,
 	) -> Result<(), BuildError> {
-		self.inner.write().unwrap().set_async_payments_role(role).map(|_| ())
+		self.inner.wlck().set_async_payments_role(role).map(|_| ())
 	}
 
 	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
@@ -1078,13 +1070,13 @@ impl ArcedNodeBuilder {
 	/// This should only be set on first startup when importing an older wallet from a previously
 	/// used [`NodeEntropy`].
 	pub fn set_wallet_recovery_mode(&self) {
-		self.inner.write().unwrap().set_wallet_recovery_mode();
+		self.inner.wlck().set_wallet_recovery_mode();
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build(*node_entropy).map(Arc::new)
+		self.inner.rlck().build(*node_entropy).map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
@@ -1092,7 +1084,7 @@ impl ArcedNodeBuilder {
 	pub fn build_with_fs_store(
 		&self, node_entropy: Arc<NodeEntropy>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build_with_fs_store(*node_entropy).map(Arc::new)
+		self.inner.rlck().build_with_fs_store(*node_entropy).map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -1117,8 +1109,7 @@ impl ArcedNodeBuilder {
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner
-			.read()
-			.unwrap()
+			.rlck()
 			.build_with_vss_store(*node_entropy, vss_url, store_id, fixed_headers)
 			.map(Arc::new)
 	}
@@ -1150,8 +1141,7 @@ impl ArcedNodeBuilder {
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner
-			.read()
-			.unwrap()
+			.rlck()
 			.build_with_vss_store_and_lnurl_auth(
 				*node_entropy,
 				vss_url,
@@ -1179,8 +1169,7 @@ impl ArcedNodeBuilder {
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner
-			.read()
-			.unwrap()
+			.rlck()
 			.build_with_vss_store_and_fixed_headers(*node_entropy, vss_url, store_id, fixed_headers)
 			.map(Arc::new)
 	}
@@ -1202,8 +1191,7 @@ impl ArcedNodeBuilder {
 	) -> Result<Arc<Node>, BuildError> {
 		let adapter = Arc::new(crate::ffi::VssHeaderProviderAdapter::new(header_provider));
 		self.inner
-			.read()
-			.unwrap()
+			.rlck()
 			.build_with_vss_store_and_header_provider(*node_entropy, vss_url, store_id, adapter)
 			.map(Arc::new)
 	}
@@ -1214,7 +1202,7 @@ impl ArcedNodeBuilder {
 	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build_with_store(*node_entropy, kv_store).map(Arc::new)
+		self.inner.rlck().build_with_store(*node_entropy, kv_store).map(Arc::new)
 	}
 }
 
@@ -1610,7 +1598,7 @@ fn build_with_store_internal(
 	// Restore external pathfinding scores from cache if possible.
 	match external_scores_res {
 		Ok(external_scores) => {
-			scorer.lock().unwrap().merge(external_scores, cur_time);
+			scorer.lck().merge(external_scores, cur_time);
 			log_trace!(logger, "External scores from cache merged successfully");
 		},
 		Err(e) => {
@@ -1763,7 +1751,7 @@ fn build_with_store_internal(
 
 			// Reset the RGS sync timestamp in case we somehow switch gossip sources
 			{
-				let mut locked_node_metrics = node_metrics.write().unwrap();
+				let mut locked_node_metrics = node_metrics.wlck();
 				locked_node_metrics.latest_rgs_snapshot_timestamp = None;
 				write_node_metrics(&*locked_node_metrics, &*kv_store, Arc::clone(&logger))
 					.map_err(|e| {
@@ -1775,7 +1763,7 @@ fn build_with_store_internal(
 		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
 			let latest_sync_timestamp =
-				node_metrics.read().unwrap().latest_rgs_snapshot_timestamp.unwrap_or(0);
+				node_metrics.rlck().latest_rgs_snapshot_timestamp.unwrap_or(0);
 			Arc::new(GossipSource::new_rgs(
 				rgs_server.clone(),
 				latest_sync_timestamp,

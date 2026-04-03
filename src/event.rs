@@ -56,6 +56,7 @@ use crate::runtime::Runtime;
 use crate::types::{
 	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
 };
+use crate::util::locks::MutexExt;
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -370,21 +371,21 @@ where
 
 	pub(crate) async fn add_event(&self, event: Event) -> Result<(), Error> {
 		let data = {
-			let mut locked_queue = self.queue.lock().unwrap();
+			let mut locked_queue = self.queue.lck();
 			locked_queue.push_back(event);
 			EventQueueSerWrapper(&locked_queue).encode()
 		};
 
 		self.persist_queue(data).await?;
 
-		if let Some(waker) = self.waker.lock().unwrap().take() {
+		if let Some(waker) = self.waker.lck().take() {
 			waker.wake();
 		}
 		Ok(())
 	}
 
 	pub(crate) fn next_event(&self) -> Option<Event> {
-		let locked_queue = self.queue.lock().unwrap();
+		let locked_queue = self.queue.lck();
 		locked_queue.front().cloned()
 	}
 
@@ -394,14 +395,14 @@ where
 
 	pub(crate) async fn event_handled(&self) -> Result<(), Error> {
 		let data = {
-			let mut locked_queue = self.queue.lock().unwrap();
+			let mut locked_queue = self.queue.lck();
 			locked_queue.pop_front();
 			EventQueueSerWrapper(&locked_queue).encode()
 		};
 
 		self.persist_queue(data).await?;
 
-		if let Some(waker) = self.waker.lock().unwrap().take() {
+		if let Some(waker) = self.waker.lck().take() {
 			waker.wake();
 		}
 		Ok(())
@@ -485,10 +486,10 @@ impl Future for EventFuture {
 	fn poll(
 		self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>,
 	) -> core::task::Poll<Self::Output> {
-		if let Some(event) = self.event_queue.lock().unwrap().front() {
+		if let Some(event) = self.event_queue.lck().front() {
 			Poll::Ready(event.clone())
 		} else {
-			*self.waker.lock().unwrap() = Some(cx.waker().clone());
+			*self.waker.lck() = Some(cx.waker().clone());
 			Poll::Pending
 		}
 	}
@@ -1091,11 +1092,13 @@ where
 				};
 
 				self.payment_store.get(&payment_id).map(|payment| {
+					#[allow(clippy::unwrap_used)]
+					let amount_msat = payment.amount_msat.unwrap();
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
 						payment hash {:?} with preimage {:?}",
-						payment.amount_msat.unwrap(),
+						amount_msat,
 						if let Some(fee) = fee_paid_msat {
 							format!(" (fee {} msat)", fee)
 						} else {
@@ -1256,7 +1259,9 @@ where
 				}
 
 				let user_channel_id: u128 = u128::from_ne_bytes(
-					self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
+					self.keys_manager.get_secure_random_bytes()[..16]
+						.try_into()
+						.expect("a 16-byte slice should convert into a [u8; 16]"),
 				);
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
@@ -1446,10 +1451,13 @@ where
 					counterparty_node_id,
 				);
 
+				#[allow(clippy::unwrap_used)]
+				let former_temporary_channel_id = former_temporary_channel_id.unwrap();
+
 				let event = Event::ChannelPending {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
-					former_temporary_channel_id: former_temporary_channel_id.unwrap(),
+					former_temporary_channel_id,
 					counterparty_node_id,
 					funding_txo,
 				};

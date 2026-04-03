@@ -22,6 +22,7 @@ use crate::hex_utils;
 use crate::io::STATIC_INVOICE_STORE_PRIMARY_NAMESPACE;
 use crate::payment::asynchronous::rate_limiter::RateLimiter;
 use crate::types::DynStore;
+use crate::util::locks::MutexExt;
 
 struct PersistedStaticInvoice {
 	invoice: StaticInvoice,
@@ -63,7 +64,7 @@ impl StaticInvoiceStore {
 	fn check_rate_limit(
 		limiter: &Mutex<RateLimiter>, recipient_id: &[u8],
 	) -> Result<(), lightning::io::Error> {
-		let mut limiter = limiter.lock().unwrap();
+		let mut limiter = limiter.lck();
 		if !limiter.allow(recipient_id) {
 			Err(lightning::io::Error::new(lightning::io::ErrorKind::Other, "Rate limit exceeded"))
 		} else {

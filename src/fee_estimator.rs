@@ -14,6 +14,8 @@ use lightning::chain::chaininterface::{
 	FEERATE_FLOOR_SATS_PER_KW,
 };
 
+use crate::util::locks::RwLockExt;
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ConfirmationTarget {
 	/// The default target for onchain payments.
@@ -48,7 +50,7 @@ impl OnchainFeeEstimator {
 	pub(crate) fn set_fee_rate_cache(
 		&self, fee_rate_cache_update: HashMap<ConfirmationTarget, FeeRate>,
 	) -> bool {
-		let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
+		let mut locked_fee_rate_cache = self.fee_rate_cache.wlck();
 		if fee_rate_cache_update != *locked_fee_rate_cache {
 			*locked_fee_rate_cache = fee_rate_cache_update;
 			true
@@ -60,7 +62,7 @@ impl OnchainFeeEstimator {
 
 impl FeeEstimator for OnchainFeeEstimator {
 	fn estimate_fee_rate(&self, confirmation_target: ConfirmationTarget) -> FeeRate {
-		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
+		let locked_fee_rate_cache = self.fee_rate_cache.rlck();
 
 		let fallback_sats_kwu = get_fallback_rate_for_target(confirmation_target);
 

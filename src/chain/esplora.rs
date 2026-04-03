@@ -25,6 +25,7 @@ use crate::fee_estimator::{
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::util::locks::{MutexExt, RwLockExt};
 use crate::{Error, NodeMetrics};
 
 pub(super) struct EsploraChainSource {
@@ -54,6 +55,7 @@ impl EsploraChainSource {
 			client_builder = client_builder.header(header_name, header_value);
 		}
 
+		#[allow(clippy::unwrap_used)]
 		let esplora_client = client_builder.build_async().unwrap();
 		let tx_sync =
 			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
@@ -78,7 +80,7 @@ impl EsploraChainSource {
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
 		let receiver_res = {
-			let mut status_lock = self.onchain_wallet_sync_status.lock().unwrap();
+			let mut status_lock = self.onchain_wallet_sync_status.lck();
 			status_lock.register_or_subscribe_pending_sync()
 		};
 		if let Some(mut sync_receiver) = receiver_res {
@@ -92,7 +94,7 @@ impl EsploraChainSource {
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
-		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+		self.onchain_wallet_sync_status.lck().propagate_result_to_subscribers(res);
 
 		res
 	}
@@ -101,7 +103,7 @@ impl EsploraChainSource {
 		// If this is our first sync, do a full scan with the configured gap limit.
 		// Otherwise just do an incremental sync.
 		let incremental_sync =
-			self.node_metrics.read().unwrap().latest_onchain_wallet_sync_timestamp.is_some();
+			self.node_metrics.rlck().latest_onchain_wallet_sync_timestamp.is_some();
 
 		macro_rules! get_and_apply_wallet_update {
 			($sync_future: expr) => {{
@@ -121,7 +123,7 @@ impl EsploraChainSource {
 									.ok()
 									.map(|d| d.as_secs());
 									{
-										let mut locked_node_metrics = self.node_metrics.write().unwrap();
+									let mut locked_node_metrics = self.node_metrics.wlck();
 										locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
 										write_node_metrics(
 											&*locked_node_metrics,
@@ -207,7 +209,7 @@ impl EsploraChainSource {
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let receiver_res = {
-			let mut status_lock = self.lightning_wallet_sync_status.lock().unwrap();
+			let mut status_lock = self.lightning_wallet_sync_status.lck();
 			status_lock.register_or_subscribe_pending_sync()
 		};
 		if let Some(mut sync_receiver) = receiver_res {
@@ -222,7 +224,7 @@ impl EsploraChainSource {
 		let res =
 			self.sync_lightning_wallet_inner(channel_manager, chain_monitor, output_sweeper).await;
 
-		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+		self.lightning_wallet_sync_status.lck().propagate_result_to_subscribers(res);
 
 		res
 	}
@@ -259,7 +261,7 @@ impl EsploraChainSource {
 					let unix_time_secs_opt =
 						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
 					{
-						let mut locked_node_metrics = self.node_metrics.write().unwrap();
+						let mut locked_node_metrics = self.node_metrics.wlck();
 						locked_node_metrics.latest_lightning_wallet_sync_timestamp =
 							unix_time_secs_opt;
 						write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
@@ -344,7 +346,7 @@ impl EsploraChainSource {
 		let unix_time_secs_opt =
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
 		{
-			let mut locked_node_metrics = self.node_metrics.write().unwrap();
+			let mut locked_node_metrics = self.node_metrics.wlck();
 			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
 			write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
 		}

@@ -30,6 +30,7 @@ use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::types::{ChannelManager, KeysManager, PaymentStore};
+use crate::util::locks::RwLockExt;
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt12Invoice = lightning::offers::invoice::Bolt12Invoice;
@@ -89,7 +90,7 @@ impl Bolt12Payment {
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.rlck() {
 			return Err(Error::NotRunning);
 		}
 
@@ -207,7 +208,7 @@ impl Bolt12Payment {
 		if let Some(expiry_secs) = expiry_secs {
 			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 				.duration_since(UNIX_EPOCH)
-				.unwrap();
+				.expect("a future expiry should not be earlier than the Unix epoch");
 			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
 		}
 
@@ -219,7 +220,10 @@ impl Bolt12Payment {
 				log_error!(self.logger, "Failed to create offer: quantity can't be zero.");
 				return Err(Error::InvalidQuantity);
 			} else {
-				offer = offer.supported_quantity(Quantity::Bounded(NonZeroU64::new(qty).unwrap()))
+				offer = offer.supported_quantity(Quantity::Bounded(
+					NonZeroU64::new(qty)
+						.expect("qty == 0 was rejected before constructing NonZeroU64"),
+				))
 			};
 		};
 
@@ -262,7 +266,7 @@ impl Bolt12Payment {
 		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.rlck() {
 			return Err(Error::NotRunning);
 		}
 
@@ -405,7 +409,7 @@ impl Bolt12Payment {
 		if let Some(expiry_secs) = expiry_secs {
 			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 				.duration_since(UNIX_EPOCH)
-				.unwrap();
+				.expect("a future expiry should not be earlier than the Unix epoch");
 			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
 		}
 
@@ -425,7 +429,7 @@ impl Bolt12Payment {
 	/// [`Refund`]: lightning::offers::refund::Refund
 	/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
 	pub fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.rlck() {
 			return Err(Error::NotRunning);
 		}
 
@@ -474,7 +478,7 @@ impl Bolt12Payment {
 
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 			.duration_since(UNIX_EPOCH)
-			.unwrap();
+			.expect("a future expiry should not be earlier than the Unix epoch");
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();

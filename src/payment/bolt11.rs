@@ -37,6 +37,7 @@ use crate::payment::store::{
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, PaymentStore};
+use crate::util::locks::RwLockExt;
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
@@ -241,7 +242,7 @@ impl Bolt11Payment {
 	pub fn send(
 		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.rlck() {
 			return Err(Error::NotRunning);
 		}
 
@@ -275,7 +276,9 @@ impl Bolt11Payment {
 		) {
 			Ok(()) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
-				let amt_msat = invoice.amount_milli_satoshis().unwrap();
+				let amt_msat = invoice
+					.amount_milli_satoshis()
+					.expect("zero-amount invoices should be rejected before initiating payment");
 				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
 
 				let kind = PaymentKind::Bolt11 {
@@ -342,7 +345,7 @@ impl Bolt11Payment {
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.rlck() {
 			return Err(Error::NotRunning);
 		}
 
@@ -776,7 +779,7 @@ impl Bolt11Payment {
 	pub fn send_probes(
 		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<(), Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.rlck() {
 			return Err(Error::NotRunning);
 		}
 
@@ -831,7 +834,7 @@ impl Bolt11Payment {
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<(), Error> {
-		if !*self.is_running.read().unwrap() {
+		if !*self.is_running.rlck() {
 			return Err(Error::NotRunning);
 		}
 
