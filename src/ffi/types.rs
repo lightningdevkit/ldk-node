@@ -25,6 +25,7 @@ pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
 use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
+use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 pub use lightning::ln::types::ChannelId;
@@ -1414,6 +1415,26 @@ uniffi::custom_type!(LSPSDateTime, String, {
 		obj.to_rfc3339()
 	},
 });
+
+/// The shutdown state of a channel as returned in [`ChannelDetails::channel_shutdown_state`].
+///
+/// [`ChannelDetails::channel_shutdown_state`]: crate::ChannelDetails::channel_shutdown_state
+#[uniffi::remote(Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelShutdownState {
+	/// Channel has not sent or received a shutdown message.
+	NotShuttingDown,
+	/// Local node has sent a shutdown message for this channel.
+	ShutdownInitiated,
+	/// Shutdown message exchanges have concluded and the channels are in the midst of
+	/// resolving all existing open HTLCs before closing can continue.
+	ResolvingHTLCs,
+	/// All HTLCs have been resolved, nodes are currently negotiating channel close onchain fee rates.
+	NegotiatingClosingFee,
+	/// We've successfully negotiated a closing_signed dance. At this point `ChannelManager` is about
+	/// to drop the channel.
+	ShutdownComplete,
+}
 
 /// The reason the channel was closed. See individual variants for more details.
 #[uniffi::remote(Enum)]
