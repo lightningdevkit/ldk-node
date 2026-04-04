@@ -40,7 +40,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::util::persist::{
-	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -85,57 +85,78 @@ async fn channel_full_cycle_tier_store() {
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
 		.await;
 
-	// Verify Primary store contains channel manager data
+	// Verify primary and backup both contain the same channel manager data.
 	let primary_channel_manager = test_kv_read(
 		&(primary_a.clone()),
 		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_KEY,
-	);
-	assert!(primary_channel_manager.is_ok(), "Primary should have channel manager data");
-
-	// Verify Primary store contains payment info
-	let primary_payments = test_kv_list(&(primary_a.clone()), "payments", "");
-	assert!(primary_payments.is_ok(), "Primary should have payment data");
-	assert!(!primary_payments.unwrap().is_empty(), "Primary should have payment entries");
-
-	// Verify Backup store synced critical data
+	)
+	.expect("Primary should have channel manager data");
 	let backup_channel_manager = test_kv_read(
 		&(backup_a.clone()),
 		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	)
+	.expect("Backup should have channel manager data");
+	assert_eq!(
+		primary_channel_manager, backup_channel_manager,
+		"Primary and backup should store identical channel manager data"
 	);
-	assert!(backup_channel_manager.is_ok(), "Backup should have synced channel manager");
 
-	// Verify backup is not empty
-	let backup_all_keys = test_kv_list(&(backup_a.clone()), "", "").unwrap();
-	assert!(!backup_all_keys.is_empty(), "Backup store should not be empty");
+	// Verify payment data is persisted in both primary and backup stores.
+	let primary_payments =
+		test_kv_list(&(primary_a.clone()), "payments", "").expect("Primary should list payments");
+	assert!(
+		!primary_payments.is_empty(),
+		"Primary should have payment entries after the full cycle"
+	);
 
-	// Verify Ephemeral does NOT have channel manager
+	let backup_payments =
+		test_kv_list(&(backup_a.clone()), "payments", "").expect("Backup should list payments");
+	assert!(!backup_payments.is_empty(), "Backup should have payment entries after the full cycle");
+
+	// Verify ephemeral store does not contain primary-backed critical data.
 	let ephemeral_channel_manager = test_kv_read(
 		&(ephemeral_a.clone()),
 		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_KEY,
 	);
-	assert!(ephemeral_channel_manager.is_err(), "Ephemeral should NOT have channel manager");
+	assert!(ephemeral_channel_manager.is_err(), "Ephemeral should not have channel manager data");
 
-	// Verify Ephemeral does NOT have payment info
 	let ephemeral_payments = test_kv_list(&(ephemeral_a.clone()), "payments", "");
 	assert!(
 		ephemeral_payments.is_err() || ephemeral_payments.unwrap().is_empty(),
-		"Ephemeral should NOT have payment data"
+		"Ephemeral should not have payment data"
 	);
 
-	//Verify Ephemeral does have network graph
+	// Verify ephemeral-routed data is stored in the ephemeral store.
 	let ephemeral_network_graph = test_kv_read(
 		&(ephemeral_a.clone()),
 		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 		NETWORK_GRAPH_PERSISTENCE_KEY,
 	);
-	assert!(ephemeral_network_graph.is_ok(), "Ephemeral should have network graph");
+	assert!(ephemeral_network_graph.is_ok(), "Ephemeral should have network graph data");
+
+	// Verify ephemeral-routed data is not mirrored to primary or backup stores.
+	let primary_network_graph = test_kv_read(
+		&(primary_a.clone()),
+		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_KEY,
+	);
+	assert!(primary_network_graph.is_err(), "Primary should not have ephemeral network graph data");
+
+	let backup_network_graph = test_kv_read(
+		&(backup_a.clone()),
+		NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_KEY,
+	);
+	assert!(backup_network_graph.is_err(), "Backup should not have ephemeral network graph data");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

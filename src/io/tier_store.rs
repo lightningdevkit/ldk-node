@@ -16,24 +16,28 @@ use lightning::util::persist::{
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
-use lightning::{io, log_error, log_warn};
-
-use tokio::sync::mpsc::{self, error::TrySendError};
+use lightning::{io, log_error};
 
 use std::future::Future;
 use std::sync::Arc;
 
-#[cfg(not(test))]
-const BACKUP_QUEUE_CAPACITY: usize = 100;
-#[cfg(test)]
-const BACKUP_QUEUE_CAPACITY: usize = 5;
-
-/// A 3-tiered [`KVStoreSync`] implementation that manages data across
-/// three distinct storage locations, i.e. primary (preferably remote)
-/// store for all critical data, optional ephemeral (local) store for
-/// non-critical and easily rebuildable data, and backup (preferably
-/// local) to lazily backup the primary store for disaster recovery
-/// scenarios.
+/// A 3-tiered [`KVStoreSync`] implementation that routes data across storage
+/// backends that may be local or remote:
+/// - a primary store for durable, authoritative persistence,
+/// - an optional backup store that maintains an additional durable copy of
+///   primary-backed data, and
+/// - an optional ephemeral store for non-critical, rebuildable cached data.
+///
+/// When a backup store is configured, writes and removals for primary-backed data
+/// are issued to the primary and backup stores concurrently and only succeed once
+/// both stores complete successfully.
+///
+/// Reads and lists do not consult the backup store during normal operation.
+/// Ephemeral data is read from and written to the ephemeral store when configured.
+///
+/// Note that dual-store writes and removals are not atomic across the primary and
+/// backup stores. If one store succeeds and the other fails, the operation
+/// returns an error even though one store may already reflect the change.
 pub(crate) struct TierStore {
 	inner: Arc<TierStoreInner>,
 	runtime: Arc<Runtime>,
@@ -47,29 +51,17 @@ impl TierStore {
 		Self { inner, runtime, logger }
 	}
 
-	/// Configures the local backup store for disaster recovery.
+	/// Configures a backup store for primary-backed data.
 	///
-	/// This store serves as a local copy of the critical data for disaster
-	/// recovery scenarios. When configured, this method also spawns a background
-	/// task that asynchronously processes backup writes and removals to avoid
-	/// blocking primary store operations.
+	/// Once set, writes and removals targeting the primary tier succeed only if both
+	/// the primary and backup stores succeed. The two operations are issued
+	/// concurrently, and any failure is returned to the caller.
 	///
-	/// The backup operates on a best-effort basis:
-	/// - Writes are queued asynchronously (non-blocking)
-	/// - No retry logic (We assume local store is unlikely to have transient failures).
-	/// - Failures are logged but don't propagate to all the way to caller.
+	/// Note: dual-store writes/removals are not atomic. An error may be returned
+	/// after the primary store has already been updated if the backup store fails.
+	///
+	/// The backup store is not consulted for normal reads or lists.
 	pub fn set_backup_store(&mut self, backup: Arc<DynStore>) {
-		let (tx, rx) = mpsc::channel::<BackupOp>(BACKUP_QUEUE_CAPACITY);
-
-		let backup_clone = Arc::clone(&backup);
-		let logger = Arc::clone(&self.logger);
-
-		self.runtime.spawn_background_task(Self::process_backup_operation(
-			rx,
-			backup_clone,
-			logger,
-		));
-
 		debug_assert_eq!(Arc::strong_count(&self.inner), 1);
 
 		let inner = Arc::get_mut(&mut self.inner).expect(
@@ -77,49 +69,12 @@ impl TierStore {
 		);
 
 		inner.backup_store = Some(backup);
-		inner.backup_sender = Some(tx);
 	}
 
-	async fn process_backup_operation(
-		mut receiver: mpsc::Receiver<BackupOp>, backup_store: Arc<DynStore>, logger: Arc<Logger>,
-	) {
-		while let Some(op) = receiver.recv().await {
-			match Self::apply_backup_operation(&op, &backup_store).await {
-				Ok(_) => {},
-				Err(e) => {
-					log_error!(
-						logger,
-						"Backup failed permanently for key {}/{}/{}: {}",
-						op.primary_namespace(),
-						op.secondary_namespace(),
-						op.key(),
-						e
-					);
-				},
-			}
-		}
-	}
-
-	async fn apply_backup_operation(op: &BackupOp, store: &Arc<DynStore>) -> io::Result<()> {
-		match op {
-			BackupOp::Write { primary_namespace, secondary_namespace, key, data } => {
-				KVStore::write(
-					store.as_ref(),
-					primary_namespace,
-					secondary_namespace,
-					key,
-					data.clone(),
-				)
-				.await
-			},
-			BackupOp::Remove { primary_namespace, secondary_namespace, key, lazy } => {
-				KVStore::remove(store.as_ref(), primary_namespace, secondary_namespace, key, *lazy)
-					.await
-			},
-		}
-	}
-
-	/// Configures the local store for non-critical data storage.
+	/// Configures the ephemeral store for non-critical, rebuildable data.
+	///
+	/// When configured, selected cache-like data is routed to this store instead of
+	/// the primary store.
 	pub fn set_ephemeral_store(&mut self, ephemeral: Arc<DynStore>) {
 		debug_assert_eq!(Arc::strong_count(&self.inner), 1);
 
@@ -230,134 +185,19 @@ impl KVStoreSync for TierStore {
 }
 
 struct TierStoreInner {
-	/// For local or remote data.
+	/// The authoritative store for durable data.
 	primary_store: Arc<DynStore>,
-	/// For local non-critical/ephemeral data.
+	/// The store used for non-critical, rebuildable cached data.
 	ephemeral_store: Option<Arc<DynStore>>,
-	/// For redundancy (disaster recovery).
+	/// An optional second durable store for primary-backed data.
 	backup_store: Option<Arc<DynStore>>,
-	backup_sender: Option<mpsc::Sender<BackupOp>>,
 	logger: Arc<Logger>,
 }
 
 impl TierStoreInner {
 	/// Creates a tier store with the primary data store.
 	pub fn new(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
-		Self {
-			primary_store,
-			ephemeral_store: None,
-			backup_store: None,
-			backup_sender: None,
-			logger,
-		}
-	}
-
-	/// Queues data for asynchronous backup/write to the configured backup store.
-	///
-	/// We perform a non-blocking send to avoid impacting primary storage operations.
-	/// This is a no-op if backup store is not configured.
-	///
-	/// ## Returns
-	/// - `Ok(())`: Backup was successfully queued or no backup is configured
-	/// - `Err(WouldBlock)`: Backup queue is full - data was not queued
-	/// - `Err(BrokenPipe)`: Backup queue is no longer available
-	fn enqueue_backup_write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		if let Some(backup_sender) = &self.backup_sender {
-			let backup_res = backup_sender.try_send(BackupOp::Write {
-				primary_namespace: primary_namespace.to_string(),
-				secondary_namespace: secondary_namespace.to_string(),
-				key: key.to_string(),
-				data: buf,
-			});
-			if let Err(e) = backup_res {
-				match e {
-					// Assuming the channel is only full for a short time, should we explore
-					// retrying here to add some resiliency?
-					TrySendError::Full(op) => {
-						log_warn!(
-							self.logger,
-							"Backup queue is full. Cannot write data for key: {}/{}/{}",
-							op.primary_namespace(),
-							op.secondary_namespace(),
-							op.key()
-						);
-						let e = io::Error::new(
-							io::ErrorKind::WouldBlock,
-							"Backup queue is currently full.",
-						);
-						return Err(e);
-					},
-					TrySendError::Closed(op) => {
-						log_error!(
-							self.logger,
-							"Backup queue is closed. Cannot write data for key: {}/{}/{}",
-							op.primary_namespace(),
-							op.secondary_namespace(),
-							op.key()
-						);
-						let e =
-							io::Error::new(io::ErrorKind::BrokenPipe, "Backup queue is closed.");
-						return Err(e);
-					},
-				}
-			}
-		}
-		Ok(())
-	}
-
-	/// Queues the removal of data from the configured backup store.
-	///
-	/// We perform a non-blocking send to avoid impacting primary storage operations.
-	/// This is a no-op if backup store is not configured.
-	///
-	/// # Returns
-	/// - `Ok(())`: Backup was successfully queued or no backup is configured
-	/// - `Err(WouldBlock)`: Backup queue is full - data was not queued
-	/// - `Err(BrokenPipe)`: Backup system is no longer available
-	fn enqueue_backup_remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		if let Some(backup_sender) = &self.backup_sender {
-			let removal_res = backup_sender.try_send(BackupOp::Remove {
-				primary_namespace: primary_namespace.to_string(),
-				secondary_namespace: secondary_namespace.to_string(),
-				key: key.to_string(),
-				lazy,
-			});
-			if let Err(e) = removal_res {
-				match e {
-					TrySendError::Full(op) => {
-						log_warn!(
-							self.logger,
-							"Backup queue is full. Cannot remove data for key: {}/{}/{}",
-							op.primary_namespace(),
-							op.secondary_namespace(),
-							op.key()
-						);
-						let e = io::Error::new(
-							io::ErrorKind::WouldBlock,
-							"Backup queue is currently full.",
-						);
-						return Err(e);
-					},
-					TrySendError::Closed(op) => {
-						log_error!(
-							self.logger,
-							"Backup queue is closed. Cannot remove data for key: {}/{}/{}",
-							op.primary_namespace(),
-							op.secondary_namespace(),
-							op.key()
-						);
-						let e =
-							io::Error::new(io::ErrorKind::BrokenPipe, "Backup queue is closed.");
-						return Err(e);
-					},
-				}
-			}
-		}
-		Ok(())
+		Self { primary_store, ephemeral_store: None, backup_store: None, logger }
 	}
 
 	/// Reads from the primary data store.
@@ -408,87 +248,91 @@ impl TierStoreInner {
 		}
 	}
 
-	async fn primary_write_then_schedule_backup(
+	async fn write_primary_backup_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
-		match KVStore::write(
+		let primary_fut = KVStore::write(
 			self.primary_store.as_ref(),
 			primary_namespace,
 			secondary_namespace,
 			key,
 			buf.clone(),
-		)
-		.await
-		{
-			Ok(()) => {
-				if let Err(e) =
-					self.enqueue_backup_write(primary_namespace, secondary_namespace, key, buf)
-				{
-					// We don't propagate backup errors here, opting to log only.
-					log_warn!(
-						self.logger,
-						"Failed to queue backup write for key: {}/{}/{}. Error: {}",
-						primary_namespace,
-						secondary_namespace,
-						key,
-						e
-					)
-				}
+		);
 
-				Ok(())
-			},
-			Err(e) => {
-				log_error!(
+		if let Some(backup_store) = self.backup_store.as_ref() {
+			let backup_fut = KVStore::write(
+				backup_store.as_ref(),
+				primary_namespace,
+				secondary_namespace,
+				key,
+				buf,
+			);
+
+			let (primary_res, backup_res) = tokio::join!(primary_fut, backup_fut);
+
+			match (primary_res, backup_res) {
+				(Ok(()), Ok(())) => Ok(()),
+				(Err(primary_err), Ok(())) => Err(primary_err),
+				(Ok(()), Err(backup_err)) => Err(backup_err),
+				(Err(primary_err), Err(backup_err)) => {
+					log_error!(
 					self.logger,
-					"Skipping backup write due to primary write failure for key: {}/{}/{}.",
+					"Primary and backup writes both failed for key {}/{}/{}: primary={}, backup={}",
 					primary_namespace,
 					secondary_namespace,
-					key
+					key,
+					primary_err,
+					backup_err
 				);
-				Err(e)
-			},
+					Err(primary_err)
+				},
+			}
+		} else {
+			primary_fut.await
 		}
 	}
 
-	async fn primary_remove_then_schedule_backup(
+	async fn remove_primary_backup_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
-		match KVStore::remove(
+		let primary_fut = KVStore::remove(
 			self.primary_store.as_ref(),
 			primary_namespace,
 			secondary_namespace,
 			key,
 			lazy,
-		)
-		.await
-		{
-			Ok(()) => {
-				if let Err(e) =
-					self.enqueue_backup_remove(primary_namespace, secondary_namespace, key, lazy)
-				{
-					// We don't propagate backup errors here, opting to silently log.
-					log_warn!(
-						self.logger,
-						"Failed to queue backup removal for key: {}/{}/{}. Error: {}",
-						primary_namespace,
-						secondary_namespace,
-						key,
-						e
-					)
-				}
+		);
 
-				Ok(())
-			},
-			Err(e) => {
-				log_error!(
+		if let Some(backup_store) = self.backup_store.as_ref() {
+			let backup_fut = KVStore::remove(
+				backup_store.as_ref(),
+				primary_namespace,
+				secondary_namespace,
+				key,
+				lazy,
+			);
+
+			let (primary_res, backup_res) = tokio::join!(primary_fut, backup_fut);
+
+			match (primary_res, backup_res) {
+				(Ok(()), Ok(())) => Ok(()),
+				(Err(primary_err), Ok(())) => Err(primary_err),
+				(Ok(()), Err(backup_err)) => Err(backup_err),
+				(Err(primary_err), Err(backup_err)) => {
+					log_error!(
 					self.logger,
-					"Skipping backup removal due to primary removal failure for key: {}/{}/{}.",
+					"Primary and backup removals both failed for key {}/{}/{}: primary={}, backup={}",
 					primary_namespace,
 					secondary_namespace,
-					key
+					key,
+					primary_err,
+					backup_err
 				);
-				Err(e)
-			},
+					Err(primary_err)
+				},
+			}
+		} else {
+			primary_fut.await
 		}
 	}
 
@@ -507,14 +351,8 @@ impl TierStoreInner {
 			.as_ref()
 			.filter(|_s| is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key))
 		{
-			// We only try once here (without retry logic) because local failure might be indicative
-			// of a more serious issue (e.g. full memory, memory corruption, permissions change) that
-			// do not self-resolve such that retrying would negate the latency benefits.
-
-			// The following questions remain:
-			// 1. Are there situations where local transient errors may warrant a retry?
-			// 2. Can we reliably identify/detect these transient errors?
-			// 3. Should we fall back to the primary or backup stores in the event of any error?
+			// We don't retry ephemeral-store reads here. Local failures are treated as
+			// terminal for this access path rather than falling back to another store.
 			KVStore::read(eph_store.as_ref(), &primary_namespace, &secondary_namespace, &key).await
 		} else {
 			self.read_primary(&primary_namespace, &secondary_namespace, &key).await
@@ -538,7 +376,7 @@ impl TierStoreInner {
 			)
 			.await
 		} else {
-			self.primary_write_then_schedule_backup(
+			self.write_primary_backup_async(
 				primary_namespace.as_str(),
 				secondary_namespace.as_str(),
 				key.as_str(),
@@ -565,7 +403,7 @@ impl TierStoreInner {
 			)
 			.await
 		} else {
-			self.primary_remove_then_schedule_backup(
+			self.remove_primary_backup_async(
 				primary_namespace.as_str(),
 				secondary_namespace.as_str(),
 				key.as_str(),
@@ -585,6 +423,8 @@ impl TierStoreInner {
 			)
 			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _) => {
 				if let Some(eph_store) = self.ephemeral_store.as_ref() {
+					// We don't retry ephemeral-store lists here. Local failures are treated as
+					// terminal for this access path rather than falling back to another store.
 					KVStore::list(eph_store.as_ref(), &primary_namespace, &secondary_namespace)
 						.await
 				} else {
@@ -592,33 +432,6 @@ impl TierStoreInner {
 				}
 			},
 			_ => self.list_primary(&primary_namespace, &secondary_namespace).await,
-		}
-	}
-}
-
-enum BackupOp {
-	Write { primary_namespace: String, secondary_namespace: String, key: String, data: Vec<u8> },
-	Remove { primary_namespace: String, secondary_namespace: String, key: String, lazy: bool },
-}
-
-impl BackupOp {
-	fn primary_namespace(&self) -> &str {
-		match self {
-			BackupOp::Write { primary_namespace, .. }
-			| BackupOp::Remove { primary_namespace, .. } => primary_namespace,
-		}
-	}
-
-	fn secondary_namespace(&self) -> &str {
-		match self {
-			BackupOp::Write { secondary_namespace, .. }
-			| BackupOp::Remove { secondary_namespace, .. } => secondary_namespace,
-		}
-	}
-
-	fn key(&self) -> &str {
-		match self {
-			BackupOp::Write { key, .. } | BackupOp::Remove { key, .. } => key,
 		}
 	}
 }
@@ -636,8 +449,6 @@ mod tests {
 	use std::panic::RefUnwindSafe;
 	use std::path::PathBuf;
 	use std::sync::Arc;
-	use std::thread;
-	use std::time::Duration;
 
 	use lightning::util::logger::Level;
 	use lightning::util::persist::{
@@ -706,7 +517,6 @@ mod tests {
 
 		let data = vec![42u8; 32];
 
-		// Non-critical
 		KVStoreSync::write(
 			&tier,
 			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -716,7 +526,6 @@ mod tests {
 		)
 		.unwrap();
 
-		// Critical
 		KVStoreSync::write(
 			&tier,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -760,7 +569,7 @@ mod tests {
 	}
 
 	#[test]
-	fn lazy_backup() {
+	fn backup_write_is_part_of_success_path() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
 		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
@@ -787,77 +596,51 @@ mod tests {
 		)
 		.unwrap();
 
-		// Immediate read from backup should fail
-		let backup_read_cm = KVStoreSync::read(
-			&*backup_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-		);
-		assert!(backup_read_cm.is_err());
-
-		// Primary not blocked by backup hence immediate read should succeed
-		let primary_read_cm = KVStoreSync::read(
+		let primary_read = KVStoreSync::read(
 			&*primary_store,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		);
-		assert_eq!(primary_read_cm.unwrap(), data);
-
-		// Delayed read  from backup should succeed
-		thread::sleep(Duration::from_millis(50));
-		let backup_read_cm = KVStoreSync::read(
+		let backup_read = KVStoreSync::read(
 			&*backup_store,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		);
-		assert_eq!(backup_read_cm.unwrap(), data);
+
+		assert_eq!(primary_read.unwrap(), data);
+		assert_eq!(backup_read.unwrap(), data);
 	}
 
 	#[test]
-	fn lazy_removal() {
+	fn backup_remove_is_part_of_success_path() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path.clone(), Level::Trace).unwrap());
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
 		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
 
 		let _cleanup = CleanupDir(base_dir.clone());
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
-		let mut tier =
-			setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger), Arc::clone(&runtime));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger, runtime);
 
 		let backup_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
 		tier.set_backup_store(Arc::clone(&backup_store));
 
 		let data = vec![42u8; 32];
-
 		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
-		let write_result = KVStoreSync::write(
+
+		KVStoreSync::write(
 			&tier,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			key,
-			data.clone(),
-		);
-		assert!(write_result.is_ok(), "Write should succeed");
-
-		thread::sleep(Duration::from_millis(100));
-
-		assert_eq!(
-			KVStoreSync::read(
-				&*backup_store,
-				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-				key,
-			)
-			.unwrap(),
-			data
-		);
+			data,
+		)
+		.unwrap();
 
 		KVStoreSync::remove(
 			&tier,
@@ -868,15 +651,20 @@ mod tests {
 		)
 		.unwrap();
 
-		thread::sleep(Duration::from_millis(10));
-
-		let res = KVStoreSync::read(
+		let primary_read = KVStoreSync::read(
+			&*primary_store,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+		);
+		let backup_read = KVStoreSync::read(
 			&*backup_store,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			key,
 		);
 
-		assert!(res.is_err());
+		assert!(primary_read.is_err());
+		assert!(backup_read.is_err());
 	}
 }
