@@ -14,7 +14,6 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -269,16 +268,6 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-static NEXT_PORT: AtomicU16 = AtomicU16::new(20000);
-
-pub(crate) fn generate_listening_addresses() -> Vec<SocketAddress> {
-	let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
-	vec![
-		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port },
-		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: port + 1 },
-	]
-}
-
 pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	let mut rng = rng();
 	let rand_val = rng.random_range(0..1000);
@@ -302,7 +291,7 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 	println!("Setting random LDK storage dir: {}", rand_dir.display());
 	node_config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
 
-	let listening_addresses = generate_listening_addresses();
+	let listening_addresses = vec![SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: 0 }];
 	println!("Setting LDK listening addresses: {:?}", listening_addresses);
 	node_config.listening_addresses = Some(listening_addresses);
 
