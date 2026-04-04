@@ -27,6 +27,7 @@ use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::log_trace;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
+use lightning_liquidity::lsps2::router::LSPS2BOLT12Router;
 use lightning::routing::scoring::{
 	CombinedScorer, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 	ProbabilisticScoringFeeParameters,
@@ -77,7 +78,7 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	GossipSync, Graph, InnerMessageRouter, KeysManager, OnionMessenger, PaymentStore, PeerManager,
 	PendingPaymentStore, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
@@ -1622,12 +1623,19 @@ fn build_with_store_internal(
 	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	let router = Arc::new(DefaultRouter::new(
+	let inner_router = DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
 		scoring_fee_params,
+	);
+	let inner_message_router =
+		InnerMessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
+	let router = Arc::new(LSPS2BOLT12Router::new(
+		inner_router,
+		inner_message_router,
+		Arc::clone(&keys_manager),
 	));
 
 	let mut user_config = default_user_config(&config);
@@ -1656,8 +1664,7 @@ fn build_with_store_internal(
 		}
 	}
 
-	let message_router =
-		Arc::new(MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager)));
+	let message_router = Arc::clone(&router);
 
 	// Initialize the ChannelManager
 	let channel_manager = {
@@ -1791,6 +1798,7 @@ fn build_with_store_internal(
 				Arc::clone(&wallet),
 				Arc::clone(&channel_manager),
 				Arc::clone(&keys_manager),
+				Arc::clone(&router),
 				Arc::clone(&tx_broadcaster),
 				Arc::clone(&kv_store),
 				Arc::clone(&config),
@@ -1828,6 +1836,8 @@ fn build_with_store_internal(
 
 			let liquidity_source = runtime
 				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
+			// TODO: Rehydrate persisted intercept SCID -> LSPS2Bolt12InvoiceParameters mappings here
+			// for client nodes and call `router.register_intercept_scid(...)` before startup completes.
 			let custom_message_handler =
 				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
 			(Some(liquidity_source), custom_message_handler)

@@ -1333,6 +1333,12 @@ where
 				claim_from_onchain_tx,
 				outbound_amount_forwarded_msat,
 			} => {
+				let prev_channel_id = prev_htlcs.first().map(|h| h.channel_id);
+				let next_channel_id = next_htlcs.first().map(|h| h.channel_id);
+				let prev_user_channel_id = prev_htlcs.first().and_then(|h| h.user_channel_id);
+				let next_user_channel_id = next_htlcs.first().and_then(|h| h.user_channel_id);
+				let prev_node_id = prev_htlcs.first().and_then(|h| h.node_id);
+				let next_node_id = next_htlcs.first().and_then(|h| h.node_id);
 				{
 					let read_only_network_graph = self.network_graph.read_only();
 					let nodes = read_only_network_graph.nodes();
@@ -1653,14 +1659,25 @@ where
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { peer_node_id, message } => {
-				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
-					om_mailbox.onion_message_intercepted(peer_node_id, message);
-				} else {
-					log_trace!(
-						self.logger,
-						"Onion message intercepted, but no onion message mailbox available"
-					);
+			LdkEvent::OnionMessageIntercepted { next_hop, message } => {
+				match next_hop {
+					lightning::blinded_path::message::NextMessageHop::NodeId(peer_node_id) => {
+						if let Some(om_mailbox) = self.om_mailbox.as_ref() {
+							om_mailbox.onion_message_intercepted(peer_node_id, message);
+						} else {
+							log_trace!(
+								self.logger,
+								"Onion message intercepted, but no onion message mailbox available"
+							);
+						}
+					},
+					lightning::blinded_path::message::NextMessageHop::ShortChannelId(scid) => {
+						log_trace!(
+							self.logger,
+							"Onion message intercepted for unknown SCID {}, ignoring",
+							scid
+						);
+					},
 				}
 			},
 			LdkEvent::OnionMessagePeerConnected { peer_node_id } => {
