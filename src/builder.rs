@@ -77,8 +77,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore, SyncAndAsyncKVStore,
+	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PayerProofContextStore,
+	PaymentStore, PeerManager, PendingPaymentStore, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1265,7 +1265,7 @@ fn build_with_store_internal(
 			tokio::join!(
 				read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
 				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref))
+				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
 			)
 		});
 
@@ -1295,6 +1295,8 @@ fn build_with_store_internal(
 			return Err(BuildError::ReadFailed);
 		},
 	};
+
+	let payer_proof_context_store = Arc::new(PayerProofContextStore::new());
 
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
@@ -1987,6 +1989,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		payer_proof_context_store,
 		lnurl_auth,
 		is_running,
 		node_metrics,

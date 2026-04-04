@@ -15,8 +15,6 @@ use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
 use lightning::events::bump_transaction::BumpTransactionEvent;
-#[cfg(not(feature = "uniffi"))]
-use lightning::events::PaidBolt12Invoice;
 use lightning::events::{
 	ClosureReason, Event as LdkEvent, FundingInfo, PaymentFailureReason, PaymentPurpose,
 	ReplayEvent,
@@ -24,6 +22,9 @@ use lightning::events::{
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
+#[cfg(not(feature = "uniffi"))]
+use lightning::offers::payer_proof::Bolt12InvoiceType;
+use lightning::offers::payer_proof::PaidBolt12Invoice;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
 use lightning::util::config::{
@@ -40,7 +41,7 @@ use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::fee_estimator::ConfirmationTarget;
 #[cfg(feature = "uniffi")]
-use crate::ffi::PaidBolt12Invoice;
+use crate::ffi::PaidBolt12Invoice as FfiPaidBolt12Invoice;
 use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -54,12 +55,18 @@ use crate::payment::store::{
 };
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PayerProofContextStore, PaymentStore,
+	Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
 };
+
+#[cfg(not(feature = "uniffi"))]
+type Bolt12InvoiceInfo = Bolt12InvoiceType;
+#[cfg(feature = "uniffi")]
+type Bolt12InvoiceInfo = FfiPaidBolt12Invoice;
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -83,17 +90,16 @@ pub enum Event {
 		payment_preimage: Option<PaymentPreimage>,
 		/// The total fee which was spent at intermediate hops in this payment.
 		fee_paid_msat: Option<u64>,
-		/// The BOLT12 invoice that was paid.
+		/// The BOLT12 invoice type that was paid.
 		///
 		/// This is useful for proof of payment. A third party can verify that the payment was made
 		/// by checking that the `payment_hash` in the invoice matches `sha256(payment_preimage)`.
 		///
 		/// Will be `None` for non-BOLT12 payments.
 		///
-		/// Note that static invoices (indicated by [`PaidBolt12Invoice::StaticInvoice`], used for
-		/// async payments) do not support proof of payment as the payment hash is not derived
-		/// from a preimage known only to the recipient.
-		bolt12_invoice: Option<PaidBolt12Invoice>,
+		/// Note that static invoices (via [`Bolt12InvoiceType::StaticInvoice`], used for
+		/// async payments) do not support payer proofs.
+		bolt12_invoice: Option<Bolt12InvoiceInfo>,
 	},
 	/// A sent payment has failed.
 	PaymentFailed {
@@ -507,6 +513,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
+	payer_proof_context_store: Arc<PayerProofContextStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	runtime: Arc<Runtime>,
@@ -527,10 +534,11 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
-		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
-		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		payment_store: Arc<PaymentStore>, payer_proof_context_store: Arc<PayerProofContextStore>,
+		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
+		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
+		config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -542,6 +550,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			payer_proof_context_store,
 			peer_store,
 			keys_manager,
 			logger,
@@ -550,6 +559,16 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+		}
+	}
+
+	fn persist_payer_proof_context(
+		&self, payment_id: PaymentId, paid_invoice: &Option<PaidBolt12Invoice>,
+	) {
+		if let Some(paid_invoice) = paid_invoice {
+			if paid_invoice.bolt12_invoice().is_some() {
+				self.payer_proof_context_store.insert_or_update(payment_id, paid_invoice.clone());
+			}
 		}
 	}
 
@@ -860,6 +879,7 @@ where
 							offer_id,
 							payer_note,
 							quantity,
+							bolt12_invoice: None,
 						};
 
 						let payment = PaymentDetails::new(
@@ -1074,11 +1094,28 @@ where
 					return Ok(());
 				};
 
+				self.persist_payer_proof_context(payment_id, &bolt12_invoice);
+
+				#[cfg(not(feature = "uniffi"))]
+				let bolt12_invoice_info: Option<Bolt12InvoiceInfo> = bolt12_invoice
+					.as_ref()
+					.and_then(|p| {
+						p.bolt12_invoice().map(|i| Bolt12InvoiceType::Bolt12Invoice(i.clone()))
+					})
+					.or_else(|| {
+						bolt12_invoice.as_ref().and_then(|p| {
+							p.static_invoice().map(|i| Bolt12InvoiceType::StaticInvoice(i.clone()))
+						})
+					});
+				#[cfg(feature = "uniffi")]
+				let bolt12_invoice_info: Option<Bolt12InvoiceInfo> = bolt12_invoice.map(|p| p.into());
+
 				let update = PaymentDetailsUpdate {
 					hash: Some(Some(payment_hash)),
 					preimage: Some(Some(payment_preimage)),
 					fee_paid_msat: Some(fee_paid_msat),
 					status: Some(PaymentStatus::Succeeded),
+					bolt12_invoice: Some(bolt12_invoice_info.clone()),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
@@ -1110,7 +1147,7 @@ where
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
-					bolt12_invoice: bolt12_invoice.map(Into::into),
+					bolt12_invoice: bolt12_invoice_info,
 				};
 
 				match self.event_queue.add_event(event).await {
@@ -1562,20 +1599,14 @@ where
 				};
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
-				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
+				if let FundingInfo::Tx { transaction } = funding_info {
 					log_info!(
 						self.logger,
 						"Reclaiming unused addresses from channel {} funding",
 						channel_id,
 					);
 
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: outputs,
-					};
-					if let Err(e) = self.wallet.cancel_tx(&tx) {
+					if let Err(e) = self.wallet.cancel_tx(&transaction) {
 						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
 						return Err(ReplayEvent());
 					}

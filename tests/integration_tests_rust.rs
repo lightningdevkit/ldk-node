@@ -1115,12 +1115,14 @@ async fn simple_bolt12_send_receive() {
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
+			bolt12_invoice: ref invoice,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+			assert!(invoice.is_some());
 			// TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
 			// API currently doesn't allow to do that.
 		},
@@ -1182,12 +1184,14 @@ async fn simple_bolt12_send_receive() {
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
+			bolt12_invoice: ref invoice,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+			assert!(invoice.is_some());
 			// TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
 			// API currently doesn't allow to do that.
 			hash.unwrap()
@@ -1255,11 +1259,13 @@ async fn simple_bolt12_send_receive() {
 			secret: _,
 			quantity: ref qty,
 			payer_note: ref note,
+			bolt12_invoice: ref invoice,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
 			assert_eq!(&expected_quantity, qty);
-			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0)
+			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
+			assert!(invoice.is_some());
 			// TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
 			// API currently doesn't allow to do that.
 		},
