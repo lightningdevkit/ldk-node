@@ -1,6 +1,6 @@
 services:
   bitcoin:
-    image: blockstream/bitcoind:27.2
+    image: blockstream/bitcoind:29.1
     platform: linux/amd64
     command:
       [
@@ -12,6 +12,7 @@ services:
         "-rpcuser=user",
         "-rpcpassword=pass",
         "-fallbackfee=0.00001",
+        "-rest",
         "-zmqpubrawblock=tcp://0.0.0.0:28332",
         "-zmqpubrawtx=tcp://0.0.0.0:28333"
       ]
@@ -51,33 +52,25 @@ services:
     networks:
       - bitcoin-electrs
 
-  lnd:
-    image: lightninglabs/lnd:v0.18.5-beta
-    container_name: ldk-node-lnd
+  cln:
+    image: elementsproject/lightningd:v25.12.1
+    platform: linux/amd64
     depends_on:
-      - bitcoin
+      bitcoin:
+        condition: service_healthy
     volumes:
-      - ${LND_DATA_DIR}:/root/.lnd
-    ports:
-      - "8081:8081"
-      - "9735:9735"
+      - ${CLN_DATA_DIR:-/tmp/cln-data}:/root/.lightning
     command:
-      - "--noseedbackup"
-      - "--trickledelay=5000"
-      - "--alias=ldk-node-lnd-test"
-      - "--externalip=lnd:9735"
-      - "--bitcoin.active"
-      - "--bitcoin.regtest"
-      - "--bitcoin.node=bitcoind"
-      - "--bitcoind.rpchost=bitcoin:18443"
-      - "--bitcoind.rpcuser=user"
-      - "--bitcoind.rpcpass=pass"
-      - "--bitcoind.zmqpubrawblock=tcp://bitcoin:28332"
-      - "--bitcoind.zmqpubrawtx=tcp://bitcoin:28333"
-      - "--accept-keysend"
-      - "--rpclisten=0.0.0.0:8081"
-      - "--tlsextradomain=lnd"
-      - "--tlsextraip=0.0.0.0"
+      [
+        "--bitcoin-rpcconnect=bitcoin",
+        "--bitcoin-rpcport=18443",
+        "--bitcoin-rpcuser=user",
+        "--bitcoin-rpcpassword=pass",
+        "--regtest",
+      ]
+    ports:
+      - "19846:19846"
+      - "9937:9937"
     networks:
       - bitcoin-electrs
 
