@@ -838,8 +838,7 @@ impl NodeBuilder {
 		};
 
 		let ts_config = self.tier_store_config.as_ref();
-		let mut tier_store =
-			TierStore::new(primary_store, Arc::clone(&runtime), Arc::clone(&logger));
+		let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
 		if let Some(config) = ts_config {
 			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
 			config.backup.as_ref().map(|s| tier_store.set_backup_store(Arc::clone(s)));
