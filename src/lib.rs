@@ -101,7 +101,7 @@ pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
-mod probing;
+pub mod probing;
 mod runtime;
 mod scoring;
 mod tx_broadcaster;
@@ -172,10 +172,7 @@ use payment::{
 	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
-pub use probing::{
-	HighDegreeStrategy, Probe, Prober, ProbingConfig, ProbingConfigBuilder, ProbingStrategy,
-	RandomStrategy,
-};
+use probing::{run_prober, Prober};
 use runtime::Runtime;
 pub use tokio;
 use types::{
@@ -245,7 +242,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: HRNResolver,
-	prober: Option<Arc<probing::Prober>>,
+	prober: Option<Arc<Prober>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -603,16 +600,16 @@ impl Node {
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
+			self.prober.clone(),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
-			self.prober.clone(),
 		));
 
 		if let Some(prober) = self.prober.clone() {
 			let stop_rx = self.stop_sender.subscribe();
 			self.runtime.spawn_cancellable_background_task(async move {
-				probing::run_prober(prober, stop_rx).await;
+				run_prober(prober, stop_rx).await;
 			});
 		}
 
@@ -1102,8 +1099,9 @@ impl Node {
 	/// Returns the scorer's estimated `(min, max)` liquidity range for the given channel in the
 	/// direction toward `target`, or `None` if the scorer has no data for that channel.
 	///
-	/// Works by serializing the `CombinedScorer` (which writes `local_only_scorer`) and
-	/// deserializing it as a plain `ProbabilisticScorer` to call `estimated_channel_liquidity_range`.
+	/// **Warning:** This is expensive — O(scorer size) per call. It works by serializing the
+	/// entire `CombinedScorer` and deserializing it as a plain `ProbabilisticScorer` to access
+	/// `estimated_channel_liquidity_range`. Intended for testing and debugging, not hot paths.
 	pub fn scorer_channel_liquidity(&self, scid: u64, target: PublicKey) -> Option<(u64, u64)> {
 		use lightning::routing::scoring::{
 			ProbabilisticScorer, ProbabilisticScoringDecayParameters,

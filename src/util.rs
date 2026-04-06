@@ -11,7 +11,15 @@ pub(crate) fn random_range(min: u64, max: u64) -> u64 {
 	if min == max {
 		return min;
 	}
-	let range = max - min + 1;
+	let range = match (max - min).checked_add(1) {
+		Some(r) => r,
+		None => {
+			// overflowed — full u64::MAX range
+			let mut buf = [0u8; 8];
+			getrandom::fill(&mut buf).expect("getrandom failed");
+			return u64::from_ne_bytes(buf);
+		},
+	};
 	// We remove bias due to the fact that the range does not evenly divide 2⁶⁴.
 	// Imagine we had a range from 0 to 2⁶⁴-2 (of length 2⁶⁴-1), then
 	// the outcomes of 0 would be twice as frequent as any other, as 0 can be produced

@@ -35,9 +35,10 @@ use ldk_node::config::{
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+use ldk_node::probing::ProbingConfig;
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
-	PendingSweepBalance, ProbingConfig, UserChannelId,
+	PendingSweepBalance, UserChannelId,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;

@@ -26,19 +26,22 @@ use lightning_invoice::{Bolt11InvoiceDescription, Description};
 
 use common::{
 	expect_channel_ready_event, expect_event, generate_blocks_and_wait, open_channel,
-	open_channel_no_wait, premine_and_distribute_funds, random_config, setup_bitcoind_and_electrsd,
-	setup_node, TestChainSource, TestNode,
+	open_channel_no_wait, premine_and_distribute_funds, random_chain_source, random_config,
+	setup_bitcoind_and_electrsd, setup_node, TestChainSource, TestNode,
 };
 
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
-use ldk_node::{Event, Probe, ProbingConfig, ProbingStrategy};
+use ldk_node::probing::{ProbingConfig, ProbingStrategy};
+use ldk_node::Event;
+
+use lightning::routing::router::Path;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const PROBE_AMOUNT_MSAT: u64 = 1_000_000;
@@ -46,16 +49,21 @@ const MAX_LOCKED_MSAT: u64 = 100_000_000;
 const PROBING_INTERVAL_MILLISECONDS: u64 = 100;
 const PROBING_DIVERSITY_PENALTY: u64 = 50_000;
 
-/// FixedDestStrategy — always targets one node; used by budget tests.
-struct FixedDestStrategy {
-	destination: PublicKey,
-	amount_msat: u64,
+/// FixedPathStrategy — returns a fixed pre-built path; used by budget tests.
+///
+/// The path is set after node and channel setup via [`set_path`].
+struct FixedPathStrategy {
+	path: Mutex<Option<Path>>,
 	ready_to_probe: AtomicBool,
 }
 
-impl FixedDestStrategy {
-	fn new(destination: PublicKey, amount_msat: u64) -> Arc<Self> {
-		Arc::new(Self { destination, amount_msat, ready_to_probe: AtomicBool::new(false) })
+impl FixedPathStrategy {
+	fn new() -> Arc<Self> {
+		Arc::new(Self { path: Mutex::new(None), ready_to_probe: AtomicBool::new(false) })
+	}
+
+	fn set_path(&self, path: Path) {
+		*self.path.lock().unwrap() = Some(path);
 	}
 
 	fn start_probing(&self) {
@@ -67,13 +75,56 @@ impl FixedDestStrategy {
 	}
 }
 
-impl ProbingStrategy for FixedDestStrategy {
-	fn next_probe(&self) -> Option<Probe> {
+impl ProbingStrategy for FixedPathStrategy {
+	fn next_probe(&self) -> Option<Path> {
 		if self.ready_to_probe.load(Ordering::Relaxed) {
-			Some(Probe::Destination { final_node: self.destination, amount_msat: self.amount_msat })
+			self.path.lock().unwrap().clone()
 		} else {
 			None
 		}
+	}
+}
+
+/// Builds a 2-hop probe path: node_a → node_b → node_c using live channel info.
+fn build_probe_path(
+	node_a: &TestNode, node_b: &TestNode, node_c: &TestNode, amount_msat: u64,
+) -> Path {
+	use lightning::routing::router::RouteHop;
+	use lightning_types::features::{ChannelFeatures, NodeFeatures};
+
+	let ch_ab = node_a
+		.list_channels()
+		.into_iter()
+		.find(|ch| ch.counterparty_node_id == node_b.node_id() && ch.short_channel_id.is_some())
+		.expect("A→B channel not found");
+	let ch_bc = node_b
+		.list_channels()
+		.into_iter()
+		.find(|ch| ch.counterparty_node_id == node_c.node_id() && ch.short_channel_id.is_some())
+		.expect("B→C channel not found");
+
+	Path {
+		hops: vec![
+			RouteHop {
+				pubkey: node_b.node_id(),
+				node_features: NodeFeatures::empty(),
+				short_channel_id: ch_ab.short_channel_id.unwrap(),
+				channel_features: ChannelFeatures::empty(),
+				fee_msat: 0,
+				cltv_expiry_delta: 40,
+				maybe_announced_channel: true,
+			},
+			RouteHop {
+				pubkey: node_c.node_id(),
+				node_features: NodeFeatures::empty(),
+				short_channel_id: ch_bc.short_channel_id.unwrap(),
+				channel_features: ChannelFeatures::empty(),
+				fee_msat: amount_msat,
+				cltv_expiry_delta: 0,
+				maybe_announced_channel: true,
+			},
+		],
+		blinded_tail: None,
 	}
 }
 
@@ -249,17 +300,17 @@ fn print_probing_perfomance(observers: &[&TestNode], all_nodes: &[&TestNode]) {
 #[tokio::test(flavor = "multi_thread")]
 async fn probe_budget_increments_and_decrements() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Electrum(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let node_b = setup_node(&chain_source, random_config(false));
 	let node_c = setup_node(&chain_source, random_config(false));
 
 	let mut config_a = random_config(false);
-	let strategy = FixedDestStrategy::new(node_c.node_id(), PROBE_AMOUNT_MSAT);
+	let strategy = FixedPathStrategy::new();
 	config_a.probing = Some(
 		ProbingConfig::custom(strategy.clone())
 			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
-			.max_locked_msat(PROBE_AMOUNT_MSAT)
+			.max_locked_msat(10 * PROBE_AMOUNT_MSAT)
 			.build(),
 	);
 	let node_a = setup_node(&chain_source, config_a);
@@ -291,13 +342,14 @@ async fn probe_budget_increments_and_decrements() {
 	expect_event!(node_b, ChannelReady);
 	expect_event!(node_c, ChannelReady);
 
-	// Give gossip time to propagate to A, then enable probing.
+	// Build the probe path now that channels are ready, then enable probing.
+	strategy.set_path(build_probe_path(&node_a, &node_b, &node_c, PROBE_AMOUNT_MSAT));
 	tokio::time::sleep(Duration::from_secs(3)).await;
 	strategy.start_probing();
 
 	let went_up = tokio::time::timeout(Duration::from_secs(30), async {
 		loop {
-			if node_a.prober().map_or(0, |p| p.locked_msat()) > 0 {
+			if node_a.prober().unwrap().locked_msat() > 0 {
 				break;
 			}
 			tokio::time::sleep(Duration::from_millis(1)).await;
@@ -308,12 +360,13 @@ async fn probe_budget_increments_and_decrements() {
 	assert!(went_up, "locked_msat never increased — no probe was dispatched");
 	println!("First probe dispatched; locked_msat = {}", node_a.prober().unwrap().locked_msat());
 
+	strategy.stop_probing();
 	let cleared = tokio::time::timeout(Duration::from_secs(30), async {
 		loop {
-			if node_a.prober().map_or(1, |p| p.locked_msat()) == 0 {
+			if node_a.prober().unwrap().locked_msat() == 0 {
 				break;
 			}
-			tokio::time::sleep(Duration::from_millis(1)).await;
+			tokio::time::sleep(Duration::from_millis(100)).await;
 		}
 	})
 	.await
@@ -333,17 +386,17 @@ async fn probe_budget_increments_and_decrements() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exhausted_probe_budget_blocks_new_probes() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Electrum(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let node_b = setup_node(&chain_source, random_config(false));
 	let node_c = setup_node(&chain_source, random_config(false));
 
 	let mut config_a = random_config(false);
-	let strategy = FixedDestStrategy::new(node_c.node_id(), PROBE_AMOUNT_MSAT);
+	let strategy = FixedPathStrategy::new();
 	config_a.probing = Some(
 		ProbingConfig::custom(strategy.clone())
 			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
-			.max_locked_msat(PROBE_AMOUNT_MSAT)
+			.max_locked_msat(10 * PROBE_AMOUNT_MSAT)
 			.build(),
 	);
 	let node_a = setup_node(&chain_source, config_a);
@@ -384,6 +437,7 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 
 	assert_eq!(node_a.prober().map_or(1, |p| p.locked_msat()), 0, "initial locked_msat is nonzero");
 
+	strategy.set_path(build_probe_path(&node_a, &node_b, &node_c, PROBE_AMOUNT_MSAT));
 	tokio::time::sleep(Duration::from_secs(3)).await;
 	strategy.start_probing();
 
@@ -479,7 +533,7 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probing_strategies_perfomance() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Electrum(&electrsd);
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let num_nodes = 5;
 	let channel_capacity_sat = 1_000_000u64;
@@ -572,7 +626,7 @@ async fn probing_strategies_perfomance() {
 
 	print_topology(&all_nodes);
 
-	println!("\nbefore payments");
+	println!("\n=== before random payments ===");
 	print_probing_perfomance(&observer_nodes, &all_nodes);
 
 	let desc = Bolt11InvoiceDescription::Direct(Description::new("test".to_string()).unwrap());
@@ -607,7 +661,7 @@ async fn probing_strategies_perfomance() {
 	}
 
 	tokio::time::sleep(Duration::from_secs(5)).await;
-	println!("\n=== after payments ===");
+	println!("\n=== after random payments ===");
 	print_probing_perfomance(&observer_nodes, &all_nodes);
 
 	for node in nodes.iter().chain(observer_nodes) {

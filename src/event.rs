@@ -510,13 +510,13 @@ where
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
-	runtime: Arc<Runtime>,
-	logger: L,
-	config: Arc<Config>,
 	static_invoice_store: Option<StaticInvoiceStore>,
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	prober: Option<Arc<Prober>>,
+	runtime: Arc<Runtime>,
+	logger: L,
+	config: Arc<Config>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -532,7 +532,7 @@ where
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
 		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
 		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>, prober: Option<Arc<Prober>>,
+		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -546,13 +546,13 @@ where
 			payment_store,
 			peer_store,
 			keys_manager,
-			logger,
-			runtime,
-			config,
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
 			prober,
+			runtime,
+			logger,
+			config,
 		}
 	}
 

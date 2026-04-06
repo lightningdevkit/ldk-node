@@ -5,6 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+//! Background probing strategies for training the payment scorer.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::routing::gossip::NodeId;
-use lightning::routing::router::{Path, RouteHop, MAX_PATH_LENGTH_ESTIMATE};
+use lightning::routing::router::{
+	Path, PaymentParameters, RouteHop, RouteParameters, MAX_PATH_LENGTH_ESTIMATE,
+};
 use lightning_invoice::DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning_types::features::NodeFeatures;
 
@@ -21,8 +25,10 @@ use crate::config::{
 	DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBED_NODE_COOLDOWN_SECS, DEFAULT_PROBING_INTERVAL_SECS,
 };
 use crate::logger::{log_debug, LdkLogger, Logger};
-use crate::types::{ChannelManager, Graph};
+use crate::types::{ChannelManager, Graph, Router};
 use crate::util::random_range;
+
+use lightning::routing::router::Router as LdkRouter;
 
 /// Which built-in probing strategy to use, or a custom one.
 #[derive(Clone)]
@@ -179,24 +185,10 @@ impl ProbingConfigBuilder {
 	}
 }
 
-/// A probe to be dispatched by the Prober.
-pub enum Probe {
-	/// A manually constructed path; dispatched via `send_probe`.
-	PrebuiltRoute(Path),
-	/// A destination to reach; the router selects the actual path via
-	/// `send_spontaneous_preflight_probes`.
-	Destination {
-		/// The destination node.
-		final_node: PublicKey,
-		/// The probe amount in millisatoshis.
-		amount_msat: u64,
-	},
-}
-
 /// Strategy can be used for determining the next target and amount for probing.
 pub trait ProbingStrategy: Send + Sync + 'static {
-	/// Returns the next probe to run, or `None` to skip this tick.
-	fn next_probe(&self) -> Option<Probe>;
+	/// Returns the next probe path to run, or `None` to skip this tick.
+	fn next_probe(&self) -> Option<Path>;
 }
 
 /// Probes toward the most-connected nodes in the graph.
@@ -206,12 +198,15 @@ pub trait ProbingStrategy: Send + Sync + 'static {
 /// `top_node_count` that has not been probed within `cooldown`.
 /// Nodes probed more recently are skipped so that the strategy
 /// naturally spreads across the top nodes and picks up graph changes.
-/// Returns `None` (skips the tick) if all top nodes are on cooldown.
+/// If all top nodes are on cooldown, the cooldown map is cleared and a new cycle begins
+/// immediately.
 ///
 /// The probe amount is chosen uniformly at random from
 /// `[min_amount_msat, max_amount_msat]`.
 pub struct HighDegreeStrategy {
 	network_graph: Arc<Graph>,
+	channel_manager: Arc<ChannelManager>,
+	router: Arc<Router>,
 	/// How many of the highest-degree nodes to cycle through.
 	pub top_node_count: usize,
 	/// Lower bound for the randomly chosen probe amount.
@@ -220,6 +215,9 @@ pub struct HighDegreeStrategy {
 	pub max_amount_msat: u64,
 	/// How long a node stays ineligible after being probed.
 	pub cooldown: Duration,
+	/// Skip a path when the first-hop outbound liquidity is less than
+	/// `path_value * liquidity_limit_multiplier`.
+	pub liquidity_limit_multiplier: u64,
 	/// Nodes probed recently, with the time they were last probed.
 	recently_probed: Mutex<HashMap<PublicKey, Instant>>,
 }
@@ -227,8 +225,9 @@ pub struct HighDegreeStrategy {
 impl HighDegreeStrategy {
 	/// Creates a new high-degree probing strategy.
 	pub(crate) fn new(
-		network_graph: Arc<Graph>, top_node_count: usize, min_amount_msat: u64,
-		max_amount_msat: u64, cooldown: Duration,
+		network_graph: Arc<Graph>, channel_manager: Arc<ChannelManager>, router: Arc<Router>,
+		top_node_count: usize, min_amount_msat: u64, max_amount_msat: u64, cooldown: Duration,
+		liquidity_limit_multiplier: u64,
 	) -> Self {
 		assert!(
 			min_amount_msat <= max_amount_msat,
@@ -236,20 +235,22 @@ impl HighDegreeStrategy {
 		);
 		Self {
 			network_graph,
+			channel_manager,
+			router,
 			top_node_count,
 			min_amount_msat,
 			max_amount_msat,
 			cooldown,
+			liquidity_limit_multiplier,
 			recently_probed: Mutex::new(HashMap::new()),
 		}
 	}
 }
 
 impl ProbingStrategy for HighDegreeStrategy {
-	fn next_probe(&self) -> Option<Probe> {
+	fn next_probe(&self) -> Option<Path> {
 		let graph = self.network_graph.read_only();
 
-		// Collect (pubkey, channel_count) for all nodes.
 		let mut nodes_by_degree: Vec<(PublicKey, usize)> = graph
 			.nodes()
 			.unordered_iter()
@@ -287,9 +288,43 @@ impl ProbingStrategy for HighDegreeStrategy {
 
 		probed.insert(final_node, now);
 		drop(probed);
+		drop(graph);
 
 		let amount_msat = random_range(self.min_amount_msat, self.max_amount_msat);
-		Some(Probe::Destination { final_node, amount_msat })
+		let payment_params =
+			PaymentParameters::from_node_id(final_node, DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA as u32);
+		let route_params =
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+		let payer = self.channel_manager.get_our_node_id();
+		let usable_channels = self.channel_manager.list_usable_channels();
+		let first_hops: Vec<&_> = usable_channels.iter().collect();
+		let inflight_htlcs = self.channel_manager.compute_inflight_htlcs();
+
+		let route = self
+			.router
+			.find_route(&payer, &route_params, Some(&first_hops), inflight_htlcs)
+			.ok()?;
+
+		let path = route.paths.into_iter().next()?;
+
+		// Liquidity-limit check (mirrors send_preflight_probes): skip the path when the
+		// first-hop outbound liquidity is less than path_value * liquidity_limit_multiplier.
+		if let Some(first_hop_hop) = path.hops.first() {
+			if let Some(ch) = usable_channels
+				.iter()
+				.find(|h| h.get_outbound_payment_scid() == Some(first_hop_hop.short_channel_id))
+			{
+				let path_value = path.final_value_msat() + path.fee_msat();
+				if ch.next_outbound_htlc_limit_msat
+					< path_value.saturating_mul(self.liquidity_limit_multiplier)
+				{
+					return None;
+				}
+			}
+		}
+
+		Some(path)
 	}
 }
 
@@ -301,7 +336,7 @@ impl ProbingStrategy for HighDegreeStrategy {
 ///   2. Performs a deterministic walk of a randomly chosen depth (up to
 ///      [`MAX_PATH_LENGTH_ESTIMATE`]) through the gossip graph, skipping disabled
 ///      channels and dead-ends.
-///   3. Returns `Probe::PrebuiltRoute(path)` so the prober calls `send_probe` directly.
+///   3. Returns the constructed `Path` so the prober calls `send_probe` directly.
 ///
 /// The probe amount is chosen uniformly at random from `[min_amount_msat, max_amount_msat]`.
 ///
@@ -425,7 +460,6 @@ impl RandomStrategy {
 			current_node_id = *next_node_id;
 		}
 
-		// The route is infeasible if any hop's minimum exceeds another hop's maximum.
 		if route_greatest_htlc_lower_bound > route_least_htlc_upper_bound {
 			return None;
 		}
@@ -435,48 +469,63 @@ impl RandomStrategy {
 			return None;
 		}
 
-		// Assemble hops.
-		// For hop i: fee and CLTV are determined by the *next* channel (what route[i]
-		// will charge to forward onward).  For the last hop they are amount_msat and zero expiry delta.
+		// Assemble hops backwards so each hop's proportional fee is computed on the amount it actually forwards
 		let mut hops = Vec::with_capacity(route.len());
-		for i in 0..route.len() {
-			let (node_id, via_scid, pubkey) = route[i];
+		let mut forwarded = amount_msat;
+		let last = route.len() - 1;
 
+		// Final hop: fee_msat carries the delivery amount; cltv delta is zero.
+		{
+			let (node_id, via_scid, pubkey) = route[last];
 			let channel_info = graph.channel(via_scid)?;
+			let node_features = graph
+				.node(&node_id)
+				.and_then(|n| n.announcement_info.as_ref().map(|a| a.features().clone()))
+				.unwrap_or_else(NodeFeatures::empty);
+			hops.push(RouteHop {
+				pubkey,
+				node_features,
+				short_channel_id: via_scid,
+				channel_features: channel_info.features.clone(),
+				fee_msat: amount_msat,
+				cltv_expiry_delta: 0,
+				maybe_announced_channel: true,
+			});
+		}
 
+		// Non-final hops, from second-to-last back to first.
+		for i in (0..last).rev() {
+			let (node_id, via_scid, pubkey) = route[i];
+			let channel_info = graph.channel(via_scid)?;
 			let node_features = graph
 				.node(&node_id)
 				.and_then(|n| n.announcement_info.as_ref().map(|a| a.features().clone()))
 				.unwrap_or_else(NodeFeatures::empty);
 
-			let (fee_msat, cltv_expiry_delta) = if i + 1 < route.len() {
-				// non-final hop
-				let (_, next_scid, _) = route[i + 1];
-				let next_channel = graph.channel(next_scid)?;
-				let (directed, _) = next_channel.as_directed_from(&node_id)?;
-				let update = if directed.source() == &next_channel.node_one {
-					next_channel.one_to_two.as_ref().unwrap()
-				} else {
-					next_channel.two_to_one.as_ref().unwrap()
-				};
-				let fee = update.fees.base_msat as u64
-					+ (amount_msat * update.fees.proportional_millionths as u64 / 1_000_000);
-				(fee, update.cltv_expiry_delta as u32)
+			let (_, next_scid, _) = route[i + 1];
+			let next_channel = graph.channel(next_scid)?;
+			let (directed, _) = next_channel.as_directed_from(&node_id)?;
+			let update = if directed.source() == &next_channel.node_one {
+				next_channel.one_to_two.as_ref().unwrap()
 			} else {
-				// Final hop: fee_msat carries the delivery amount; cltv delta is zero.
-				(amount_msat, 0)
+				next_channel.two_to_one.as_ref().unwrap()
 			};
+			let fee = update.fees.base_msat as u64
+				+ (forwarded * update.fees.proportional_millionths as u64 / 1_000_000);
+			forwarded += fee;
 
 			hops.push(RouteHop {
 				pubkey,
 				node_features,
 				short_channel_id: via_scid,
 				channel_features: channel_info.features.clone(),
-				fee_msat,
-				cltv_expiry_delta,
+				fee_msat: fee,
+				cltv_expiry_delta: update.cltv_expiry_delta as u32,
 				maybe_announced_channel: true,
 			});
 		}
+
+		hops.reverse();
 
 		// The first-hop HTLC carries amount_msat + all intermediate fees.
 		// Verify the total fits within our live outbound limit before returning.
@@ -490,11 +539,11 @@ impl RandomStrategy {
 }
 
 impl ProbingStrategy for RandomStrategy {
-	fn next_probe(&self) -> Option<Probe> {
+	fn next_probe(&self) -> Option<Path> {
 		let target_hops = random_range(1, self.max_hops as u64) as usize;
 		let amount_msat = random_range(self.min_amount_msat, self.max_amount_msat);
 
-		self.try_build_path(target_hops, amount_msat).map(Probe::PrebuiltRoute)
+		self.try_build_path(target_hops, amount_msat)
 	}
 }
 
@@ -506,8 +555,6 @@ pub struct Prober {
 	pub strategy: Arc<dyn ProbingStrategy>,
 	/// How often to fire a probe attempt.
 	pub interval: Duration,
-	/// Passed to `send_spontaneous_preflight_probes`. `None` uses LDK default (3×).
-	pub liquidity_limit_multiplier: Option<u64>,
 	/// Maximum total millisatoshis that may be locked in in-flight probes at any time.
 	pub max_locked_msat: u64,
 	pub(crate) locked_msat: Arc<AtomicU64>,
@@ -573,47 +620,32 @@ pub(crate) async fn run_prober(prober: Arc<Prober>, mut stop_rx: tokio::sync::wa
 				return;
 			}
 			_ = ticker.tick() => {
-				match prober.strategy.next_probe() {
-					None => {}
-					Some(Probe::PrebuiltRoute(path)) => {
-						let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-						if prober.locked_msat.load(Ordering::Acquire) + amount > prober.max_locked_msat {
-							log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
-						} else {
-							match prober.channel_manager.send_probe(path) {
-								Ok(_) => {
-									prober.locked_msat.fetch_add(amount, Ordering::Release);
-								}
-								Err(e) => {
-									log_debug!(prober.logger, "Prebuilt path probe failed: {:?}", e);
-								}
-							}
-						}
+				let path = match prober.strategy.next_probe() {
+					Some(p) => p,
+					None => continue,
+				};
+				let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
+				if prober.locked_msat.load(Ordering::Acquire) + amount > prober.max_locked_msat {
+					log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
+					continue;
+				}
+				match prober.channel_manager.send_probe(path.clone()) {
+					Ok(_) => {
+						prober.locked_msat.fetch_add(amount, Ordering::Release);
+						log_debug!(
+							prober.logger,
+							"Probe sent: locked {} msat, path: {}",
+							amount,
+							fmt_path(&path)
+						);
 					}
-					Some(Probe::Destination { final_node, amount_msat }) => {
-						if prober.locked_msat.load(Ordering::Acquire) + amount_msat
-							> prober.max_locked_msat
-						{
-							log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
-						} else {
-							match prober.channel_manager.send_spontaneous_preflight_probes(
-								final_node,
-								amount_msat,
-								DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA as u32,
-								prober.liquidity_limit_multiplier,
-							) {
-								Ok(probes) => {
-									if !probes.is_empty() {
-										prober.locked_msat.fetch_add(amount_msat, Ordering::Release);
-									} else {
-										log_debug!(prober.logger, "No probe paths found for destination {}; skipping budget increment.", final_node);
-									}
-								}
-								Err(e) => {
-									log_debug!(prober.logger, "Route-follow probe to {} failed: {:?}", final_node, e);
-								}
-							}
-						}
+					Err(e) => {
+						log_debug!(
+							prober.logger,
+							"Probe send failed: {:?}, path: {}",
+							e,
+							fmt_path(&path)
+						);
 					}
 				}
 			}

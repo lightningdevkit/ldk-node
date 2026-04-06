@@ -79,7 +79,9 @@ use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
-use crate::probing;
+use crate::probing::{
+	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind, RandomStrategy,
+};
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -296,7 +298,7 @@ pub struct NodeBuilder {
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	recovery_mode: bool,
-	probing_config: Option<probing::ProbingConfig>,
+	probing_config: Option<ProbingConfig>,
 }
 
 impl NodeBuilder {
@@ -635,7 +637,7 @@ impl NodeBuilder {
 
 	/// Configures background probing.
 	///
-	/// Use [`probing::ProbingConfig`] to build the configuration:
+	/// Use [`ProbingConfig`] to build the configuration:
 	/// ```ignore
 	/// use ldk_node::probing::ProbingConfig;
 	///
@@ -645,7 +647,7 @@ impl NodeBuilder {
 	///         .build()
 	/// );
 	/// ```
-	pub fn set_probing_config(&mut self, config: probing::ProbingConfig) -> &mut Self {
+	pub fn set_probing_config(&mut self, config: ProbingConfig) -> &mut Self {
 		self.probing_config = Some(config);
 		self
 	}
@@ -1124,8 +1126,8 @@ impl ArcedNodeBuilder {
 
 	/// Configures background probing.
 	///
-	/// See [`probing::ProbingConfig`] for details.
-	pub fn set_probing_config(&self, config: probing::ProbingConfig) {
+	/// See [`ProbingConfig`] for details.
+	pub fn set_probing_config(&self, config: ProbingConfig) {
 		self.inner.write().unwrap().set_probing_config(config);
 	}
 
@@ -1272,9 +1274,9 @@ fn build_with_store_internal(
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
-	probing_config: Option<&probing::ProbingConfig>,
-	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
-	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	probing_config: Option<&ProbingConfig>, async_payments_role: Option<AsyncPaymentsRole>,
+	recovery_mode: bool, seed_bytes: [u8; 64], runtime: Arc<Runtime>, logger: Arc<Logger>,
+	kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -2056,33 +2058,33 @@ fn build_with_store_internal(
 	}
 
 	let prober = probing_config.map(|probing_cfg| {
-		let strategy: Arc<dyn probing::ProbingStrategy> = match &probing_cfg.kind {
-			probing::ProbingStrategyKind::HighDegree { top_node_count } => {
-				Arc::new(probing::HighDegreeStrategy::new(
+		let strategy: Arc<dyn ProbingStrategy> = match &probing_cfg.kind {
+			ProbingStrategyKind::HighDegree { top_node_count } => {
+				Arc::new(HighDegreeStrategy::new(
 					Arc::clone(&network_graph),
+					Arc::clone(&channel_manager),
+					Arc::clone(&router),
 					*top_node_count,
 					MIN_PROBE_AMOUNT_MSAT,
 					DEFAULT_MAX_PROBE_AMOUNT_MSAT,
 					probing_cfg.cooldown,
+					config.probing_liquidity_limit_multiplier,
 				))
 			},
-			probing::ProbingStrategyKind::Random { max_hops } => {
-				Arc::new(probing::RandomStrategy::new(
-					Arc::clone(&network_graph),
-					Arc::clone(&channel_manager),
-					*max_hops,
-					MIN_PROBE_AMOUNT_MSAT,
-					DEFAULT_MAX_PROBE_AMOUNT_MSAT,
-				))
-			},
-			probing::ProbingStrategyKind::Custom(s) => Arc::clone(s),
+			ProbingStrategyKind::Random { max_hops } => Arc::new(RandomStrategy::new(
+				Arc::clone(&network_graph),
+				Arc::clone(&channel_manager),
+				*max_hops,
+				MIN_PROBE_AMOUNT_MSAT,
+				DEFAULT_MAX_PROBE_AMOUNT_MSAT,
+			)),
+			ProbingStrategyKind::Custom(s) => Arc::clone(s),
 		};
-		Arc::new(probing::Prober {
+		Arc::new(Prober {
 			channel_manager: Arc::clone(&channel_manager),
 			logger: Arc::clone(&logger),
 			strategy,
 			interval: probing_cfg.interval,
-			liquidity_limit_multiplier: Some(config.probing_liquidity_limit_multiplier),
 			max_locked_msat: probing_cfg.max_locked_msat,
 			locked_msat: Arc::new(AtomicU64::new(0)),
 		})
