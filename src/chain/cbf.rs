@@ -13,9 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::Update;
-use bip157::chain::BlockHeaderChanges;
+use bip157::chain::{BlockHeaderChanges, ChainState};
 use bip157::{
-	BlockHash, Builder, Client, Event, Info, Requester, SyncUpdate, TrustedPeer, Warning,
+	BlockHash, Builder, Client, Event, HeaderCheckpoint, Info, Node as CbfNode, Requester,
+	SyncUpdate, TrustedPeer, Warning,
 };
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::{Amount, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
@@ -48,6 +49,12 @@ const FEE_RATE_LOOKBACK_BLOCKS: usize = 6;
 /// Matches bdk-kyoto's `IMPOSSIBLE_REORG_DEPTH`.
 const REORG_SAFETY_BLOCKS: u32 = 7;
 
+/// Maximum consecutive restart attempts before giving up.
+const MAX_RESTART_RETRIES: u32 = 5;
+
+/// Initial backoff delay for restart retries (doubles each attempt).
+const INITIAL_BACKOFF_MS: u64 = 500;
+
 /// The fee estimation back-end used by the CBF chain source.
 enum FeeSource {
 	/// Derive fee rates from the coinbase reward of recent blocks.
@@ -72,7 +79,7 @@ pub(super) struct CbfChainSource {
 	/// Fee estimation back-end.
 	fee_source: FeeSource,
 	/// Tracks whether the bip157 node is running and holds the command handle.
-	cbf_runtime_status: Mutex<CbfRuntimeStatus>,
+	cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>,
 	/// Latest chain tip hash, updated by the background event processing task.
 	latest_tip: Arc<Mutex<Option<BlockHash>>>,
 	/// Scripts to match against compact block filters during a scan.
@@ -97,6 +104,8 @@ pub(super) struct CbfChainSource {
 	kv_store: Arc<DynStore>,
 	/// Node configuration (network, storage path, etc.).
 	config: Arc<Config>,
+	/// On-chain wallet reference for deriving chain_state checkpoints on restart.
+	onchain_wallet: Mutex<Option<Arc<Wallet>>>,
 	/// Logger instance.
 	logger: Arc<Logger>,
 	/// Shared node metrics (sync timestamps, etc.).
@@ -138,7 +147,7 @@ impl CbfChainSource {
 			None => FeeSource::Cbf,
 		};
 
-		let cbf_runtime_status = Mutex::new(CbfRuntimeStatus::Stopped);
+		let cbf_runtime_status = Arc::new(Mutex::new(CbfRuntimeStatus::Stopped));
 		let latest_tip = Arc::new(Mutex::new(None));
 		let watched_scripts = Arc::new(RwLock::new(Vec::new()));
 		let matched_block_hashes = Arc::new(Mutex::new(Vec::new()));
@@ -148,6 +157,7 @@ impl CbfChainSource {
 		let scan_lock = tokio::sync::Mutex::new(());
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		let onchain_wallet = Mutex::new(None);
 		Ok(Self {
 			peers,
 			sync_config,
@@ -163,6 +173,7 @@ impl CbfChainSource {
 			onchain_wallet_sync_status,
 			lightning_wallet_sync_status,
 			fee_estimator,
+			onchain_wallet,
 			kv_store,
 			config,
 			logger,
@@ -170,82 +181,217 @@ impl CbfChainSource {
 		})
 	}
 
-	/// Start the bip157 node and spawn background tasks for event processing.
-	pub(crate) fn start(&self, runtime: Arc<Runtime>) {
-		let mut status = self.cbf_runtime_status.lock().unwrap();
-		if matches!(*status, CbfRuntimeStatus::Started { .. }) {
-			debug_assert!(false, "We shouldn't call start if we're already started");
-			return;
-		}
+	/// Build a new bip157 node and client from the current configuration.
+	///
+	/// Delegates to [`Self::build_cbf_node_static`], passing all needed fields.
+	fn build_cbf_node(&self) -> (CbfNode, Client) {
+		let wallet = self.onchain_wallet.lock().unwrap().clone();
+		Self::build_cbf_node_static(
+			&self.peers,
+			&self.sync_config,
+			&self.config,
+			wallet.as_ref(),
+			&self.logger,
+		)
+	}
 
-		let network = self.config.network;
+	/// Static version of the builder: takes all required parameters explicitly
+	/// so it can be called from an `async move` block without borrowing `self`.
+	fn build_cbf_node_static(
+		peers: &[String], sync_config: &CbfSyncConfig, config: &Config,
+		wallet: Option<&Arc<Wallet>>, logger: &Logger,
+	) -> (CbfNode, Client) {
+		let network = config.network;
 
 		let mut builder = Builder::new(network);
 
 		// Configure data directory under the node's storage path.
-		let data_dir = std::path::PathBuf::from(&self.config.storage_dir_path).join("bip157_data");
+		let data_dir = std::path::PathBuf::from(&config.storage_dir_path).join("bip157_data");
 		builder = builder.data_dir(data_dir);
 
 		// Add configured peers.
-		let peers: Vec<TrustedPeer> = self
-			.peers
+		let trusted_peers: Vec<TrustedPeer> = peers
 			.iter()
 			.filter_map(|peer_str| {
 				peer_str.parse::<SocketAddr>().ok().map(TrustedPeer::from_socket_addr)
 			})
 			.collect();
-		if !peers.is_empty() {
-			builder = builder.add_peers(peers);
+		if !trusted_peers.is_empty() {
+			builder = builder.add_peers(trusted_peers);
 		}
+
+		// Require multiple peers to agree on filter headers before accepting them,
+		// as recommended by BIP 157 to mitigate malicious peer attacks.
+		builder = builder.required_peers(sync_config.required_peers);
 
 		// Request witness data so segwit transactions include full witnesses,
 		// required for Lightning channel operations.
 		builder = builder.fetch_witness_data();
 
 		// Set peer response timeout from user configuration (default: 30s).
-		builder =
-			builder.response_timeout(Duration::from_secs(self.sync_config.response_timeout_secs));
+		builder = builder.response_timeout(Duration::from_secs(sync_config.response_timeout_secs));
 
-		let (node, client) = builder.build();
+		// If we have a wallet reference, derive a chain_state checkpoint so the
+		// bip157 node can skip already-synced headers on restart.
+		if let Some(wallet) = wallet {
+			let cp = wallet.latest_checkpoint();
+			let target_height = cp.height().saturating_sub(REORG_SAFETY_BLOCKS);
+			// Walk the checkpoint chain back to the target height.
+			let mut cursor = cp;
+			while cursor.height() > target_height {
+				match cursor.prev() {
+					Some(prev) => cursor = prev,
+					None => break,
+				}
+			}
+			if cursor.height() > 0 {
+				let header_cp = HeaderCheckpoint::new(cursor.height(), cursor.hash());
+				builder = builder.chain_state(ChainState::Checkpoint(header_cp));
+				log_debug!(
+					logger,
+					"CBF builder: resuming from checkpoint height={}, hash={}",
+					cursor.height(),
+					cursor.hash(),
+				);
+			}
+		}
+
+		builder.build()
+	}
+
+	/// Start the bip157 node and spawn background tasks for event processing.
+	///
+	/// The node runs inside a restart loop: if `node.run()` returns an error,
+	/// the loop rebuilds the node, swaps the requester, and respawns channel
+	/// processing tasks — up to [`MAX_RESTART_RETRIES`] consecutive failures
+	/// with exponential backoff starting at [`INITIAL_BACKOFF_MS`].
+	pub(crate) fn start(&self, runtime: Arc<Runtime>, onchain_wallet: Arc<Wallet>) {
+		let mut status = self.cbf_runtime_status.lock().unwrap();
+		if matches!(*status, CbfRuntimeStatus::Started { .. }) {
+			debug_assert!(false, "We shouldn't call start if we're already started");
+			return;
+		}
+
+		// Store the wallet reference for future restarts.
+		*self.onchain_wallet.lock().unwrap() = Some(Arc::clone(&onchain_wallet));
+
+		let (node, client) = self.build_cbf_node();
 
 		let Client { requester, info_rx, warn_rx, event_rx } = client;
 
-		// Spawn the bip157 node in the background.
-		let node_logger = Arc::clone(&self.logger);
-		runtime.spawn_background_task(async move {
-			if let Err(e) = node.run().await {
-				log_error!(node_logger, "CBF node exited with error: {:?}", e);
-			}
-		});
-
-		// Spawn a task to log info messages.
-		let info_logger = Arc::clone(&self.logger);
-		runtime
-			.spawn_cancellable_background_task(Self::process_info_messages(info_rx, info_logger));
-
-		// Spawn a task to log warning messages.
-		let warn_logger = Arc::clone(&self.logger);
-		runtime
-			.spawn_cancellable_background_task(Self::process_warn_messages(warn_rx, warn_logger));
-
-		// Spawn a task to process events.
-		let event_state = CbfEventState {
-			latest_tip: Arc::clone(&self.latest_tip),
-			watched_scripts: Arc::clone(&self.watched_scripts),
-			matched_block_hashes: Arc::clone(&self.matched_block_hashes),
-			sync_completion_tx: Arc::clone(&self.sync_completion_tx),
-			filter_skip_height: Arc::clone(&self.filter_skip_height),
-		};
-		let event_logger = Arc::clone(&self.logger);
-		runtime.spawn_cancellable_background_task(Self::process_events(
-			event_rx,
-			event_state,
-			event_logger,
-		));
+		*status = CbfRuntimeStatus::Started { requester };
+		drop(status);
 
 		log_info!(self.logger, "CBF chain source started.");
 
-		*status = CbfRuntimeStatus::Started { requester };
+		// Clone all Arc references needed by the restart loop so the async
+		// block is 'static (no borrows of `self`).
+		let restart_status = Arc::clone(&self.cbf_runtime_status);
+		let restart_logger = Arc::clone(&self.logger);
+		let restart_latest_tip = Arc::clone(&self.latest_tip);
+		let restart_watched_scripts = Arc::clone(&self.watched_scripts);
+		let restart_matched_block_hashes = Arc::clone(&self.matched_block_hashes);
+		let restart_sync_completion_tx = Arc::clone(&self.sync_completion_tx);
+		let restart_filter_skip_height = Arc::clone(&self.filter_skip_height);
+		let restart_peers = self.peers.clone();
+		let restart_sync_config = self.sync_config.clone();
+		let restart_config = Arc::clone(&self.config);
+		let restart_wallet = Arc::clone(&onchain_wallet);
+
+		runtime.spawn_background_task(async move {
+			let mut current_node = node;
+			let mut current_info_rx = info_rx;
+			let mut current_warn_rx = warn_rx;
+			let mut current_event_rx = event_rx;
+			let mut retries = 0u32;
+			let mut backoff_ms = INITIAL_BACKOFF_MS;
+
+			loop {
+				// Spawn channel processing tasks for this iteration.
+				let info_handle = tokio::spawn(Self::process_info_messages(
+					current_info_rx,
+					Arc::clone(&restart_logger),
+				));
+				let warn_handle = tokio::spawn(Self::process_warn_messages(
+					current_warn_rx,
+					Arc::clone(&restart_logger),
+				));
+				let event_state = CbfEventState {
+					latest_tip: Arc::clone(&restart_latest_tip),
+					watched_scripts: Arc::clone(&restart_watched_scripts),
+					matched_block_hashes: Arc::clone(&restart_matched_block_hashes),
+					sync_completion_tx: Arc::clone(&restart_sync_completion_tx),
+					filter_skip_height: Arc::clone(&restart_filter_skip_height),
+				};
+				let event_handle = tokio::spawn(Self::process_events(
+					current_event_rx,
+					event_state,
+					Arc::clone(&restart_logger),
+				));
+
+				// Run the node until it exits.
+				match current_node.run().await {
+					Ok(()) => {
+						log_info!(restart_logger, "CBF node shut down cleanly.");
+						break;
+					},
+					Err(e) => {
+						retries += 1;
+						if retries > MAX_RESTART_RETRIES {
+							log_error!(
+								restart_logger,
+								"CBF node failed {} times, giving up: {:?}",
+								retries,
+								e,
+							);
+							*restart_status.lock().unwrap() = CbfRuntimeStatus::Stopped;
+							break;
+						}
+						log_error!(
+							restart_logger,
+							"CBF node exited with error (attempt {}/{}): {:?}. \
+							 Restarting in {}ms.",
+							retries,
+							MAX_RESTART_RETRIES,
+							e,
+							backoff_ms,
+						);
+
+						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+						backoff_ms = backoff_ms.saturating_mul(2);
+
+						// Abort old channel processing tasks.
+						info_handle.abort();
+						warn_handle.abort();
+						event_handle.abort();
+
+						// Rebuild the node from scratch.
+						let (new_node, new_client) = Self::build_cbf_node_static(
+							&restart_peers,
+							&restart_sync_config,
+							&restart_config,
+							Some(&restart_wallet),
+							&restart_logger,
+						);
+						let Client {
+							requester: new_requester,
+							info_rx: new_info_rx,
+							warn_rx: new_warn_rx,
+							event_rx: new_event_rx,
+						} = new_client;
+
+						// Swap the requester so callers pick up the new handle.
+						*restart_status.lock().unwrap() =
+							CbfRuntimeStatus::Started { requester: new_requester };
+
+						current_node = new_node;
+						current_info_rx = new_info_rx;
+						current_warn_rx = new_warn_rx;
+						current_event_rx = new_event_rx;
+					},
+				}
+			}
+		});
 	}
 
 	/// Shut down the bip157 node and stop all background tasks.
@@ -336,7 +482,16 @@ impl CbfChainSource {
 	fn requester(&self) -> Result<Requester, Error> {
 		let status = self.cbf_runtime_status.lock().unwrap();
 		match &*status {
-			CbfRuntimeStatus::Started { requester } => Ok(requester.clone()),
+			CbfRuntimeStatus::Started { requester } if requester.is_running() => {
+				Ok(requester.clone())
+			},
+			CbfRuntimeStatus::Started { .. } => {
+				log_error!(
+					self.logger,
+					"CBF node is not running; sync will fail until restart completes."
+				);
+				Err(Error::ConnectionFailed)
+			},
 			CbfRuntimeStatus::Stopped => {
 				debug_assert!(
 					false,
@@ -344,6 +499,19 @@ impl CbfChainSource {
 				);
 				Err(Error::ConnectionFailed)
 			},
+		}
+	}
+
+	/// Reset filter scan state to a clean baseline.
+	///
+	/// Called on error paths in `run_filter_scan()` to ensure no stale state
+	/// leaks between scans. The success path performs inline cleanup instead.
+	fn cleanup_scan_state(&self) {
+		self.filter_skip_height.store(0, Ordering::Release);
+		self.watched_scripts.write().unwrap().clear();
+		self.matched_block_hashes.lock().unwrap().clear();
+		if let Some(tx) = self.sync_completion_tx.lock().unwrap().take() {
+			drop(tx);
 		}
 	}
 
@@ -376,21 +544,27 @@ impl CbfChainSource {
 		let (tx, rx) = oneshot::channel();
 		*self.sync_completion_tx.lock().unwrap() = Some(tx);
 
-		requester.rescan().map_err(|e| {
+		if let Err(e) = requester.rescan().map_err(|e| {
 			log_error!(self.logger, "Failed to trigger CBF rescan: {:?}", e);
 			Error::WalletOperationFailed
-		})?;
+		}) {
+			self.cleanup_scan_state();
+			return Err(e);
+		}
 
-		let sync_update = rx.await.map_err(|e| {
-			log_error!(self.logger, "CBF sync completion channel dropped: {:?}", e);
-			Error::WalletOperationFailed
-		})?;
-
-		self.filter_skip_height.store(0, Ordering::Release);
-		self.watched_scripts.write().unwrap().clear();
-		let matched = std::mem::take(&mut *self.matched_block_hashes.lock().unwrap());
-
-		Ok((sync_update, matched))
+		match rx.await {
+			Ok(sync_update) => {
+				self.filter_skip_height.store(0, Ordering::Release);
+				self.watched_scripts.write().unwrap().clear();
+				let matched = std::mem::take(&mut *self.matched_block_hashes.lock().unwrap());
+				Ok((sync_update, matched))
+			},
+			Err(e) => {
+				log_error!(self.logger, "CBF sync completion channel dropped: {:?}", e);
+				self.cleanup_scan_state();
+				Err(Error::WalletOperationFailed)
+			},
+		}
 	}
 
 	/// Sync the on-chain wallet by scanning compact block filters for relevant transactions.
@@ -511,11 +685,20 @@ impl CbfChainSource {
 		// created outputs and spent inputs), so we include every transaction
 		// from matched blocks and let BDK determine relevance.
 		let mut tx_update = TxUpdate::default();
+		let per_request_timeout =
+			Duration::from_secs(self.sync_config.timeouts_config.per_request_timeout_secs.into());
 		for (height, block_hash) in &matched {
-			let indexed_block = requester.get_block(*block_hash).await.map_err(|e| {
-				log_error!(self.logger, "Failed to fetch block {}: {:?}", block_hash, e);
-				Error::WalletOperationFailed
-			})?;
+			let indexed_block =
+				tokio::time::timeout(per_request_timeout, requester.get_block(*block_hash))
+					.await
+					.map_err(|_| {
+						log_error!(self.logger, "Timed out fetching block {}", block_hash);
+						Error::WalletOperationFailed
+					})?
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to fetch block {}: {:?}", block_hash, e);
+						Error::WalletOperationFailed
+					})?;
 			let block = indexed_block.block;
 			let block_id = BlockId { height: *height, hash: block.header.block_hash() };
 			let conf_time =
@@ -624,12 +807,15 @@ impl CbfChainSource {
 		// The compact block filter already matched our scripts (covering both
 		// created outputs and spent inputs), so we confirm every transaction
 		// from matched blocks and let LDK determine relevance.
+		let per_request_timeout =
+			Duration::from_secs(self.sync_config.timeouts_config.per_request_timeout_secs.into());
 		for (height, block_hash) in &matched {
 			confirm_block_transactions(
 				&requester,
 				*block_hash,
 				*height,
 				&confirmables,
+				per_request_timeout,
 				&self.logger,
 			)
 			.await?;
@@ -1007,12 +1193,18 @@ fn update_node_metrics_timestamp(
 /// Fetch a block by hash and call `transactions_confirmed` on each confirmable.
 async fn confirm_block_transactions(
 	requester: &Requester, block_hash: BlockHash, height: u32,
-	confirmables: &[&(dyn Confirm + Sync + Send)], logger: &Logger,
+	confirmables: &[&(dyn Confirm + Sync + Send)], per_request_timeout: Duration, logger: &Logger,
 ) -> Result<(), Error> {
-	let indexed_block = requester.get_block(block_hash).await.map_err(|e| {
-		log_error!(logger, "Failed to fetch block {}: {:?}", block_hash, e);
-		Error::TxSyncFailed
-	})?;
+	let indexed_block = tokio::time::timeout(per_request_timeout, requester.get_block(block_hash))
+		.await
+		.map_err(|_| {
+			log_error!(logger, "Timed out fetching block {}", block_hash);
+			Error::TxSyncFailed
+		})?
+		.map_err(|e| {
+			log_error!(logger, "Failed to fetch block {}: {:?}", block_hash, e);
+			Error::TxSyncFailed
+		})?;
 	let block = &indexed_block.block;
 	let header = &block.header;
 	let txdata: Vec<(usize, &Transaction)> = block.txdata.iter().enumerate().collect();

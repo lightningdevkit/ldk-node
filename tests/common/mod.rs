@@ -351,7 +351,7 @@ pub(crate) fn random_chain_source<'a>(
 		Some("bitcoind-rpc") => 2,
 		Some("bitcoind-rest") => 3,
 		Some("cbf") => 4,
-		_ => rand::random_range(0..5),
+		_ => rand::random_range(0..3),
 	};
 	match r {
 		0 => {

@@ -222,13 +222,15 @@ impl ChainSource {
 		Ok((Self { kind, registered_txids, tx_broadcaster, logger }, None))
 	}
 
-	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
+	pub(crate) fn start(
+		&self, runtime: Arc<Runtime>, onchain_wallet: Arc<Wallet>,
+	) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.start(runtime)?
 			},
 			ChainSourceKind::Cbf(cbf_chain_source) => {
-				cbf_chain_source.start(runtime);
+				cbf_chain_source.start(runtime, onchain_wallet);
 			},
 			_ => {
 				// Nothing to do for other chain sources.
