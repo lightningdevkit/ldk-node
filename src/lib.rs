@@ -268,10 +268,12 @@ impl Node {
 		);
 
 		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
-			log_error!(self.logger, "Failed to start chain syncing: {}", e);
-			e
-		})?;
+		self.chain_source.start(Arc::clone(&self.runtime), Arc::clone(&self.wallet)).map_err(
+			|e| {
+				log_error!(self.logger, "Failed to start chain syncing: {}", e);
+				e
+			},
+		)?;
 
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);

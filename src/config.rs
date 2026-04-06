@@ -567,6 +567,17 @@ pub struct CbfSyncConfig {
 	///
 	/// Defaults to 30 seconds.
 	pub response_timeout_secs: u64,
+	/// Number of peers that must agree on filter headers before they are accepted.
+	///
+	/// Higher values increase security against malicious peers serving invalid compact block
+	/// filters, at the cost of slower sync times. Must be between 1 and 15.
+	///
+	/// As recommended by BIP 157, clients should connect to multiple peers to mitigate the risk
+	/// of downloading incorrect filter headers. Setting this to 1 means filter headers from a
+	/// single peer are trusted without cross-validation.
+	///
+	/// Defaults to 1.
+	pub required_peers: u8,
 }
 
 impl Default for CbfSyncConfig {
@@ -575,6 +586,7 @@ impl Default for CbfSyncConfig {
 			background_sync_config: Some(BackgroundSyncConfig::default()),
 			timeouts_config: SyncTimeoutsConfig::default(),
 			response_timeout_secs: 30,
+			required_peers: 1,
 		}
 	}
 }
