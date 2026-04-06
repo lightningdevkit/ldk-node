@@ -516,19 +516,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		TestChainSource::Cbf(bitcoind) => {
 			let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
 			let peer_addr = format!("{}", p2p_socket);
-			let timeouts_config = SyncTimeoutsConfig {
-				onchain_wallet_sync_timeout_secs: 3,
-				lightning_wallet_sync_timeout_secs: 3,
-				fee_rate_cache_update_timeout_secs: 3,
-				tx_broadcast_timeout_secs: 3,
-				per_request_timeout_secs: 3,
-			};
-			let sync_config = CbfSyncConfig {
-				background_sync_config: None,
-				timeouts_config,
-				required_peers: 1,
-				..Default::default()
-			};
+			let sync_config = CbfSyncConfig { background_sync_config: None, ..Default::default() };
 			builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config), None);
 		},
 	}
@@ -658,13 +646,27 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	.await;
 }
 
-pub(crate) async fn wait_for_cbf_sync(node: &TestNode) {
-	let before = node.status().latest_onchain_wallet_sync_timestamp;
+/// Wait for a CBF sync cycle to complete successfully.
+///
+/// Unlike the old version which only checked that the onchain sync timestamp
+/// advanced, this also verifies that both the onchain *and* lightning wallet
+/// syncs completed, and calls a user-supplied `check` closure after each
+/// successful sync so the caller can verify concrete wallet state (e.g.
+/// balance). This prevents false passes where the timestamp advances but
+/// the wallet state is still stale.
+pub(crate) async fn wait_for_cbf_sync<F>(node: &TestNode, check: F)
+where
+	F: Fn() -> bool,
+{
+	let before_onchain = node.status().latest_onchain_wallet_sync_timestamp;
+	let before_lightning = node.status().latest_lightning_wallet_sync_timestamp;
 	let mut delay = Duration::from_millis(200);
 	for _ in 0..30 {
 		if node.sync_wallets().is_ok() {
-			let after = node.status().latest_onchain_wallet_sync_timestamp;
-			if after > before {
+			let status = node.status();
+			let onchain_synced = status.latest_onchain_wallet_sync_timestamp > before_onchain;
+			let lightning_synced = status.latest_lightning_wallet_sync_timestamp > before_lightning;
+			if onchain_synced && lightning_synced && check() {
 				return;
 			}
 		}
