@@ -22,7 +22,7 @@ use lightning::events::{
 	ReplayEvent,
 };
 use lightning::impl_writeable_tlv_based_enum;
-use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
@@ -1285,10 +1285,11 @@ where
 					}
 				}
 				let res = if allow_0conf {
-					self.channel_manager.accept_inbound_channel_from_trusted_peer_0conf(
+					self.channel_manager.accept_inbound_channel_from_trusted_peer(
 						&temporary_channel_id,
 						&counterparty_node_id,
 						user_channel_id,
+						TrustedChannelFeatures::ZeroConf,
 						channel_override_config,
 					)
 				} else {
