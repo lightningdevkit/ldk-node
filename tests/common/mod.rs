@@ -32,8 +32,8 @@ use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
-	Builder, CustomTlvRecord, Event, LightningBalance, Node, NodeError, PendingSweepBalance,
-	UserChannelId,
+	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
+	PendingSweepBalance, UserChannelId,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -916,6 +916,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
+	// After channel_ready, no shutdown should be in progress.
+	assert!(node_a.list_channels().iter().all(|c| matches!(
+		c.channel_shutdown_state,
+		None | Some(ChannelShutdownState::NotShuttingDown)
+	)));
+
 	println!("\nB receive");
 	let invoice_amount_1_msat = 2500_000;
 	let invoice_description: Bolt11InvoiceDescription =
@@ -1267,6 +1273,20 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	} else {
 		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+		// The cooperative shutdown may complete before we get to check, but if the channel
+		// is still visible it must already be in a shutdown state.
+		if let Some(channel) =
+			node_a.list_channels().into_iter().find(|c| c.user_channel_id == user_channel_id_a)
+		{
+			assert!(
+				!matches!(
+					channel.channel_shutdown_state,
+					None | Some(ChannelShutdownState::NotShuttingDown)
+				),
+				"Expected shutdown in progress on node_a, got {:?}",
+				channel.channel_shutdown_state,
+			);
+		}
 	}
 
 	expect_event!(node_a, ChannelClosed);
