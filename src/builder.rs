@@ -52,6 +52,8 @@ use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
+#[cfg(feature = "uniffi")]
+use crate::ffi::{FfiDynStore, FfiDynStoreTrait};
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::tier_store::TierStore;
@@ -1152,6 +1154,32 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_wallet_recovery_mode();
 	}
 
+	/// Configures the backup store for local disaster recovery.
+	///
+	/// When building with tiered storage, this store receives a second durable
+	/// copy of data written to the primary store.
+	///
+	/// Writes and removals for primary-backed data only succeed once both the
+	/// primary and backup stores complete successfully.
+	///
+	/// If not set, durable data will be stored only in the primary store.
+	pub fn set_backup_store(&self, backup_store: Arc<dyn FfiDynStoreTrait>) {
+		let store: Arc<DynStore> = Arc::new(FfiDynStore::from_store(backup_store));
+		self.inner.write().unwrap().set_backup_store(store);
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with tiered storage, this store is used for ephemeral data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	pub fn set_ephemeral_store(&self, ephemeral_store: Arc<dyn FfiDynStoreTrait>) {
+		let store: Arc<DynStore> = Arc::new(FfiDynStore::from_store(ephemeral_store));
+		self.inner.write().unwrap().set_ephemeral_store(store);
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
@@ -1280,12 +1308,19 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
-	// this so its not needed.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
-		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
+	///
+	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
+	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
+	/// and a backup store for local disaster recovery can be configured via
+	/// [`set_ephemeral_store`] and [`set_backup_store`].
+	///
+	/// [`set_ephemeral_store`]: Self::set_ephemeral_store
+	/// [`set_backup_store`]: Self::set_backup_store
+	pub fn build_with_store(
+		&self, node_entropy: Arc<NodeEntropy>, kv_store: Arc<dyn FfiDynStoreTrait>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().unwrap().build_with_store(*node_entropy, kv_store).map(Arc::new)
+		let store: Arc<DynStore> = Arc::new(FfiDynStore::from_store(kv_store));
+		self.inner.read().unwrap().build_with_dynstore(*node_entropy, store).map(Arc::new)
 	}
 }
 

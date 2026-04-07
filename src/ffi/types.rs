@@ -51,6 +51,14 @@ use vss_client::headers::{
 	VssHeaderProviderError as VssClientHeaderProviderError,
 };
 
+use crate::builder::sanitize_alias;
+pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig};
+pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
+use crate::error::Error;
+pub use crate::liquidity::LSPS1OrderStatus;
+pub use crate::logger::{LogLevel, LogRecord, LogWriter};
+use crate::{hex_utils, SocketAddress, UserChannelId};
+
 /// Errors around providing headers for each VSS request.
 #[derive(Debug, uniffi::Error)]
 pub enum VssHeaderProviderError {
@@ -141,14 +149,6 @@ impl VssClientHeaderProvider for VssHeaderProviderAdapter {
 		self.inner.get_headers(request.to_vec()).await.map_err(Into::into)
 	}
 }
-
-use crate::builder::sanitize_alias;
-pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig};
-pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
-use crate::error::Error;
-pub use crate::liquidity::LSPS1OrderStatus;
-pub use crate::logger::{LogLevel, LogRecord, LogWriter};
-use crate::{hex_utils, SocketAddress, UserChannelId};
 
 uniffi::custom_type!(PublicKey, String, {
 	remote,
