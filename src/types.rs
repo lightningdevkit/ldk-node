@@ -57,7 +57,7 @@ where
 {
 }
 
-pub(crate) trait DynStoreTrait: Send + Sync {
+pub trait DynStoreTrait: Send + Sync {
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>>;
