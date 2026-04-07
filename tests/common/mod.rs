@@ -43,6 +43,8 @@ use ldk_node::config::{
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+#[cfg(feature = "uniffi")]
+use ldk_node::DynStoreWrapper;
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
 	PendingSweepBalance, UserChannelId,
@@ -598,7 +600,12 @@ where
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
+			#[cfg(not(feature = "uniffi"))]
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
+			#[cfg(feature = "uniffi")]
+			let kv_store = Arc::new(DynStoreWrapper(TestSyncStore::new(
+				config.node_config.storage_dir_path.into(),
+			)));
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),

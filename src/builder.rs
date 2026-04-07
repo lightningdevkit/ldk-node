@@ -56,6 +56,8 @@ use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
+#[cfg(feature = "uniffi")]
+use crate::ffi::{FfiDynStore, FfiDynStoreTrait};
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::tier_store::TierStore;
@@ -854,6 +856,7 @@ impl NodeBuilder {
 	///
 	/// [`set_ephemeral_store`]: Self::set_ephemeral_store
 	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
+	#[cfg(not(feature = "uniffi"))]
 	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
@@ -863,6 +866,21 @@ impl NodeBuilder {
 
 	fn build_with_store_and_logger<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
+	) -> Result<Node, BuildError> {
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
+		self.build_with_dynstore_and_logger(node_entropy, primary_store, logger)
+	}
+
+	#[cfg(feature = "uniffi")]
+	fn build_with_dynstore(
+		&self, node_entropy: NodeEntropy, primary_store: Arc<DynStore>,
+	) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		self.build_with_dynstore_and_logger(node_entropy, primary_store, logger)
+	}
+
+	fn build_with_dynstore_and_logger(
+		&self, node_entropy: NodeEntropy, primary_store: Arc<DynStore>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
 			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(&logger)))
@@ -874,10 +892,11 @@ impl NodeBuilder {
 		};
 
 		let ts_config = self.tier_store_config.as_ref();
-		let primary_store = Arc::new(DynStoreWrapper(kv_store));
 		let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
+
 		if let Some(config) = ts_config {
 			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
+
 			if let Some(backup_storage_dir_path) = config.backup_storage_dir_path.as_ref() {
 				let primary_storage_dir_path = PathBuf::from(&self.config.storage_dir_path);
 				if primary_storage_dir_path == *backup_storage_dir_path {
@@ -898,6 +917,7 @@ impl NodeBuilder {
 					log_error!(logger, "Failed to setup backup SQLite store: {}", e);
 					BuildError::KVStoreSetupFailed
 				})?;
+
 				let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(backup_store));
 				tier_store.set_backup_store(backup_store);
 			}
@@ -905,6 +925,7 @@ impl NodeBuilder {
 
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(tier_store));
 
 		build_with_store_internal(
 			config,
@@ -917,7 +938,7 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(DynStoreWrapper(tier_store)),
+			kv_store,
 		)
 	}
 }
@@ -1240,8 +1261,9 @@ impl ArcedNodeBuilder {
 	/// can be rebuilt if lost.
 	///
 	/// If not set, non-critical data will be stored in the primary store.
-	pub fn set_ephemeral_store(&self, ephemeral_store: Arc<DynStore>) {
-		self.inner.write().expect("lock").set_ephemeral_store(ephemeral_store);
+	pub fn set_ephemeral_store(&self, ephemeral_store: Arc<dyn FfiDynStoreTrait>) {
+		let store: Arc<DynStore> = Arc::new(FfiDynStore::from_store(ephemeral_store));
+		self.inner.write().expect("lock").set_ephemeral_store(store);
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1372,12 +1394,19 @@ impl ArcedNodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
-	// this so its not needed.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
-		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
+	///
+	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
+	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
+	/// and a backup store for local disaster recovery can be configured via
+	/// [`set_ephemeral_store`] and [`set_backup_storage_dir_path`].
+	///
+	/// [`set_ephemeral_store`]: Self::set_ephemeral_store
+	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
+	pub fn build_with_store(
+		&self, node_entropy: Arc<NodeEntropy>, kv_store: Arc<dyn FfiDynStoreTrait>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
+		let store: Arc<DynStore> = Arc::new(FfiDynStore::from_store(kv_store));
+		self.inner.read().expect("lock").build_with_dynstore(*node_entropy, store).map(Arc::new)
 	}
 }
 

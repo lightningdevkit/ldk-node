@@ -36,6 +36,8 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
+#[cfg(feature = "uniffi")]
+use ldk_node::DynStoreWrapper;
 use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
@@ -313,8 +315,12 @@ async fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
+	#[cfg(not(feature = "uniffi"))]
 	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
-
+	#[cfg(feature = "uniffi")]
+	let test_sync_store = Arc::new(DynStoreWrapper(TestSyncStore::new(
+		config.node_config.storage_dir_path.clone().into(),
+	)));
 	let mut sync_config = EsploraSyncConfig::default();
 	sync_config.background_sync_config = None;
 	setup_builder!(builder, config.node_config);
