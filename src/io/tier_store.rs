@@ -4,7 +4,6 @@
 // http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
-#![allow(dead_code)] // TODO: Temporal warning silencer. Will be removed in later commit.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -12,9 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lightning::util::persist::{
-	KVStore, NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	KVStore, PageToken, PaginatedKVStore, PaginatedListResponse, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
 use lightning::{io, log_error};
 use tokio::sync::Mutex as TokioMutex;
@@ -160,6 +159,21 @@ impl KVStore for TierStore {
 		let secondary_namespace = secondary_namespace.to_string();
 
 		async move { inner.list_internal(primary_namespace, secondary_namespace).await }
+	}
+}
+
+impl PaginatedKVStore for TierStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+
+		async move {
+			inner.list_paginated_internal(primary_namespace, secondary_namespace, page_token).await
+		}
 	}
 }
 
@@ -493,6 +507,47 @@ impl TierStoreInner {
 		}
 	}
 
+	async fn list_paginated_internal(
+		&self, primary_namespace: String, secondary_namespace: String,
+		page_token: Option<PageToken>,
+	) -> io::Result<PaginatedListResponse> {
+		check_namespace_key_validity(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			None,
+			"list_paginated",
+		)?;
+
+		match (primary_namespace.as_str(), secondary_namespace.as_str()) {
+			(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _) => {
+				if let Some(eph_store) = self.ephemeral_store.as_ref() {
+					// We don't retry ephemeral-store lists here. Local failures are treated as
+					// terminal for this access path rather than falling back to another store.
+					return PaginatedKVStore::list_paginated(
+						eph_store.as_ref(),
+						&primary_namespace,
+						&secondary_namespace,
+						page_token,
+					)
+					.await;
+				}
+			},
+			_ => {},
+		}
+
+		PaginatedKVStore::list_paginated(
+			self.primary_store.as_ref(),
+			&primary_namespace,
+			&secondary_namespace,
+			page_token,
+		)
+		.await
+	}
+
 	fn handle_primary_backup_results(
 		&self, op: &str, primary_namespace: &str, secondary_namespace: &str, key: &str,
 		primary_res: io::Result<()>, backup_res: io::Result<()>,
@@ -560,6 +615,8 @@ mod tests {
 	use lightning::util::persist::{
 		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 	use lightning_persister::fs_store::v2::FilesystemStoreV2;
 
@@ -668,6 +725,85 @@ mod tests {
 
 		assert!(ephemeral_read_cm.is_err());
 		assert_eq!(primary_read_cm.unwrap(), data);
+	}
+
+	#[tokio::test]
+	async fn list_paginated_routes_to_selected_tier() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		let ephemeral_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("ephemeral")).unwrap()));
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		tier.write(
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			"monitor-key",
+			vec![1u8; 32],
+		)
+		.await
+		.unwrap();
+
+		// This decoy uses the same namespace but the opposite physical store, so it
+		// would show up if paginated listing routed to the wrong tier.
+		ephemeral_store
+			.write(
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				"ephemeral-decoy",
+				vec![2u8; 32],
+			)
+			.await
+			.unwrap();
+
+		// Same decoy check in the other direction: this key should be ignored
+		// because network graph listings route to the ephemeral store when set.
+		primary_store
+			.write(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				"primary-decoy",
+				vec![3u8; 32],
+			)
+			.await
+			.unwrap();
+
+		tier.write(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			vec![4u8; 32],
+		)
+		.await
+		.unwrap();
+
+		let primary_response = PaginatedKVStore::list_paginated(
+			&tier,
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			None,
+		)
+		.await
+		.unwrap();
+		assert_eq!(primary_response.keys, vec!["monitor-key".to_string()]);
+
+		let ephemeral_response = PaginatedKVStore::list_paginated(
+			&tier,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			None,
+		)
+		.await
+		.unwrap();
+		assert_eq!(ephemeral_response.keys, vec![NETWORK_GRAPH_PERSISTENCE_KEY.to_string()]);
 	}
 
 	#[tokio::test]
