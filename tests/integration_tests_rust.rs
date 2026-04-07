@@ -26,8 +26,8 @@ use common::{
 	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event,
 	expect_channel_ready_events, expect_event, expect_payment_claimable_event,
 	expect_payment_received_event, expect_payment_successful_event, expect_splice_negotiated_event,
-	generate_blocks_and_wait, generate_listening_addresses, invalidate_blocks, open_channel,
-	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
+	generate_blocks_and_wait, generate_listening_addresses, into_builder_store, invalidate_blocks,
+	open_channel, open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
 	wait_for_block, wait_for_tx, InMemoryStore, NodePaymentExt, TestChainSource, TestConfig,
@@ -178,7 +178,10 @@ fn wallet_store_contention_does_not_stall_runtime() {
 				wallet_write_started: Arc::new(tokio::sync::Notify::new()),
 			};
 			let node = builder
-				.build_with_store(test_config.node_entropy.into(), store.clone())
+				.build_with_store(
+					test_config.node_entropy.into(),
+					into_builder_store(store.clone()),
+				)
 				.map_err(|e| format!("failed to build node: {e:?}"))?;
 			#[cfg(not(feature = "uniffi"))]
 			let node = Arc::new(node);
@@ -345,7 +348,9 @@ async fn channel_open_completes_while_wallet_persistence_is_stalled() {
 	sync_config.background_sync_config = None;
 	builder_b.set_chain_source_esplora(esplora_url, Some(sync_config));
 	let store = WalletPersistGatedStore::new();
-	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	let node_b = builder_b
+		.build_with_store(config_b.node_entropy.into(), into_builder_store(store.clone()))
+		.unwrap();
 	node_b.start().unwrap();
 
 	// Fund both nodes so node B passes the anchor reserve check on the accept path.
@@ -429,7 +434,9 @@ async fn address_pool_is_reloaded_on_restart() {
 
 	setup_builder!(builder_b, config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	let node_b = builder_b
+		.build_with_store(config_b.node_entropy.into(), into_builder_store(store.clone()))
+		.unwrap();
 	node_b.start().unwrap();
 	node_b.stop().unwrap();
 	drop(node_b);
@@ -439,7 +446,9 @@ async fn address_pool_is_reloaded_on_restart() {
 	let wallet_writes_before = store.wallet_writes_completed.load(Ordering::Acquire);
 	setup_builder!(builder_b, config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url, Some(sync_config));
-	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	let node_b = builder_b
+		.build_with_store(config_b.node_entropy.into(), into_builder_store(store.clone()))
+		.unwrap();
 	assert_eq!(store.wallet_writes_completed.load(Ordering::Acquire), wallet_writes_before);
 	node_b.start().unwrap();
 
@@ -1012,8 +1021,9 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+	let node = builder
+		.build_with_store(config.node_entropy.into(), into_builder_store(test_sync_store.clone()))
+		.unwrap();
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -1051,8 +1061,9 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let reinitialized_node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+	let reinitialized_node = builder
+		.build_with_store(config.node_entropy.into(), into_builder_store(test_sync_store))
+		.unwrap();
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 

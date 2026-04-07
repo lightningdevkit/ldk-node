@@ -53,6 +53,8 @@ use ldk_node::payment::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
 };
 use ldk_node::probing::ProbingConfig;
+#[cfg(all(feature = "uniffi", feature = "storage-tier"))]
+use ldk_node::DynStoreTrait;
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
 	PendingSweepBalance, UserChannelId,
@@ -719,6 +721,19 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
+#[cfg(all(feature = "uniffi", feature = "storage-tier"))]
+pub(crate) fn into_builder_store<S>(store: S) -> Arc<dyn DynStoreTrait>
+where
+	S: PaginatedKVStore + MigratableKVStore + Send + Sync + 'static,
+{
+	Arc::new(store)
+}
+
+#[cfg(not(all(feature = "uniffi", feature = "storage-tier")))]
+pub(crate) fn into_builder_store<S>(store: S) -> S {
+	store
+}
+
 pub(crate) fn configure_chain_source(
 	chain_source: &TestChainSource, builder: &mut Builder, config: &TestConfig,
 ) {
@@ -862,7 +877,9 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
-			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
+			builder
+				.build_with_store(config.node_entropy.into(), into_builder_store(kv_store))
+				.unwrap()
 		},
 		#[cfg(feature = "storage-sqlite")]
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),

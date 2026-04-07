@@ -69,6 +69,8 @@ use crate::data_store::{KeepAllEntries, KeepLeastRecentlyUsed};
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
+#[cfg(all(feature = "uniffi", feature = "storage-tier"))]
+use crate::ffi::DynStoreTrait;
 use crate::gossip::GossipSource;
 #[cfg(feature = "storage-filesystem")]
 use crate::io::fs_store::open_or_migrate_fs_store;
@@ -729,7 +731,7 @@ impl NodeBuilder {
 	/// If not set, durable data will be stored only in the primary store.
 	///
 	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
-	#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+	#[cfg(feature = "storage-tier")]
 	pub fn set_backup_storage_dir_path(&mut self, backup_storage_dir_path: String) -> &mut Self {
 		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
 		tier_store_config.backup_storage_dir_path = Some(backup_storage_dir_path.into());
@@ -742,7 +744,7 @@ impl NodeBuilder {
 	/// the network graph and scorer. Data stored here can be rebuilt if lost.
 	///
 	/// If not set, non-critical data will be stored in the primary store.
-	#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+	#[cfg(feature = "storage-tier")]
 	pub fn set_ephemeral_storage_dir_path(
 		&mut self, ephemeral_storage_dir_path: String,
 	) -> &mut Self {
@@ -975,6 +977,7 @@ impl NodeBuilder {
 	/// [`set_ephemeral_storage_dir_path`]: Self::set_ephemeral_storage_dir_path
 	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
 	#[cfg(not(feature = "storage-tier"))]
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
@@ -995,6 +998,7 @@ impl NodeBuilder {
 	/// [`set_ephemeral_storage_dir_path`]: Self::set_ephemeral_storage_dir_path
 	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
 	#[cfg(feature = "storage-tier")]
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
 	pub fn build_with_store<S: PaginatedKVStore + MigratableKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
@@ -1055,9 +1059,28 @@ impl NodeBuilder {
 	>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
+		let store = self.setup_tier_store(primary_store, &runtime, &logger)?;
+		self.build_with_dyn_store(node_entropy, store, runtime, logger)
+	}
+
+	#[cfg(all(feature = "uniffi", feature = "storage-tier"))]
+	fn build_with_ffi_store(
+		&self, node_entropy: NodeEntropy, kv_store: Arc<dyn DynStoreTrait>,
+	) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
+		let primary_store: Arc<DynStore> = Arc::new(crate::ffi::DynStore::new(kv_store));
+		let store = self.setup_tier_store(primary_store, &runtime, &logger)?;
+		self.build_with_dyn_store(node_entropy, store, runtime, logger)
+	}
+
+	#[cfg(feature = "storage-tier")]
+	fn setup_tier_store(
+		&self, primary_store: Arc<DynStore>, runtime: &Arc<Runtime>, logger: &Arc<Logger>,
+	) -> Result<Arc<DynStore>, BuildError> {
 		let store: Arc<DynStore> = {
 			let ts_config = self.tier_store_config.as_ref();
-			let primary_store = Arc::new(DynStoreWrapper(kv_store));
 			let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
 			let tier_index_exists = PathBuf::from(&self.config.storage_dir_path)
 				.join(io::sqlite_store::SQLITE_TIER_INDEX_DB_FILE_NAME)
@@ -1121,7 +1144,7 @@ impl NodeBuilder {
 				})?;
 			Arc::new(DynStoreWrapper(tier_store))
 		};
-		self.build_with_dyn_store(node_entropy, store, runtime, logger)
+		Ok(store)
 	}
 
 	fn build_with_dyn_store(
@@ -1668,23 +1691,45 @@ impl Builder {
 	}
 }
 
-#[cfg(feature = "uniffi")]
+#[cfg(all(feature = "uniffi", not(feature = "storage-tier")))]
 impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
-	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
-	// this so its not needed.
-	#[cfg(not(feature = "storage-tier"))]
+	// Note that the generics here don't actually work for UniFFI, but we don't currently expose
+	// this so it is only used by Rust tests compiled with the `uniffi` feature.
 	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
 	}
+}
 
-	#[cfg(feature = "storage-tier")]
-	pub fn build_with_store<S: PaginatedKVStore + MigratableKVStore + Send + Sync + 'static>(
-		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
+#[cfg(all(feature = "uniffi", feature = "storage-tier"))]
+#[uniffi::export]
+impl Builder {
+	/// Configures a local SQLite backup store for durable data.
+	///
+	/// The backup is brought up to date before node construction completes. While configured,
+	/// durable writes and removals only succeed when both primary and backup storage succeed.
+	pub fn set_backup_storage_dir_path(&self, backup_storage_dir_path: String) {
+		self.inner.write().expect("lock").set_backup_storage_dir_path(backup_storage_dir_path);
+	}
+
+	/// Configures a local SQLite store for rebuildable cache data.
+	pub fn set_ephemeral_storage_dir_path(&self, ephemeral_storage_dir_path: String) {
+		self.inner
+			.write()
+			.expect("lock")
+			.set_ephemeral_storage_dir_path(ephemeral_storage_dir_path);
+	}
+
+	/// Builds a [`Node`] instance according to the options previously configured.
+	///
+	/// The provided store is used as authoritative primary storage. It must support paginated
+	/// namespace listing and exhaustive key enumeration for backup synchronization.
+	pub fn build_with_store(
+		&self, node_entropy: Arc<NodeEntropy>, kv_store: Arc<dyn DynStoreTrait>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
+		self.inner.read().expect("lock").build_with_ffi_store(*node_entropy, kv_store).map(Arc::new)
 	}
 }
 
