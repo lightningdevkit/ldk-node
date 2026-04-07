@@ -5,12 +5,29 @@ import subprocess
 import os
 import re
 import requests
+import asyncio
+import threading
 
+import ldk_node
 from ldk_node import *
+from kv_store import TestKvStore
 
 DEFAULT_ESPLORA_SERVER_URL = "http://127.0.0.1:3002"
 DEFAULT_TEST_NETWORK = Network.REGTEST
 DEFAULT_BITCOIN_CLI_BIN = "bitcoin-cli"
+
+class NodeSetup:
+    def __init__(self, node, node_id, tmp_dir, listening_addresses, stores=None):
+        self.node = node
+        self.node_id = node_id
+        self.tmp_dir = tmp_dir
+        self.listening_addresses = listening_addresses
+        self.stores = stores  # (primary, backup, ephemeral) or None
+        
+    def cleanup(self):
+        self.node.stop()
+        time.sleep(1)
+        self.tmp_dir.cleanup()
 
 def bitcoin_cli(cmd):
     args = []
@@ -95,7 +112,6 @@ def send_to_address(address, amount_sats):
     print("SEND TX:", res)
     return res
 
-
 def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
     mnemonic = generate_entropy_mnemonic(None)
     node_entropy = NodeEntropy.from_bip39_mnemonic(mnemonic, None)
@@ -106,6 +122,140 @@ def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
     builder.set_network(DEFAULT_TEST_NETWORK)
     builder.set_listening_addresses(listening_addresses)
     return builder.build(node_entropy)
+
+def setup_two_nodes(esplora_endpoint, port_1=2323, port_2=2324, use_tier_store=False) -> tuple[NodeSetup, NodeSetup]:
+    # Setup Node 1
+    tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
+    print("TMP DIR 1:", tmp_dir_1.name)
+    
+    listening_addresses_1 = [f"127.0.0.1:{port_1}"]
+    if use_tier_store:
+        node_1, stores_1 = setup_node_with_tier_store(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
+    else:
+        node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
+        stores_1 = None
+    
+    node_1.start()
+    node_id_1 = node_1.node_id()
+    print("Node ID 1:", node_id_1)
+    
+    setup_1 = NodeSetup(node_1, node_id_1, tmp_dir_1, listening_addresses_1, stores_1)
+    
+    # Setup Node 2
+    tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
+    print("TMP DIR 2:", tmp_dir_2.name)
+    
+    listening_addresses_2 = [f"127.0.0.1:{port_2}"]
+    if use_tier_store:
+        node_2, stores_2 = setup_node_with_tier_store(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
+    else:
+        node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
+        stores_2 = None
+    
+    node_2.start()
+    node_id_2 = node_2.node_id()
+    print("Node ID 2:", node_id_2)
+    
+    setup_2 = NodeSetup(node_2, node_id_2, tmp_dir_2, listening_addresses_2, stores_2)
+    
+    return setup_1, setup_2
+
+def setup_node_with_tier_store(tmp_dir, esplora_endpoint, listening_addresses) -> tuple[Node, tuple[TestKvStore, TestKvStore, TestKvStore]]:
+    mnemonic = generate_entropy_mnemonic(None)
+    node_entropy = NodeEntropy.from_bip39_mnemonic(mnemonic, None)
+    config = default_config()
+
+    primary = TestKvStore("primary")
+    backup = TestKvStore("backup")
+    ephemeral = TestKvStore("ephemeral")
+
+    builder = Builder.from_config(config)
+    builder.set_storage_dir_path(tmp_dir)
+    builder.set_chain_source_esplora(esplora_endpoint, None)
+    builder.set_network(DEFAULT_TEST_NETWORK)
+    builder.set_listening_addresses(listening_addresses)
+    builder.set_backup_store(backup)
+    builder.set_ephemeral_store(ephemeral)
+    
+    return builder.build_with_store(node_entropy, primary), (primary, backup, ephemeral)
+
+def do_channel_full_cycle(setup_1: NodeSetup, setup_2: NodeSetup, esplora_endpoint):
+    # Fund both nodes
+    (node_1, node_2) = (setup_1.node, setup_2.node)
+    address_1 = node_1.onchain_payment().new_address()
+    txid_1 = send_to_address(address_1, 100000)
+    address_2 = node_2.onchain_payment().new_address()
+    txid_2 = send_to_address(address_2, 100000)
+
+    wait_for_tx(esplora_endpoint, txid_1)
+    wait_for_tx(esplora_endpoint, txid_2)
+
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+    spendable_balance_1 = node_1.list_balances().spendable_onchain_balance_sats
+    spendable_balance_2 = node_2.list_balances().spendable_onchain_balance_sats
+    total_balance_1 = node_1.list_balances().total_onchain_balance_sats
+    total_balance_2 = node_2.list_balances().total_onchain_balance_sats
+
+    print("SPENDABLE 1:", spendable_balance_1)
+    assert spendable_balance_1 == 100000
+
+    print("SPENDABLE 2:", spendable_balance_2)
+    assert spendable_balance_2 == 100000
+
+    print("TOTAL 1:", total_balance_1)
+    assert total_balance_1 == 100000
+
+    print("TOTAL 2:", total_balance_2)
+    assert total_balance_2 == 100000
+
+    (node_id_2, listening_addresses_2) = (setup_2.node_id, setup_2.listening_addresses)
+    node_1.open_channel(node_id_2, listening_addresses_2[0], 50000, None, None)
+
+    channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
+    channel_pending_event_2 = expect_event(node_2, Event.CHANNEL_PENDING)
+    funding_txid = channel_pending_event_1.funding_txo.txid
+    wait_for_tx(esplora_endpoint, funding_txid)
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+    channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
+    print("funding_txo:", funding_txid)
+
+    channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
+
+    description = Bolt11InvoiceDescription.DIRECT("asdf")
+    invoice = node_2.bolt11_payment().receive(2500000, description, 9217)
+    node_1.bolt11_payment().send(invoice, None)
+
+    expect_event(node_1, Event.PAYMENT_SUCCESSFUL)
+
+    expect_event(node_2, Event.PAYMENT_RECEIVED)
+
+    node_id_1 = setup_1.node_id
+    time.sleep(1)
+    node_2.close_channel(channel_ready_event_2.user_channel_id, node_id_1)
+
+    # expect channel closed event on both nodes
+    expect_event(node_1, Event.CHANNEL_CLOSED)
+
+    expect_event(node_2, Event.CHANNEL_CLOSED)
+
+    mine_and_wait(esplora_endpoint, 1)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+    spendable_balance_after_close_1 = node_1.list_balances().spendable_onchain_balance_sats
+    assert spendable_balance_after_close_1 > 95000
+    assert spendable_balance_after_close_1 < 100000
+    spendable_balance_after_close_2 = node_2.list_balances().spendable_onchain_balance_sats
+    assert spendable_balance_after_close_2 == 102500
 
 def get_esplora_endpoint():
     if os.environ.get('ESPLORA_ENDPOINT'):
@@ -120,7 +270,31 @@ def expect_event(node, expected_event_type):
     node.event_handled()
     return event 
 
+def wait_until(predicate, timeout=10.0, interval=0.1, message="condition not met before timeout"):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise AssertionError(message)
 
+
+def stores_match(store_a, store_b):
+    if set(store_a.storage.keys()) != set(store_b.storage.keys()):
+        return False
+
+    for namespace_key in store_a.storage:
+        keys_a = store_a.storage[namespace_key]
+        keys_b = store_b.storage[namespace_key]
+
+        if set(keys_a.keys()) != set(keys_b.keys()):
+            return False
+
+        for key in keys_a:
+            if keys_a[key] != keys_b[key]:
+                return False
+
+    return True
 
 class TestLdkNode(unittest.TestCase):
     def setUp(self):
@@ -132,109 +306,77 @@ class TestLdkNode(unittest.TestCase):
 
     def test_channel_full_cycle(self):
         esplora_endpoint = get_esplora_endpoint()
+        setup_1, setup_2 = setup_two_nodes(esplora_endpoint)
 
-        ## Setup Node 1
-        tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
-        print("TMP DIR 1:", tmp_dir_1.name)
-
-        listening_addresses_1 = ["127.0.0.1:2323"]
-        node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
-        node_1.start()
-        node_id_1 = node_1.node_id()
-        print("Node ID 1:", node_id_1)
-
-        # Setup Node 2
-        tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
-        print("TMP DIR 2:", tmp_dir_2.name)
-
-        listening_addresses_2 = ["127.0.0.1:2324"]
-        node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
-        node_2.start()
-        node_id_2 = node_2.node_id()
-        print("Node ID 2:", node_id_2)
-
-        address_1 = node_1.onchain_payment().new_address()
-        txid_1 = send_to_address(address_1, 100000)
-        address_2 = node_2.onchain_payment().new_address()
-        txid_2 = send_to_address(address_2, 100000)
-
-        wait_for_tx(esplora_endpoint, txid_1)
-        wait_for_tx(esplora_endpoint, txid_2)
-
-        mine_and_wait(esplora_endpoint, 6)
-
-        node_1.sync_wallets()
-        node_2.sync_wallets()
-
-        spendable_balance_1 = node_1.list_balances().spendable_onchain_balance_sats
-        spendable_balance_2 = node_2.list_balances().spendable_onchain_balance_sats
-        total_balance_1 = node_1.list_balances().total_onchain_balance_sats
-        total_balance_2 = node_2.list_balances().total_onchain_balance_sats
-
-        print("SPENDABLE 1:", spendable_balance_1)
-        self.assertEqual(spendable_balance_1, 100000)
-
-        print("SPENDABLE 2:", spendable_balance_2)
-        self.assertEqual(spendable_balance_2, 100000)
-
-        print("TOTAL 1:", total_balance_1)
-        self.assertEqual(total_balance_1, 100000)
-
-        print("TOTAL 2:", total_balance_2)
-        self.assertEqual(total_balance_2, 100000)
-
-        node_1.open_channel(node_id_2, listening_addresses_2[0], 50000, None, None)
+        try:
+            do_channel_full_cycle(setup_1, setup_2, esplora_endpoint)
+        finally:
+            setup_1.cleanup()
+            setup_2.cleanup()
 
 
-        channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
-        channel_pending_event_2 = expect_event(node_2, Event.CHANNEL_PENDING)
-        funding_txid = channel_pending_event_1.funding_txo.txid
-        wait_for_tx(esplora_endpoint, funding_txid)
-        mine_and_wait(esplora_endpoint, 6)
+    def test_tier_store(self):
+        # Set an event loop for async Python callbacks invoked from Rust.
+        # (https://mozilla.github.io/uniffi-rs/0.27/futures.html#python-uniffi_set_event_loop)
+        loop = asyncio.new_event_loop()
 
-        node_1.sync_wallets()
-        node_2.sync_wallets()
+        def run_loop():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
 
-        channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
-        print("funding_txo:", funding_txid)
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+        ldk_node.uniffi_set_event_loop(loop)
 
-        channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
+        esplora_endpoint = get_esplora_endpoint()
+        setup_1, setup_2 = setup_two_nodes(
+            esplora_endpoint,
+            port_1=2325,
+            port_2=2326,
+            use_tier_store=True,
+        )
 
-        description = Bolt11InvoiceDescription.DIRECT("asdf")
-        invoice = node_2.bolt11_payment().receive(2500000, description, 9217)
-        node_1.bolt11_payment().send(invoice, None)
-  
-        expect_event(node_1, Event.PAYMENT_SUCCESSFUL)
+        try:
+            do_channel_full_cycle(setup_1, setup_2, esplora_endpoint)
 
-        expect_event(node_2, Event.PAYMENT_RECEIVED)
-    
+            primary, backup, ephemeral = setup_1.stores
 
-        node_2.close_channel(channel_ready_event_2.user_channel_id, node_id_1)
+            wait_until(
+                lambda: len(primary.storage) > 0,
+                message="primary store did not receive any data",
+            )
+            wait_until(
+                lambda: len(backup.storage) > 0,
+                message="backup store did not receive any data",
+            )
+            wait_until(
+                lambda: stores_match(primary, backup),
+                timeout=15.0,
+                message="backup store did not converge to primary contents",
+            )
 
-        # expect channel closed event on both nodes
-        expect_event(node_1, Event.CHANNEL_CLOSED)
+            self.assertTrue(stores_match(primary, backup), "backup should mirror primary contents")
 
-        expect_event(node_2, Event.CHANNEL_CLOSED)
+            self.assertGreater(len(ephemeral.storage), 0, "ephemeral should have data")
 
-        mine_and_wait(esplora_endpoint, 1)
-
-        node_1.sync_wallets()
-        node_2.sync_wallets()
-
-        spendable_balance_after_close_1 = node_1.list_balances().spendable_onchain_balance_sats
-        assert spendable_balance_after_close_1 > 95000
-        assert spendable_balance_after_close_1 < 100000
-        spendable_balance_after_close_2 = node_2.list_balances().spendable_onchain_balance_sats
-        self.assertEqual(spendable_balance_after_close_2, 102500)
-
-        # Stop nodes
-        node_1.stop()
-        node_2.stop()
-
-        # Cleanup
-        time.sleep(1) # Wait a sec so our logs can finish writing
-        tmp_dir_1.cleanup()
-        tmp_dir_2.cleanup()
+            ephemeral_keys = [
+                key
+                for namespace in ephemeral.storage.values()
+                for key in namespace.keys()
+            ]
+            has_scorer_or_graph = any(
+                key in ["scorer", "network_graph"] for key in ephemeral_keys
+            )
+            self.assertTrue(
+                has_scorer_or_graph,
+                "ephemeral should contain scorer or network_graph data",
+            )
+        finally:
+            setup_1.cleanup()
+            setup_2.cleanup()
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=5)
+            loop.close()
 
 if __name__ == '__main__':
     unittest.main()
