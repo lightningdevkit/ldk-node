@@ -13,6 +13,8 @@ typedef dictionary TorConfig;
 
 typedef interface NodeEntropy;
 
+typedef interface ProbingConfig;
+
 typedef enum WordCount;
 
 [Remote]
@@ -61,6 +63,7 @@ interface Builder {
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	void set_wallet_recovery_mode();
+	void set_probing_config(ProbingConfig config);
 	[Throws=BuildError]
 	Node build(NodeEntropy node_entropy);
 	[Throws=BuildError]

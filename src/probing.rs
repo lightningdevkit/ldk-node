@@ -58,6 +58,7 @@ pub(crate) enum ProbingStrategyKind {
 /// [`custom`]: Self::custom
 /// [`build`]: ProbingConfigBuilder::build
 #[derive(Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct ProbingConfig {
 	pub(crate) kind: ProbingStrategyKind,
 	pub(crate) interval: Duration,
@@ -105,6 +106,60 @@ impl ProbingConfig {
 	/// Start building a config with a custom [`ProbingStrategy`] implementation.
 	pub fn custom(strategy: Arc<dyn ProbingStrategy>) -> ProbingConfigBuilder {
 		ProbingConfigBuilder::new(ProbingStrategyKind::Custom(strategy))
+	}
+}
+
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl ProbingConfig {
+	/// Creates a probing config that probes toward the highest-degree nodes in the graph.
+	///
+	/// `top_node_count` controls how many of the most-connected nodes are cycled through.
+	/// All other parameters are optional and fall back to sensible defaults when `None`.
+	#[uniffi::constructor]
+	pub fn new_high_degree(
+		top_node_count: u64, interval_secs: Option<u64>, max_locked_msat: Option<u64>,
+		diversity_penalty_msat: Option<u64>, cooldown_secs: Option<u64>,
+	) -> Self {
+		let mut builder = Self::high_degree(top_node_count as usize);
+		if let Some(secs) = interval_secs {
+			builder = builder.interval(Duration::from_secs(secs));
+		}
+		if let Some(msat) = max_locked_msat {
+			builder = builder.max_locked_msat(msat);
+		}
+		if let Some(penalty) = diversity_penalty_msat {
+			builder = builder.diversity_penalty_msat(penalty);
+		}
+		if let Some(secs) = cooldown_secs {
+			builder = builder.cooldown(Duration::from_secs(secs));
+		}
+		builder.build()
+	}
+
+	/// Creates a probing config that probes via random graph walks.
+	///
+	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
+	/// All other parameters are optional and fall back to sensible defaults when `None`.
+	#[uniffi::constructor]
+	pub fn new_random_walk(
+		max_hops: u64, interval_secs: Option<u64>, max_locked_msat: Option<u64>,
+		diversity_penalty_msat: Option<u64>, cooldown_secs: Option<u64>,
+	) -> Self {
+		let mut builder = Self::random_walk(max_hops as usize);
+		if let Some(secs) = interval_secs {
+			builder = builder.interval(Duration::from_secs(secs));
+		}
+		if let Some(msat) = max_locked_msat {
+			builder = builder.max_locked_msat(msat);
+		}
+		if let Some(penalty) = diversity_penalty_msat {
+			builder = builder.diversity_penalty_msat(penalty);
+		}
+		if let Some(secs) = cooldown_secs {
+			builder = builder.cooldown(Duration::from_secs(secs));
+		}
+		builder.build()
 	}
 }
 
