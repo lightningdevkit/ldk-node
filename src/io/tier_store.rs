@@ -4,16 +4,15 @@
 // http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
-#![allow(dead_code)] // TODO: Temporal warning silencer. Will be removed in later commit.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use lightning::util::persist::{
-	KVStore, KVStoreSync, NETWORK_GRAPH_PERSISTENCE_KEY,
-	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	KVStore, NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
 use lightning::{io, log_error};
 use tokio::sync::Mutex as TokioMutex;
@@ -134,45 +133,6 @@ impl KVStore for TierStore {
 	}
 }
 
-impl KVStoreSync for TierStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		self.inner.read_internal_sync(
-			primary_namespace.to_string(),
-			secondary_namespace.to_string(),
-			key.to_string(),
-		)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		self.inner.write_internal_sync(
-			primary_namespace.to_string(),
-			secondary_namespace.to_string(),
-			key.to_string(),
-			buf,
-		)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		self.inner.remove_internal_sync(
-			primary_namespace.to_string(),
-			secondary_namespace.to_string(),
-			key.to_string(),
-			lazy,
-		)
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.inner
-			.list_internal_sync(primary_namespace.to_string(), secondary_namespace.to_string())
-	}
-}
-
 struct TierStoreInner {
 	/// The authoritative store for durable data.
 	primary_store: Arc<DynStore>,
@@ -216,30 +176,6 @@ impl TierStoreInner {
 		}
 	}
 
-	fn read_primary_sync(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		match KVStoreSync::read(
-			self.primary_store.as_ref(),
-			primary_namespace,
-			secondary_namespace,
-			key,
-		) {
-			Ok(data) => Ok(data),
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to read from primary store for key {}/{}/{}: {}.",
-					primary_namespace,
-					secondary_namespace,
-					key,
-					e
-				);
-				Err(e)
-			},
-		}
-	}
-
 	/// Lists keys from the primary data store.
 	async fn list_primary(
 		&self, primary_namespace: &str, secondary_namespace: &str,
@@ -252,25 +188,6 @@ impl TierStoreInner {
 				log_error!(
 					self.logger,
 					"Failed to list from primary store for namespace {}/{}: {}.",
-					primary_namespace,
-					secondary_namespace,
-					e
-				);
-				Err(e)
-			},
-		}
-	}
-
-	fn list_primary_sync(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
-		match KVStoreSync::list(self.primary_store.as_ref(), primary_namespace, secondary_namespace)
-		{
-			Ok(keys) => Ok(keys),
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to list keys in namespace {}/{} from primary store: {}.",
 					primary_namespace,
 					secondary_namespace,
 					e
@@ -315,44 +232,6 @@ impl TierStoreInner {
 		}
 	}
 
-	fn write_primary_backup_sync(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		if let Some(backup_store) = self.backup_store.as_ref() {
-			let primary_res = KVStoreSync::write(
-				self.primary_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				buf.clone(),
-			);
-			let backup_res = KVStoreSync::write(
-				backup_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				buf,
-			);
-
-			self.handle_primary_backup_results(
-				"write",
-				primary_namespace,
-				secondary_namespace,
-				key,
-				primary_res,
-				backup_res,
-			)
-		} else {
-			KVStoreSync::write(
-				self.primary_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				buf,
-			)
-		}
-	}
-
 	async fn remove_primary_backup_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
@@ -388,44 +267,6 @@ impl TierStoreInner {
 		}
 	}
 
-	fn remove_primary_backup_sync(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		if let Some(backup_store) = self.backup_store.as_ref() {
-			let primary_res = KVStoreSync::remove(
-				self.primary_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				lazy,
-			);
-			let backup_res = KVStoreSync::remove(
-				backup_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				lazy,
-			);
-
-			self.handle_primary_backup_results(
-				"removal",
-				primary_namespace,
-				secondary_namespace,
-				key,
-				primary_res,
-				backup_res,
-			)
-		} else {
-			KVStoreSync::remove(
-				self.primary_store.as_ref(),
-				primary_namespace,
-				secondary_namespace,
-				key,
-				lazy,
-			)
-		}
-	}
-
 	async fn read_internal(
 		&self, primary_namespace: String, secondary_namespace: String, key: String,
 	) -> io::Result<Vec<u8>> {
@@ -444,25 +285,6 @@ impl TierStoreInner {
 			KVStore::read(eph_store.as_ref(), &primary_namespace, &secondary_namespace, &key).await
 		} else {
 			self.read_primary(&primary_namespace, &secondary_namespace, &key).await
-		}
-	}
-
-	fn read_internal_sync(
-		&self, primary_namespace: String, secondary_namespace: String, key: String,
-	) -> io::Result<Vec<u8>> {
-		check_namespace_key_validity(
-			primary_namespace.as_str(),
-			secondary_namespace.as_str(),
-			Some(key.as_str()),
-			"read",
-		)?;
-
-		if let Some(eph_store) =
-			self.ephemeral_store(&primary_namespace, &secondary_namespace, &key)
-		{
-			KVStoreSync::read(eph_store.as_ref(), &primary_namespace, &secondary_namespace, &key)
-		} else {
-			self.read_primary_sync(&primary_namespace, &secondary_namespace, &key)
 		}
 	}
 
@@ -498,36 +320,6 @@ impl TierStoreInner {
 		}
 	}
 
-	fn write_internal_sync(
-		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
-	) -> io::Result<()> {
-		check_namespace_key_validity(
-			primary_namespace.as_str(),
-			secondary_namespace.as_str(),
-			Some(key.as_str()),
-			"write",
-		)?;
-
-		if let Some(ephemeral_store) =
-			self.ephemeral_store(&primary_namespace, &secondary_namespace, &key)
-		{
-			KVStoreSync::write(
-				ephemeral_store.as_ref(),
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				buf,
-			)
-		} else {
-			self.write_primary_backup_sync(
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				buf,
-			)
-		}
-	}
-
 	async fn remove_internal(
 		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
 	) -> io::Result<()> {
@@ -560,36 +352,6 @@ impl TierStoreInner {
 		}
 	}
 
-	fn remove_internal_sync(
-		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
-	) -> io::Result<()> {
-		check_namespace_key_validity(
-			primary_namespace.as_str(),
-			secondary_namespace.as_str(),
-			Some(key.as_str()),
-			"remove",
-		)?;
-
-		if let Some(ephemeral_store) =
-			self.ephemeral_store(&primary_namespace, &secondary_namespace, &key)
-		{
-			KVStoreSync::remove(
-				ephemeral_store.as_ref(),
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				lazy,
-			)
-		} else {
-			self.remove_primary_backup_sync(
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				lazy,
-			)
-		}
-	}
-
 	async fn list_internal(
 		&self, primary_namespace: String, secondary_namespace: String,
 	) -> io::Result<Vec<String>> {
@@ -616,36 +378,6 @@ impl TierStoreInner {
 				}
 			},
 			_ => self.list_primary(&primary_namespace, &secondary_namespace).await,
-		}
-	}
-
-	fn list_internal_sync(
-		&self, primary_namespace: String, secondary_namespace: String,
-	) -> io::Result<Vec<String>> {
-		check_namespace_key_validity(
-			primary_namespace.as_str(),
-			secondary_namespace.as_str(),
-			None,
-			"list",
-		)?;
-
-		match (primary_namespace.as_str(), secondary_namespace.as_str()) {
-			(
-				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-			)
-			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _) => {
-				if let Some(ephemeral_store) = self.ephemeral_store.as_ref() {
-					KVStoreSync::list(
-						ephemeral_store.as_ref(),
-						&primary_namespace,
-						&secondary_namespace,
-					)
-				} else {
-					self.list_primary_sync(&primary_namespace, &secondary_namespace)
-				}
-			},
-			_ => self.list_primary_sync(&primary_namespace, &secondary_namespace),
 		}
 	}
 
@@ -722,8 +454,8 @@ mod tests {
 		TierStore::new(primary_store, logger)
 	}
 
-	#[test]
-	fn write_read_list_remove() {
+	#[tokio::test]
+	async fn write_read_list_remove() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
 		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
@@ -734,11 +466,11 @@ mod tests {
 			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
 		let tier = setup_tier_store(primary_store, logger);
 
-		do_read_write_remove_list_persist(&tier);
+		do_read_write_remove_list_persist(&tier).await;
 	}
 
-	#[test]
-	fn ephemeral_routing() {
+	#[tokio::test]
+	async fn ephemeral_routing() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
 		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
@@ -755,49 +487,53 @@ mod tests {
 
 		let data = vec![42u8; 32];
 
-		KVStoreSync::write(
-			&tier,
+		tier.write(
 			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_KEY,
 			data.clone(),
 		)
+		.await
 		.unwrap();
 
-		KVStoreSync::write(
-			&tier,
+		tier.write(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 			data.clone(),
 		)
+		.await
 		.unwrap();
 
-		let primary_read_ng = KVStoreSync::read(
-			&*primary_store,
-			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-			NETWORK_GRAPH_PERSISTENCE_KEY,
-		);
-		let ephemeral_read_ng = KVStoreSync::read(
-			&*ephemeral_store,
-			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-			NETWORK_GRAPH_PERSISTENCE_KEY,
-		);
+		let primary_read_ng = primary_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await;
+		let ephemeral_read_ng = ephemeral_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await;
 
-		let primary_read_cm = KVStoreSync::read(
-			&*primary_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-		);
-		let ephemeral_read_cm = KVStoreSync::read(
-			&*ephemeral_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-		);
+		let primary_read_cm = primary_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
+		let ephemeral_read_cm = ephemeral_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
 
 		assert!(primary_read_ng.is_err());
 		assert_eq!(ephemeral_read_ng.unwrap(), data);
@@ -806,8 +542,8 @@ mod tests {
 		assert_eq!(primary_read_cm.unwrap(), data);
 	}
 
-	#[test]
-	fn backup_write_is_part_of_success_path() {
+	#[tokio::test]
+	async fn backup_write_is_part_of_success_path() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
 		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
@@ -824,34 +560,36 @@ mod tests {
 
 		let data = vec![42u8; 32];
 
-		KVStoreSync::write(
-			&tier,
+		tier.write(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 			data.clone(),
 		)
+		.await
 		.unwrap();
 
-		let primary_read = KVStoreSync::read(
-			&*primary_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-		);
-		let backup_read = KVStoreSync::read(
-			&*backup_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-		);
+		let primary_read = primary_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
+		let backup_read = backup_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
 
 		assert_eq!(primary_read.unwrap(), data);
 		assert_eq!(backup_read.unwrap(), data);
 	}
 
-	#[test]
-	fn backup_remove_is_part_of_success_path() {
+	#[tokio::test]
+	async fn backup_remove_is_part_of_success_path() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
 		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
@@ -869,36 +607,38 @@ mod tests {
 		let data = vec![42u8; 32];
 		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
 
-		KVStoreSync::write(
-			&tier,
+		tier.write(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			key,
 			data,
 		)
+		.await
 		.unwrap();
 
-		KVStoreSync::remove(
-			&tier,
+		tier.remove(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			key,
 			true,
 		)
+		.await
 		.unwrap();
 
-		let primary_read = KVStoreSync::read(
-			&*primary_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			key,
-		);
-		let backup_read = KVStoreSync::read(
-			&*backup_store,
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			key,
-		);
+		let primary_read = primary_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				key,
+			)
+			.await;
+		let backup_read = backup_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				key,
+			)
+			.await;
 
 		assert!(primary_read.is_err());
 		assert!(backup_read.is_err());

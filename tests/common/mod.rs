@@ -461,9 +461,7 @@ impl Default for TestConfig {
 
 macro_rules! setup_builder {
 	($builder:ident, $config:expr) => {
-		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_config($config.clone());
-		#[cfg(not(feature = "uniffi"))]
+		#[allow(unused_mut)]
 		let mut $builder = Builder::from_config($config.clone());
 	};
 }
@@ -531,7 +529,17 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
+	setup_node_with_builder(chain_source, config, |_| {})
+}
+
+pub(crate) fn setup_node_with_builder<F>(
+	chain_source: &TestChainSource, config: TestConfig, configure_builder: F,
+) -> TestNode
+where
+	F: FnOnce(&mut Builder),
+{
 	setup_builder!(builder, config.node_config);
+
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
@@ -590,6 +598,8 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		builder.set_wallet_recovery_mode();
 	}
 
+	configure_builder(&mut builder);
+
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
@@ -600,10 +610,6 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
 		},
 	};
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
 
 	node.start().unwrap();
 	assert!(node.status().is_running);

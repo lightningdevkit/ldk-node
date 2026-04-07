@@ -57,6 +57,7 @@ use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
+use crate::io::tier_store::TierStore;
 use crate::io::utils::{
 	open_or_migrate_fs_store, read_all_objects, read_event_queue,
 	read_external_pathfinding_scores_from_cache, read_network_graph, read_node_metrics,
@@ -150,6 +151,21 @@ impl std::fmt::Debug for LogWriterConfig {
 	}
 }
 
+#[derive(Default)]
+struct TierStoreConfig {
+	ephemeral: Option<Arc<DynStore>>,
+	backup_storage_dir_path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for TierStoreConfig {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("TierStoreConfig")
+			.field("ephemeral", &self.ephemeral.as_ref().map(|_| "Arc<DynStore>"))
+			.field("backup_storage_dir_path", &self.backup_storage_dir_path)
+			.finish()
+	}
+}
+
 /// An error encountered during building a [`Node`].
 ///
 /// [`Node`]: crate::Node
@@ -196,6 +212,11 @@ pub enum BuildError {
 	AsyncPaymentsConfigMismatch,
 	/// An attempt to setup a DNS Resolver failed.
 	DNSResolverSetupFailed,
+	/// The configured backup storage path conflicts with the primary storage path.
+	///
+	/// Backup storage must use a distinct local directory so that the primary and
+	/// backup stores do not point to the same SQLite database.
+	BackupStorePathConflict,
 }
 
 impl fmt::Display for BuildError {
@@ -232,6 +253,12 @@ impl fmt::Display for BuildError {
 			},
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
+			},
+			Self::BackupStorePathConflict => {
+				write!(
+					f,
+					"The configured backup storage path conflicts with the primary storage path."
+				)
 			},
 		}
 	}
@@ -285,6 +312,7 @@ pub struct NodeBuilder {
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	tier_store_config: Option<TierStoreConfig>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	recovery_mode: bool,
@@ -303,6 +331,7 @@ impl NodeBuilder {
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
+		let tier_store_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
 		let recovery_mode = false;
@@ -312,6 +341,7 @@ impl NodeBuilder {
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
+			tier_store_config,
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
@@ -612,6 +642,42 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Configures a local SQLite backup store for disaster recovery.
+	///
+	/// When building with tiered storage, a SQLite store will be created at the
+	/// given directory path using [`SQLITE_BACKUP_DB_FILE_NAME`] as its database
+	/// file name. It receives a second durable copy of data written to the
+	/// primary store.
+	///
+	/// Writes and removals for primary-backed data only succeed once both the
+	/// primary and backup SQLite stores complete successfully.
+	///
+	/// The configured path must point to a distinct local directory from the
+	/// primary storage path. If the backup path equals the primary storage path,
+	/// building will fail with [`BuildError::BackupStorePathConflict`].
+	///
+	/// If not set, durable data will be stored only in the primary store.
+	///
+	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
+	pub fn set_backup_storage_dir_path(&mut self, backup_storage_dir_path: String) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.backup_storage_dir_path = Some(backup_storage_dir_path.into());
+		self
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with tiered storage, this store is used for ephemeral data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	pub fn set_ephemeral_store(&mut self, ephemeral_store: Arc<DynStore>) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.ephemeral = Some(ephemeral_store);
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -813,11 +879,18 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
+	///
+	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
+	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
+	/// and a local SQLite backup store for disaster recovery can be configured via
+	/// [`set_ephemeral_store`] and [`set_backup_storage_dir_path`].
+	///
+	/// [`set_ephemeral_store`]: Self::set_ephemeral_store
+	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
 	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
-
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
 	}
 
@@ -842,6 +915,36 @@ impl NodeBuilder {
 	fn build_with_store_runtime_and_logger<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
+		let ts_config = self.tier_store_config.as_ref();
+		let primary_store = Arc::new(DynStoreWrapper(kv_store));
+		let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
+		if let Some(config) = ts_config {
+			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
+			if let Some(backup_storage_dir_path) = config.backup_storage_dir_path.as_ref() {
+				let primary_storage_dir_path = PathBuf::from(&self.config.storage_dir_path);
+				if primary_storage_dir_path == *backup_storage_dir_path {
+					log_error!(
+						logger,
+						"Backup storage path must differ from primary storage path: {}",
+						backup_storage_dir_path.display()
+					);
+					return Err(BuildError::BackupStorePathConflict);
+				}
+
+				let backup_store = SqliteStore::new(
+					backup_storage_dir_path.clone(),
+					Some(io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+					Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+				)
+				.map_err(|e| {
+					log_error!(logger, "Failed to setup backup SQLite store: {}", e);
+					BuildError::KVStoreSetupFailed
+				})?;
+				let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(backup_store));
+				tier_store.set_backup_store(backup_store);
+			}
+		}
+
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
 
@@ -856,7 +959,7 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(DynStoreWrapper(kv_store)),
+			Arc::new(DynStoreWrapper(tier_store)),
 		)
 	}
 }
@@ -1146,6 +1249,38 @@ impl ArcedNodeBuilder {
 	/// used [`NodeEntropy`].
 	pub fn set_wallet_recovery_mode(&self) {
 		self.inner.write().expect("lock").set_wallet_recovery_mode();
+	}
+
+	/// Configures a local SQLite backup store for disaster recovery.
+	///
+	/// When building with tiered storage, a SQLite store will be created at the
+	/// given directory path using [`SQLITE_BACKUP_DB_FILE_NAME`] as its database
+	/// file name. It receives a second durable copy of data written to the
+	/// primary store.
+	///
+	/// Writes and removals for primary-backed data only succeed once both the
+	/// primary and backup SQLite stores complete successfully.
+	///
+	/// The configured path must point to a distinct local directory from the
+	/// primary storage path. If the backup path equals the primary storage path,
+	/// building will fail with [`BuildError::BackupStorePathConflict`].
+	///
+	/// If not set, durable data will be stored only in the primary store.
+	///
+	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
+	pub fn set_backup_storage_dir_path(&self, backup_storage_dir_path: String) {
+		self.inner.write().expect("lock").set_backup_storage_dir_path(backup_storage_dir_path);
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with tiered storage, this store is used for ephemeral data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	pub fn set_ephemeral_store(&self, ephemeral_store: Arc<DynStore>) {
+		self.inner.write().expect("lock").set_ephemeral_store(ephemeral_store);
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
