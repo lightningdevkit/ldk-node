@@ -505,7 +505,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 	}
 
 	if let Some(probing) = config.probing {
-		builder.set_probing_config(probing);
+		builder.set_probing_config(probing.into());
 	}
 
 	let node = match config.store_type {
