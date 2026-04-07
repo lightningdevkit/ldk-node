@@ -292,7 +292,7 @@ pub(crate) type InnerRouter = DefaultRouter<
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
-pub(crate) type Router = LSPS2BOLT12Router<InnerRouter, InnerMessageRouter, Arc<KeysManager>>;
+pub(crate) type Router = LSPS2BOLT12Router<InnerRouter, Arc<KeysManager>>;
 pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
@@ -331,7 +331,7 @@ pub(crate) type InnerMessageRouter = lightning::onion_message::messenger::Defaul
 	Arc<Logger>,
 	Arc<KeysManager>,
 >;
-pub(crate) type MessageRouter = Router;
+pub(crate) type MessageRouter = InnerMessageRouter;
 
 pub(crate) type Sweeper = OutputSweeper<
 	Arc<Broadcaster>,

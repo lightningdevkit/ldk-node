@@ -1632,11 +1632,7 @@ fn build_with_store_internal(
 	);
 	let inner_message_router =
 		InnerMessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
-	let router = Arc::new(LSPS2BOLT12Router::new(
-		inner_router,
-		inner_message_router,
-		Arc::clone(&keys_manager),
-	));
+	let router = Arc::new(LSPS2BOLT12Router::new(inner_router, Arc::clone(&keys_manager)));
 
 	let mut user_config = default_user_config(&config);
 
@@ -1664,7 +1660,7 @@ fn build_with_store_internal(
 		}
 	}
 
-	let message_router = Arc::clone(&router);
+	let message_router = Arc::new(inner_message_router);
 
 	// Initialize the ChannelManager
 	let channel_manager = {
