@@ -37,6 +37,7 @@ use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
+pub(crate) use crate::payment::payer_proof_store::PayerProofContextStore;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 

@@ -57,6 +57,10 @@ pub enum Error {
 	WalletOperationFailed,
 	/// A wallet operation timed out.
 	WalletOperationTimeout,
+	/// Creating a payer proof failed.
+	PayerProofCreationFailed,
+	/// A payer proof is unavailable for the requested payment.
+	PayerProofUnavailable,
 	/// A signing operation for transaction failed.
 	OnchainTxSigningFailed,
 	/// A transaction sync operation failed.
@@ -137,6 +141,8 @@ pub enum Error {
 	LnurlAuthTimeout,
 	/// The provided lnurl is invalid.
 	InvalidLnurl,
+	/// The provided payer proof is invalid.
+	InvalidPayerProof,
 }
 
 impl fmt::Display for Error {
@@ -168,6 +174,10 @@ impl fmt::Display for Error {
 			},
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
 			Self::WalletOperationTimeout => write!(f, "A wallet operation timed out."),
+			Self::PayerProofCreationFailed => write!(f, "Failed to create payer proof."),
+			Self::PayerProofUnavailable => {
+				write!(f, "A payer proof is unavailable for the requested payment.")
+			},
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::TxSyncTimeout => write!(f, "Syncing transactions timed out."),
@@ -222,6 +232,7 @@ impl fmt::Display for Error {
 			Self::LnurlAuthFailed => write!(f, "LNURL-auth authentication failed."),
 			Self::LnurlAuthTimeout => write!(f, "LNURL-auth authentication timed out."),
 			Self::InvalidLnurl => write!(f, "The provided lnurl is invalid."),
+			Self::InvalidPayerProof => write!(f, "The provided payer proof is invalid."),
 		}
 	}
 }
