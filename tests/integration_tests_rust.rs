@@ -40,7 +40,7 @@ use ldk_node::config::{
 	DEFAULT_FULL_SCAN_STOP_GAP,
 };
 use ldk_node::entropy::NodeEntropy;
-#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+#[cfg(feature = "storage-tier")]
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
@@ -54,6 +54,12 @@ use lightning::routing::router::RouteParametersConfig;
 #[cfg(feature = "storage-tier")]
 use lightning::util::persist::MigratableKVStore;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::{
+	CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
@@ -5273,20 +5279,23 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	cheap.stop().unwrap();
 	expensive.stop().unwrap();
 }
-
-// Builder backup-store configuration is not yet exposed via FFI (see #871)
-#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+#[cfg(feature = "storage-tier")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn builder_configures_sqlite_backup_store() {
+async fn builder_routes_data_across_configured_storage_tiers() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
-	let mut config_a = random_config();
-	config_a.store_type = TestStoreType::Sqlite;
-	let primary_dir = config_a.node_config.storage_dir_path.clone();
+	let config_a = random_config();
+	let primary_store = TestSyncStore::new(common::random_storage_path());
+	let preexisting_key = ("test", "", "preexisting");
+	let preexisting_value = vec![42];
+	primary_store
+		.write(preexisting_key.0, preexisting_key.1, preexisting_key.2, preexisting_value.clone())
+		.await
+		.unwrap();
 	let backup_dir = common::random_storage_path();
+	let ephemeral_dir = common::random_storage_path();
 
-	// Build node_a with backup storage configured
 	setup_builder!(builder_a, config_a.node_config.clone());
 	builder_a.set_chain_source_esplora(
 		format!("http://{}", electrsd.esplora_url.as_ref().unwrap()),
@@ -5294,8 +5303,11 @@ async fn builder_configures_sqlite_backup_store() {
 	);
 	builder_a.set_filesystem_logger(None, None);
 	builder_a.set_backup_storage_dir_path(backup_dir.to_str().unwrap().to_owned());
+	builder_a.set_ephemeral_storage_dir_path(ephemeral_dir.to_str().unwrap().to_owned());
 
-	let node_a = builder_a.build(config_a.node_entropy.into()).unwrap();
+	let node_a = builder_a
+		.build_with_store(config_a.node_entropy.into(), into_builder_store(primary_store.clone()))
+		.unwrap();
 	node_a.start().unwrap();
 	assert!(node_a.status().is_running);
 	assert!(node_a.status().latest_fee_rate_cache_update_timestamp.is_some());
@@ -5316,19 +5328,30 @@ async fn builder_configures_sqlite_backup_store() {
 	)
 	.await;
 
-	let primary_store = SqliteStore::new(
-		primary_dir.into(),
-		Some(ldk_node::io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
-		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
-	)
-	.unwrap();
-
 	let backup_store = SqliteStore::new(
 		backup_dir,
 		Some(ldk_node::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
 		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
 	)
 	.unwrap();
+	let ephemeral_store = SqliteStore::new(
+		ephemeral_dir,
+		Some(ldk_node::io::sqlite_store::SQLITE_EPHEMERAL_DB_FILE_NAME.to_string()),
+		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+
+	assert_eq!(
+		backup_store.read(preexisting_key.0, preexisting_key.1, preexisting_key.2).await.unwrap(),
+		preexisting_value
+	);
+	assert!(
+		ephemeral_store
+			.read(preexisting_key.0, preexisting_key.1, preexisting_key.2)
+			.await
+			.is_err(),
+		"ephemeral store contains pre-existing durable data"
+	);
 
 	for (pn, sn, key) in [
 		("bdk_wallet", "", "descriptor"),
@@ -5342,5 +5365,78 @@ async fn builder_configures_sqlite_backup_store() {
 		let backup = backup_store.read(pn, sn, key).await.unwrap();
 
 		assert_eq!(backup, primary, "backup mismatch for {pn}/{sn}/{key}");
+		assert!(
+			ephemeral_store.read(pn, sn, key).await.is_err(),
+			"ephemeral store contains durable value {pn}/{sn}/{key}"
+		);
 	}
+
+	let primary_channel_manager = primary_store
+		.read(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+	let backup_channel_manager = backup_store
+		.read(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+	assert_eq!(backup_channel_manager, primary_channel_manager);
+	assert!(
+		ephemeral_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err(),
+		"ephemeral store contains channel manager data"
+	);
+
+	let mut primary_payments = primary_store.list("payments", "").await.unwrap();
+	let mut backup_payments = backup_store.list("payments", "").await.unwrap();
+	assert!(!primary_payments.is_empty());
+	primary_payments.sort();
+	backup_payments.sort();
+	assert_eq!(backup_payments, primary_payments);
+	assert!(ephemeral_store.list("payments", "").await.unwrap().is_empty());
+
+	let ephemeral_network_graph = ephemeral_store
+		.read(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+		)
+		.await
+		.expect("ephemeral store should contain network graph data");
+	assert!(!ephemeral_network_graph.is_empty());
+	assert!(
+		primary_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err(),
+		"primary store contains ephemeral network graph data"
+	);
+	assert!(
+		backup_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err(),
+		"backup store contains ephemeral network graph data"
+	);
 }
