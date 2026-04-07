@@ -4,7 +4,6 @@
 // http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
-#![allow(dead_code)] // TODO: Temporal warning silencer. Will be removed in later commit.
 
 use std::collections::HashMap;
 use std::future::Future;
