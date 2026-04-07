@@ -2082,10 +2082,8 @@ async fn lsps2_bolt12_jit_channel_opens_successfully() {
 		.receive_via_jit_channel(jit_amount_msat, "jit-payment", None, Some(1), None)
 		.unwrap();
 
-	let payment_id = payer_node
-		.bolt12_payment()
-		.send(&offer, Some(1), Some("pay".to_string()), None)
-		.unwrap();
+	let payment_id =
+		payer_node.bolt12_payment().send(&offer, Some(1), Some("pay".to_string()), None).unwrap();
 
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());

@@ -27,7 +27,6 @@ use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::log_trace;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
-use lightning_liquidity::lsps2::router::LSPS2BOLT12Router;
 use lightning::routing::scoring::{
 	CombinedScorer, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 	ProbabilisticScoringFeeParameters,
@@ -40,6 +39,7 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
+use lightning_liquidity::lsps2::router::LSPS2BOLT12Router;
 use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 

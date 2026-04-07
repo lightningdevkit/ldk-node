@@ -307,10 +307,7 @@ impl Bolt12Payment {
 		let (lsp_total_opening_fee, lsp_prop_opening_fee) = self.runtime.block_on(async move {
 			if let Some(amount_msat) = amount_msat {
 				liquidity_source
-					.lsps2_register_bolt12_payment_paths(
-						amount_msat,
-						max_total_lsp_fee_limit_msat,
-					)
+					.lsps2_register_bolt12_payment_paths(amount_msat, max_total_lsp_fee_limit_msat)
 					.await
 					.map(|total_fee| (Some(total_fee), None))
 			} else {
