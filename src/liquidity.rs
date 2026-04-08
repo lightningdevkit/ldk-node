@@ -52,7 +52,7 @@ use crate::{total_anchor_channels_reserve_sats, Config, Error};
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
-const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
+const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u16 = 72;
 
 struct LSPS1Client {
 	lsp_node_id: PublicKey,
@@ -1407,14 +1407,7 @@ where
 			src_node_id: lsps2_client.lsp_node_id,
 			short_channel_id: buy_response.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
-			cltv_expiry_delta: u16::try_from(buy_response.cltv_expiry_delta).map_err(|_| {
-				log_error!(
-					self.logger,
-					"Failed to create JIT invoice as LSPS2 CLTV delta {} exceeds supported range",
-					buy_response.cltv_expiry_delta
-				);
-				Error::LiquidityRequestFailed
-			})?,
+			cltv_expiry_delta: buy_response.cltv_expiry_delta,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]);
@@ -1547,7 +1540,7 @@ pub(crate) struct LSPS2FeeResponse {
 #[derive(Debug, Clone)]
 pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
-	cltv_expiry_delta: u32,
+	cltv_expiry_delta: u16,
 }
 
 /// A liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
