@@ -232,7 +232,12 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut electrsd_conf = electrsd::Conf::default();
 	electrsd_conf.http_enabled = true;
 	electrsd_conf.network = "regtest";
+	electrsd_conf.view_stderr = true;
 	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	println!(
+		"Electrs started with electrum_url={}, esplora_url={:?}",
+		electrsd.electrum_url, electrsd.esplora_url
+	);
 	(bitcoind, electrsd)
 }
 
@@ -269,9 +274,20 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-static NEXT_PORT: AtomicU16 = AtomicU16::new(20000);
+static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
 
-pub(crate) fn generate_listening_addresses() -> Vec<SocketAddress> {
+fn init_base_port() {
+	// Initialize once with a random base port. compare_exchange ensures only one thread wins.
+	// Use a range below the Linux ephemeral port range (32768-60999) to avoid
+	// collisions with OS-assigned ports used by electrsd/bitcoind.
+	let base = rng().random_range(10000..30000u16);
+	let _ = NEXT_PORT.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+pub(crate) fn random_listening_addresses() -> Vec<SocketAddress> {
+	// Use an atomic counter to avoid intra-process collisions between parallel tests.
+	// The base port is randomized once per process to avoid inter-process collisions.
+	init_base_port();
 	let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
 	vec![
 		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port },
@@ -302,8 +318,8 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 	println!("Setting random LDK storage dir: {}", rand_dir.display());
 	node_config.storage_dir_path = rand_dir.to_str().unwrap().to_owned();
 
-	let listening_addresses = generate_listening_addresses();
-	println!("Setting LDK listening addresses: {:?}", listening_addresses);
+	let listening_addresses = random_listening_addresses();
+	println!("Setting random LDK listening addresses: {:?}", listening_addresses);
 	node_config.listening_addresses = Some(listening_addresses);
 
 	let alias = random_node_alias();
@@ -422,81 +438,125 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
-	setup_builder!(builder, config.node_config);
-	match chain_source {
-		TestChainSource::Esplora(electrsd) => {
-			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let mut sync_config = EsploraSyncConfig::default();
-			sync_config.background_sync_config = None;
-			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-		},
-		TestChainSource::Electrum(electrsd) => {
-			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
-			let mut sync_config = ElectrumSyncConfig::default();
-			sync_config.background_sync_config = None;
-			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
-		},
-		TestChainSource::BitcoindRpcSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
-		},
-		TestChainSource::BitcoindRestSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rest_port = bitcoind.params.rpc_socket.port();
-			builder.set_chain_source_bitcoind_rest(
-				rest_host,
-				rest_port,
-				rpc_host,
-				rpc_port,
-				rpc_user,
-				rpc_password,
+	for attempt in 0..5 {
+		let mut node_config = config.node_config.clone();
+		if attempt > 0 {
+			let new_addrs = random_listening_addresses();
+			let new_dir = random_storage_path();
+			println!(
+				"Retrying with new listening addresses and storage dir (attempt {}): {:?}, {}",
+				attempt + 1,
+				new_addrs,
+				new_dir.display()
 			);
-		},
+			node_config.listening_addresses = Some(new_addrs);
+			node_config.storage_dir_path = new_dir.to_str().unwrap().to_owned();
+		}
+
+		setup_builder!(builder, node_config);
+		match chain_source {
+			TestChainSource::Esplora(electrsd) => {
+				let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+				let mut sync_config = EsploraSyncConfig::default();
+				sync_config.background_sync_config = None;
+				builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+			},
+			TestChainSource::Electrum(electrsd) => {
+				let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+				let mut sync_config = ElectrumSyncConfig::default();
+				sync_config.background_sync_config = None;
+				builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
+			},
+			TestChainSource::BitcoindRpcSync(bitcoind) => {
+				let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+				let rpc_port = bitcoind.params.rpc_socket.port();
+				let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+				let rpc_user = values.user;
+				let rpc_password = values.password;
+				builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
+			},
+			TestChainSource::BitcoindRestSync(bitcoind) => {
+				let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+				let rpc_port = bitcoind.params.rpc_socket.port();
+				let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+				let rpc_user = values.user;
+				let rpc_password = values.password;
+				let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+				let rest_port = bitcoind.params.rpc_socket.port();
+				builder.set_chain_source_bitcoind_rest(
+					rest_host,
+					rest_port,
+					rpc_host,
+					rpc_port,
+					rpc_user,
+					rpc_password,
+				);
+			},
+		}
+
+		match &config.log_writer {
+			TestLogWriter::FileWriter => {
+				builder.set_filesystem_logger(None, None);
+			},
+			TestLogWriter::LogFacade => {
+				builder.set_log_facade_logger();
+			},
+			TestLogWriter::Custom(custom_log_writer) => {
+				builder.set_custom_logger(Arc::clone(custom_log_writer));
+			},
+		}
+
+		builder.set_async_payments_role(config.async_payments_role).unwrap();
+
+		if config.recovery_mode {
+			builder.set_wallet_recovery_mode();
+		}
+
+		let node = match config.store_type {
+			TestStoreType::TestSyncStore => {
+				let kv_store = TestSyncStore::new(node_config.storage_dir_path.into());
+				builder.build_with_store(config.node_entropy.clone().into(), kv_store).unwrap()
+			},
+			TestStoreType::Sqlite => builder.build(config.node_entropy.clone().into()).unwrap(),
+		};
+
+		match node.start() {
+			Ok(()) => {
+				assert!(node.status().is_running);
+				assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+				return node;
+			},
+			Err(NodeError::InvalidSocketAddress) => {
+				if let Some(ref addrs) = node_config.listening_addresses {
+					for addr in addrs {
+						if let SocketAddress::TcpIpV4 { port, .. }
+						| SocketAddress::TcpIpV6 { port, .. } = addr
+						{
+							let output = std::process::Command::new("lsof")
+								.args(["-i", &format!(":{}", port), "-P", "-n"])
+								.output();
+							match output {
+								Ok(o) if !o.stdout.is_empty() => {
+									eprintln!(
+										"Port {} is in use:\n{}",
+										port,
+										String::from_utf8_lossy(&o.stdout)
+									);
+								},
+								_ => {
+									eprintln!("Port {} appears unavailable (no lsof info)", port);
+								},
+							}
+						}
+					}
+				}
+				eprintln!("node.start() failed with InvalidSocketAddress, retrying...");
+				continue;
+			},
+			Err(e) => panic!("node.start() failed: {:?}", e),
+		}
 	}
-
-	match &config.log_writer {
-		TestLogWriter::FileWriter => {
-			builder.set_filesystem_logger(None, None);
-		},
-		TestLogWriter::LogFacade => {
-			builder.set_log_facade_logger();
-		},
-		TestLogWriter::Custom(custom_log_writer) => {
-			builder.set_custom_logger(Arc::clone(custom_log_writer));
-		},
-	}
-
-	builder.set_async_payments_role(config.async_payments_role).unwrap();
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
-
-	let node = match config.store_type {
-		TestStoreType::TestSyncStore => {
-			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
-			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
-		},
-		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
-	};
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
-
-	node.start().unwrap();
-	assert!(node.status().is_running);
-	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
-	node
+	panic!("Failed to start node after 5 attempts due to port collisions")
 }
 
 pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
@@ -510,6 +570,9 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
+	if let Err(ref e) = _block_hashes_res {
+		eprintln!("generate_to_address({}) failed: {:?}", num, e);
+	}
 	wait_for_block(electrs, cur_height as usize + num).await;
 	print!(" Done!");
 	println!("\n");
@@ -533,10 +596,14 @@ pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
 pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
 	let mut header = match electrs.block_headers_subscribe() {
 		Ok(header) => header,
-		Err(_) => {
+		Err(e) => {
 			// While subscribing should succeed the first time around, we ran into some cases where
 			// it didn't. Since we can't proceed without subscribing, we try again after a delay
 			// and panic if it still fails.
+			eprintln!("block_headers_subscribe failed (will retry in 3s): {:?}", e);
+			if let Err(ping_err) = electrs.ping() {
+				eprintln!("electrs ping also failed: {:?}", ping_err);
+			}
 			tokio::time::sleep(Duration::from_secs(3)).await;
 			electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
 		},
@@ -546,8 +613,10 @@ pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usiz
 			break;
 		}
 		header = exponential_backoff_poll(|| {
-			electrs.ping().expect("failed to ping electrs");
-			electrs.block_headers_pop().expect("failed to pop block header")
+			electrs.ping().unwrap_or_else(|e| panic!("failed to ping electrs: {:?}", e));
+			electrs
+				.block_headers_pop()
+				.unwrap_or_else(|e| panic!("failed to pop block header: {:?}", e))
 		})
 		.await;
 	}
@@ -559,7 +628,7 @@ pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	}
 
 	exponential_backoff_poll(|| {
-		electrs.ping().unwrap();
+		electrs.ping().unwrap_or_else(|e| panic!("failed to ping electrs: {:?}", e));
 		electrs.transaction_get(&txid).ok()
 	})
 	.await;
@@ -575,7 +644,7 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	}
 
 	exponential_backoff_poll(|| {
-		electrs.ping().unwrap();
+		electrs.ping().unwrap_or_else(|e| panic!("failed to ping electrs: {:?}", e));
 
 		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
 		is_spent.then_some(())
