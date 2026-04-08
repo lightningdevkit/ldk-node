@@ -142,6 +142,10 @@ pub struct LSPS2ServiceConfig {
 	///
 	/// [`bLIP-52`]: https://github.com/lightning/blips/blob/master/blip-0052.md#trust-models
 	pub client_trusts_lsp: bool,
+	/// When set, clients that we open channels to will be allowed to spend their entire channel
+	/// balance. This allows clients to try to steal your funds with no financial penalty, so
+	/// this should only be set if you trust your clients.
+	pub allow_client_0reserve: bool,
 }
 
 pub(crate) struct LiquiditySourceBuilder<L: Deref>
@@ -786,22 +790,38 @@ where
 				config.channel_config.forwarding_fee_base_msat = 0;
 				config.channel_config.forwarding_fee_proportional_millionths = 0;
 
-				match self.channel_manager.create_channel(
-					their_network_key,
-					channel_amount_sats,
-					0,
-					user_channel_id,
-					None,
-					Some(config),
-				) {
+				let result = if service_config.allow_client_0reserve {
+					self.channel_manager.create_channel_to_trusted_peer_0reserve(
+						their_network_key,
+						channel_amount_sats,
+						0,
+						user_channel_id,
+						None,
+						Some(config),
+					)
+				} else {
+					self.channel_manager.create_channel(
+						their_network_key,
+						channel_amount_sats,
+						0,
+						user_channel_id,
+						None,
+						Some(config),
+					)
+				};
+
+				match result {
 					Ok(_) => {},
 					Err(e) => {
 						// TODO: We just silently fail here. Eventually we will need to remember
 						// the pending requests and regularly retry opening the channel until we
 						// succeed.
+						let zero_reserve_string =
+							if service_config.allow_client_0reserve { "0reserve " } else { "" };
 						log_error!(
 							self.logger,
-							"Failed to open LSPS2 channel to {}: {:?}",
+							"Failed to open LSPS2 {}channel to {}: {:?}",
+							zero_reserve_string,
 							their_network_key,
 							e
 						);

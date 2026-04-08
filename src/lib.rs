@@ -1129,7 +1129,7 @@ impl Node {
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: FundingAmount,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_for_forwarding: bool,
+		announce_for_forwarding: bool, set_0reserve: bool,
 	) -> Result<UserChannelId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -1197,25 +1197,46 @@ impl Node {
 			self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
 		);
 
-		match self.channel_manager.create_channel(
-			peer_info.node_id,
-			channel_amount_sats,
-			push_msat,
-			user_channel_id,
-			None,
-			Some(user_config),
-		) {
+		let result = if set_0reserve {
+			self.channel_manager.create_channel_to_trusted_peer_0reserve(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			)
+		} else {
+			self.channel_manager.create_channel(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			)
+		};
+
+		let zero_reserve_string = if set_0reserve { "0reserve " } else { "" };
+
+		match result {
 			Ok(_) => {
 				log_info!(
 					self.logger,
-					"Initiated channel creation with peer {}. ",
+					"Initiated {}channel creation with peer {}. ",
+					zero_reserve_string,
 					peer_info.node_id
 				);
 				self.peer_store.add_peer(peer_info)?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
-				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
+				log_error!(
+					self.logger,
+					"Failed to initiate {}channel creation: {:?}",
+					zero_reserve_string,
+					e
+				);
 				Err(Error::ChannelCreationFailed)
 			},
 		}
@@ -1291,6 +1312,7 @@ impl Node {
 			push_to_counterparty_msat,
 			channel_config,
 			false,
+			false,
 		)
 	}
 
@@ -1331,6 +1353,7 @@ impl Node {
 			push_to_counterparty_msat,
 			channel_config,
 			true,
+			false,
 		)
 	}
 
@@ -1358,6 +1381,7 @@ impl Node {
 			FundingAmount::Max,
 			push_to_counterparty_msat,
 			channel_config,
+			false,
 			false,
 		)
 	}
@@ -1395,6 +1419,70 @@ impl Node {
 			FundingAmount::Max,
 			push_to_counterparty_msat,
 			channel_config,
+			true,
+			false,
+		)
+	}
+
+	/// Connect to a node and open a new unannounced channel, in which the target node can
+	/// spend its entire balance.
+	///
+	/// This channel allows the target node to try to steal your funds with no financial
+	/// penalty, so this channel should only be opened to nodes you trust.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// If Anchor channels are enabled, this will ensure the configured
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
+	/// opening the channel.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	///
+	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
+	pub fn open_0reserve_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			FundingAmount::Exact { amount_sats: channel_amount_sats },
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+			true,
+		)
+	}
+
+	/// Connect to a node and open a new unannounced channel, using all available on-chain funds
+	/// minus fees and anchor reserves. The target node will be able to spend its entire channel
+	/// balance.
+	///
+	/// This channel allows the target node to try to steal your funds with no financial
+	/// penalty, so this channel should only be opened to nodes you trust.
+	///
+	/// Disconnects and reconnects are handled automatically.
+	///
+	/// If `push_to_counterparty_msat` is set, the given value will be pushed (read: sent) to the
+	/// channel counterparty on channel open. This can be useful to start out with the balance not
+	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
+	///
+	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	pub fn open_0reserve_channel_with_all(
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>,
+	) -> Result<UserChannelId, Error> {
+		self.open_channel_inner(
+			node_id,
+			address,
+			FundingAmount::Max,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
 			true,
 		)
 	}
