@@ -25,10 +25,14 @@ use lightning::util::ser::{Readable, Writeable};
 use lightning_types::string::UntrustedString;
 
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::connection::ConnectionManager;
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
+use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use crate::peer_store::{PeerInfo, PeerStore};
+use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
@@ -59,9 +63,13 @@ type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 /// [`Node::bolt12_payment`]: crate::Node::bolt12_payment
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Bolt12Payment {
+	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
+	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
 	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
@@ -70,14 +78,22 @@ pub struct Bolt12Payment {
 
 impl Bolt12Payment {
 	pub(crate) fn new(
-		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
-		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
+		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
+		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore>,
+		peer_store: Arc<PeerStore<Arc<Logger>>>, config: Arc<Config>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
 		Self {
+			runtime,
 			channel_manager,
+			connection_manager,
+			liquidity_source,
 			keys_manager,
 			payment_store,
+			peer_store,
 			config,
 			is_running,
 			logger,
@@ -229,6 +245,134 @@ impl Bolt12Payment {
 		})?;
 
 		Ok(finalized_offer)
+	}
+
+	fn receive_variable_amount_inner(
+		&self, description: &str, expiry_secs: Option<u32>,
+	) -> Result<LdkOffer, Error> {
+		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+			Error::OfferCreationFailed
+		})?;
+
+		if let Some(expiry_secs) = expiry_secs {
+			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.unwrap();
+			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
+		}
+
+		offer_builder.description(description.to_string()).build().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer: {:?}", e);
+			Error::OfferCreationFailed
+		})
+	}
+
+	fn connect_to_lsps2_peer(
+		&self, liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
+	) -> Result<PeerInfo, Error> {
+		let (node_id, address) =
+			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let peer_info = PeerInfo { node_id, address };
+		let con_node_id = peer_info.node_id;
+		let con_addr = peer_info.address.clone();
+		let connection_manager = Arc::clone(&self.connection_manager);
+
+		self.runtime.block_on(async move {
+			connection_manager.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
+
+		Ok(peer_info)
+	}
+
+	fn receive_jit_channel_inner(
+		&self, amount_msat: Option<u64>, description: &str, expiry_secs: Option<u32>,
+		quantity: Option<u64>, max_total_lsp_fee_limit_msat: Option<u64>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<LdkOffer, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let peer_info = self.connect_to_lsps2_peer(Arc::clone(liquidity_source))?;
+		let offer = if let Some(amount_msat) = amount_msat {
+			self.receive_inner(amount_msat, description, expiry_secs, quantity)?
+		} else {
+			self.receive_variable_amount_inner(description, expiry_secs)?
+		};
+
+		let liquidity_source = Arc::clone(liquidity_source);
+		let (lsp_total_opening_fee, lsp_prop_opening_fee) = self.runtime.block_on(async move {
+			if let Some(amount_msat) = amount_msat {
+				liquidity_source
+					.lsps2_register_bolt12_payment_paths(amount_msat, max_total_lsp_fee_limit_msat)
+					.await
+					.map(|total_fee| (Some(total_fee), None))
+			} else {
+				liquidity_source
+					.lsps2_register_variable_amount_bolt12_payment_paths(
+						max_proportional_lsp_fee_limit_ppm_msat,
+					)
+					.await
+					.map(|prop_fee| (None, Some(prop_fee)))
+			}
+		})?;
+
+		if let Some(total_fee_msat) = lsp_total_opening_fee {
+			log_info!(
+				self.logger,
+				"JIT-channel BOLT12 offer created: {} (max total LSP opening fee: {}msat)",
+				offer,
+				total_fee_msat
+			);
+		}
+		if let Some(prop_fee_ppm_msat) = lsp_prop_opening_fee {
+			log_info!(
+				self.logger,
+				"JIT-channel variable-amount BOLT12 offer created: {} (max proportional LSP opening fee: {}ppm msat)",
+				offer,
+				prop_fee_ppm_msat
+			);
+		}
+
+		self.peer_store.add_peer(peer_info)?;
+
+		Ok(offer)
+	}
+
+	fn receive_async_jit_channel_inner(
+		&self, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<LdkOffer, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let peer_info = self.connect_to_lsps2_peer(Arc::clone(liquidity_source))?;
+		let liquidity_source = Arc::clone(liquidity_source);
+		let lsp_prop_opening_fee = self.runtime.block_on(async move {
+			liquidity_source
+				.lsps2_register_variable_amount_bolt12_payment_paths(
+					max_proportional_lsp_fee_limit_ppm_msat,
+				)
+				.await
+		})?;
+
+		self.peer_store.add_peer(peer_info)?;
+		self.channel_manager.refresh_async_receive_offers().or(Err(Error::OfferCreationFailed))?;
+		let offer = self
+			.channel_manager
+			.await_async_receive_offer(Duration::from_secs(10))
+			.or(Err(Error::OfferCreationFailed))?;
+
+		log_info!(
+			self.logger,
+			"JIT-channel async BOLT12 offer created: {} (max proportional LSP opening fee: {}ppm msat)",
+			offer,
+			lsp_prop_opening_fee
+		);
+
+		Ok(offer)
 	}
 
 	fn blinded_paths_for_async_recipient_internal(
@@ -397,23 +541,47 @@ impl Bolt12Payment {
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
-		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
-			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-			Error::OfferCreationFailed
-		})?;
+		let offer = self.receive_variable_amount_inner(description, expiry_secs)?;
+		Ok(maybe_wrap(offer))
+	}
 
-		if let Some(expiry_secs) = expiry_secs {
-			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.unwrap();
-			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
-		}
+	/// Returns a payable offer that can be used to request a payment of the amount given and
+	/// receive it via a just-in-time (JIT) channel.
+	///
+	/// If the node already has sufficient inbound liquidity via pre-existing channels, the
+	/// payment may be received through those channels without opening a new JIT channel.
+	pub fn receive_via_jit_channel(
+		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>,
+		quantity: Option<u64>, max_total_lsp_fee_limit_msat: Option<u64>,
+	) -> Result<Offer, Error> {
+		let offer = self.receive_jit_channel_inner(
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			quantity,
+			max_total_lsp_fee_limit_msat,
+			None,
+		)?;
+		Ok(maybe_wrap(offer))
+	}
 
-		let offer = offer_builder.description(description.to_string()).build().map_err(|e| {
-			log_error!(self.logger, "Failed to create offer: {:?}", e);
-			Error::OfferCreationFailed
-		})?;
-
+	/// Returns a payable offer that can be used to request a variable amount payment and receive it
+	/// via a just-in-time (JIT) channel.
+	///
+	/// If the node already has sufficient inbound liquidity via pre-existing channels, the
+	/// payment may be received through those channels without opening a new JIT channel.
+	pub fn receive_variable_amount_via_jit_channel(
+		&self, description: &str, expiry_secs: Option<u32>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<Offer, Error> {
+		let offer = self.receive_jit_channel_inner(
+			None,
+			description,
+			expiry_secs,
+			None,
+			None,
+			max_proportional_lsp_fee_limit_ppm_msat,
+		)?;
 		Ok(maybe_wrap(offer))
 	}
 
@@ -545,6 +713,21 @@ impl Bolt12Payment {
 			.get_async_receive_offer()
 			.map(maybe_wrap)
 			.or(Err(Error::OfferCreationFailed))
+	}
+
+	/// Retrieve an async [`Offer`] for receiving payments via an LSPS2 just-in-time (JIT) channel.
+	///
+	/// This requires a configured LSPS2 liquidity source as well as paths to a static invoice server
+	/// via [`Bolt12Payment::set_paths_to_static_invoice_server`].
+	///
+	/// Since async offers are variable-amount, the LSP fee limit is expressed as a proportional
+	/// limit in parts-per-million millisatoshis.
+	pub fn receive_async_via_jit_channel(
+		&self, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<Offer, Error> {
+		let offer =
+			self.receive_async_jit_channel_inner(max_proportional_lsp_fee_limit_ppm_msat)?;
+		Ok(maybe_wrap(offer))
 	}
 }
 
