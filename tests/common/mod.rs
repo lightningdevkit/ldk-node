@@ -326,10 +326,23 @@ pub(crate) enum TestChainSource<'a> {
 	BitcoindRestSync(&'a BitcoinD),
 }
 
-#[derive(Clone, Copy)]
+#[cfg(feature = "uniffi")]
+use ldk_node::FfiDynStoreTrait;
+
+#[cfg(feature = "uniffi")]
+type TestDynStore = Arc<dyn FfiDynStoreTrait>;
+#[cfg(not(feature = "uniffi"))]
+type TestDynStore = TestSyncStore;
+
+#[derive(Clone)]
 pub(crate) enum TestStoreType {
 	TestSyncStore,
 	Sqlite,
+	TierStore {
+		primary: TestDynStore,
+		backup: Option<TestDynStore>,
+		ephemeral: Option<TestDynStore>,
+	},
 }
 
 impl Default for TestStoreType {
@@ -380,6 +393,27 @@ macro_rules! setup_builder {
 
 pub(crate) use setup_builder;
 
+pub(crate) fn create_tier_stores(base_path: PathBuf) -> (TestDynStore, TestDynStore, TestDynStore) {
+	let primary = TestSyncStore::new(base_path.join("primary"));
+	let backup = TestSyncStore::new(base_path.join("backup"));
+	let ephemeral = TestSyncStore::new(base_path.join("ephemeral"));
+
+	#[cfg(feature = "uniffi")]
+	{
+		use ldk_node::DynStoreWrapper;
+
+		(
+			Arc::new(DynStoreWrapper(primary)) as Arc<dyn FfiDynStoreTrait>,
+			Arc::new(DynStoreWrapper(backup)) as Arc<dyn FfiDynStoreTrait>,
+			Arc::new(DynStoreWrapper(ephemeral)) as Arc<dyn FfiDynStoreTrait>,
+		)
+	}
+	#[cfg(not(feature = "uniffi"))]
+	{
+		(primary, backup, ephemeral)
+	}
+}
+
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
@@ -390,21 +424,22 @@ pub(crate) fn setup_two_nodes(
 		anchor_channels,
 		anchors_trusted_no_reserve,
 		TestStoreType::TestSyncStore,
+		TestStoreType::TestSyncStore,
 	)
 }
 
 pub(crate) fn setup_two_nodes_with_store(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
+	anchors_trusted_no_reserve: bool, store_type_a: TestStoreType, store_type_b: TestStoreType,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
 	let mut config_a = random_config(anchor_channels);
-	config_a.store_type = store_type;
+	config_a.store_type = store_type_a;
 	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
-	config_b.store_type = store_type;
+	config_b.store_type = store_type_b;
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
@@ -484,9 +519,53 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
-			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
+			#[cfg(feature = "uniffi")]
+			{
+				use ldk_node::DynStoreWrapper;
+				let kv_store: Arc<dyn FfiDynStoreTrait> = Arc::new(DynStoreWrapper(kv_store));
+
+				builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
+			}
+			#[cfg(not(feature = "uniffi"))]
+			{
+				builder.build_with_store(config.node_entropy, kv_store).unwrap()
+			}
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
+		TestStoreType::TierStore { primary, backup, ephemeral } => {
+			if let Some(backup) = backup {
+				#[cfg(feature = "uniffi")]
+				{
+					builder.set_backup_store(backup);
+				}
+				#[cfg(not(feature = "uniffi"))]
+				{
+					use ldk_node::{DynStore, DynStoreWrapper};
+					let store: Arc<DynStore> = Arc::new(DynStoreWrapper(backup));
+					builder.set_backup_store(store);
+				}
+			}
+			if let Some(ephemeral) = ephemeral {
+				#[cfg(feature = "uniffi")]
+				{
+					builder.set_ephemeral_store(ephemeral);
+				}
+				#[cfg(not(feature = "uniffi"))]
+				{
+					use ldk_node::{DynStore, DynStoreWrapper};
+					let store: Arc<DynStore> = Arc::new(DynStoreWrapper(ephemeral));
+					builder.set_ephemeral_store(store);
+				}
+			}
+			#[cfg(feature = "uniffi")]
+			{
+				builder.build_with_store(config.node_entropy.into(), primary).unwrap()
+			}
+			#[cfg(not(feature = "uniffi"))]
+			{
+				builder.build_with_store(config.node_entropy, primary).unwrap()
+			}
+		},
 	};
 
 	if config.recovery_mode {
@@ -1707,5 +1786,38 @@ impl TestSyncStoreInner {
 	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().unwrap();
 		self.do_list(primary_namespace, secondary_namespace)
+	}
+}
+
+pub fn test_kv_read(
+	store: &TestDynStore, primary_ns: &str, secondary_ns: &str, key: &str,
+) -> Result<Vec<u8>, bitcoin::io::Error> {
+	#[cfg(feature = "uniffi")]
+	{
+		ldk_node::FfiDynStoreTrait::read(
+			&**store,
+			primary_ns.to_string(),
+			secondary_ns.to_string(),
+			key.to_string(),
+		)
+		.map_err(Into::into)
+	}
+	#[cfg(not(feature = "uniffi"))]
+	{
+		KVStoreSync::read(store, primary_ns, secondary_ns, key)
+	}
+}
+
+pub fn test_kv_list(
+	store: &TestDynStore, primary_ns: &str, secondary_ns: &str,
+) -> Result<Vec<String>, bitcoin::io::Error> {
+	#[cfg(feature = "uniffi")]
+	{
+		ldk_node::FfiDynStoreTrait::list(&**store, primary_ns.to_string(), secondary_ns.to_string())
+			.map_err(Into::into)
+	}
+	#[cfg(not(feature = "uniffi"))]
+	{
+		KVStoreSync::list(store, primary_ns, secondary_ns)
 	}
 }
