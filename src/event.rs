@@ -370,21 +370,21 @@ where
 
 	pub(crate) async fn add_event(&self, event: Event) -> Result<(), Error> {
 		let data = {
-			let mut locked_queue = self.queue.lock().unwrap();
+			let mut locked_queue = self.queue.lock().expect("lock");
 			locked_queue.push_back(event);
 			EventQueueSerWrapper(&locked_queue).encode()
 		};
 
 		self.persist_queue(data).await?;
 
-		if let Some(waker) = self.waker.lock().unwrap().take() {
+		if let Some(waker) = self.waker.lock().expect("lock").take() {
 			waker.wake();
 		}
 		Ok(())
 	}
 
 	pub(crate) fn next_event(&self) -> Option<Event> {
-		let locked_queue = self.queue.lock().unwrap();
+		let locked_queue = self.queue.lock().expect("lock");
 		locked_queue.front().cloned()
 	}
 
@@ -394,14 +394,14 @@ where
 
 	pub(crate) async fn event_handled(&self) -> Result<(), Error> {
 		let data = {
-			let mut locked_queue = self.queue.lock().unwrap();
+			let mut locked_queue = self.queue.lock().expect("lock");
 			locked_queue.pop_front();
 			EventQueueSerWrapper(&locked_queue).encode()
 		};
 
 		self.persist_queue(data).await?;
 
-		if let Some(waker) = self.waker.lock().unwrap().take() {
+		if let Some(waker) = self.waker.lock().expect("lock").take() {
 			waker.wake();
 		}
 		Ok(())
@@ -485,10 +485,10 @@ impl Future for EventFuture {
 	fn poll(
 		self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>,
 	) -> core::task::Poll<Self::Output> {
-		if let Some(event) = self.event_queue.lock().unwrap().front() {
+		if let Some(event) = self.event_queue.lock().expect("lock").front() {
 			Poll::Ready(event.clone())
 		} else {
-			*self.waker.lock().unwrap() = Some(cx.waker().clone());
+			*self.waker.lock().expect("lock") = Some(cx.waker().clone());
 			Poll::Pending
 		}
 	}
@@ -1091,11 +1091,14 @@ where
 				};
 
 				self.payment_store.get(&payment_id).map(|payment| {
+					let amount_msat = payment.amount_msat.expect(
+						"outbound payments should record their amount before they can succeed",
+					);
 					log_info!(
 						self.logger,
 						"Successfully sent payment of {}msat{} from \
 						payment hash {:?} with preimage {:?}",
-						payment.amount_msat.unwrap(),
+						amount_msat,
 						if let Some(fee) = fee_paid_msat {
 							format!(" (fee {} msat)", fee)
 						} else {
@@ -1256,7 +1259,9 @@ where
 				}
 
 				let user_channel_id: u128 = u128::from_ne_bytes(
-					self.keys_manager.get_secure_random_bytes()[..16].try_into().unwrap(),
+					self.keys_manager.get_secure_random_bytes()[..16]
+						.try_into()
+						.expect("slice is exactly 16 bytes"),
 				);
 				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
@@ -1447,10 +1452,14 @@ where
 					counterparty_node_id,
 				);
 
+				let former_temporary_channel_id = former_temporary_channel_id.expect(
+					"LDK Node has only ever persisted ChannelPending events from rust-lightning 0.0.115 or later",
+				);
+
 				let event = Event::ChannelPending {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
-					former_temporary_channel_id: former_temporary_channel_id.unwrap(),
+					former_temporary_channel_id,
 					counterparty_node_id,
 					funding_txo,
 				};

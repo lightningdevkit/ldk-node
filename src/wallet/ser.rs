@@ -94,7 +94,9 @@ impl Readable for ChangeSetDeserWrapper<BdkLocalChainChangeSet> {
 		decode_tlv_stream!(reader, {
 			(0, blocks, required),
 		});
-		Ok(Self(BdkLocalChainChangeSet { blocks: blocks.0.unwrap() }))
+		Ok(Self(BdkLocalChainChangeSet {
+			blocks: blocks.0.expect("required blocks TLV field should be present"),
+		}))
 	}
 }
 
@@ -141,10 +143,10 @@ impl Readable for ChangeSetDeserWrapper<BdkTxGraphChangeSet<ConfirmationBlockTim
 		});
 
 		Ok(Self(BdkTxGraphChangeSet {
-			txs: txs.0.unwrap().0,
-			txouts: txouts.0.unwrap(),
-			anchors: anchors.0.unwrap().0,
-			last_seen: last_seen.0.unwrap(),
+			txs: txs.0.expect("required txs TLV field should be present").0,
+			txouts: txouts.0.expect("required txouts TLV field should be present"),
+			anchors: anchors.0.expect("required anchors TLV field should be present").0,
+			last_seen: last_seen.0.expect("required last_seen TLV field should be present"),
 			first_seen: first_seen.unwrap_or_default(),
 			last_evicted: last_evicted.unwrap_or_default(),
 		}))
@@ -177,7 +179,10 @@ impl Readable for ChangeSetDeserWrapper<BTreeSet<(ConfirmationBlockTime, Txid)>>
 				(0, time, required),
 				(2, txid, required),
 			});
-			set.insert((time.0.unwrap().0, txid.0.unwrap()));
+			set.insert((
+				time.0.expect("required confirmation time TLV field should be present").0,
+				txid.0.expect("required txid TLV field should be present"),
+			));
 		}
 		Ok(Self(set))
 	}
@@ -205,7 +210,7 @@ impl Readable for ChangeSetDeserWrapper<BTreeSet<Arc<Transaction>>> {
 			read_tlv_fields!(reader, {
 				(0, tx, required),
 			});
-			set.insert(Arc::new(tx.0.unwrap()));
+			set.insert(Arc::new(tx.0.expect("required transaction TLV field should be present")));
 		}
 		Ok(Self(set))
 	}
@@ -232,8 +237,10 @@ impl Readable for ChangeSetDeserWrapper<ConfirmationBlockTime> {
 		});
 
 		Ok(Self(ConfirmationBlockTime {
-			block_id: block_id.0.unwrap().0,
-			confirmation_time: confirmation_time.0.unwrap(),
+			block_id: block_id.0.expect("required block_id TLV field should be present").0,
+			confirmation_time: confirmation_time
+				.0
+				.expect("required confirmation_time TLV field should be present"),
 		}))
 	}
 }
@@ -257,7 +264,10 @@ impl Readable for ChangeSetDeserWrapper<BlockId> {
 			(2, hash, required),
 		});
 
-		Ok(Self(BlockId { height: height.0.unwrap(), hash: hash.0.unwrap() }))
+		Ok(Self(BlockId {
+			height: height.0.expect("required height TLV field should be present"),
+			hash: hash.0.expect("required hash TLV field should be present"),
+		}))
 	}
 }
 
@@ -285,7 +295,10 @@ impl Readable for ChangeSetDeserWrapper<BdkIndexerChangeSet> {
 		decode_tlv_stream!(reader, { (0, last_revealed, required) });
 
 		Ok(Self(BdkIndexerChangeSet {
-			last_revealed: last_revealed.0.unwrap().0,
+			last_revealed: last_revealed
+				.0
+				.expect("required last_revealed TLV field should be present")
+				.0,
 			spk_cache: Default::default(),
 		}))
 	}
@@ -317,7 +330,10 @@ impl Readable for ChangeSetDeserWrapper<BTreeMap<DescriptorId, u32>> {
 				(0, descriptor_id, required),
 				(2, last_index, required),
 			});
-			set.insert(descriptor_id.0.unwrap().0, last_index.0.unwrap());
+			set.insert(
+				descriptor_id.0.expect("required descriptor_id TLV field should be present").0,
+				last_index.0.expect("required last_index TLV field should be present"),
+			);
 		}
 		Ok(Self(set))
 	}
@@ -336,7 +352,9 @@ impl Readable for ChangeSetDeserWrapper<DescriptorId> {
 
 		decode_tlv_stream!(reader, { (0, hash, required) });
 
-		Ok(Self(DescriptorId(hash.0.unwrap().0)))
+		Ok(Self(DescriptorId(
+			hash.0.expect("required descriptor hash TLV field should be present").0,
+		)))
 	}
 }
 
@@ -351,6 +369,9 @@ impl Readable for ChangeSetDeserWrapper<Sha256Hash> {
 		use bitcoin::hashes::Hash;
 
 		let buf: [u8; 32] = Readable::read(reader)?;
-		Ok(Self(Sha256Hash::from_slice(&buf[..]).unwrap()))
+		Ok(Self(
+			Sha256Hash::from_slice(&buf[..])
+				.expect("a 32-byte buffer should decode into a sha256 hash"),
+		))
 	}
 }

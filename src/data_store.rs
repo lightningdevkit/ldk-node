@@ -65,7 +65,7 @@ where
 	}
 
 	pub(crate) fn insert(&self, object: SO) -> Result<bool, Error> {
-		let mut locked_objects = self.objects.lock().unwrap();
+		let mut locked_objects = self.objects.lock().expect("lock");
 
 		self.persist(&object)?;
 		let updated = locked_objects.insert(object.id(), object).is_some();
@@ -73,7 +73,7 @@ where
 	}
 
 	pub(crate) fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
-		let mut locked_objects = self.objects.lock().unwrap();
+		let mut locked_objects = self.objects.lock().expect("lock");
 
 		let updated;
 		match locked_objects.entry(object.id()) {
@@ -95,7 +95,7 @@ where
 	}
 
 	pub(crate) fn remove(&self, id: &SO::Id) -> Result<(), Error> {
-		let removed = self.objects.lock().unwrap().remove(id).is_some();
+		let removed = self.objects.lock().expect("lock").remove(id).is_some();
 		if removed {
 			let store_key = id.encode_to_hex_str();
 			KVStoreSync::remove(
@@ -121,11 +121,11 @@ where
 	}
 
 	pub(crate) fn get(&self, id: &SO::Id) -> Option<SO> {
-		self.objects.lock().unwrap().get(id).cloned()
+		self.objects.lock().expect("lock").get(id).cloned()
 	}
 
 	pub(crate) fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
-		let mut locked_objects = self.objects.lock().unwrap();
+		let mut locked_objects = self.objects.lock().expect("lock");
 
 		if let Some(object) = locked_objects.get_mut(&update.id()) {
 			let updated = object.update(update);
@@ -141,7 +141,7 @@ where
 	}
 
 	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
-		self.objects.lock().unwrap().values().filter(f).cloned().collect::<Vec<SO>>()
+		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
 	}
 
 	fn persist(&self, object: &SO) -> Result<(), Error> {
@@ -169,7 +169,7 @@ where
 	}
 
 	pub(crate) fn contains_key(&self, id: &SO::Id) -> bool {
-		self.objects.lock().unwrap().contains_key(id)
+		self.objects.lock().expect("lock").contains_key(id)
 	}
 }
 

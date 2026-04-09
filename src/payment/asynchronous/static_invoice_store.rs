@@ -63,7 +63,7 @@ impl StaticInvoiceStore {
 	fn check_rate_limit(
 		limiter: &Mutex<RateLimiter>, recipient_id: &[u8],
 	) -> Result<(), lightning::io::Error> {
-		let mut limiter = limiter.lock().unwrap();
+		let mut limiter = limiter.lock().expect("lock");
 		if !limiter.allow(recipient_id) {
 			Err(lightning::io::Error::new(lightning::io::ErrorKind::Other, "Rate limit exceeded"))
 		} else {

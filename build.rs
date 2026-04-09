@@ -7,5 +7,6 @@
 
 fn main() {
 	#[cfg(feature = "uniffi")]
-	uniffi::generate_scaffolding("bindings/ldk_node.udl").unwrap();
+	uniffi::generate_scaffolding("bindings/ldk_node.udl")
+		.expect("the checked-in UniFFI UDL should always generate scaffolding");
 }

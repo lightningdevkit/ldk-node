@@ -288,7 +288,10 @@ impl SqliteStoreInner {
 		})?;
 
 		let sql = format!("SELECT user_version FROM pragma_user_version");
-		let version_res: u16 = connection.query_row(&sql, [], |row| row.get(0)).unwrap();
+		let version_res: u16 = connection.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
+			let msg = format!("Failed to read PRAGMA user_version: {}", e);
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
 
 		if version_res == 0 {
 			// New database, set our SCHEMA_USER_VERSION and continue
@@ -364,7 +367,7 @@ impl SqliteStoreInner {
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<Mutex<u64>> {
-		let mut outer_lock = self.write_version_locks.lock().unwrap();
+		let mut outer_lock = self.write_version_locks.lock().expect("lock");
 		Arc::clone(&outer_lock.entry(locking_key).or_default())
 	}
 
@@ -373,7 +376,7 @@ impl SqliteStoreInner {
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "read")?;
 
-		let locked_conn = self.connection.lock().unwrap();
+		let locked_conn = self.connection.lock().expect("lock");
 		let sql =
 			format!("SELECT value FROM {} WHERE primary_namespace=:primary_namespace AND secondary_namespace=:secondary_namespace AND key=:key;",
 			self.kv_table_name);
@@ -423,7 +426,7 @@ impl SqliteStoreInner {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, || {
-			let locked_conn = self.connection.lock().unwrap();
+			let locked_conn = self.connection.lock().expect("lock");
 
 			let sort_order = self.next_sort_order.fetch_add(1, Ordering::Relaxed);
 
@@ -467,7 +470,7 @@ impl SqliteStoreInner {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, || {
-			let locked_conn = self.connection.lock().unwrap();
+			let locked_conn = self.connection.lock().expect("lock");
 
 			let sql = format!("DELETE FROM {} WHERE primary_namespace=:primary_namespace AND secondary_namespace=:secondary_namespace AND key=:key;", self.kv_table_name);
 
@@ -500,7 +503,7 @@ impl SqliteStoreInner {
 	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(primary_namespace, secondary_namespace, None, "list")?;
 
-		let locked_conn = self.connection.lock().unwrap();
+		let locked_conn = self.connection.lock().expect("lock");
 
 		let sql = format!(
 			"SELECT key FROM {} WHERE primary_namespace=:primary_namespace AND secondary_namespace=:secondary_namespace",
@@ -546,7 +549,7 @@ impl SqliteStoreInner {
 			"list_paginated",
 		)?;
 
-		let locked_conn = self.connection.lock().unwrap();
+		let locked_conn = self.connection.lock().expect("lock");
 
 		// Fetch one extra row beyond PAGE_SIZE to determine whether a next page exists.
 		let fetch_limit = (PAGE_SIZE + 1) as i64;
@@ -644,7 +647,7 @@ impl SqliteStoreInner {
 		&self, inner_lock_ref: Arc<Mutex<u64>>, locking_key: String, version: u64, callback: F,
 	) -> Result<(), lightning::io::Error> {
 		let res = {
-			let mut last_written_version = inner_lock_ref.lock().unwrap();
+			let mut last_written_version = inner_lock_ref.lock().expect("lock");
 
 			// Check if we already have a newer version written/removed. This is used in async contexts to realize eventual
 			// consistency.
@@ -670,7 +673,7 @@ impl SqliteStoreInner {
 		// to prevent leaking memory. The two arcs that are expected are the one in the map and the one held here in
 		// inner_lock_ref. The outer lock is obtained first, to avoid a new arc being cloned after we've already
 		// counted.
-		let mut outer_lock = self.write_version_locks.lock().unwrap();
+		let mut outer_lock = self.write_version_locks.lock().expect("lock");
 
 		let strong_count = Arc::strong_count(&inner_lock_ref);
 		debug_assert!(strong_count >= 2, "Unexpected SqliteStore strong count");

@@ -115,21 +115,21 @@ impl Wallet {
 	}
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
-		self.inner.lock().unwrap().start_full_scan().build()
+		self.inner.lock().expect("lock").start_full_scan().build()
 	}
 
 	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
-		self.inner.lock().unwrap().start_sync_with_revealed_spks().build()
+		self.inner.lock().expect("lock").start_sync_with_revealed_spks().build()
 	}
 
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
-		self.inner.lock().unwrap().tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
+		self.inner.lock().expect("lock").tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
 	}
 
 	pub(crate) fn get_unconfirmed_txids(&self) -> Vec<Txid> {
 		self.inner
 			.lock()
-			.unwrap()
+			.expect("lock")
 			.transactions()
 			.filter(|t| t.chain_position.is_unconfirmed())
 			.map(|t| t.tx_node.txid)
@@ -137,12 +137,12 @@ impl Wallet {
 	}
 
 	pub(crate) fn current_best_block(&self) -> BestBlock {
-		let checkpoint = self.inner.lock().unwrap().latest_checkpoint();
+		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
 		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
 	}
 
 	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
 		match locked_wallet.apply_update_events(update) {
 			Ok(events) => {
 				self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
@@ -150,7 +150,7 @@ impl Wallet {
 					Error::PersistenceFailed
 				})?;
 
-				let mut locked_persister = self.persister.lock().unwrap();
+				let mut locked_persister = self.persister.lock().expect("lock");
 				locked_wallet.persist(&mut locked_persister).map_err(|e| {
 					log_error!(self.logger, "Failed to persist wallet: {}", e);
 					Error::PersistenceFailed
@@ -172,7 +172,7 @@ impl Wallet {
 			return Ok(());
 		}
 
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
 
 		let chain_tip1 = locked_wallet.latest_checkpoint().block_id();
 		let wallet_txs1 = locked_wallet
@@ -203,7 +203,7 @@ impl Wallet {
 			Error::PersistenceFailed
 		})?;
 
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_persister = self.persister.lock().expect("lock");
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
@@ -426,7 +426,7 @@ impl Wallet {
 	) -> Result<Transaction, Error> {
 		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
 		let mut tx_builder = locked_wallet.build_tx();
 
 		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
@@ -454,7 +454,7 @@ impl Wallet {
 			},
 		}
 
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_persister = self.persister.lock().expect("lock");
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
@@ -469,8 +469,8 @@ impl Wallet {
 	}
 
 	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
+		let mut locked_persister = self.persister.lock().expect("lock");
 
 		let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
@@ -481,8 +481,8 @@ impl Wallet {
 	}
 
 	pub(crate) fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
+		let mut locked_persister = self.persister.lock().expect("lock");
 
 		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
@@ -493,8 +493,8 @@ impl Wallet {
 	}
 
 	pub(crate) fn cancel_tx(&self, tx: &Transaction) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
+		let mut locked_persister = self.persister.lock().expect("lock");
 
 		locked_wallet.cancel_tx(tx);
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
@@ -508,7 +508,7 @@ impl Wallet {
 	pub(crate) fn get_balances(
 		&self, total_anchor_channels_reserve_sats: u64,
 	) -> Result<(u64, u64), Error> {
-		let balance = self.inner.lock().unwrap().balance();
+		let balance = self.inner.lock().expect("lock").balance();
 
 		// Make sure `list_confirmed_utxos` returns at least one `Utxo` we could use to spend/bump
 		// Anchors if we have any confirmed amounts.
@@ -644,7 +644,7 @@ impl Wallet {
 	pub(crate) fn get_max_funding_amount(
 		&self, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
 	) -> Result<u64, Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
 
 		// Use a dummy P2WSH script (34 bytes) to match the size of a real funding output.
 		let dummy_p2wsh_script = ScriptBuf::new().to_p2wsh();
@@ -668,7 +668,7 @@ impl Wallet {
 		&self, shared_input: Input, shared_output_script: ScriptBuf, cur_anchor_reserve_sats: u64,
 		fee_rate: FeeRate,
 	) -> Result<u64, Error> {
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
 
 		debug_assert!(matches!(
 			locked_wallet.public_descriptor(KeychainKind::External),
@@ -712,7 +712,7 @@ impl Wallet {
 			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
 
 		let tx = {
-			let mut locked_wallet = self.inner.lock().unwrap();
+			let mut locked_wallet = self.inner.lock().expect("lock");
 
 			// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
 			let tx_builder = match send_amount {
@@ -834,7 +834,7 @@ impl Wallet {
 				},
 			}
 
-			let mut locked_persister = self.persister.lock().unwrap();
+			let mut locked_persister = self.persister.lock().expect("lock");
 			locked_wallet.persist(&mut locked_persister).map_err(|e| {
 				log_error!(self.logger, "Failed to persist wallet: {}", e);
 				Error::PersistenceFailed
@@ -888,8 +888,8 @@ impl Wallet {
 	pub(crate) fn select_confirmed_utxos(
 		&self, must_spend: Vec<Input>, must_pay_to: &[TxOut], fee_rate: FeeRate,
 	) -> Result<CoinSelection, ()> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
+		let mut locked_persister = self.persister.lock().expect("lock");
 
 		debug_assert!(matches!(
 			locked_wallet.public_descriptor(KeychainKind::External),
@@ -964,7 +964,7 @@ impl Wallet {
 	}
 
 	fn list_confirmed_utxos_inner(&self) -> Result<Vec<Utxo>, ()> {
-		let locked_wallet = self.inner.lock().unwrap();
+		let locked_wallet = self.inner.lock().expect("lock");
 		let mut utxos = Vec::new();
 		let confirmed_txs: Vec<Txid> = locked_wallet
 			.transactions()
@@ -1058,8 +1058,8 @@ impl Wallet {
 
 	#[allow(deprecated)]
 	fn get_change_script_inner(&self) -> Result<ScriptBuf, ()> {
-		let mut locked_wallet = self.inner.lock().unwrap();
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
+		let mut locked_persister = self.persister.lock().expect("lock");
 
 		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
@@ -1071,7 +1071,7 @@ impl Wallet {
 
 	#[allow(deprecated)]
 	pub(crate) fn sign_owned_inputs(&self, unsigned_tx: Transaction) -> Result<Transaction, ()> {
-		let locked_wallet = self.inner.lock().unwrap();
+		let locked_wallet = self.inner.lock().expect("lock");
 
 		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| {
 			log_error!(self.logger, "Failed to construct PSBT: {}", e);
@@ -1108,7 +1108,7 @@ impl Wallet {
 
 	#[allow(deprecated)]
 	fn sign_psbt_inner(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
-		let locked_wallet = self.inner.lock().unwrap();
+		let locked_wallet = self.inner.lock().expect("lock");
 
 		// While BDK populates both `witness_utxo` and `non_witness_utxo` fields, LDK does not. As
 		// BDK by default doesn't trust the witness UTXO to account for the Segwit bug, we must
@@ -1256,7 +1256,7 @@ impl Wallet {
 			},
 		};
 
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
 
 		debug_assert!(
 			locked_wallet.tx_details(txid).is_some(),
@@ -1319,7 +1319,7 @@ impl Wallet {
 						log_error!(
 							self.logger,
 							"Provided fee rate {} is too low for RBF fee bump of txid {}, required minimum fee rate: {}",
-							fee_rate.unwrap(),
+							fee_rate.expect("fee rate is set"),
 							txid,
 							required_fee_rate
 						);
@@ -1380,7 +1380,7 @@ impl Wallet {
 			},
 		}
 
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_persister = self.persister.lock().expect("lock");
 		locked_wallet.persist(&mut locked_persister).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet after fee bump of {}: {}", txid, e);
 			Error::PersistenceFailed
@@ -1431,7 +1431,7 @@ impl Listen for Wallet {
 	}
 
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		let mut locked_wallet = self.inner.lock().unwrap();
+		let mut locked_wallet = self.inner.lock().expect("lock");
 
 		let pre_checkpoint = locked_wallet.latest_checkpoint();
 		if pre_checkpoint.height() != height - 1
@@ -1481,7 +1481,7 @@ impl Listen for Wallet {
 			},
 		};
 
-		let mut locked_persister = self.persister.lock().unwrap();
+		let mut locked_persister = self.persister.lock().expect("lock");
 		match locked_wallet.persist(&mut locked_persister) {
 			Ok(_) => (),
 			Err(e) => {
@@ -1513,7 +1513,7 @@ impl WalletSource for Wallet {
 		&'a self, outpoint: OutPoint,
 	) -> impl Future<Output = Result<Transaction, ()>> + Send + 'a {
 		async move {
-			let locked_wallet = self.inner.lock().unwrap();
+			let locked_wallet = self.inner.lock().expect("lock");
 			locked_wallet
 				.tx_details(outpoint.txid)
 				.map(|tx_details| tx_details.tx.deref().clone())

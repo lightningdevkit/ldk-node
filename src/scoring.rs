@@ -82,10 +82,11 @@ async fn sync_external_scores(
 				log_error!(logger, "Failed to persist external scores to cache: {}", e);
 			}
 
-			let duration_since_epoch =
-				SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-			scorer.lock().unwrap().merge(liquidities, duration_since_epoch);
-			let mut locked_node_metrics = node_metrics.write().unwrap();
+			let duration_since_epoch = SystemTime::now()
+				.duration_since(SystemTime::UNIX_EPOCH)
+				.expect("system time must be after Unix epoch");
+			scorer.lock().expect("lock").merge(liquidities, duration_since_epoch);
+			let mut locked_node_metrics = node_metrics.write().expect("lock");
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
 				Some(duration_since_epoch.as_secs());
 			write_node_metrics(&*locked_node_metrics, &*kv_store, logger).unwrap_or_else(|e| {
