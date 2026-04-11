@@ -142,9 +142,13 @@ pub struct LSPS2ServiceConfig {
 	///
 	/// [`bLIP-52`]: https://github.com/lightning/blips/blob/master/blip-0052.md#trust-models
 	pub client_trusts_lsp: bool,
-	/// When set, clients that we open channels to will be allowed to spend their entire channel
-	/// balance. This allows clients to try to steal your funds with no financial penalty, so
-	/// this should only be set if you trust your clients.
+	/// When set, we will allow clients to spend their entire channel balance in the channels
+	/// we open to them. This allows clients to try to steal your channel balance with
+	/// no financial penalty, so this should only be set if you trust your clients.
+	///
+	/// See [`Node::open_0reserve_channel`] to manually open these channels.
+	///
+	/// [`Node::open_0reserve_channel`]: crate::Node::open_0reserve_channel
 	pub allow_client_0reserve: bool,
 }
 

@@ -1449,8 +1449,8 @@ impl Node {
 	/// Connect to a node and open a new unannounced channel, in which the target node can
 	/// spend its entire balance.
 	///
-	/// This channel allows the target node to try to steal your funds with no financial
-	/// penalty, so this channel should only be opened to nodes you trust.
+	/// This channel allows the target node to try to steal your channel balance with no
+	/// financial penalty, so this channel should only be opened to nodes you trust.
 	///
 	/// Disconnects and reconnects are handled automatically.
 	///
@@ -1484,8 +1484,8 @@ impl Node {
 	/// minus fees and anchor reserves. The target node will be able to spend its entire channel
 	/// balance.
 	///
-	/// This channel allows the target node to try to steal your funds with no financial
-	/// penalty, so this channel should only be opened to nodes you trust.
+	/// This channel allows the target node to try to steal your channel balance with no
+	/// financial penalty, so this channel should only be opened to nodes you trust.
 	///
 	/// Disconnects and reconnects are handled automatically.
 	///
