@@ -54,6 +54,7 @@ async fn channel_full_cycle_with_vss_store() {
 		&bitcoind.client,
 		&electrsd.client,
 		false,
+		false,
 		true,
 		false,
 	)

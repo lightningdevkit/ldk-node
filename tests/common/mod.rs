@@ -790,7 +790,7 @@ pub async fn splice_in_with_all(
 
 pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
-	expect_anchor_channel: bool, force_close: bool,
+	allow_0reserve: bool, expect_anchor_channel: bool, force_close: bool,
 ) {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -846,15 +846,27 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nA -- open_channel -> B");
 	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
-	node_a
-		.open_announced_channel(
-			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
-			funding_amount_sat,
-			Some(push_msat),
-			None,
-		)
-		.unwrap();
+	if allow_0reserve {
+		node_a
+			.open_0reserve_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				Some(push_msat),
+				None,
+			)
+			.unwrap();
+	} else {
+		node_a
+			.open_announced_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				funding_amount_sat,
+				Some(push_msat),
+				None,
+			)
+			.unwrap();
+	}
 
 	assert_eq!(node_a.list_peers().first().unwrap().node_id, node_b.node_id());
 	assert!(node_a.list_peers().first().unwrap().is_persisted);
@@ -912,6 +924,22 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		node_b.list_balances().total_anchor_channels_reserve_sats,
 		node_b_anchor_reserve_sat
 	);
+
+	// Note that only node B has 0-reserve, we don't yet have an API to allow the opener of the
+	// channel to have 0-reserve.
+	if allow_0reserve {
+		assert_eq!(node_b.list_channels()[0].unspendable_punishment_reserve, Some(0));
+		assert_eq!(node_b.list_channels()[0].outbound_capacity_msat, push_msat);
+		assert_eq!(node_b.list_channels()[0].next_outbound_htlc_limit_msat, push_msat);
+
+		assert_eq!(node_b.list_balances().total_lightning_balance_sats * 1000, push_msat);
+		let LightningBalance::ClaimableOnChannelClose { amount_satoshis, .. } =
+			node_b.list_balances().lightning_balances[0]
+		else {
+			panic!("Unexpected `LightningBalance` variant");
+		};
+		assert_eq!(amount_satoshis * 1000, push_msat);
+	}
 
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
@@ -1266,6 +1294,39 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			.len(),
 		2
 	);
+
+	if allow_0reserve {
+		let node_a_outbound_capacity_msat = node_a.list_channels()[0].outbound_capacity_msat;
+		let node_a_reserve_msat =
+			node_a.list_channels()[0].unspendable_punishment_reserve.unwrap() * 1000;
+		// TODO: Zero-fee commitment channels are anchor channels, but do not allocate any
+		// funds to the anchor, so this will need to be updated when we ship these channels
+		// in ldk-node.
+		let node_a_anchors_msat = if expect_anchor_channel { 2 * 330 * 1000 } else { 0 };
+		let funding_amount_msat = node_a.list_channels()[0].channel_value_sats * 1000;
+		// Node B does not have any reserve, so we only subtract a few items on node A's
+		// side to arrive at node B's capacity
+		let node_b_capacity_msat = funding_amount_msat
+			- node_a_outbound_capacity_msat
+			- node_a_reserve_msat
+			- node_a_anchors_msat;
+		let got_capacity_msat = node_b.list_channels()[0].outbound_capacity_msat;
+		assert_eq!(got_capacity_msat, node_b_capacity_msat);
+		assert_ne!(got_capacity_msat, 0);
+		// Sanity check to make sure this is a non-trivial amount
+		assert!(got_capacity_msat > 15_000_000);
+
+		// This is a private channel, so node B can send 100% of the value over
+		assert_eq!(node_b.list_channels()[0].next_outbound_htlc_limit_msat, node_b_capacity_msat);
+
+		node_b.spontaneous_payment().send(node_b_capacity_msat, node_a.node_id(), None).unwrap();
+		expect_event!(node_b, PaymentSuccessful);
+		expect_event!(node_a, PaymentReceived);
+
+		node_a.spontaneous_payment().send(node_b_capacity_msat, node_b.node_id(), None).unwrap();
+		expect_event!(node_a, PaymentSuccessful);
+		expect_event!(node_b, PaymentReceived);
+	}
 
 	println!("\nB close_channel (force: {})", force_close);
 	tokio::time::sleep(Duration::from_secs(1)).await;

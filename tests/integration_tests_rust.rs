@@ -48,8 +48,17 @@ async fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, false)
-		.await;
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		false,
+		true,
+		false,
+	)
+	.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -57,8 +66,17 @@ async fn channel_full_cycle_force_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true)
-		.await;
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		false,
+		true,
+		true,
+	)
+	.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -66,8 +84,17 @@ async fn channel_full_cycle_force_close_trusted_no_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, true, true)
-		.await;
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		false,
+		true,
+		true,
+	)
+	.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -75,8 +102,17 @@ async fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, true, true, false)
-		.await;
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		true,
+		false,
+		true,
+		false,
+	)
+	.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -84,8 +120,53 @@ async fn channel_full_cycle_legacy_staticremotekey() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
-	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false)
-		.await;
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		false,
+		false,
+		false,
+	)
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_full_cycle_0reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		true,
+		true,
+		false,
+	)
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_full_cycle_0conf_0reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, true, true, false);
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		true,
+		true,
+		true,
+		false,
+	)
+	.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
