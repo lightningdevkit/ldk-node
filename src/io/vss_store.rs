@@ -474,35 +474,32 @@ impl VssStoreInner {
 		}
 	}
 
-	async fn list_all_keys(
+	async fn list_keys(
 		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: &str,
-		secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
-		let mut page_token = None;
-		let mut keys = vec![];
+		secondary_namespace: &str, page_token: Option<String>, page_size: Option<i32>,
+	) -> io::Result<(Vec<String>, Option<String>)> {
 		let key_prefix = self.build_obfuscated_prefix(primary_namespace, secondary_namespace);
-		while page_token != Some("".to_string()) {
-			let request = ListKeyVersionsRequest {
-				store_id: self.store_id.clone(),
-				key_prefix: Some(key_prefix.clone()),
-				page_token,
-				page_size: None,
-			};
+		let request = ListKeyVersionsRequest {
+			store_id: self.store_id.clone(),
+			key_prefix: Some(key_prefix),
+			page_token,
+			page_size,
+		};
 
-			let response = client.list_key_versions(&request).await.map_err(|e| {
-				let msg = format!(
-					"Failed to list keys in {}/{}: {}",
-					primary_namespace, secondary_namespace, e
-				);
-				Error::new(ErrorKind::Other, msg)
-			})?;
+		let response = client.list_key_versions(&request).await.map_err(|e| {
+			let msg = format!(
+				"Failed to list keys in {}/{}: {}",
+				primary_namespace, secondary_namespace, e
+			);
+			Error::new(ErrorKind::Other, msg)
+		})?;
 
-			for kv in response.key_versions {
-				keys.push(self.extract_key(&kv.key)?);
-			}
-			page_token = response.next_page_token;
+		let mut keys = Vec::with_capacity(response.key_versions.len());
+		for kv in response.key_versions {
+			keys.push(self.extract_key(&kv.key)?);
 		}
-		Ok(keys)
+
+		Ok((keys, response.next_page_token))
 	}
 
 	async fn read_internal(
@@ -624,17 +621,18 @@ impl VssStoreInner {
 	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, None, "list")?;
 
-		let keys = self
-			.list_all_keys(client, &primary_namespace, &secondary_namespace)
-			.await
-			.map_err(|e| {
-				let msg = format!(
-					"Failed to retrieve keys in namespace: {}/{} : {}",
-					primary_namespace, secondary_namespace, e
-				);
-				Error::new(ErrorKind::Other, msg)
-			})?;
-
+		let mut page_token: Option<String> = None;
+		let mut keys = vec![];
+		loop {
+			let (page_keys, next_page_token) = self
+				.list_keys(client, &primary_namespace, &secondary_namespace, page_token, None)
+				.await?;
+			keys.extend(page_keys);
+			match next_page_token {
+				Some(t) if !t.is_empty() => page_token = Some(t),
+				_ => break,
+			}
+		}
 		Ok(keys)
 	}
 
