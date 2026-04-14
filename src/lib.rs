@@ -1098,37 +1098,6 @@ impl Node {
 		self.prober.as_deref()
 	}
 
-	/// Returns the scorer's estimated `(min, max)` liquidity range for the given channel in the
-	/// direction toward `target`, or `None` if the scorer has no data for that channel.
-	///
-	/// **Warning:** This is expensive — O(scorer size) per call. It works by serializing the
-	/// entire `CombinedScorer` and deserializing it as a plain `ProbabilisticScorer` to access
-	/// `estimated_channel_liquidity_range`. Intended for testing and debugging, not hot paths.
-	pub fn scorer_channel_liquidity(&self, scid: u64, target: PublicKey) -> Option<(u64, u64)> {
-		use lightning::routing::scoring::{
-			ProbabilisticScorer, ProbabilisticScoringDecayParameters,
-		};
-		use lightning::util::ser::{ReadableArgs, Writeable};
-
-		let target_node_id = lightning::routing::gossip::NodeId::from_pubkey(&target);
-
-		let bytes = {
-			let scorer = self.scorer.lock().unwrap();
-			let mut buf = Vec::new();
-			scorer.write(&mut buf).ok()?;
-			buf
-		};
-
-		let decay_params = ProbabilisticScoringDecayParameters::default();
-		let prob_scorer = ProbabilisticScorer::read(
-			&mut &bytes[..],
-			(decay_params, Arc::clone(&self.network_graph), Arc::clone(&self.logger)),
-		)
-		.ok()?;
-
-		prob_scorer.estimated_channel_liquidity_range(scid, &target_node_id)
-	}
-
 	/// Retrieve a list of known channels.
 	pub fn list_channels(&self) -> Vec<ChannelDetails> {
 		self.channel_manager.list_channels().into_iter().map(|c| c.into()).collect()
