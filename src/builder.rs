@@ -654,7 +654,6 @@ impl NodeBuilder {
 	/// primary and backup stores complete successfully.
 	///
 	/// If not set, durable data will be stored only in the primary store.
-	#[allow(dead_code)] // Used by subsequent FFI/test integration commits.
 	pub fn set_backup_store(&mut self, backup_store: Arc<DynStore>) -> &mut Self {
 		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
 		tier_store_config.backup = Some(backup_store);
@@ -668,7 +667,6 @@ impl NodeBuilder {
 	/// can be rebuilt if lost.
 	///
 	/// If not set, non-critical data will be stored in the primary store.
-	#[allow(dead_code)] // Used by subsequent FFI/test integration commits.
 	pub fn set_ephemeral_store(&mut self, ephemeral_store: Arc<DynStore>) -> &mut Self {
 		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
 		tier_store_config.ephemeral = Some(ephemeral_store);
