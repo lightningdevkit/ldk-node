@@ -1020,34 +1020,27 @@ mod tests {
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
 
-	#[test]
-	fn vss_read_write_remove_list_persist() {
+	fn build_vss_store() -> VssStore {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut node_seed = [0u8; 64];
 		rng.fill_bytes(&mut node_seed);
 		let entropy = NodeEntropy::from_seed_bytes(node_seed);
-		let vss_store =
-			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
-				.build_with_sigs_auth(HashMap::new())
-				.unwrap();
+		VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
+			.build_with_sigs_auth(HashMap::new())
+			.unwrap()
+	}
+
+	#[test]
+	fn vss_read_write_remove_list_persist() {
+		let vss_store = build_vss_store();
 		do_read_write_remove_list_persist(&vss_store);
 	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 	async fn vss_read_write_remove_list_persist_in_runtime_context() {
-		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
-		let mut rng = rng();
-		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let mut node_seed = [0u8; 64];
-		rng.fill_bytes(&mut node_seed);
-		let entropy = NodeEntropy::from_seed_bytes(node_seed);
-		let vss_store =
-			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
-				.build_with_sigs_auth(HashMap::new())
-				.unwrap();
-
+		let vss_store = build_vss_store();
 		do_read_write_remove_list_persist(&vss_store);
 		drop(vss_store)
 	}
