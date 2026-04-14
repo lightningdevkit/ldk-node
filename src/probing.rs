@@ -323,7 +323,7 @@ impl ProbingStrategy for HighDegreeStrategy {
 		let top_node_count = self.top_node_count.min(nodes_by_degree.len());
 		let now = Instant::now();
 
-		let mut probed = self.recently_probed.lock().unwrap();
+		let mut probed = self.recently_probed.lock().unwrap_or_else(|e| e.into_inner());
 
 		// We could check staleness when we use the entry, but that way we'd not clear cache at
 		// all. For hundreds of top nodes it's okay to call retain each tick.
@@ -444,7 +444,7 @@ impl RandomStrategy {
 		let graph = self.network_graph.read_only();
 		let first_hop =
 			&initial_channels[random_range(0, initial_channels.len() as u64 - 1) as usize];
-		let first_hop_scid = first_hop.short_channel_id.unwrap();
+		let first_hop_scid = first_hop.short_channel_id?;
 		let next_peer_pubkey = first_hop.counterparty.node_id;
 		let next_peer_node_id = NodeId::from_pubkey(&next_peer_pubkey);
 
@@ -488,11 +488,15 @@ impl RandomStrategy {
 				break;
 			};
 			// Retrieve the direction-specific update via the public ChannelInfo fields.
-			// Safe to unwrap: as_directed_from already checked both directions are Some.
-			let update = if directed.source() == &next_channel.node_one {
-				next_channel.one_to_two.as_ref().unwrap()
+			// as_directed_from already checked both directions are Some, but we break
+			// defensively rather than unwrap.
+			let update = match if directed.source() == &next_channel.node_one {
+				next_channel.one_to_two.as_ref()
 			} else {
-				next_channel.two_to_one.as_ref().unwrap()
+				next_channel.two_to_one.as_ref()
+			} {
+				Some(u) => u,
+				None => break,
 			};
 
 			if !update.enabled {
@@ -560,10 +564,13 @@ impl RandomStrategy {
 			let (_, next_scid, _) = route[i + 1];
 			let next_channel = graph.channel(next_scid)?;
 			let (directed, _) = next_channel.as_directed_from(&node_id)?;
-			let update = if directed.source() == &next_channel.node_one {
-				next_channel.one_to_two.as_ref().unwrap()
+			let update = match if directed.source() == &next_channel.node_one {
+				next_channel.one_to_two.as_ref()
 			} else {
-				next_channel.two_to_one.as_ref().unwrap()
+				next_channel.two_to_one.as_ref()
+			} {
+				Some(u) => u,
+				None => return None,
 			};
 			let fee = update.fees.base_msat as u64
 				+ (forwarded * update.fees.proportional_millionths as u64 / 1_000_000);
