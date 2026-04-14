@@ -19,8 +19,8 @@ use lightning::{io, log_error};
 use std::future::Future;
 use std::sync::Arc;
 
-/// A 3-tiered [`KVStoreSync`] implementation that routes data across storage
-/// backends that may be local or remote:
+/// A 3-tiered [`KVStore`]/[`KVStoreSync`] implementation that routes data across
+/// storage backends that may be local or remote:
 /// - a primary store for durable, authoritative persistence,
 /// - an optional backup store that maintains an additional durable copy of
 ///   primary-backed data, and
