@@ -19,7 +19,7 @@ use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{BlockHash, Network};
+use bitcoin::Network;
 use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::{chainmonitor, BestBlock};
@@ -1695,8 +1695,8 @@ fn build_with_store_internal(
 				user_config,
 				channel_monitor_references,
 			);
-			let (_hash, channel_manager) =
-				<(BlockHash, ChannelManager)>::read(&mut &*reader, read_args).map_err(|e| {
+			let (_best_block, channel_manager) =
+				<(BestBlock, ChannelManager)>::read(&mut &*reader, read_args).map_err(|e| {
 					log_error!(logger, "Failed to read channel manager from store: {}", e);
 					BuildError::ReadFailed
 				})?;

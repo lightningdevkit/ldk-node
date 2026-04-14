@@ -138,7 +138,14 @@ impl Wallet {
 
 	pub(crate) fn current_best_block(&self) -> BestBlock {
 		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
-		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
+		let mut current_block = Some(checkpoint.clone());
+		let previous_blocks = std::array::from_fn(|_| {
+			let child = current_block.take()?;
+			let parent = child.prev().filter(|cp| cp.height() + 1 == child.height())?;
+			current_block = Some(parent.clone());
+			Some(parent.hash())
+		});
+		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height(), previous_blocks }
 	}
 
 	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
