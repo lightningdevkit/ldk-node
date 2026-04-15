@@ -790,7 +790,7 @@ pub async fn splice_in_with_all(
 
 pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
-	allow_0reserve: bool, expect_anchor_channel: bool, force_close: bool,
+	disable_node_b_reserve: bool, expect_anchor_channel: bool, force_close: bool,
 ) {
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -846,7 +846,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	println!("\nA -- open_channel -> B");
 	let funding_amount_sat = 2_080_000;
 	let push_msat = (funding_amount_sat / 2) * 1000; // balance the channel
-	if allow_0reserve {
+	if disable_node_b_reserve {
 		node_a
 			.open_0reserve_channel(
 				node_b.node_id(),
@@ -927,7 +927,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Note that only node B has 0-reserve, we don't yet have an API to allow the opener of the
 	// channel to have 0-reserve.
-	if allow_0reserve {
+	if disable_node_b_reserve {
 		assert_eq!(node_b.list_channels()[0].unspendable_punishment_reserve, Some(0));
 		assert_eq!(node_b.list_channels()[0].outbound_capacity_msat, push_msat);
 		assert_eq!(node_b.list_channels()[0].next_outbound_htlc_limit_msat, push_msat);
@@ -1295,7 +1295,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		2
 	);
 
-	if allow_0reserve {
+	if disable_node_b_reserve {
 		let node_a_outbound_capacity_msat = node_a.list_channels()[0].outbound_capacity_msat;
 		let node_a_reserve_msat =
 			node_a.list_channels()[0].unspendable_punishment_reserve.unwrap() * 1000;
