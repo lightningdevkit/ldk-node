@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "uniffi")]
+use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,23 +42,20 @@ pub(crate) enum ProbingStrategyKind {
 
 /// Configuration for the background probing subsystem.
 ///
-/// Use the constructor methods [`high_degree`], [`random_walk`], or [`custom`] to start
-/// building, then chain optional setters and call [`build`].
+/// Construct via [`ProbingConfigBuilder`]. Pick a strategy with
+/// [`ProbingConfigBuilder::high_degree`], [`ProbingConfigBuilder::random_walk`], or
+/// [`ProbingConfigBuilder::custom`], chain optional setters, and finalize with
+/// [`ProbingConfigBuilder::build`].
 ///
 /// # Example
 /// ```ignore
-/// let config = ProbingConfig::high_degree(100)
+/// let config = ProbingConfigBuilder::high_degree(100)
 ///     .interval(Duration::from_secs(30))
 ///     .max_locked_msat(500_000)
 ///     .diversity_penalty_msat(250)
 ///     .build();
 /// builder.set_probing_config(config);
 /// ```
-///
-/// [`high_degree`]: Self::high_degree
-/// [`random_walk`]: Self::random_walk
-/// [`custom`]: Self::custom
-/// [`build`]: ProbingConfigBuilder::build
 #[derive(Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct ProbingConfig {
@@ -88,86 +87,14 @@ impl fmt::Debug for ProbingConfig {
 	}
 }
 
-impl ProbingConfig {
-	/// Start building a config that probes toward the highest-degree nodes in the graph.
-	///
-	/// `top_node_count` controls how many of the most-connected nodes are cycled through.
-	pub fn high_degree(top_node_count: usize) -> ProbingConfigBuilder {
-		ProbingConfigBuilder::new(ProbingStrategyKind::HighDegree { top_node_count })
-	}
-
-	/// Start building a config that probes via random graph walks.
-	///
-	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
-	pub fn random_walk(max_hops: usize) -> ProbingConfigBuilder {
-		ProbingConfigBuilder::new(ProbingStrategyKind::Random { max_hops })
-	}
-
-	/// Start building a config with a custom [`ProbingStrategy`] implementation.
-	pub fn custom(strategy: Arc<dyn ProbingStrategy>) -> ProbingConfigBuilder {
-		ProbingConfigBuilder::new(ProbingStrategyKind::Custom(strategy))
-	}
-}
-
-#[cfg(feature = "uniffi")]
-#[uniffi::export]
-impl ProbingConfig {
-	/// Creates a probing config that probes toward the highest-degree nodes in the graph.
-	///
-	/// `top_node_count` controls how many of the most-connected nodes are cycled through.
-	/// All other parameters are optional and fall back to sensible defaults when `None`.
-	#[uniffi::constructor]
-	pub fn new_high_degree(
-		top_node_count: u64, interval_secs: Option<u64>, max_locked_msat: Option<u64>,
-		diversity_penalty_msat: Option<u64>, cooldown_secs: Option<u64>,
-	) -> Self {
-		let mut builder = Self::high_degree(top_node_count as usize);
-		if let Some(secs) = interval_secs {
-			builder = builder.interval(Duration::from_secs(secs));
-		}
-		if let Some(msat) = max_locked_msat {
-			builder = builder.max_locked_msat(msat);
-		}
-		if let Some(penalty) = diversity_penalty_msat {
-			builder = builder.diversity_penalty_msat(penalty);
-		}
-		if let Some(secs) = cooldown_secs {
-			builder = builder.cooldown(Duration::from_secs(secs));
-		}
-		builder.build()
-	}
-
-	/// Creates a probing config that probes via random graph walks.
-	///
-	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
-	/// All other parameters are optional and fall back to sensible defaults when `None`.
-	#[uniffi::constructor]
-	pub fn new_random_walk(
-		max_hops: u64, interval_secs: Option<u64>, max_locked_msat: Option<u64>,
-		diversity_penalty_msat: Option<u64>, cooldown_secs: Option<u64>,
-	) -> Self {
-		let mut builder = Self::random_walk(max_hops as usize);
-		if let Some(secs) = interval_secs {
-			builder = builder.interval(Duration::from_secs(secs));
-		}
-		if let Some(msat) = max_locked_msat {
-			builder = builder.max_locked_msat(msat);
-		}
-		if let Some(penalty) = diversity_penalty_msat {
-			builder = builder.diversity_penalty_msat(penalty);
-		}
-		if let Some(secs) = cooldown_secs {
-			builder = builder.cooldown(Duration::from_secs(secs));
-		}
-		builder.build()
-	}
-}
-
 /// Builder for [`ProbingConfig`].
 ///
-/// Created via [`ProbingConfig::high_degree`], [`ProbingConfig::random_walk`], or
-/// [`ProbingConfig::custom`]. Call [`build`] to finalize.
+/// Pick a strategy with [`high_degree`], [`random_walk`], or [`custom`], chain optional
+/// setters, and call [`build`] to finalize.
 ///
+/// [`high_degree`]: Self::high_degree
+/// [`random_walk`]: Self::random_walk
+/// [`custom`]: Self::custom
 /// [`build`]: Self::build
 pub struct ProbingConfigBuilder {
 	kind: ProbingStrategyKind,
@@ -178,7 +105,7 @@ pub struct ProbingConfigBuilder {
 }
 
 impl ProbingConfigBuilder {
-	fn new(kind: ProbingStrategyKind) -> Self {
+	fn with_kind(kind: ProbingStrategyKind) -> Self {
 		Self {
 			kind,
 			interval: Duration::from_secs(DEFAULT_PROBING_INTERVAL_SECS),
@@ -188,10 +115,29 @@ impl ProbingConfigBuilder {
 		}
 	}
 
+	/// Start building a config that probes toward the highest-degree nodes in the graph.
+	///
+	/// `top_node_count` controls how many of the most-connected nodes are cycled through.
+	pub fn high_degree(top_node_count: usize) -> Self {
+		Self::with_kind(ProbingStrategyKind::HighDegree { top_node_count })
+	}
+
+	/// Start building a config that probes via random graph walks.
+	///
+	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
+	pub fn random_walk(max_hops: usize) -> Self {
+		Self::with_kind(ProbingStrategyKind::Random { max_hops })
+	}
+
+	/// Start building a config with a custom [`ProbingStrategy`] implementation.
+	pub fn custom(strategy: Arc<dyn ProbingStrategy>) -> Self {
+		Self::with_kind(ProbingStrategyKind::Custom(strategy))
+	}
+
 	/// Overrides the interval between probe attempts.
 	///
 	/// Defaults to 10 seconds.
-	pub fn interval(mut self, interval: Duration) -> Self {
+	pub fn interval(&mut self, interval: Duration) -> &mut Self {
 		self.interval = interval;
 		self
 	}
@@ -199,7 +145,7 @@ impl ProbingConfigBuilder {
 	/// Overrides the maximum millisatoshis that may be locked in in-flight probes at any time.
 	///
 	/// Defaults to 100 000 000 msat (100k sats).
-	pub fn max_locked_msat(mut self, max_msat: u64) -> Self {
+	pub fn max_locked_msat(&mut self, max_msat: u64) -> &mut Self {
 		self.max_locked_msat = max_msat;
 		self
 	}
@@ -215,7 +161,7 @@ impl ProbingConfigBuilder {
 	/// (e.g., [`RandomStrategy`]) bypass the scorer entirely.
 	///
 	/// If unset, LDK's default of `0` (no penalty) is used.
-	pub fn diversity_penalty_msat(mut self, penalty_msat: u64) -> Self {
+	pub fn diversity_penalty_msat(&mut self, penalty_msat: u64) -> &mut Self {
 		self.diversity_penalty_msat = Some(penalty_msat);
 		self
 	}
@@ -223,20 +169,92 @@ impl ProbingConfigBuilder {
 	/// Sets how long a probed node stays ineligible before being probed again.
 	///
 	/// Only applies to [`HighDegreeStrategy`]. Defaults to 1 hour.
-	pub fn cooldown(mut self, cooldown: Duration) -> Self {
+	pub fn cooldown(&mut self, cooldown: Duration) -> &mut Self {
 		self.cooldown = cooldown;
 		self
 	}
 
 	/// Builds the [`ProbingConfig`].
-	pub fn build(self) -> ProbingConfig {
+	pub fn build(&self) -> ProbingConfig {
 		ProbingConfig {
-			kind: self.kind,
+			kind: self.kind.clone(),
 			interval: self.interval,
 			max_locked_msat: self.max_locked_msat,
 			diversity_penalty_msat: self.diversity_penalty_msat,
 			cooldown: self.cooldown,
 		}
+	}
+}
+
+/// A UniFFI-compatible wrapper around [`ProbingConfigBuilder`] that uses interior mutability
+/// so it can be shared behind an `Arc` as required by the FFI object model.
+///
+/// Obtain one via the constructors [`new_high_degree`] or [`new_random_walk`], configure it
+/// with the `set_*` methods, then call [`build`] to produce a [`ProbingConfig`].
+///
+/// [`new_high_degree`]: Self::new_high_degree
+/// [`new_random_walk`]: Self::new_random_walk
+/// [`build`]: Self::build
+#[cfg(feature = "uniffi")]
+#[derive(uniffi::Object)]
+pub struct ArcedProbingConfigBuilder {
+	inner: RwLock<ProbingConfigBuilder>,
+}
+
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl ArcedProbingConfigBuilder {
+	/// Creates a builder configured to probe toward the highest-degree nodes in the graph.
+	///
+	/// `top_node_count` controls how many of the most-connected nodes are cycled through.
+	#[uniffi::constructor]
+	pub fn new_high_degree(top_node_count: u64) -> Arc<Self> {
+		Arc::new(Self {
+			inner: RwLock::new(ProbingConfigBuilder::high_degree(top_node_count as usize)),
+		})
+	}
+
+	/// Creates a builder configured to probe via random graph walks.
+	///
+	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
+	#[uniffi::constructor]
+	pub fn new_random_walk(max_hops: u64) -> Arc<Self> {
+		Arc::new(Self { inner: RwLock::new(ProbingConfigBuilder::random_walk(max_hops as usize)) })
+	}
+
+	/// Overrides the interval between probe attempts. Defaults to 10 seconds.
+	pub fn set_interval(&self, secs: u64) {
+		self.inner.write().unwrap().interval(Duration::from_secs(secs));
+	}
+
+	/// Overrides the maximum millisatoshis that may be locked in in-flight probes at any time.
+	///
+	/// Defaults to 100 000 000 msat (100k sats).
+	pub fn set_max_locked_msat(&self, max_msat: u64) {
+		self.inner.write().unwrap().max_locked_msat(max_msat);
+	}
+
+	/// Sets the probing diversity penalty applied by the probabilistic scorer.
+	///
+	/// When set, the scorer will penalize channels that have been recently probed,
+	/// encouraging path diversity during background probing. The penalty decays
+	/// quadratically over 24 hours.
+	///
+	/// If unset, LDK's default of `0` (no penalty) is used.
+	pub fn set_diversity_penalty_msat(&self, penalty_msat: u64) {
+		self.inner.write().unwrap().diversity_penalty_msat(penalty_msat);
+	}
+
+	/// Sets how long a probed node stays ineligible before being probed again.
+	///
+	/// Only applies to the high-degree strategy. Defaults to 1 hour.
+	pub fn set_cooldown(&self, secs: u64) {
+		self.inner.write().unwrap().cooldown(Duration::from_secs(secs));
+	}
+
+	/// Builds the [`ProbingConfig`].
+	pub fn build(&self) -> Arc<ProbingConfig> {
+		Arc::new(self.inner.read().unwrap().build())
 	}
 }
 

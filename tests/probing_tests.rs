@@ -21,7 +21,7 @@ use common::{
 };
 
 use ldk_node::bitcoin::Amount;
-use ldk_node::probing::{ProbingConfig, ProbingStrategy};
+use ldk_node::probing::{ProbingConfigBuilder, ProbingStrategy};
 use ldk_node::Event;
 
 use lightning::routing::router::Path;
@@ -124,7 +124,7 @@ async fn probe_budget_increments_and_decrements() {
 	let mut config_a = random_config(false);
 	let strategy = FixedPathStrategy::new();
 	config_a.probing = Some(
-		ProbingConfig::custom(strategy.clone())
+		ProbingConfigBuilder::custom(strategy.clone())
 			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
 			.max_locked_msat(10 * PROBE_AMOUNT_MSAT)
 			.build(),
@@ -210,7 +210,7 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	let mut config_a = random_config(false);
 	let strategy = FixedPathStrategy::new();
 	config_a.probing = Some(
-		ProbingConfig::custom(strategy.clone())
+		ProbingConfigBuilder::custom(strategy.clone())
 			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
 			.max_locked_msat(10 * PROBE_AMOUNT_MSAT)
 			.build(),

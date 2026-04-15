@@ -637,16 +637,18 @@ impl NodeBuilder {
 
 	/// Configures background probing.
 	///
-	/// Use [`ProbingConfig`] to build the configuration:
+	/// Use [`ProbingConfigBuilder`] to build the configuration:
 	/// ```ignore
-	/// use ldk_node::probing::ProbingConfig;
+	/// use ldk_node::probing::ProbingConfigBuilder;
 	///
 	/// builder.set_probing_config(
-	///     ProbingConfig::high_degree(100)
+	///     ProbingConfigBuilder::high_degree(100)
 	///         .interval(Duration::from_secs(30))
 	///         .build()
 	/// );
 	/// ```
+	///
+	/// [`ProbingConfigBuilder`]: crate::probing::ProbingConfigBuilder
 	pub fn set_probing_config(&mut self, config: ProbingConfig) -> &mut Self {
 		self.probing_config = Some(config);
 		self
