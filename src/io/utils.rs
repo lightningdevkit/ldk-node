@@ -221,6 +221,48 @@ where
 	})
 }
 
+/// Read all objects of type `T` from the given namespace, spawning reads in parallel.
+///
+/// Concurrency is expected to be limited externally (e.g., via [`BatchingStore`]).
+///
+/// [`BatchingStore`]: crate::types::BatchingStore
+pub(crate) async fn read_all_objects<T, L>(
+	kv_store: &DynStore, primary_namespace: &str, secondary_namespace: &str, logger: L,
+) -> Result<Vec<T>, std::io::Error>
+where
+	T: Readable,
+	L: Deref,
+	L::Target: LdkLogger,
+{
+	let keys = KVStore::list(&*kv_store, primary_namespace, secondary_namespace).await?;
+
+	let mut set = tokio::task::JoinSet::new();
+	for key in keys {
+		set.spawn(KVStore::read(kv_store, primary_namespace, secondary_namespace, &key));
+	}
+
+	let mut results = Vec::with_capacity(set.len());
+	while let Some(res) = set.join_next().await {
+		let bytes = res
+			.map_err(|e| {
+				log_error!(logger, "Failed to join read task: {}", e);
+				e
+			})?
+			.map_err(|e| {
+				log_error!(logger, "Failed to read object: {}", e);
+				e
+			})?;
+		results.push(T::read(&mut &*bytes).map_err(|e| {
+			log_error!(logger, "Failed to deserialize object: {}", e);
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				format!("Failed to deserialize: {}", e),
+			)
+		})?);
+	}
+	Ok(results)
+}
+
 /// Read previously persisted payments information from the store.
 pub(crate) async fn read_payments<L: Deref>(
 	kv_store: &DynStore, logger: L,
@@ -228,74 +270,13 @@ pub(crate) async fn read_payments<L: Deref>(
 where
 	L::Target: LdkLogger,
 {
-	let mut res = Vec::new();
-
-	let mut stored_keys = KVStore::list(
-		&*kv_store,
+	read_all_objects(
+		kv_store,
 		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		logger,
 	)
-	.await?;
-
-	const BATCH_SIZE: usize = 50;
-
-	let mut set = tokio::task::JoinSet::new();
-
-	// Fill JoinSet with tasks if possible
-	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(
-				&*kv_store,
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&next_key,
-			);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
-		}
-	}
-
-	while let Some(read_res) = set.join_next().await {
-		// Exit early if we get an IO error.
-		let reader = read_res
-			.map_err(|e| {
-				log_error!(logger, "Failed to read PaymentDetails: {}", e);
-				set.abort_all();
-				e
-			})?
-			.map_err(|e| {
-				log_error!(logger, "Failed to read PaymentDetails: {}", e);
-				set.abort_all();
-				e
-			})?;
-
-		// Refill set for every finished future, if we still have something to do.
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(
-				&*kv_store,
-				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&next_key,
-			);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
-		}
-
-		// Handle result.
-		let payment = PaymentDetails::read(&mut &*reader).map_err(|e| {
-			log_error!(logger, "Failed to deserialize PaymentDetails: {}", e);
-			std::io::Error::new(
-				std::io::ErrorKind::InvalidData,
-				"Failed to deserialize PaymentDetails",
-			)
-		})?;
-		res.push(payment);
-	}
-
-	debug_assert!(set.is_empty());
-	debug_assert!(stored_keys.is_empty());
-
-	Ok(res)
+	.await
 }
 
 /// Read `OutputSweeper` state from the store.
@@ -632,74 +613,13 @@ pub(crate) async fn read_pending_payments<L: Deref>(
 where
 	L::Target: LdkLogger,
 {
-	let mut res = Vec::new();
-
-	let mut stored_keys = KVStore::list(
-		&*kv_store,
+	read_all_objects(
+		kv_store,
 		PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		logger,
 	)
-	.await?;
-
-	const BATCH_SIZE: usize = 50;
-
-	let mut set = tokio::task::JoinSet::new();
-
-	// Fill JoinSet with tasks if possible
-	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(
-				&*kv_store,
-				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&next_key,
-			);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
-		}
-	}
-
-	while let Some(read_res) = set.join_next().await {
-		// Exit early if we get an IO error.
-		let reader = read_res
-			.map_err(|e| {
-				log_error!(logger, "Failed to read PendingPaymentDetails: {}", e);
-				set.abort_all();
-				e
-			})?
-			.map_err(|e| {
-				log_error!(logger, "Failed to read PendingPaymentDetails: {}", e);
-				set.abort_all();
-				e
-			})?;
-
-		// Refill set for every finished future, if we still have something to do.
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(
-				&*kv_store,
-				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-				&next_key,
-			);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
-		}
-
-		// Handle result.
-		let pending_payment = PendingPaymentDetails::read(&mut &*reader).map_err(|e| {
-			log_error!(logger, "Failed to deserialize PendingPaymentDetails: {}", e);
-			std::io::Error::new(
-				std::io::ErrorKind::InvalidData,
-				"Failed to deserialize PendingPaymentDetails",
-			)
-		})?;
-		res.push(pending_payment);
-	}
-
-	debug_assert!(set.is_empty());
-	debug_assert!(stored_keys.is_empty());
-
-	Ok(res)
+	.await
 }
 
 #[cfg(test)]

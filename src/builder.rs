@@ -76,9 +76,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore, SyncAndAsyncKVStore,
+	AsyncPersister, BatchingStore, ChainMonitor, ChannelManager, DynStore, DynStoreRef,
+	DynStoreWrapper, GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
+	PeerManager, PendingPaymentStore, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -86,6 +86,7 @@ use crate::{Node, NodeMetrics};
 
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
+const STORE_READ_BATCH_SIZE: usize = 50;
 
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
@@ -1265,14 +1266,18 @@ fn build_with_store_internal(
 	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
 	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 
-	let kv_store_ref = Arc::clone(&kv_store);
+	// Wrap the store with concurrency limiting for parallel initialization reads.
+	let batch_store: Arc<DynStore> =
+		Arc::new(DynStoreWrapper(BatchingStore::new(Arc::clone(&kv_store), STORE_READ_BATCH_SIZE)));
+
+	let batch_store_ref = Arc::clone(&batch_store);
 	let logger_ref = Arc::clone(&logger);
 	let (payment_store_res, node_metris_res, pending_payment_store_res) =
 		runtime.block_on(async move {
 			tokio::join!(
-				read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref))
+				read_payments(&*batch_store_ref, Arc::clone(&logger_ref)),
+				read_node_metrics(&*batch_store_ref, Arc::clone(&logger_ref)),
+				read_pending_payments(&*batch_store_ref, Arc::clone(&logger_ref))
 			)
 		});
 
@@ -1515,12 +1520,12 @@ fn build_with_store_internal(
 	));
 
 	// Read ChannelMonitors and the NetworkGraph
-	let kv_store_ref = Arc::clone(&kv_store);
+	let batch_store_ref = Arc::clone(&batch_store);
 	let logger_ref = Arc::clone(&logger);
 	let (monitor_read_res, network_graph_res) = runtime.block_on(async {
 		tokio::join!(
 			monitor_reader.read_all_channel_monitors_with_updates_parallel(),
-			read_network_graph(&*kv_store_ref, logger_ref),
+			read_network_graph(&*batch_store_ref, logger_ref),
 		)
 	});
 
@@ -1566,7 +1571,10 @@ fn build_with_store_internal(
 		},
 	};
 
-	// Read various smaller LDK and ldk-node objects from the store
+	// Read various smaller LDK and ldk-node objects from the store.
+	// Functions that take &DynStore (borrow-only) use batch_store for throttled reads.
+	// Functions that take Arc<DynStore> (persist into runtime objects) use the original kv_store.
+	let batch_store_ref = Arc::clone(&batch_store);
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
 	let network_graph_ref = Arc::clone(&network_graph);
@@ -1587,10 +1595,10 @@ fn build_with_store_internal(
 		peer_info_res,
 	) = runtime.block_on(async move {
 		tokio::join!(
-			read_scorer(&*kv_store_ref, network_graph_ref, Arc::clone(&logger_ref)),
-			read_external_pathfinding_scores_from_cache(&*kv_store_ref, Arc::clone(&logger_ref)),
+			read_scorer(&*batch_store_ref, network_graph_ref, Arc::clone(&logger_ref)),
+			read_external_pathfinding_scores_from_cache(&*batch_store_ref, Arc::clone(&logger_ref)),
 			KVStore::read(
-				&*kv_store_ref,
+				&*batch_store_ref,
 				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 				CHANNEL_MANAGER_PERSISTENCE_KEY,

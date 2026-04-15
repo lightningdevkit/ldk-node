@@ -218,6 +218,113 @@ impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> 
 	}
 }
 
+/// A [`KVStore`] wrapper that limits the number of concurrent async I/O operations using a
+/// semaphore. Sync methods pass through without throttling.
+///
+/// This is used during node initialization to cap the number of inflight reads across all
+/// parallel readers to a single configurable limit.
+pub(crate) struct BatchingStore {
+	inner: Arc<DynStore>,
+	semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl BatchingStore {
+	pub(crate) fn new(inner: Arc<DynStore>, max_concurrent: usize) -> Self {
+		Self { inner, semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)) }
+	}
+}
+
+impl KVStore for BatchingStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static {
+		let inner = Arc::clone(&self.inner);
+		let semaphore = Arc::clone(&self.semaphore);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			let _permit = semaphore.acquire_owned().await.map_err(|e| {
+				bitcoin::io::Error::new(bitcoin::io::ErrorKind::Other, format!("{}", e))
+			})?;
+			inner.read_async(&primary_namespace, &secondary_namespace, &key).await
+		}
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static {
+		let inner = Arc::clone(&self.inner);
+		let semaphore = Arc::clone(&self.semaphore);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			let _permit = semaphore.acquire_owned().await.map_err(|e| {
+				bitcoin::io::Error::new(bitcoin::io::ErrorKind::Other, format!("{}", e))
+			})?;
+			inner.write_async(&primary_namespace, &secondary_namespace, &key, buf).await
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), bitcoin::io::Error>> + Send + 'static {
+		let inner = Arc::clone(&self.inner);
+		let semaphore = Arc::clone(&self.semaphore);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			let _permit = semaphore.acquire_owned().await.map_err(|e| {
+				bitcoin::io::Error::new(bitcoin::io::ErrorKind::Other, format!("{}", e))
+			})?;
+			inner.remove_async(&primary_namespace, &secondary_namespace, &key, lazy).await
+		}
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static {
+		let inner = Arc::clone(&self.inner);
+		let semaphore = Arc::clone(&self.semaphore);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		async move {
+			let _permit = semaphore.acquire_owned().await.map_err(|e| {
+				bitcoin::io::Error::new(bitcoin::io::ErrorKind::Other, format!("{}", e))
+			})?;
+			inner.list_async(&primary_namespace, &secondary_namespace).await
+		}
+	}
+}
+
+impl KVStoreSync for BatchingStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, bitcoin::io::Error> {
+		DynStoreTrait::read(&*self.inner, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), bitcoin::io::Error> {
+		DynStoreTrait::write(&*self.inner, primary_namespace, secondary_namespace, key, buf)
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), bitcoin::io::Error> {
+		DynStoreTrait::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, bitcoin::io::Error> {
+		DynStoreTrait::list(&*self.inner, primary_namespace, secondary_namespace)
+	}
+}
+
 pub(crate) type AsyncPersister = MonitorUpdatingPersisterAsync<
 	DynStoreRef,
 	RuntimeSpawner,
