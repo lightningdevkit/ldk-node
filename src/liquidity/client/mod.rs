@@ -7,3 +7,5 @@
 
 pub(crate) mod lsps1;
 pub(crate) mod lsps2;
+
+pub use lsps1::LSPS1OrderStatus;

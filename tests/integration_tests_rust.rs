@@ -1792,7 +1792,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let service_config = random_config(true);
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	service_builder.enable_liquidity_provider(lsps2_service_config);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -1802,7 +1802,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let client_config = random_config(true);
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
+	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
 	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 
@@ -2111,7 +2111,7 @@ async fn lsps2_client_trusts_lsp() {
 	let service_config = random_config(true);
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	service_builder.enable_liquidity_provider(lsps2_service_config);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 	let service_node_id = service_node.node_id();
@@ -2120,7 +2120,7 @@ async fn lsps2_client_trusts_lsp() {
 	let client_config = random_config(true);
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
 	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 	let client_node_id = client_node.node_id();
@@ -2286,7 +2286,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let service_config = random_config(true);
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	service_builder.enable_liquidity_provider(lsps2_service_config);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -2296,7 +2296,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let client_config = random_config(true);
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
 	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 
