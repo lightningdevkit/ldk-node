@@ -24,7 +24,7 @@ use common::{
 	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	wait_for_tx, TestChainSource, TestConfig, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
@@ -2541,15 +2541,19 @@ async fn build_0_6_2_node(
 }
 
 async fn build_0_7_0_node(
-	bitcoind: &BitcoinD, electrsd: &ElectrsD, storage_path: String, esplora_url: String,
-	seed_bytes: [u8; 64],
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, esplora_url: String, seed_bytes: [u8; 64],
+	config: &TestConfig,
 ) -> (u64, bitcoin::secp256k1::PublicKey) {
 	let mut builder_old = ldk_node_070::Builder::new();
 	builder_old.set_network(bitcoin::Network::Regtest);
-	builder_old.set_storage_dir_path(storage_path);
+	builder_old.set_storage_dir_path(config.node_config.storage_dir_path.clone());
 	builder_old.set_entropy_seed_bytes(seed_bytes);
 	builder_old.set_chain_source_esplora(esplora_url, None);
-	let node_old = builder_old.build().unwrap();
+	let node_old = match config.store_type {
+		TestStoreType::FilesystemStore => builder_old.build_with_fs_store().unwrap(),
+		TestStoreType::Sqlite => builder_old.build().unwrap(),
+		TestStoreType::TestSyncStore => panic!("TestSyncStore not supported in v0.7.0 builder"),
+	};
 
 	node_old.start().unwrap();
 	let addr_old = node_old.onchain_payment().new_address().unwrap();
@@ -2590,14 +2594,10 @@ async fn do_persistence_backwards_compatibility(version: OldLdkVersion) {
 			.await
 		},
 		OldLdkVersion::V0_7_0 => {
-			build_0_7_0_node(
-				&bitcoind,
-				&electrsd,
-				storage_path.clone(),
-				esplora_url.clone(),
-				seed_bytes,
-			)
-			.await
+			let mut config = TestConfig::default();
+			config.store_type = TestStoreType::Sqlite;
+			config.node_config.storage_dir_path = storage_path.clone();
+			build_0_7_0_node(&bitcoind, &electrsd, esplora_url.clone(), seed_bytes, &config).await
 		},
 	};
 
@@ -2632,6 +2632,49 @@ async fn do_persistence_backwards_compatibility(version: OldLdkVersion) {
 async fn persistence_backwards_compatibility() {
 	do_persistence_backwards_compatibility(OldLdkVersion::V0_6_2).await;
 	do_persistence_backwards_compatibility(OldLdkVersion::V0_7_0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn fs_store_persistence_backwards_compatibility() {
+	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
+	let seed_bytes = [42u8; 64];
+
+	// Build a node using v0.7.0's build_with_fs_store (FilesystemStore v1).
+	let mut config = TestConfig::default();
+	config.node_config.storage_dir_path = storage_path.clone();
+	config.store_type = TestStoreType::FilesystemStore;
+	let (old_balance, old_node_id) =
+		build_0_7_0_node(&bitcoind, &electrsd, esplora_url.clone(), seed_bytes, &config).await;
+
+	// Now reopen with current code's build_with_fs_store, which should
+	// auto-migrate from FilesystemStore v1 to FilesystemStoreV2.
+	#[cfg(feature = "uniffi")]
+	let builder_new = Builder::new();
+	#[cfg(not(feature = "uniffi"))]
+	let mut builder_new = Builder::new();
+	builder_new.set_network(bitcoin::Network::Regtest);
+	builder_new.set_storage_dir_path(storage_path);
+	builder_new.set_chain_source_esplora(esplora_url, None);
+
+	#[cfg(feature = "uniffi")]
+	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes.to_vec()).unwrap();
+	#[cfg(not(feature = "uniffi"))]
+	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
+	let node_new = builder_new.build_with_fs_store(node_entropy.into()).unwrap();
+
+	node_new.start().unwrap();
+	node_new.sync_wallets().unwrap();
+
+	let new_balance = node_new.list_balances().spendable_onchain_balance_sats;
+	let new_node_id = node_new.node_id();
+
+	assert_eq!(old_node_id, new_node_id);
+	assert_eq!(old_balance, new_balance);
+
+	node_new.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

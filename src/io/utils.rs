@@ -10,7 +10,7 @@ use std::io::Write;
 use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
@@ -26,14 +26,16 @@ use lightning::routing::scoring::{
 	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 };
 use lightning::util::persist::{
-	KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
-	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_KEY,
-	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
-	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	migrate_kv_store_data, KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET,
+	KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
+use lightning_persister::fs_store::v1::FilesystemStore;
+use lightning_persister::fs_store::v2::FilesystemStoreV2;
 use lightning_types::string::PrintableString;
 
 use super::*;
@@ -48,7 +50,7 @@ use crate::payment::PendingPaymentDetails;
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
+use crate::{BuildError, Error, EventQueue, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
@@ -700,6 +702,42 @@ where
 	debug_assert!(stored_keys.is_empty());
 
 	Ok(res)
+}
+
+/// Opens a [`FilesystemStoreV2`], automatically migrating from v1 format if necessary.
+///
+/// If the directory contains v1 data (files at the top level), the data is migrated to v2 format
+/// in a temporary directory, the original is renamed to `fs_store_v1_backup`, and the migrated
+/// directory is moved into place.
+pub(crate) fn open_or_migrate_fs_store(
+	storage_dir_path: PathBuf,
+) -> Result<FilesystemStoreV2, BuildError> {
+	match FilesystemStoreV2::new(storage_dir_path.clone()) {
+		Ok(store) => Ok(store),
+		Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+			// The directory contains v1 data, migrate to v2.
+			let mut v1_store = FilesystemStore::new(storage_dir_path.clone());
+
+			let mut v2_dir = storage_dir_path.clone();
+			v2_dir.set_file_name("fs_store_v2_migrating");
+			fs::create_dir_all(v2_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
+			let mut v2_store = FilesystemStoreV2::new(v2_dir.clone())
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+			migrate_kv_store_data(&mut v1_store, &mut v2_store)
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+			// Swap directories: rename v1 out of the way, move v2 into place.
+			let mut backup_dir = storage_dir_path.clone();
+			backup_dir.set_file_name("fs_store_v1_backup");
+			fs::rename(&storage_dir_path, &backup_dir)
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+			fs::rename(&v2_dir, &storage_dir_path).map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+			FilesystemStoreV2::new(storage_dir_path).map_err(|_| BuildError::KVStoreSetupFailed)
+		},
+		Err(_) => Err(BuildError::KVStoreSetupFailed),
+	}
 }
 
 #[cfg(test)]
