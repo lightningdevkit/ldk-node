@@ -1149,7 +1149,7 @@ impl Node {
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: FundingAmount,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_for_forwarding: bool, set_0reserve: bool,
+		announce_for_forwarding: bool, disable_counterparty_reserve: bool,
 	) -> Result<UserChannelId, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -1219,7 +1219,7 @@ impl Node {
 				.expect("a 16-byte slice should convert into a [u8; 16]"),
 		);
 
-		let result = if set_0reserve {
+		let result = if disable_counterparty_reserve {
 			self.channel_manager.create_channel_to_trusted_peer_0reserve(
 				peer_info.node_id,
 				channel_amount_sats,
@@ -1239,7 +1239,7 @@ impl Node {
 			)
 		};
 
-		let zero_reserve_string = if set_0reserve { "0reserve " } else { "" };
+		let zero_reserve_string = if disable_counterparty_reserve { "0reserve " } else { "" };
 
 		match result {
 			Ok(_) => {
@@ -1449,8 +1449,8 @@ impl Node {
 	/// Connect to a node and open a new unannounced channel, in which the target node can
 	/// spend its entire balance.
 	///
-	/// This channel allows the target node to try to steal your funds with no financial
-	/// penalty, so this channel should only be opened to nodes you trust.
+	/// This channel allows the target node to try to steal your channel balance with no
+	/// financial penalty, so this channel should only be opened to nodes you trust.
 	///
 	/// Disconnects and reconnects are handled automatically.
 	///
@@ -1484,8 +1484,8 @@ impl Node {
 	/// minus fees and anchor reserves. The target node will be able to spend its entire channel
 	/// balance.
 	///
-	/// This channel allows the target node to try to steal your funds with no financial
-	/// penalty, so this channel should only be opened to nodes you trust.
+	/// This channel allows the target node to try to steal your channel balance with no
+	/// financial penalty, so this channel should only be opened to nodes you trust.
 	///
 	/// Disconnects and reconnects are handled automatically.
 	///

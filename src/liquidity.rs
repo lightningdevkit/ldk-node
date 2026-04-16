@@ -142,10 +142,14 @@ pub struct LSPS2ServiceConfig {
 	///
 	/// [`bLIP-52`]: https://github.com/lightning/blips/blob/master/blip-0052.md#trust-models
 	pub client_trusts_lsp: bool,
-	/// When set, clients that we open channels to will be allowed to spend their entire channel
-	/// balance. This allows clients to try to steal your funds with no financial penalty, so
-	/// this should only be set if you trust your clients.
-	pub allow_client_0reserve: bool,
+	/// When set, we will allow clients to spend their entire channel balance in the channels
+	/// we open to them. This allows clients to try to steal your channel balance with
+	/// no financial penalty, so this should only be set if you trust your clients.
+	///
+	/// See [`Node::open_0reserve_channel`] to manually open these channels.
+	///
+	/// [`Node::open_0reserve_channel`]: crate::Node::open_0reserve_channel
+	pub disable_client_reserve: bool,
 }
 
 pub(crate) struct LiquiditySourceBuilder<L: Deref>
@@ -792,7 +796,7 @@ where
 				config.channel_config.forwarding_fee_base_msat = 0;
 				config.channel_config.forwarding_fee_proportional_millionths = 0;
 
-				let result = if service_config.allow_client_0reserve {
+				let result = if service_config.disable_client_reserve {
 					self.channel_manager.create_channel_to_trusted_peer_0reserve(
 						their_network_key,
 						channel_amount_sats,
@@ -819,7 +823,7 @@ where
 						// the pending requests and regularly retry opening the channel until we
 						// succeed.
 						let zero_reserve_string =
-							if service_config.allow_client_0reserve { "0reserve " } else { "" };
+							if service_config.disable_client_reserve { "0reserve " } else { "" };
 						log_error!(
 							self.logger,
 							"Failed to open LSPS2 {}channel to {}: {:?}",
