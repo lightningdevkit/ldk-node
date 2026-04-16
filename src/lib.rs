@@ -180,6 +180,7 @@ use types::{
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
 pub use vss_client;
 
+use crate::payment::PendingBolt12InvoiceContexts;
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
 
@@ -239,6 +240,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
+	pending_bolt12_invoice_contexts: PendingBolt12InvoiceContexts,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -608,6 +610,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
+			Arc::clone(&self.pending_bolt12_invoice_contexts),
 		));
 
 		// Setup background processing
@@ -929,6 +932,7 @@ impl Node {
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.async_payments_role,
+			Arc::clone(&self.pending_bolt12_invoice_contexts),
 		)
 	}
 
@@ -945,6 +949,7 @@ impl Node {
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.async_payments_role,
+			Arc::clone(&self.pending_bolt12_invoice_contexts),
 		))
 	}
 

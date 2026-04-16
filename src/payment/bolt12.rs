@@ -9,11 +9,12 @@
 //!
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 
+use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::blinded_path::message::{BlindedMessagePath, OffersContext};
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
@@ -51,6 +52,14 @@ type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadable
 #[cfg(feature = "uniffi")]
 type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 
+/// Holds a pending BOLT12 invoice and its associated context, for use with manual invoice
+/// handling. See [`Config::manually_handle_bolt12_invoices`].
+///
+/// [`Config::manually_handle_bolt12_invoices`]: crate::config::Config::manually_handle_bolt12_invoices
+pub(crate) type PendingBolt12InvoiceContexts = Arc<
+	Mutex<HashMap<PaymentId, (lightning::offers::invoice::Bolt12Invoice, Option<OffersContext>)>>,
+>;
+
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
 /// Should be retrieved by calling [`Node::bolt12_payment`].
@@ -66,6 +75,7 @@ pub struct Bolt12Payment {
 	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	pending_bolt12_invoice_contexts: PendingBolt12InvoiceContexts,
 }
 
 impl Bolt12Payment {
@@ -73,6 +83,7 @@ impl Bolt12Payment {
 		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
 		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
 		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
+		pending_bolt12_invoice_contexts: PendingBolt12InvoiceContexts,
 	) -> Self {
 		Self {
 			channel_manager,
@@ -82,6 +93,7 @@ impl Bolt12Payment {
 			is_running,
 			logger,
 			async_payments_role,
+			pending_bolt12_invoice_contexts,
 		}
 	}
 
@@ -579,6 +591,70 @@ impl Bolt12Payment {
 	) -> Result<Vec<BlindedMessagePath>, Error> {
 		self.blinded_paths_for_async_recipient_internal(recipient_id)
 	}
+
+	/// Pays a BOLT12 invoice that was previously received via an
+	/// [`Event::Bolt12InvoiceReceived`] event.
+	///
+	/// This is only relevant when [`Config::manually_handle_bolt12_invoices`] is set to `true`.
+	///
+	/// Returns an [`Error::InvalidPaymentId`] if no pending invoice is found for the given
+	/// `payment_id`.
+	///
+	/// [`Event::Bolt12InvoiceReceived`]: crate::Event::Bolt12InvoiceReceived
+	/// [`Config::manually_handle_bolt12_invoices`]: crate::config::Config::manually_handle_bolt12_invoices
+	pub fn send_payment_for_bolt12_invoice(&self, payment_id: PaymentId) -> Result<(), Error> {
+		let (invoice, context) = self
+			.pending_bolt12_invoice_contexts
+			.lock()
+			.unwrap()
+			.remove(&payment_id)
+			.ok_or(Error::InvalidPaymentId)?;
+
+		self.channel_manager.send_payment_for_bolt12_invoice(&invoice, context.as_ref()).map_err(
+			|e| {
+				log_error!(self.logger, "Failed to send payment for BOLT12 invoice: {:?}", e);
+				Error::PaymentSendingFailed
+			},
+		)?;
+
+		log_info!(
+			self.logger,
+			"Initiated payment for manually-handled BOLT12 invoice with payment_id {}",
+			payment_id
+		);
+		Ok(())
+	}
+
+	/// Abandons a BOLT12 invoice that was previously received via an
+	/// [`Event::Bolt12InvoiceReceived`] event.
+	///
+	/// This is only relevant when [`Config::manually_handle_bolt12_invoices`] is set to `true`.
+	/// Use this to reject an invoice you don't want to pay. This will result in an
+	/// [`Event::PaymentFailed`] being emitted.
+	///
+	/// Returns an [`Error::InvalidPaymentId`] if no pending invoice is found for the given
+	/// `payment_id`.
+	///
+	/// [`Event::Bolt12InvoiceReceived`]: crate::Event::Bolt12InvoiceReceived
+	/// [`Event::PaymentFailed`]: crate::Event::PaymentFailed
+	/// [`Config::manually_handle_bolt12_invoices`]: crate::config::Config::manually_handle_bolt12_invoices
+	pub fn abandon_bolt12_invoice(&self, payment_id: PaymentId) -> Result<(), Error> {
+		let _removed = self
+			.pending_bolt12_invoice_contexts
+			.lock()
+			.unwrap()
+			.remove(&payment_id)
+			.ok_or(Error::InvalidPaymentId)?;
+
+		self.channel_manager.abandon_payment(payment_id);
+
+		log_info!(
+			self.logger,
+			"Abandoned manually-handled BOLT12 invoice with payment_id {}",
+			payment_id
+		);
+		Ok(())
+	}
 }
 
 #[cfg(feature = "uniffi")]
@@ -615,5 +691,69 @@ impl Bolt12Payment {
 		let mut bytes = Vec::new();
 		paths.write(&mut bytes).or(Err(Error::InvalidBlindedPaths))?;
 		Ok(bytes)
+	}
+
+	/// Pays a BOLT12 invoice that was previously received via an
+	/// [`Event::Bolt12InvoiceReceived`] event.
+	///
+	/// This is only relevant when [`Config::manually_handle_bolt12_invoices`] is set to `true`.
+	///
+	/// Returns an [`Error::InvalidPaymentId`] if no pending invoice is found for the given
+	/// `payment_id`.
+	///
+	/// [`Event::Bolt12InvoiceReceived`]: crate::Event::Bolt12InvoiceReceived
+	/// [`Config::manually_handle_bolt12_invoices`]: crate::config::Config::manually_handle_bolt12_invoices
+	pub fn send_payment_for_bolt12_invoice(&self, payment_id: PaymentId) -> Result<(), Error> {
+		let (invoice, context) = self
+			.pending_bolt12_invoice_contexts
+			.lock()
+			.unwrap()
+			.remove(&payment_id)
+			.ok_or(Error::InvalidPaymentId)?;
+
+		self.channel_manager.send_payment_for_bolt12_invoice(&invoice, context.as_ref()).map_err(
+			|e| {
+				log_error!(self.logger, "Failed to send payment for BOLT12 invoice: {:?}", e);
+				Error::PaymentSendingFailed
+			},
+		)?;
+
+		log_info!(
+			self.logger,
+			"Initiated payment for manually-handled BOLT12 invoice with payment_id {}",
+			payment_id
+		);
+		Ok(())
+	}
+
+	/// Abandons a BOLT12 invoice that was previously received via an
+	/// [`Event::Bolt12InvoiceReceived`] event.
+	///
+	/// This is only relevant when [`Config::manually_handle_bolt12_invoices`] is set to `true`.
+	/// Use this to reject an invoice you don't want to pay. This will result in an
+	/// [`Event::PaymentFailed`] being emitted.
+	///
+	/// Returns an [`Error::InvalidPaymentId`] if no pending invoice is found for the given
+	/// `payment_id`.
+	///
+	/// [`Event::Bolt12InvoiceReceived`]: crate::Event::Bolt12InvoiceReceived
+	/// [`Event::PaymentFailed`]: crate::Event::PaymentFailed
+	/// [`Config::manually_handle_bolt12_invoices`]: crate::config::Config::manually_handle_bolt12_invoices
+	pub fn abandon_bolt12_invoice(&self, payment_id: PaymentId) -> Result<(), Error> {
+		let _removed = self
+			.pending_bolt12_invoice_contexts
+			.lock()
+			.unwrap()
+			.remove(&payment_id)
+			.ok_or(Error::InvalidPaymentId)?;
+
+		self.channel_manager.abandon_payment(payment_id);
+
+		log_info!(
+			self.logger,
+			"Abandoned manually-handled BOLT12 invoice with payment_id {}",
+			payment_id
+		);
+		Ok(())
 	}
 }
