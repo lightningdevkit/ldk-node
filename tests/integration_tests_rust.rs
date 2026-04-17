@@ -21,10 +21,10 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
 	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
-	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
-	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	open_channel, open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds,
+	premine_blocks, prepare_rbf, random_chain_source, random_config, setup_bitcoind_and_electrsd,
+	setup_builder, setup_node, setup_two_nodes, splice_in_with_all, wait_for_tx, TestChainSource,
+	TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
@@ -37,6 +37,7 @@ use ldk_node::payment::{
 };
 use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
@@ -1505,29 +1506,28 @@ async fn test_node_announcement_propagation() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
-	// Node A will use both listening and announcement addresses
 	let mut config_a = random_config(true);
 	let node_a_alias_string = "ldk-node-a".to_string();
 	let mut node_a_alias_bytes = [0u8; 32];
 	node_a_alias_bytes[..node_a_alias_string.as_bytes().len()]
 		.copy_from_slice(node_a_alias_string.as_bytes());
 	let node_a_node_alias = Some(NodeAlias(node_a_alias_bytes));
-	let node_a_announcement_addresses = generate_listening_addresses();
 	config_a.node_config.node_alias = node_a_node_alias.clone();
-	config_a.node_config.listening_addresses = Some(generate_listening_addresses());
+	// Set explicit announcement addresses to verify they take priority over bound addresses.
+	let node_a_announcement_addresses = vec![
+		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: 10001 },
+		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: 10002 },
+	];
 	config_a.node_config.announcement_addresses = Some(node_a_announcement_addresses.clone());
 
-	// Node B will only use listening addresses
+	// Node B uses default config to verify that bound addresses are announced.
 	let mut config_b = random_config(true);
 	let node_b_alias_string = "ldk-node-b".to_string();
 	let mut node_b_alias_bytes = [0u8; 32];
 	node_b_alias_bytes[..node_b_alias_string.as_bytes().len()]
 		.copy_from_slice(node_b_alias_string.as_bytes());
 	let node_b_node_alias = Some(NodeAlias(node_b_alias_bytes));
-	let node_b_listening_addresses = generate_listening_addresses();
 	config_b.node_config.node_alias = node_b_node_alias.clone();
-	config_b.node_config.listening_addresses = Some(node_b_listening_addresses.clone());
-	config_b.node_config.announcement_addresses = None;
 
 	let node_a = setup_node(&chain_source, config_a);
 	let node_b = setup_node(&chain_source, config_b);
@@ -1586,10 +1586,11 @@ async fn test_node_announcement_propagation() {
 	#[cfg(feature = "uniffi")]
 	assert_eq!(node_b_announcement_info.alias, node_b_alias_string);
 
+	let node_b_announcement_addresses = node_b.announcement_addresses().unwrap();
 	#[cfg(not(feature = "uniffi"))]
-	assert_eq!(node_b_announcement_info.addresses(), &node_b_listening_addresses);
+	assert_eq!(node_b_announcement_info.addresses(), &node_b_announcement_addresses);
 	#[cfg(feature = "uniffi")]
-	assert_eq!(node_b_announcement_info.addresses, node_b_listening_addresses);
+	assert_eq!(node_b_announcement_info.addresses, node_b_announcement_addresses);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -544,6 +544,11 @@ impl NodeBuilder {
 			return Err(BuildError::InvalidListeningAddresses);
 		}
 
+		#[cfg(not(test))]
+		if listening_addresses.iter().any(crate::config::has_port_zero) {
+			return Err(BuildError::InvalidListeningAddresses);
+		}
+
 		self.config.listening_addresses = Some(listening_addresses);
 		Ok(self)
 	}
@@ -1953,6 +1958,7 @@ fn build_with_store_internal(
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (background_processor_stop_sender, _) = tokio::sync::watch::channel(());
+	let last_bound_addresses: Arc<RwLock<Option<Vec<SocketAddress>>>> = Arc::new(RwLock::new(None));
 	let is_running = Arc::new(RwLock::new(false));
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
@@ -1997,6 +2003,7 @@ fn build_with_store_internal(
 		peer_store,
 		payment_store,
 		lnurl_auth,
+		last_bound_addresses,
 		is_running,
 		node_metrics,
 		om_mailbox,

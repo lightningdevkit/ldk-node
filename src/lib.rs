@@ -234,6 +234,7 @@ pub struct Node {
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
+	last_bound_addresses: Arc<RwLock<Option<Vec<SocketAddress>>>>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -356,14 +357,21 @@ impl Node {
 			);
 		}
 
-		if let Some(listening_addresses) = &self.config.listening_addresses {
+		let effective_listening_addresses = self
+			.last_bound_addresses
+			.read()
+			.unwrap()
+			.clone()
+			.or_else(|| self.config.listening_addresses.clone());
+
+		if let Some(listening_addresses) = &effective_listening_addresses {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
 			let listening_logger = Arc::clone(&self.logger);
 
 			let logger = Arc::clone(&listening_logger);
 			let listening_addrs = listening_addresses.clone();
-			let listeners = self.runtime.block_on(async move {
+			let (listeners, bound_addrs) = self.runtime.block_on(async move {
 				let mut bind_addrs = Vec::with_capacity(listening_addrs.len());
 
 				for listening_addr in &listening_addrs {
@@ -381,12 +389,29 @@ impl Node {
 				}
 
 				let mut listeners = Vec::new();
+				let mut bound_addrs = Vec::new();
 
-				// Try to bind to all addresses
 				for addr in &bind_addrs {
 					match tokio::net::TcpListener::bind(addr).await {
 						Ok(listener) => {
-							log_trace!(logger, "Listener bound to {}", addr);
+							let local_addr = listener.local_addr().map_err(|e| {
+								log_error!(
+									logger,
+									"Failed to retrieve local address from listener: {}",
+									e
+								);
+								Error::InvalidSocketAddress
+							})?;
+							let socket_address = match local_addr {
+								std::net::SocketAddr::V4(a) => {
+									SocketAddress::TcpIpV4 { addr: a.ip().octets(), port: a.port() }
+								},
+								std::net::SocketAddr::V6(a) => {
+									SocketAddress::TcpIpV6 { addr: a.ip().octets(), port: a.port() }
+								},
+							};
+							log_info!(logger, "Listening on {}", socket_address);
+							bound_addrs.push(socket_address);
 							listeners.push(listener);
 						},
 						Err(e) => {
@@ -401,8 +426,10 @@ impl Node {
 					}
 				}
 
-				Ok(listeners)
+				Ok((listeners, bound_addrs))
 			})?;
+
+			*self.last_bound_addresses.write().unwrap() = Some(bound_addrs);
 
 			for listener in listeners {
 				let logger = Arc::clone(&listening_logger);
@@ -490,6 +517,7 @@ impl Node {
 		let bcast_cm = Arc::clone(&self.channel_manager);
 		let bcast_pm = Arc::clone(&self.peer_manager);
 		let bcast_config = Arc::clone(&self.config);
+		let bcast_bound_addrs = Arc::clone(&self.last_bound_addresses);
 		let bcast_store = Arc::clone(&self.kv_store);
 		let bcast_logger = Arc::clone(&self.logger);
 		let bcast_node_metrics = Arc::clone(&self.node_metrics);
@@ -540,6 +568,8 @@ impl Node {
 
 							let addresses = if let Some(announcement_addresses) = bcast_config.announcement_addresses.clone() {
 								announcement_addresses
+							} else if let Some(bound_addresses) = bcast_bound_addrs.read().unwrap().clone() {
+								bound_addresses
 							} else if let Some(listening_addresses) = bcast_config.listening_addresses.clone() {
 								listening_addresses
 							} else {
@@ -863,15 +893,28 @@ impl Node {
 	}
 
 	/// Returns our own listening addresses.
+	///
+	/// If the node has been started, this returns the actual bound addresses (which may differ
+	/// from the configured addresses if port 0 was used). Otherwise, this returns the configured
+	/// addresses.
 	pub fn listening_addresses(&self) -> Option<Vec<SocketAddress>> {
-		self.config.listening_addresses.clone()
+		self.last_bound_addresses
+			.read()
+			.unwrap()
+			.clone()
+			.or_else(|| self.config.listening_addresses.clone())
 	}
 
 	/// Returns the addresses that the node will announce to the network.
+	///
+	/// Returns the configured announcement addresses if set, otherwise falls back to the
+	/// actual bound addresses (which may differ from configured addresses if port 0 was used),
+	/// or the configured listening addresses.
 	pub fn announcement_addresses(&self) -> Option<Vec<SocketAddress>> {
 		self.config
 			.announcement_addresses
 			.clone()
+			.or_else(|| self.last_bound_addresses.read().unwrap().clone())
 			.or_else(|| self.config.listening_addresses.clone())
 	}
 
