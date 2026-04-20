@@ -32,6 +32,7 @@ use lightning_net_tokio::SocketDescriptor;
 
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::ChannelConfig;
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -353,7 +354,7 @@ pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>>;
 /// A local, potentially user-provided, identifier of a channel.
 ///
 /// By default, this will be randomly generated for the user to ensure local uniqueness.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct UserChannelId(pub u128);
 
 impl Writeable for UserChannelId {
@@ -663,3 +664,5 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 }
 
 pub(crate) type PendingPaymentStore = DataStore<PendingPaymentDetails, Arc<Logger>>;
+
+pub(crate) type ClosedChannelStore = DataStore<ClosedChannelDetails, Arc<Logger>>;

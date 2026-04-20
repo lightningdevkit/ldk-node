@@ -38,10 +38,13 @@ use lightning_types::string::PrintableString;
 
 use super::*;
 use crate::chain::ChainSource;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::{
-	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE, NODE_METRICS_KEY,
+	NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::payment::PendingPaymentDetails;
@@ -290,6 +293,82 @@ where
 			)
 		})?;
 		res.push(payment);
+	}
+
+	debug_assert!(set.is_empty());
+	debug_assert!(stored_keys.is_empty());
+
+	Ok(res)
+}
+
+pub(crate) async fn read_closed_channels<L: Deref>(
+	kv_store: &DynStore, logger: L,
+) -> Result<Vec<ClosedChannelDetails>, std::io::Error>
+where
+	L::Target: LdkLogger,
+{
+	let mut res = Vec::new();
+
+	let mut stored_keys = KVStore::list(
+		&*kv_store,
+		CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	)
+	.await?;
+
+	const BATCH_SIZE: usize = 50;
+
+	let mut set = tokio::task::JoinSet::new();
+
+	// Fill JoinSet with tasks if possible
+	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
+				&*kv_store,
+				CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+	}
+
+	while let Some(read_res) = set.join_next().await {
+		// Exit early if we get an IO error.
+		let reader = read_res
+			.map_err(|e| {
+				log_error!(logger, "Failed to read ClosedChannelDetails: {}", e);
+				set.abort_all();
+				e
+			})?
+			.map_err(|e| {
+				log_error!(logger, "Failed to read ClosedChannelDetails: {}", e);
+				set.abort_all();
+				e
+			})?;
+
+		// Refill set for every finished future, if we still have something to do.
+		if let Some(next_key) = stored_keys.pop() {
+			let fut = KVStore::read(
+				&*kv_store,
+				CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				&next_key,
+			);
+			set.spawn(fut);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+
+		// Handle result.
+		let channel = ClosedChannelDetails::read(&mut &*reader).map_err(|e| {
+			log_error!(logger, "Failed to deserialize ClosedChannelDetails: {}", e);
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"Failed to deserialize ClosedChannelDetails",
+			)
+		})?;
+		res.push(channel);
 	}
 
 	debug_assert!(set.is_empty());

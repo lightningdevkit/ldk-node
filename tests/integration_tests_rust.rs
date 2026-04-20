@@ -35,7 +35,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{Builder, ClosedChannelDetails, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -2956,4 +2956,99 @@ async fn splice_in_with_all_balance() {
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn closed_channel_history_persists_after_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	println!("== Node A ==");
+	let mut config_a = random_config(true);
+	config_a.store_type = TestStoreType::Sqlite;
+
+	println!("\n== Node B ==");
+	let mut config_b = random_config(true);
+	config_b.store_type = TestStoreType::Sqlite;
+
+	let channel_amount_sat = 1_000_000;
+	let premine_amount_sat = 2_125_000;
+
+	let closed_channel_before: ClosedChannelDetails;
+
+	{
+		let node_a = setup_node(&chain_source, config_a.clone());
+		let node_b = setup_node(&chain_source, config_b.clone());
+
+		let addr_a = node_a.onchain_payment().new_address().unwrap();
+		let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+		premine_and_distribute_funds(
+			&bitcoind.client,
+			&electrsd.client,
+			vec![addr_a, addr_b],
+			Amount::from_sat(premine_amount_sat),
+		)
+		.await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+
+		// Open channel from A to B.
+		let funding_txo = open_channel(&node_a, &node_b, channel_amount_sat, true, &electrsd).await;
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+		expect_channel_ready_event!(node_a, node_b.node_id());
+		expect_channel_ready_event!(node_b, node_a.node_id());
+
+		// Cooperatively close.
+		let user_channel_id = node_a
+			.list_channels()
+			.into_iter()
+			.find(|c| c.counterparty_node_id == node_b.node_id())
+			.map(|c| c.user_channel_id)
+			.expect("open channel not found");
+		node_a.close_channel(&user_channel_id, node_b.node_id()).unwrap();
+		expect_event!(node_a, ChannelClosed);
+		expect_event!(node_b, ChannelClosed);
+
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+
+		// Verify the record is present before restart.
+		let closed_a = node_a.list_closed_channels();
+		assert_eq!(closed_a.len(), 1);
+		let record = &closed_a[0];
+		assert_eq!(record.channel_capacity_sats, Some(channel_amount_sat));
+		assert!(record.is_outbound);
+		assert_eq!(record.counterparty_node_id, Some(node_b.node_id()));
+		assert!(record.funding_txo.is_some());
+		assert_eq!(record.funding_txo.unwrap().txid, funding_txo.txid);
+		assert!(record.closure_reason.is_some());
+
+		closed_channel_before = record.clone();
+
+		node_a.stop().unwrap();
+		node_b.stop().unwrap();
+	}
+
+	// Restart node_a with the same config and verify the record survived.
+	println!("\nRestarting node A...");
+	let restarted_node_a = setup_node(&chain_source, config_a);
+
+	let closed_after = restarted_node_a.list_closed_channels();
+	assert_eq!(closed_after.len(), 1, "closed channel record should survive restart");
+
+	let record = &closed_after[0];
+	assert_eq!(record.channel_id, closed_channel_before.channel_id);
+	assert_eq!(record.user_channel_id, closed_channel_before.user_channel_id);
+	assert_eq!(record.channel_capacity_sats, closed_channel_before.channel_capacity_sats);
+	assert_eq!(record.funding_txo, closed_channel_before.funding_txo);
+	assert_eq!(record.counterparty_node_id, closed_channel_before.counterparty_node_id);
+	assert_eq!(record.is_outbound, closed_channel_before.is_outbound);
+	assert_eq!(record.closed_at, closed_channel_before.closed_at);
+	assert_eq!(record.closure_reason, closed_channel_before.closure_reason);
+
+	restarted_node_a.stop().unwrap();
 }
