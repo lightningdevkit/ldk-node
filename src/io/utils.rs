@@ -11,7 +11,7 @@ use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
 use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
@@ -346,13 +346,20 @@ where
 	})
 }
 
-pub(crate) fn write_node_metrics<L: Deref>(
-	node_metrics: &NodeMetrics, kv_store: &DynStore, logger: L,
+/// Take a write lock on `node_metrics`, apply `update`, and persist the result to `kv_store`.
+///
+/// The write lock is held across the KV-store write, preserving the invariant that readers only
+/// observe the mutation once it has been durably persisted (or the persist has failed).
+pub(crate) fn update_and_persist_node_metrics<L: Deref>(
+	node_metrics: &RwLock<NodeMetrics>, kv_store: &DynStore, logger: L,
+	update: impl FnOnce(&mut NodeMetrics),
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
 {
-	let data = node_metrics.encode();
+	let mut locked_node_metrics = node_metrics.write().expect("lock");
+	update(&mut *locked_node_metrics);
+	let data = locked_node_metrics.encode();
 	KVStoreSync::write(
 		&*kv_store,
 		NODE_METRICS_PRIMARY_NAMESPACE,

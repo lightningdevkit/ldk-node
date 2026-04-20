@@ -143,7 +143,7 @@ use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
-use io::utils::write_node_metrics;
+use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BestBlock;
 use lightning::impl_writeable_tlv_based;
@@ -320,15 +320,16 @@ impl Node {
 										gossip_sync_logger,
 										"Background sync of RGS gossip data finished in {}ms.",
 										now.elapsed().as_millis()
-										);
-									{
-										let mut locked_node_metrics = gossip_node_metrics.write().expect("lock");
-										locked_node_metrics.latest_rgs_snapshot_timestamp = Some(updated_timestamp);
-										write_node_metrics(&*locked_node_metrics, &*gossip_sync_store, Arc::clone(&gossip_sync_logger))
-											.unwrap_or_else(|e| {
-												log_error!(gossip_sync_logger, "Persistence failed: {}", e);
-											});
-									}
+									);
+									update_and_persist_node_metrics(
+										&gossip_node_metrics,
+										&*gossip_sync_store,
+										Arc::clone(&gossip_sync_logger),
+										|m| m.latest_rgs_snapshot_timestamp = Some(updated_timestamp),
+									)
+									.unwrap_or_else(|e| {
+										log_error!(gossip_sync_logger, "Persistence failed: {}", e);
+									});
 								}
 								Err(e) => {
 									log_error!(
@@ -552,14 +553,15 @@ impl Node {
 
 								let unix_time_secs_opt =
 									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-								{
-									let mut locked_node_metrics = bcast_node_metrics.write().expect("lock");
-									locked_node_metrics.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt;
-									write_node_metrics(&*locked_node_metrics, &*bcast_store, Arc::clone(&bcast_logger))
-										.unwrap_or_else(|e| {
-											log_error!(bcast_logger, "Persistence failed: {}", e);
-										});
-								}
+								update_and_persist_node_metrics(
+									&bcast_node_metrics,
+									&*bcast_store,
+									Arc::clone(&bcast_logger),
+									|m| m.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt,
+								)
+								.unwrap_or_else(|e| {
+									log_error!(bcast_logger, "Persistence failed: {}", e);
+								});
 							} else {
 								debug_assert!(false, "We checked whether the node may announce, so node alias should always be set");
 								continue

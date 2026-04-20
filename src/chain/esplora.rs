@@ -22,7 +22,7 @@ use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	OnchainFeeEstimator,
 };
-use crate::io::utils::write_node_metrics;
+use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
@@ -122,16 +122,13 @@ impl EsploraChainSource {
 									.duration_since(UNIX_EPOCH)
 									.ok()
 									.map(|d| d.as_secs());
-									{
-										let mut locked_node_metrics = self.node_metrics.write().expect("lock");
-										locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
-										write_node_metrics(
-											&*locked_node_metrics,
-											&*self.kv_store,
-											&*self.logger
-										)?;
-									}
-									Ok(())
+								update_and_persist_node_metrics(
+									&self.node_metrics,
+									&*self.kv_store,
+									&*self.logger,
+									|m| m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt,
+								)?;
+								Ok(())
 							},
 							Err(e) => Err(e),
 						},
@@ -263,12 +260,12 @@ impl EsploraChainSource {
 
 					let unix_time_secs_opt =
 						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-					{
-						let mut locked_node_metrics = self.node_metrics.write().expect("lock");
-						locked_node_metrics.latest_lightning_wallet_sync_timestamp =
-							unix_time_secs_opt;
-						write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
-					}
+					update_and_persist_node_metrics(
+						&self.node_metrics,
+						&*self.kv_store,
+						&*self.logger,
+						|m| m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt,
+					)?;
 					Ok(())
 				},
 				Err(e) => {
@@ -348,11 +345,9 @@ impl EsploraChainSource {
 		);
 		let unix_time_secs_opt =
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-		{
-			let mut locked_node_metrics = self.node_metrics.write().expect("lock");
-			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
-			write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
-		}
+		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
+			m.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt
+		})?;
 
 		Ok(())
 	}
