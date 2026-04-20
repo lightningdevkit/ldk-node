@@ -43,6 +43,7 @@ use lightning_net_tokio::SocketDescriptor;
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
 use crate::channel::store::ChannelRecord;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::{AnchorChannelsConfig, ChannelConfig};
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -757,5 +758,7 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 }
 
 pub(crate) type PendingPaymentStore = DataStore<PendingPaymentDetails, Arc<Logger>>;
+
+pub(crate) type ClosedChannelStore = DataStore<ClosedChannelDetails, Arc<Logger>>;
 
 pub(crate) type ChannelRecordStore = DataStore<ChannelRecord, Arc<Logger>>;

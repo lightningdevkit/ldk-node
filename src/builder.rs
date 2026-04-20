@@ -65,8 +65,10 @@ use crate::io::utils::{
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, CHANNEL_RECORD_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_RECORD_PERSISTENCE_SECONDARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-	PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_RECORD_PERSISTENCE_SECONDARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -79,9 +81,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, ChannelRecordStore, DynStore, DynStoreRef,
-	DynStoreWrapper, GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger,
-	PaymentStore, PeerManager, PendingPaymentStore,
+	AsyncPersister, ChainMonitor, ChannelManager, ChannelRecordStore, ClosedChannelStore, DynStore,
+	DynStoreRef, DynStoreWrapper, GossipSync, Graph, HRNResolver, KeysManager, MessageRouter,
+	OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1399,30 +1401,41 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res, channel_record_store_res) =
-		runtime.block_on(async move {
-			tokio::join!(
-				read_all_objects(
-					&*kv_store_ref,
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				),
-				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_all_objects(
-					&*kv_store_ref,
-					PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				),
-				read_all_objects(
-					&*kv_store_ref,
-					CHANNEL_RECORD_PERSISTENCE_PRIMARY_NAMESPACE,
-					CHANNEL_RECORD_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				)
-			)
-		});
+	let (
+		payment_store_res,
+		node_metris_res,
+		pending_payment_store_res,
+		closed_channel_store_res,
+		channel_record_store_res,
+	) = runtime.block_on(async move {
+		tokio::join!(
+			read_all_objects(
+				&*kv_store_ref,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
+			read_all_objects(
+				&*kv_store_ref,
+				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_all_objects(
+				&*kv_store_ref,
+				CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_all_objects(
+				&*kv_store_ref,
+				CHANNEL_RECORD_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_RECORD_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+		)
+	});
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
@@ -1447,6 +1460,20 @@ fn build_with_store_internal(
 		)),
 		Err(e) => {
 			log_error!(logger, "Failed to read payment data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
+	let closed_channel_store = match closed_channel_store_res {
+		Ok(channels) => Arc::new(ClosedChannelStore::new(
+			channels,
+			CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read closed channel data from store: {}", e);
 			return Err(BuildError::ReadFailed);
 		},
 	};
@@ -2267,6 +2294,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		closed_channel_store,
 		channel_record_store,
 		lnurl_auth,
 		is_running,
