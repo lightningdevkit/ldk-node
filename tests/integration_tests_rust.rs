@@ -23,9 +23,9 @@ use common::{
 	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
 	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_two_nodes, skip_if_cbf, splice_in_with_all, wait_for_cbf_sync, wait_for_tx,
-	TestChainSource, TestStoreType, TestSyncStore,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, skip_if_cbf,
+	splice_in_with_all, wait_for_cbf_sync, wait_for_tx, TestChainSource, TestStoreType,
+	TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;

@@ -448,6 +448,7 @@ impl CbfChainSource {
 							reorganized.len(),
 							accepted.len(),
 						);
+						*state.latest_tip.lock().unwrap() = None;
 
 						// No height reset needed: skip heights are derived from
 						// BDK's checkpoint (on-chain) and LDK's best block
@@ -609,19 +610,18 @@ impl CbfChainSource {
 				},
 			};
 
-			// Build chain checkpoint extending from the wallet's current tip.
+			// Build chain checkpoint extending from the wallet's current tip,
+			// using `insert` (not `push`) so that reorgs are handled correctly.
+			// `insert` detects conflicting hashes and purges stale blocks,
+			// matching bdk-kyoto's approach in `UpdateBuilder::apply_chain_event`.
 			let mut cp = onchain_wallet.latest_checkpoint();
 			for (height, header) in sync_update.recent_history() {
-				if *height > cp.height() {
-					let block_id = BlockId { height: *height, hash: header.block_hash() };
-					cp = cp.push(block_id).unwrap_or_else(|old| old);
-				}
+				let block_id = BlockId { height: *height, hash: header.block_hash() };
+				cp = cp.insert(block_id);
 			}
 			let tip = sync_update.tip();
-			if tip.height > cp.height() {
-				let tip_block_id = BlockId { height: tip.height, hash: tip.hash };
-				cp = cp.push(tip_block_id).unwrap_or_else(|old| old);
-			}
+			let tip_block_id = BlockId { height: tip.height, hash: tip.hash };
+			cp = cp.insert(tip_block_id);
 
 			let update =
 				Update { last_active_indices: BTreeMap::new(), tx_update, chain: Some(cp) };
@@ -1399,11 +1399,11 @@ mod tests {
 	/// Test that checkpoint building from `recent_history` handles reorgs.
 	///
 	/// Scenario: wallet synced to height 103. A 3-block reorg replaces blocks
-	/// 101-103 with new ones, and `recent_history` returns {97..=106} with
-	/// new hashes at heights 101-103.
+	/// 101-103 with new ones (same tip height). `recent_history` returns
+	/// {94..=103} (last 10 blocks ending at tip) with new hashes at 101-103.
 	///
 	/// The checkpoint must reflect the reorged chain: new hashes at 101-103,
-	/// pre-reorg blocks at ≤100 preserved, new blocks 104-106 present.
+	/// pre-reorg blocks at ≤100 preserved.
 	#[test]
 	fn checkpoint_building_handles_reorg() {
 		use bdk_chain::local_chain::LocalChain;
@@ -1430,8 +1430,8 @@ mod tests {
 		])
 		.unwrap();
 
-		// recent_history after reorg: 97-106, heights 101-103 have NEW hashes.
-		let recent_history: BTreeMap<u32, BlockHash> = (97..=106)
+		// recent_history after reorg: 94-103, heights 101-103 have NEW hashes.
+		let recent_history: BTreeMap<u32, BlockHash> = (94..=103)
 			.map(|h| {
 				let seed = if (101..=103).contains(&h) { h + 1000 } else { h };
 				(h, hash(seed))
@@ -1441,14 +1441,12 @@ mod tests {
 		// Build checkpoint using the same logic as sync_onchain_wallet.
 		let mut cp = wallet_cp;
 		for (height, block_hash) in &recent_history {
-			if *height > cp.height() {
-				let block_id = BlockId { height: *height, hash: *block_hash };
-				cp = cp.push(block_id).unwrap_or_else(|old| old);
-			}
+			let block_id = BlockId { height: *height, hash: *block_hash };
+			cp = cp.insert(block_id);
 		}
 
 		// Reorged blocks must have the NEW hashes.
-		assert_eq!(cp.height(), 106);
+		assert_eq!(cp.height(), 103);
 		assert_eq!(
 			cp.get(101).expect("height 101 must exist").hash(),
 			hash(1101),
@@ -1459,11 +1457,6 @@ mod tests {
 
 		// Pre-reorg blocks are preserved.
 		assert_eq!(cp.get(100).expect("height 100 must exist").hash(), hash(100));
-
-		// New blocks above the reorg are present.
-		assert!(cp.get(104).is_some());
-		assert!(cp.get(105).is_some());
-		assert!(cp.get(106).is_some());
 
 		// The checkpoint must connect cleanly to a LocalChain.
 		let (mut chain, _) = LocalChain::from_genesis_hash(genesis.hash);
