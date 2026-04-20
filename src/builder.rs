@@ -55,13 +55,15 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
-	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
-	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
-	read_scorer, write_node_metrics,
+	read_closed_channels, read_event_queue, read_external_pathfinding_scores_from_cache,
+	read_network_graph, read_node_metrics, read_output_sweeper, read_payments, read_peer_info,
+	read_pending_payments, read_scorer, write_node_metrics,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
-	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	self, CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -76,9 +78,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore, SyncAndAsyncKVStore,
+	AsyncPersister, ChainMonitor, ChannelManager, ClosedChannelStore, DynStore, DynStoreRef,
+	DynStoreWrapper, GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
+	PeerManager, PendingPaymentStore, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1267,12 +1269,13 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res) =
+	let (payment_store_res, node_metris_res, pending_payment_store_res, closed_channel_store_res) =
 		runtime.block_on(async move {
 			tokio::join!(
 				read_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
 				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref))
+				read_pending_payments(&*kv_store_ref, Arc::clone(&logger_ref)),
+				read_closed_channels(&*kv_store_ref, Arc::clone(&logger_ref)),
 			)
 		});
 
@@ -1299,6 +1302,20 @@ fn build_with_store_internal(
 		)),
 		Err(e) => {
 			log_error!(logger, "Failed to read payment data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
+	let closed_channel_store = match closed_channel_store_res {
+		Ok(channels) => Arc::new(ClosedChannelStore::new(
+			channels,
+			CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read closed channel data from store: {}", e);
 			return Err(BuildError::ReadFailed);
 		},
 	};
@@ -1996,6 +2013,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		closed_channel_store,
 		lnurl_auth,
 		is_running,
 		node_metrics,

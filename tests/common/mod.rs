@@ -1481,6 +1481,23 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
 
+	// Check that the closed channel record was persisted.
+	let closed_a = node_a.list_closed_channels();
+	let closed_b = node_b.list_closed_channels();
+	assert_eq!(closed_a.len(), 1);
+	assert_eq!(closed_b.len(), 1);
+	assert!(closed_a[0].channel_capacity_sats.is_some());
+	assert!(closed_b[0].channel_capacity_sats.is_some());
+	assert!(closed_a[0].is_outbound, "node_a opened the channel, should be outbound");
+	assert!(!closed_b[0].is_outbound, "node_b received the channel, should be inbound");
+	assert!(closed_a[0].closure_reason.is_some());
+	assert!(closed_b[0].closure_reason.is_some());
+	assert!(closed_a[0].funding_txo.is_some());
+	assert!(closed_b[0].funding_txo.is_some());
+	assert_eq!(closed_a[0].funding_txo, closed_b[0].funding_txo);
+	assert_eq!(closed_a[0].counterparty_node_id, Some(node_b.node_id()));
+	assert_eq!(closed_b[0].counterparty_node_id, Some(node_a.node_id()));
+
 	node_a.stop().unwrap();
 	println!("\nA stopped");
 	node_b.stop().unwrap();
