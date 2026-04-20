@@ -84,6 +84,7 @@ mod balance;
 mod builder;
 mod chain;
 mod channel;
+pub(crate) mod closed_channel;
 pub mod config;
 mod connection;
 mod data_store;
@@ -127,6 +128,7 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
+pub use closed_channel::ClosedChannelDetails;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
@@ -177,8 +179,8 @@ use runtime::Runtime;
 pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, ChannelRecordStore,
-	DynStore, Graph, HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router,
-	Scorer, Sweeper, Wallet,
+	ClosedChannelStore, DynStore, Graph, HRNResolver, KeysManager, OnionMessenger, PaymentStore,
+	PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
 	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
@@ -245,9 +247,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
-	// Foundational per-channel record store, loaded and persisted here so that upcoming
-	// per-channel features can build on it. Not yet read within this crate.
-	#[allow(dead_code)]
+	closed_channel_store: Arc<ClosedChannelStore>,
 	channel_record_store: Arc<ChannelRecordStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
@@ -611,6 +611,8 @@ impl Node {
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
+			Arc::clone(&self.closed_channel_store),
+			Arc::clone(&self.channel_record_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
@@ -1157,6 +1159,13 @@ impl Node {
 			.into_iter()
 			.map(|c| ChannelDetails::from_ldk(c, self.config.anchor_channels_config.as_ref()))
 			.collect()
+	}
+
+	/// Retrieve a list of closed channels.
+	///
+	/// Channels are added to this list when they are closed and will be persisted across restarts.
+	pub fn list_closed_channels(&self) -> Vec<ClosedChannelDetails> {
+		self.closed_channel_store.list_filter(|_| true)
 	}
 
 	/// Connect to a node on the peer-to-peer network.

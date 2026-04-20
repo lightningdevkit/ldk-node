@@ -7,9 +7,10 @@
 
 use core::future::Future;
 use core::task::{Poll, Waker};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
@@ -33,6 +34,8 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
+use crate::channel::store::ChannelRecord;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -53,7 +56,8 @@ use crate::payment::store::{
 use crate::payment::PaymentMetadata;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	ChannelRecordStore, ClosedChannelStore, CustomTlvRecord, DynStore, KeysManager, OnionMessenger,
+	PaymentStore, Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -270,6 +274,18 @@ pub enum Event {
 		counterparty_node_id: Option<PublicKey>,
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
+		/// The channel's capacity in satoshis.
+		///
+		/// This will be `None` for events serialized by LDK Node v0.8.0 and prior.
+		channel_capacity_sats: Option<u64>,
+		/// The channel's funding transaction outpoint.
+		///
+		/// This will be `None` for events serialized by LDK Node v0.8.0 and prior.
+		channel_funding_txo: Option<OutPoint>,
+		/// Our local balance in millisatoshis at the time of channel closure.
+		///
+		/// This will be `None` for events serialized by LDK Node v0.8.0 and prior.
+		last_local_balance_msat: Option<u64>,
 	},
 	/// A channel splice has been negotiated and the funding transaction is pending
 	/// confirmation on-chain.
@@ -331,6 +347,9 @@ impl_writeable_tlv_based_enum!(Event,
 		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
 		(3, reason, upgradable_option),
+		(5, channel_capacity_sats, option),
+		(7, channel_funding_txo, option),
+		(9, last_local_balance_msat, option),
 	},
 	(6, PaymentClaimable) => {
 		(0, payment_hash, required),
@@ -536,6 +555,14 @@ where
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
+	closed_channel_store: Arc<ClosedChannelStore>,
+	channel_record_store: Arc<ChannelRecordStore>,
+	// Tracks which user_channel_ids correspond to outbound channels. Populated at startup from
+	// list_channels() and updated on ChannelPending events. Consumed on ChannelClosed events.
+	outbound_channel_ids: Mutex<HashSet<UserChannelId>>,
+	// Tracks which user_channel_ids correspond to announced channels. Populated at startup from
+	// list_channels() and updated on ChannelPending events. Consumed on ChannelClosed events.
+	announced_channel_ids: Mutex<HashSet<UserChannelId>>,
 	keys_manager: Arc<KeysManager>,
 	runtime: Arc<Runtime>,
 	logger: L,
@@ -555,11 +582,28 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
+		peer_store: Arc<PeerStore<L>>, closed_channel_store: Arc<ClosedChannelStore>,
+		channel_record_store: Arc<ChannelRecordStore>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
 		config: Arc<Config>,
 	) -> Self {
+		// Seed outbound_channel_ids and announced_channel_ids from currently open channels so we
+		// correctly classify channels that were already open when this node started.
+		let (outbound_channel_ids, announced_channel_ids) = {
+			let mut outbound = HashSet::new();
+			let mut announced = HashSet::new();
+			for chan in channel_manager.list_channels() {
+				if chan.is_outbound {
+					outbound.insert(UserChannelId(chan.user_channel_id));
+				}
+				if chan.is_announced {
+					announced.insert(UserChannelId(chan.user_channel_id));
+				}
+			}
+			(Mutex::new(outbound), Mutex::new(announced))
+		};
+
 		Self {
 			event_queue,
 			wallet,
@@ -571,6 +615,10 @@ where
 			liquidity_source,
 			payment_store,
 			peer_store,
+			closed_channel_store,
+			channel_record_store,
+			outbound_channel_ids,
+			announced_channel_ids,
 			keys_manager,
 			logger,
 			runtime,
@@ -1346,12 +1394,23 @@ where
 						100
 					);
 				}
+				// For LSPS2 JIT channels (channel_override_config is Some iff the counterparty
+				// is our configured LSP), accept with ZeroConfZeroReserve so the LSP is not
+				// forced to keep 1000 sats locked as reserve. Without this, the hard
+				// MIN_THEIR_CHAN_RESERVE_SATOSHIS = 1000 floor in LDK reduces the usable
+				// outbound capacity enough that the initial HTLC forward fails on small channels.
+				let is_lsps2_channel = channel_override_config.is_some();
 				let res = if allow_0conf {
+					let trusted_features = if is_lsps2_channel {
+						TrustedChannelFeatures::ZeroConfZeroReserve
+					} else {
+						TrustedChannelFeatures::ZeroConf
+					};
 					self.channel_manager.accept_inbound_channel_from_trusted_peer(
 						&temporary_channel_id,
 						&counterparty_node_id,
 						user_channel_id,
-						TrustedChannelFeatures::ZeroConf,
+						trusted_features,
 						channel_override_config,
 					)
 				} else {
@@ -1527,15 +1586,39 @@ where
 					},
 				};
 
-				let peer_to_store = {
+				let (record_opt, peer_to_store) = {
 					let network_graph = self.network_graph.read_only();
 					let channels =
 						self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
-					channels
-						.into_iter()
-						.find(|c| c.channel_id == channel_id)
-						.filter(|pending_channel| {
-							!pending_channel.is_outbound
+					let pending_channel = channels.into_iter().find(|c| c.channel_id == channel_id);
+
+					let record_opt = if let Some(ref ch) = pending_channel {
+						if ch.is_outbound {
+							self.outbound_channel_ids
+								.lock()
+								.expect("Lock poisoned")
+								.insert(UserChannelId(user_channel_id));
+						}
+						if ch.is_announced {
+							self.announced_channel_ids
+								.lock()
+								.expect("Lock poisoned")
+								.insert(UserChannelId(user_channel_id));
+						}
+						Some(ChannelRecord::Funded {
+							user_channel_id: UserChannelId(user_channel_id),
+							counterparty_node_id,
+							channel_id,
+							is_outbound: ch.is_outbound,
+							is_announced: ch.is_announced,
+						})
+					} else {
+						None
+					};
+
+					let peer_to_store = pending_channel
+						.filter(|ch| {
+							!ch.is_outbound
 								&& self.peer_store.get_peer(&counterparty_node_id).is_none()
 						})
 						.and_then(|_| {
@@ -1548,8 +1631,22 @@ where
 									node_id: counterparty_node_id,
 									address: address.clone(),
 								})
-						})
-				};
+						});
+
+					(record_opt, peer_to_store)
+				}; // network_graph is dropped here, before any await
+
+				if let Some(record) = record_opt {
+					if let Err(e) = self.channel_record_store.insert_or_update(record).await {
+						log_error!(
+							self.logger,
+							"Failed to persist channel record for {}: {}",
+							channel_id,
+							e
+						);
+						return Err(ReplayEvent());
+					}
+				}
 				if let Some(peer) = peer_to_store {
 					self.peer_store.add_peer(peer).await.unwrap_or_else(|e| {
 						log_error!(
@@ -1609,19 +1706,99 @@ where
 				reason,
 				user_channel_id,
 				counterparty_node_id,
-				..
+				channel_capacity_sats,
+				channel_funding_txo,
+				last_local_balance_msat,
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
 
+				let user_channel_id = UserChannelId(user_channel_id);
+				let is_outbound_from_set = self
+					.outbound_channel_ids
+					.lock()
+					.expect("Lock poisoned")
+					.remove(&user_channel_id);
+				let is_announced_from_set = self
+					.announced_channel_ids
+					.lock()
+					.expect("Lock poisoned")
+					.remove(&user_channel_id);
+
+				// Primary: use the durably-persisted ChannelRecord written at ChannelPending
+				// time. Falls back to in-memory sets (populated at startup or on
+				// ChannelPending), then to any already-persisted ClosedChannelDetails record
+				// (for the replay case where insert_or_update already succeeded but
+				// add_event failed and the ChannelRecord was already cleaned up).
+				let (is_outbound, is_announced) = self
+					.channel_record_store
+					.get(&user_channel_id)
+					.and_then(|record| match record {
+						ChannelRecord::Funded { is_outbound, is_announced, .. } => {
+							Some((is_outbound, is_announced))
+						},
+					})
+					.or_else(|| {
+						self.closed_channel_store
+							.get(&user_channel_id)
+							.map(|existing| (existing.is_outbound, existing.is_announced))
+					})
+					.unwrap_or((is_outbound_from_set, is_announced_from_set));
+
+				let closed_at = SystemTime::now()
+					.duration_since(UNIX_EPOCH)
+					.unwrap_or(Duration::ZERO)
+					.as_secs();
+
+				let funding_txo = channel_funding_txo.map(|op| op.into_bitcoin_outpoint());
+
+				// Since LDK Node v0.2 this is expected to always be set. See
+				// CHANGELOG.md for details on the serialization compatibility break.
+				let counterparty_node_id = counterparty_node_id
+					.expect("counterparty_node_id must be set for closed channels");
+
+				let record = ClosedChannelDetails {
+					channel_id,
+					user_channel_id,
+					counterparty_node_id,
+					funding_txo,
+					channel_capacity_sats,
+					last_local_balance_msat,
+					is_outbound,
+					is_announced,
+					closure_reason: Some(reason.clone()),
+					closed_at,
+				};
+
+				if let Err(e) = self.closed_channel_store.insert(record).await {
+					log_error!(
+						self.logger,
+						"Failed to persist closed channel {}: {}",
+						channel_id,
+						e
+					);
+				}
+
 				let event = Event::ChannelClosed {
 					channel_id,
-					user_channel_id: UserChannelId(user_channel_id),
-					counterparty_node_id,
+					user_channel_id,
+					counterparty_node_id: Some(counterparty_node_id),
 					reason: Some(reason),
+					channel_capacity_sats,
+					channel_funding_txo: funding_txo,
+					last_local_balance_msat,
 				};
 
 				match self.event_queue.add_event(event).await {
-					Ok(_) => {},
+					Ok(_) => {
+						if let Err(e) = self.channel_record_store.remove(&user_channel_id).await {
+							log_error!(
+								self.logger,
+								"Failed to remove channel record for {}: {}",
+								channel_id,
+								e
+							);
+						}
+					},
 					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						return Err(ReplayEvent());
