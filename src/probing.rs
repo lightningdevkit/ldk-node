@@ -21,7 +21,7 @@ use lightning::routing::router::{
 	Path, PaymentParameters, RouteHop, RouteParameters, MAX_PATH_LENGTH_ESTIMATE,
 };
 use lightning_invoice::DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA;
-use lightning_types::features::NodeFeatures;
+use lightning_types::features::{ChannelFeatures, NodeFeatures};
 
 use crate::config::{
 	DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBED_NODE_COOLDOWN_SECS, DEFAULT_PROBING_INTERVAL_SECS,
@@ -551,33 +551,45 @@ impl RandomStrategy {
 		let mut forwarded = amount_msat;
 		let last = route.len() - 1;
 
+		// Resolve (node_features, channel_features, maybe_announced_channel) for a hop.
+		// The first hop is our local channel and may be unannounced, so its ChannelFeatures
+		// are not in the gossip graph — match on SCID to detect it and fall back to local-state
+		// defaults. All other (walked) hops were picked from the graph and must resolve there.
+		let hop_features =
+			|node_id: &NodeId, via_scid: u64| -> Option<(NodeFeatures, ChannelFeatures, bool)> {
+				let node_features = graph
+					.node(node_id)
+					.and_then(|n| n.announcement_info.as_ref().map(|a| a.features().clone()))
+					.unwrap_or_else(NodeFeatures::empty);
+				let (channel_features, maybe_announced_channel) = if via_scid == first_hop_scid {
+					(ChannelFeatures::empty(), false)
+				} else {
+					(graph.channel(via_scid)?.features.clone(), true)
+				};
+				Some((node_features, channel_features, maybe_announced_channel))
+			};
+
 		// Final hop: fee_msat carries the delivery amount; cltv delta is zero.
 		{
 			let (node_id, via_scid, pubkey) = route[last];
-			let channel_info = graph.channel(via_scid)?;
-			let node_features = graph
-				.node(&node_id)
-				.and_then(|n| n.announcement_info.as_ref().map(|a| a.features().clone()))
-				.unwrap_or_else(NodeFeatures::empty);
+			let (node_features, channel_features, maybe_announced_channel) =
+				hop_features(&node_id, via_scid)?;
 			hops.push(RouteHop {
 				pubkey,
 				node_features,
 				short_channel_id: via_scid,
-				channel_features: channel_info.features.clone(),
+				channel_features,
 				fee_msat: amount_msat,
 				cltv_expiry_delta: 0,
-				maybe_announced_channel: true,
+				maybe_announced_channel,
 			});
 		}
 
 		// Non-final hops, from second-to-last back to first.
 		for i in (0..last).rev() {
 			let (node_id, via_scid, pubkey) = route[i];
-			let channel_info = graph.channel(via_scid)?;
-			let node_features = graph
-				.node(&node_id)
-				.and_then(|n| n.announcement_info.as_ref().map(|a| a.features().clone()))
-				.unwrap_or_else(NodeFeatures::empty);
+			let (node_features, channel_features, maybe_announced_channel) =
+				hop_features(&node_id, via_scid)?;
 
 			let (_, next_scid, _) = route[i + 1];
 			let next_channel = graph.channel(next_scid)?;
@@ -598,10 +610,10 @@ impl RandomStrategy {
 				pubkey,
 				node_features,
 				short_channel_id: via_scid,
-				channel_features: channel_info.features.clone(),
+				channel_features,
 				fee_msat: fee,
 				cltv_expiry_delta: update.cltv_expiry_delta as u32,
-				maybe_announced_channel: true,
+				maybe_announced_channel,
 			});
 		}
 
