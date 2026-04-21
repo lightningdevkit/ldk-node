@@ -24,7 +24,8 @@ use lightning_invoice::DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning_types::features::{ChannelFeatures, NodeFeatures};
 
 use crate::config::{
-	DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBED_NODE_COOLDOWN_SECS, DEFAULT_PROBING_INTERVAL_SECS,
+	DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBED_NODE_COOLDOWN_SECS,
+	DEFAULT_PROBING_INTERVAL_SECS, MIN_PROBING_INTERVAL,
 };
 use crate::logger::{log_debug, LdkLogger, Logger};
 use crate::types::{ChannelManager, Graph, Router};
@@ -40,12 +41,34 @@ pub(crate) enum ProbingStrategyKind {
 	Custom(Arc<dyn ProbingStrategy>),
 }
 
+impl fmt::Debug for ProbingStrategyKind {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::HighDegree { top_node_count } => {
+				f.debug_struct("HighDegree").field("top_node_count", top_node_count).finish()
+			},
+			Self::Random { max_hops } => {
+				f.debug_struct("Random").field("max_hops", max_hops).finish()
+			},
+			Self::Custom(_) => f.write_str("Custom(<probing strategy>)"),
+		}
+	}
+}
+
 /// Configuration for the background probing subsystem.
 ///
 /// Construct via [`ProbingConfigBuilder`]. Pick a strategy with
 /// [`ProbingConfigBuilder::high_degree`], [`ProbingConfigBuilder::random_walk`], or
 /// [`ProbingConfigBuilder::custom`], chain optional setters, and finalize with
 /// [`ProbingConfigBuilder::build`].
+///
+/// # Caution
+///
+/// Probes send real HTLCs along real paths. If an intermediate hop is offline or
+/// misbehaving, the probe HTLC can remain in-flight — locking outbound liquidity
+/// on the first-hop channel until the HTLC timeout elapses (potentially hours).
+/// `max_locked_msat` caps the total outbound capacity that in-flight probes may
+/// hold at any one time; tune it conservatively for nodes with tight liquidity.
 ///
 /// # Example
 /// ```ignore
@@ -56,7 +79,7 @@ pub(crate) enum ProbingStrategyKind {
 ///     .build();
 /// builder.set_probing_config(config);
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct ProbingConfig {
 	pub(crate) kind: ProbingStrategyKind,
@@ -64,27 +87,6 @@ pub struct ProbingConfig {
 	pub(crate) max_locked_msat: u64,
 	pub(crate) diversity_penalty_msat: Option<u64>,
 	pub(crate) cooldown: Duration,
-}
-
-impl fmt::Debug for ProbingConfig {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let kind_str = match &self.kind {
-			ProbingStrategyKind::HighDegree { top_node_count } => {
-				format!("HighDegree {{ top_node_count: {} }}", top_node_count)
-			},
-			ProbingStrategyKind::Random { max_hops } => {
-				format!("Random {{ max_hops: {} }}", max_hops)
-			},
-			ProbingStrategyKind::Custom(_) => "Custom(<probing strategy>)".to_string(),
-		};
-		f.debug_struct("ProbingConfig")
-			.field("kind", &kind_str)
-			.field("interval", &self.interval)
-			.field("max_locked_msat", &self.max_locked_msat)
-			.field("diversity_penalty_msat", &self.diversity_penalty_msat)
-			.field("cooldown", &self.cooldown)
-			.finish()
-	}
 }
 
 /// Builder for [`ProbingConfig`].
@@ -178,7 +180,7 @@ impl ProbingConfigBuilder {
 	pub fn build(&self) -> ProbingConfig {
 		ProbingConfig {
 			kind: self.kind.clone(),
-			interval: self.interval,
+			interval: self.interval.max(MIN_PROBING_INTERVAL),
 			max_locked_msat: self.max_locked_msat,
 			diversity_penalty_msat: self.diversity_penalty_msat,
 			cooldown: self.cooldown,
@@ -406,10 +408,8 @@ impl ProbingStrategy for HighDegreeStrategy {
 ///
 /// On each tick:
 ///   1. Picks one of our confirmed, usable channels to start from.
-///   2. Performs a deterministic walk of a randomly chosen depth (up to
-///      [`MAX_PATH_LENGTH_ESTIMATE`]) through the gossip graph, skipping disabled
-///      channels and dead-ends.
-///   3. Returns the constructed `Path` so the prober calls `send_probe` directly.
+///   2. Performs a random walk of a chosen depth (up to [`MAX_PATH_LENGTH_ESTIMATE`]) through the
+///      gossip graph, skipping disabled channels and dead-ends.
 ///
 /// The probe amount is chosen uniformly at random from `[min_amount_msat, max_amount_msat]`.
 ///
@@ -484,7 +484,8 @@ impl RandomStrategy {
 				None => break,
 			};
 
-			// Outward channels: skip the one we arrived on to avoid backtracking.
+			// Skip the edge we arrived on. Longer cycles aren't filtered — probes fail at
+			// the destination anyway, so revisiting nodes is harmless.
 			let candidates: Vec<u64> =
 				node_info.channels.iter().copied().filter(|&scid| scid != prev_scid).collect();
 
@@ -542,7 +543,7 @@ impl RandomStrategy {
 		}
 		let amount_msat =
 			amount_msat.max(route_greatest_htlc_lower_bound).min(route_least_htlc_upper_bound);
-		if amount_msat < self.min_amount_msat {
+		if amount_msat < self.min_amount_msat || amount_msat > self.max_amount_msat {
 			return None;
 		}
 
@@ -671,13 +672,14 @@ impl Prober {
 		let prev = self
 			.locked_msat
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
-			.unwrap_or(0);
+			.expect("fetch_update closure always returns Some");
+		let new = prev.saturating_sub(amount);
 		log_debug!(
 			self.logger,
 			"Probe successful: released {} msat (locked_msat {} -> {}), path: {}",
 			amount,
 			prev,
-			prev.saturating_sub(amount),
+			new,
 			fmt_path(path)
 		);
 	}
@@ -687,13 +689,14 @@ impl Prober {
 		let prev = self
 			.locked_msat
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
-			.unwrap_or(0);
+			.expect("fetch_update closure always returns Some");
+		let new = prev.saturating_sub(amount);
 		log_debug!(
 			self.logger,
 			"Probe failed: released {} msat (locked_msat {} -> {}), path: {}",
 			amount,
 			prev,
-			prev.saturating_sub(amount),
+			new,
 			fmt_path(path)
 		);
 	}
