@@ -61,7 +61,7 @@ use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
 	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
-	read_scorer, write_node_metrics,
+	read_scorer,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
@@ -1843,21 +1843,11 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 			));
 
-			// Reset the RGS sync timestamp in case we somehow switch gossip sources
-			{
-				let mut locked_node_metrics = node_metrics.write().expect("lock");
-				locked_node_metrics.latest_rgs_snapshot_timestamp = None;
-				write_node_metrics(&*locked_node_metrics, &*kv_store, Arc::clone(&logger))
-					.map_err(|e| {
-						log_error!(logger, "Failed writing to store: {}", e);
-						BuildError::WriteFailed
-					})?;
-			}
 			p2p_source
 		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
 			let latest_sync_timestamp =
-				node_metrics.read().expect("lock").latest_rgs_snapshot_timestamp.unwrap_or(0);
+				network_graph.get_last_rapid_gossip_sync_timestamp().unwrap_or(0);
 			Arc::new(GossipSource::new_rgs(
 				rgs_server.clone(),
 				latest_sync_timestamp,

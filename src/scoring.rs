@@ -13,7 +13,7 @@ use crate::io::utils::write_external_pathfinding_scores_to_cache;
 use crate::logger::LdkLogger;
 use crate::runtime::Runtime;
 use crate::types::DynStore;
-use crate::{write_node_metrics, Logger, NodeMetrics, Scorer};
+use crate::{update_and_persist_node_metrics, Logger, NodeMetrics, Scorer};
 
 /// Start a background task that periodically downloads scores via an external url and merges them into the local
 /// pathfinding scores.
@@ -86,10 +86,10 @@ async fn sync_external_scores(
 				.duration_since(SystemTime::UNIX_EPOCH)
 				.expect("system time must be after Unix epoch");
 			scorer.lock().expect("lock").merge(liquidities, duration_since_epoch);
-			let mut locked_node_metrics = node_metrics.write().expect("lock");
-			locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
-				Some(duration_since_epoch.as_secs());
-			write_node_metrics(&*locked_node_metrics, &*kv_store, logger).unwrap_or_else(|e| {
+			update_and_persist_node_metrics(&node_metrics, &*kv_store, logger, |m| {
+				m.latest_pathfinding_scores_sync_timestamp = Some(duration_since_epoch.as_secs());
+			})
+			.unwrap_or_else(|e| {
 				log_error!(logger, "Persisting node metrics failed: {}", e);
 			});
 			log_trace!(logger, "External scores merged successfully");

@@ -39,7 +39,7 @@ use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	ConfirmationTarget, OnchainFeeEstimator,
 };
-use crate::io::utils::write_node_metrics;
+use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
@@ -203,15 +203,18 @@ impl BitcoindChainSource {
 						*self.latest_chain_tip.write().expect("lock") = Some(chain_tip);
 						let unix_time_secs_opt =
 							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-						let mut locked_node_metrics = self.node_metrics.write().expect("lock");
-						locked_node_metrics.latest_lightning_wallet_sync_timestamp =
-							unix_time_secs_opt;
-						locked_node_metrics.latest_onchain_wallet_sync_timestamp =
-							unix_time_secs_opt;
-						write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)
-							.unwrap_or_else(|e| {
-								log_error!(self.logger, "Failed to persist node metrics: {}", e);
-							});
+						update_and_persist_node_metrics(
+							&self.node_metrics,
+							&*self.kv_store,
+							&*self.logger,
+							|m| {
+								m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+								m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+							},
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to persist node metrics: {}", e);
+						});
 					}
 					break;
 				},
@@ -454,11 +457,10 @@ impl BitcoindChainSource {
 
 		let unix_time_secs_opt =
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-		let mut locked_node_metrics = self.node_metrics.write().expect("lock");
-		locked_node_metrics.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
-		locked_node_metrics.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
-
-		write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
+		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
+			m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+			m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+		})?;
 
 		Ok(())
 	}
@@ -568,11 +570,9 @@ impl BitcoindChainSource {
 
 		let unix_time_secs_opt =
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-		{
-			let mut locked_node_metrics = self.node_metrics.write().expect("lock");
-			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
-			write_node_metrics(&*locked_node_metrics, &*self.kv_store, &*self.logger)?;
-		}
+		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
+			m.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt
+		})?;
 
 		Ok(())
 	}
