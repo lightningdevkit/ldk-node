@@ -201,6 +201,13 @@ pub enum BuildError {
 	AsyncPaymentsConfigMismatch,
 	/// An attempt to setup a DNS Resolver failed.
 	DNSResolverSetupFailed,
+	/// We failed to determine the current chain tip on first startup.
+	///
+	/// Returned when a fresh node is built against a Bitcoin Core RPC or REST chain source that
+	/// is unreachable or misconfigured, so we cannot learn the tip height/hash to use as the
+	/// wallet birthday. Falling back to genesis would silently force a full-history rescan on
+	/// the next successful startup, so we abort instead.
+	ChainTipFetchFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -237,6 +244,12 @@ impl fmt::Display for BuildError {
 			},
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
+			},
+			Self::ChainTipFetchFailed => {
+				write!(
+					f,
+					"Failed to determine the current chain tip on first startup. Verify the chain data source is reachable and correctly configured."
+				)
 			},
 		}
 	}
@@ -1440,6 +1453,23 @@ fn build_with_store_internal(
 	let bdk_wallet = match wallet_opt {
 		Some(wallet) => wallet,
 		None => {
+			// Guard against silently setting the wallet birthday to genesis on a fresh node:
+			// if we are creating a new wallet but failed to learn the current chain tip from
+			// a Bitcoin Core RPC/REST backend, we'd otherwise persist fresh wallet state
+			// pinned at height 0 and force a full-history rescan once the backend comes back.
+			// Abort cleanly instead so the misconfiguration surfaces on the first startup.
+			// Esplora/Electrum backends currently never return a tip at build time, so they
+			// retain their existing behavior.
+			let is_bitcoind_source =
+				matches!(chain_data_source_config, Some(ChainDataSourceConfig::Bitcoind { .. }));
+			if !recovery_mode && chain_tip_opt.is_none() && is_bitcoind_source {
+				log_error!(
+					logger,
+					"Failed to determine chain tip on first startup. Aborting to avoid pinning the wallet birthday to genesis."
+				);
+				return Err(BuildError::ChainTipFetchFailed);
+			}
+
 			let mut wallet = BdkWallet::create(descriptor, change_descriptor)
 				.network(config.network)
 				.create_wallet(&mut wallet_persister)

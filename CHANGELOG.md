@@ -1,3 +1,8 @@
+# Unreleased
+
+## Bug Fixes and Improvements
+- Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of silently pinning the wallet birthday to genesis, which would have forced a full-history rescan once the chain source became reachable again.
+
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 

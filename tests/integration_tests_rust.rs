@@ -35,7 +35,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{BuildError, Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -741,6 +741,36 @@ async fn onchain_wallet_recovery() {
 		recovered_node.list_balances().spendable_onchain_balance_sats,
 		premine_amount_sat * 3
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn build_aborts_on_first_startup_bitcoind_tip_fetch_failure() {
+	// A fresh node pointed at an unreachable bitcoind RPC endpoint must not silently
+	// fall back to genesis as the wallet birthday. The build must abort cleanly so the
+	// misconfiguration surfaces immediately.
+	let config = random_config(false);
+	let entropy = config.node_entropy;
+
+	setup_builder!(builder, config.node_config);
+	// Pick a localhost port that is extremely unlikely to be bound. The kernel will
+	// refuse the connection immediately so the test does not have to wait for the
+	// chain-polling timeout.
+	let unreachable_port: u16 = 1;
+	builder.set_chain_source_bitcoind_rpc(
+		"127.0.0.1".to_string(),
+		unreachable_port,
+		"user".to_string(),
+		"password".to_string(),
+	);
+
+	let res = builder.build(entropy.into());
+	match res {
+		Err(BuildError::ChainTipFetchFailed) => {},
+		other => panic!(
+			"expected BuildError::ChainTipFetchFailed on fresh node with unreachable bitcoind, got {:?}",
+			other.map(|_| "Ok(_)")
+		),
+	}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
