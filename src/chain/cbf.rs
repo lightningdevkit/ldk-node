@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bdk_chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::Update;
 use bip157::chain::{BlockHeaderChanges, ChainState};
+use bip157::error::FetchBlockError;
 use bip157::{
 	BlockHash, Builder, Client, Event, HeaderCheckpoint, Info, Node as CbfNode, Requester,
 	SyncUpdate, TrustedPeer, Warning,
@@ -915,6 +916,18 @@ impl CbfChainSource {
 					.await
 				{
 					Ok(Ok(indexed_block)) => indexed_block,
+					Ok(Err(FetchBlockError::UnknownHash)) => {
+						// Kyoto doesn't know this block yet (e.g. startup before
+						// filter sync, or hash is at/below the resume checkpoint).
+						// Skip this cycle and try again later.
+						log_debug!(
+							self.logger,
+							"CBF node does not yet have block {} for fee estimation; \
+							 skipping until sync progresses.",
+							current_hash,
+						);
+						return Ok(None);
+					},
 					Ok(Err(e)) => {
 						log_error!(
 							self.logger,
