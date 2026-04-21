@@ -730,35 +730,34 @@ impl CbfChainSource {
 			let scripts: Vec<ScriptBuf> = self.registered_scripts.lock().unwrap().clone();
 			if scripts.is_empty() {
 				log_debug!(self.logger, "No registered scripts for CBF lightning sync.");
-				return Ok(());
+			} else {
+				let timeout_fut = tokio::time::timeout(
+					Duration::from_secs(
+						self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs,
+					),
+					self.sync_lightning_wallet_op(
+						requester,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+						scripts,
+					),
+				);
+
+				match timeout_fut.await {
+					Ok(res) => res?,
+					Err(e) => {
+						log_error!(self.logger, "Sync of Lightning wallet timed out: {}", e);
+						return Err(Error::TxSyncTimeout);
+					},
+				};
+
+				log_debug!(
+					self.logger,
+					"Sync of Lightning wallet via CBF finished in {}ms.",
+					now.elapsed().as_millis()
+				);
 			}
-
-			let timeout_fut = tokio::time::timeout(
-				Duration::from_secs(
-					self.sync_config.timeouts_config.lightning_wallet_sync_timeout_secs,
-				),
-				self.sync_lightning_wallet_op(
-					requester,
-					channel_manager,
-					chain_monitor,
-					output_sweeper,
-					scripts,
-				),
-			);
-
-			match timeout_fut.await {
-				Ok(res) => res?,
-				Err(e) => {
-					log_error!(self.logger, "Sync of Lightning wallet timed out: {}", e);
-					return Err(Error::TxSyncTimeout);
-				},
-			};
-
-			log_debug!(
-				self.logger,
-				"Sync of Lightning wallet via CBF finished in {}ms.",
-				now.elapsed().as_millis()
-			);
 
 			update_node_metrics_timestamp(
 				&self.node_metrics,
