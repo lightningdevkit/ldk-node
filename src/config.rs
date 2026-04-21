@@ -8,6 +8,7 @@
 //! Objects for configuring the node.
 
 use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
@@ -128,6 +129,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                     | None               |
 /// | `tor_config`                           | None               |
+/// | `hrn_config`                           | HumanReadableNamesConfig::default()           |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -199,6 +201,10 @@ pub struct Config {
 	///
 	/// **Note**: If unset, connecting to peer OnionV3 addresses will fail.
 	pub tor_config: Option<TorConfig>,
+	/// Configuration options for Human-Readable Names ([BIP 353]).
+	///
+	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	pub hrn_config: HumanReadableNamesConfig,
 }
 
 impl Default for Config {
@@ -214,6 +220,62 @@ impl Default for Config {
 			tor_config: None,
 			route_parameters: None,
 			node_alias: None,
+			hrn_config: HumanReadableNamesConfig::default(),
+		}
+	}
+}
+
+/// Configuration options for how our node resolves Human-Readable Names (BIP 353).
+///
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum HRNResolverConfig {
+	/// Use [bLIP-32] to ask other nodes to resolve names for us.
+	///
+	/// [bLIP-32]: https://github.com/lightning/blips/blob/master/blip-0032.md
+	Blip32,
+	/// Resolve names locally using a specific DNS server.
+	Dns {
+		/// The IP and port of the DNS server.
+		///
+		/// **Default:** `8.8.8.8:53` (Google Public DNS)
+		dns_server_address: SocketAddress,
+		/// If set to true, this allows others to use our node for HRN resolutions.
+		///
+		/// **Default:** `false`
+		///
+		/// **Note:** Enabling `enable_hrn_resolution_service` allows your node to act
+		/// as a resolver for the rest of the network. For this to work, your node must
+		/// be announceable (publicly visible in the network graph) so that other nodes
+		/// can route resolution requests to you via Onion Messages. This does not affect
+		/// your node's ability to resolve names for its own outgoing payments.
+		enable_hrn_resolution_service: bool,
+	},
+}
+
+/// Configuration options for Human-Readable Names ([BIP 353]).
+///
+/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct HumanReadableNamesConfig {
+	/// This sets how our node resolves names when we want to send a payment.
+	///
+	/// By default, this uses the `Dns` variant with the following settings:
+	/// * **DNS Server**: `8.8.8.8:53` (Google Public DNS)
+	/// * **Resolution Service**: Enabled (`false`)
+	pub resolution_config: HRNResolverConfig,
+}
+
+impl Default for HumanReadableNamesConfig {
+	fn default() -> Self {
+		HumanReadableNamesConfig {
+			resolution_config: HRNResolverConfig::Dns {
+				dns_server_address: SocketAddress::from_str("8.8.8.8:53")
+					.expect("Socket address conversion failed."),
+				enable_hrn_resolution_service: false,
+			},
 		}
 	}
 }

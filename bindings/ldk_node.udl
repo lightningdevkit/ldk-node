@@ -416,3 +416,7 @@ typedef string LSPSDateTime;
 typedef string ScriptBuf;
 
 typedef enum Event;
+
+typedef interface HRNResolverConfig;
+
+typedef dictionary HumanReadableNamesConfig;
