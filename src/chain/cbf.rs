@@ -80,8 +80,6 @@ pub(super) struct CbfChainSource {
 	fee_source: FeeSource,
 	/// Tracks whether the bip157 node is running and holds the command handle.
 	cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>,
-	/// Latest chain tip hash, updated by the background event processing task.
-	latest_tip: Arc<Mutex<Option<BlockHash>>>,
 	/// Scripts to match against compact block filters during a scan.
 	watched_scripts: Arc<RwLock<Vec<ScriptBuf>>>,
 	/// Block (height, hash) pairs where filters matched watched scripts.
@@ -119,7 +117,6 @@ enum CbfRuntimeStatus {
 
 /// Shared state passed to the background event processing task.
 struct CbfEventState {
-	latest_tip: Arc<Mutex<Option<BlockHash>>>,
 	watched_scripts: Arc<RwLock<Vec<ScriptBuf>>>,
 	matched_block_hashes: Arc<Mutex<Vec<(u32, BlockHash)>>>,
 	sync_completion_tx: Arc<Mutex<Option<oneshot::Sender<SyncUpdate>>>>,
@@ -148,7 +145,6 @@ impl CbfChainSource {
 		};
 
 		let cbf_runtime_status = Arc::new(Mutex::new(CbfRuntimeStatus::Stopped));
-		let latest_tip = Arc::new(Mutex::new(None));
 		let watched_scripts = Arc::new(RwLock::new(Vec::new()));
 		let matched_block_hashes = Arc::new(Mutex::new(Vec::new()));
 		let sync_completion_tx = Arc::new(Mutex::new(None));
@@ -163,7 +159,6 @@ impl CbfChainSource {
 			sync_config,
 			fee_source,
 			cbf_runtime_status,
-			latest_tip,
 			watched_scripts,
 			matched_block_hashes,
 			sync_completion_tx,
@@ -288,7 +283,6 @@ impl CbfChainSource {
 		// block is 'static (no borrows of `self`).
 		let restart_status = Arc::clone(&self.cbf_runtime_status);
 		let restart_logger = Arc::clone(&self.logger);
-		let restart_latest_tip = Arc::clone(&self.latest_tip);
 		let restart_watched_scripts = Arc::clone(&self.watched_scripts);
 		let restart_matched_block_hashes = Arc::clone(&self.matched_block_hashes);
 		let restart_sync_completion_tx = Arc::clone(&self.sync_completion_tx);
@@ -317,7 +311,6 @@ impl CbfChainSource {
 					Arc::clone(&restart_logger),
 				));
 				let event_state = CbfEventState {
-					latest_tip: Arc::clone(&restart_latest_tip),
 					watched_scripts: Arc::clone(&restart_watched_scripts),
 					matched_block_hashes: Arc::clone(&restart_matched_block_hashes),
 					sync_completion_tx: Arc::clone(&restart_sync_completion_tx),
@@ -428,7 +421,6 @@ impl CbfChainSource {
 			match event {
 				Event::FiltersSynced(sync_update) => {
 					let tip = sync_update.tip();
-					*state.latest_tip.lock().unwrap() = Some(tip.hash);
 					log_info!(
 						logger,
 						"CBF filters synced to tip: height={}, hash={}",
@@ -448,7 +440,6 @@ impl CbfChainSource {
 							reorganized.len(),
 							accepted.len(),
 						);
-						*state.latest_tip.lock().unwrap() = None;
 
 						// No height reset needed: skip heights are derived from
 						// BDK's checkpoint (on-chain) and LDK's best block
@@ -861,19 +852,47 @@ impl CbfChainSource {
 
 	/// Derive per-target fee rates from recent blocks' coinbase outputs.
 	///
-	/// Returns `Ok(None)` when no chain tip is available yet (first startup before sync).
+	/// Returns `Ok(None)` when the chain is too short to sample `FEE_RATE_LOOKBACK_BLOCKS`
+	/// blocks (e.g. kyoto has not yet synced past the genesis region).
 	async fn fee_rate_cache_from_cbf(
 		&self,
 	) -> Result<Option<HashMap<crate::fee_estimator::ConfirmationTarget, FeeRate>>, Error> {
 		let requester = self.requester()?;
 
-		let tip_hash = match *self.latest_tip.lock().unwrap() {
-			Some(hash) => hash,
-			None => {
-				log_debug!(self.logger, "No tip available yet for fee rate estimation, skipping.");
+		let timeout = Duration::from_secs(
+			self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
+		);
+		let fetch_start = Instant::now();
+
+		// Ask kyoto for its current chain tip rather than maintaining a mirrored
+		// cache: the returned hash is always fresh (post-reorg, post-restart),
+		// so no defensive invalidation is needed below.
+		let tip = match tokio::time::timeout(timeout, requester.chain_tip()).await {
+			Ok(Ok(tip)) => tip,
+			Ok(Err(e)) => {
+				log_debug!(
+					self.logger,
+					"Failed to fetch CBF chain tip for fee estimation: {:?}",
+					e,
+				);
 				return Ok(None);
 			},
+			Err(e) => {
+				log_error!(self.logger, "Timed out fetching CBF chain tip: {}", e);
+				return Err(Error::FeerateEstimationUpdateTimeout);
+			},
 		};
+
+		if (tip.height as usize) < FEE_RATE_LOOKBACK_BLOCKS {
+			log_debug!(
+				self.logger,
+				"CBF chain tip at height {} is below the {}-block lookback window, \
+				 skipping fee estimation.",
+				tip.height,
+				FEE_RATE_LOOKBACK_BLOCKS,
+			);
+			return Ok(None);
+		}
 
 		let now = Instant::now();
 
@@ -881,14 +900,9 @@ impl CbfChainSource {
 		// We compute fee rates ourselves rather than using Requester::average_fee_rate,
 		// so we can sample multiple blocks and select percentiles per confirmation target.
 		let mut block_fee_rates: Vec<u64> = Vec::with_capacity(FEE_RATE_LOOKBACK_BLOCKS);
-		let mut current_hash = tip_hash;
+		let mut current_hash = tip.hash;
 
-		let timeout = Duration::from_secs(
-			self.sync_config.timeouts_config.fee_rate_cache_update_timeout_secs,
-		);
-		let fetch_start = Instant::now();
-
-		for idx in 0..FEE_RATE_LOOKBACK_BLOCKS {
+		for _ in 0..FEE_RATE_LOOKBACK_BLOCKS {
 			// Check if we've exceeded the overall timeout for fee estimation.
 			let remaining_timeout = timeout.saturating_sub(fetch_start.elapsed());
 			if remaining_timeout.is_zero() {
@@ -896,25 +910,11 @@ impl CbfChainSource {
 				return Err(Error::FeerateEstimationUpdateTimeout);
 			}
 
-			// Fetch the block via P2P. On the first iteration, a fetch failure
-			// likely means the cached tip is stale (initial sync or reorg), so
-			// we clear the tip and skip gracefully instead of returning an error.
 			let indexed_block =
 				match tokio::time::timeout(remaining_timeout, requester.get_block(current_hash))
 					.await
 				{
 					Ok(Ok(indexed_block)) => indexed_block,
-					Ok(Err(e)) if idx == 0 => {
-						log_debug!(
-							self.logger,
-							"Cached CBF tip {} was unavailable during fee estimation, \
-							 likely due to initial sync or a reorg: {:?}",
-							current_hash,
-							e
-						);
-						*self.latest_tip.lock().unwrap() = None;
-						return Ok(None);
-					},
 					Ok(Err(e)) => {
 						log_error!(
 							self.logger,
@@ -922,17 +922,6 @@ impl CbfChainSource {
 							e
 						);
 						return Err(Error::FeerateEstimationUpdateFailed);
-					},
-					Err(e) if idx == 0 => {
-						log_debug!(
-							self.logger,
-							"Timed out fetching cached CBF tip {} during fee estimation, \
-							 likely due to initial sync or a reorg: {}",
-							current_hash,
-							e
-						);
-						*self.latest_tip.lock().unwrap() = None;
-						return Ok(None);
 					},
 					Err(e) => {
 						log_error!(self.logger, "Updating fee rate estimates timed out: {}", e);
