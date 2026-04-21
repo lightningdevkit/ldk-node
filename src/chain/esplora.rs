@@ -101,9 +101,11 @@ impl EsploraChainSource {
 
 	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<(), Error> {
 		// If this is our first sync, do a full scan with the configured gap limit.
-		// Otherwise just do an incremental sync.
-		let incremental_sync =
+		// Otherwise just do an incremental sync. Also take one-shot priority over an incremental
+		// sync if the user opted into recovery mode via `NodeBuilder::set_wallet_recovery_mode`.
+		let has_prior_sync =
 			self.node_metrics.read().expect("lock").latest_onchain_wallet_sync_timestamp.is_some();
+		let incremental_sync = has_prior_sync && !onchain_wallet.take_force_full_scan();
 
 		macro_rules! get_and_apply_wallet_update {
 			($sync_future: expr) => {{

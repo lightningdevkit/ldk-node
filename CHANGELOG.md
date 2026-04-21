@@ -1,5 +1,8 @@
 # Unreleased
 
+## Feature and API updates
+- The `Builder::set_wallet_recovery_mode` method has been generalized to accept an `Option<RecoveryMode>` argument instead of being a no-argument toggle. `RecoveryMode::rescan_from_height` lets users specify an explicit block height to rescan from on bitcoind-backed nodes — useful for restoring a wallet on a pruned node where the wallet's birthday height is known but the full history is unavailable (#818). On Esplora/Electrum backends, any `Some(RecoveryMode { .. })` now forces a one-shot BDK `full_scan` on the next wallet sync to re-discover funds sent to previously-unknown addresses. This is a breaking API change.
+
 ## Bug Fixes and Improvements
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of silently pinning the wallet birthday to genesis, which would have forced a full-history rescan once the chain source became reachable again.
 
