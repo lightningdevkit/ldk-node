@@ -1067,6 +1067,9 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
+	// Our per-node fee contribution, computed exactly from the `FundingContribution`
+	// (inputs − outputs − change − value_added). For a sole-contributor splice-in
+	// that equals the whole-tx fee BDK pays from our wallet.
 	let expected_splice_in_fee_sat = 255;
 
 	let payments = node_b.list_payments();
@@ -1212,6 +1215,35 @@ async fn rbf_splice_channel() {
 
 	assert_ne!(original_txo, rbf_txo, "RBF should produce a different funding txo");
 
+	// After RBF but before confirmation, node_b (the initiator) should have a single
+	// on-chain payment covering both candidates: id anchored to the first broadcast,
+	// `kind.txid` pointing at the latest (RBF) candidate, and the original candidate
+	// recorded as a replaced one on the pending record.
+	{
+		let payment_id = PaymentId(original_txo.txid.to_byte_array());
+		let payment = node_b.payment(&payment_id).expect("splice payment exists");
+		match payment.kind {
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed } => {
+				assert_eq!(txid, rbf_txo.txid);
+			},
+			ref other => panic!("expected Onchain Unconfirmed, got {:?}", other),
+		}
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		// Only one Onchain Pending payment for this splice attempt (not one per candidate).
+		let splice_payments = node_b.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+				&& p.status == PaymentStatus::Pending
+		});
+		assert_eq!(
+			splice_payments.len(),
+			1,
+			"expected exactly one pending Onchain payment for the splice, got {}: {:#?}",
+			splice_payments.len(),
+			splice_payments,
+		);
+	}
+
 	// Wait for the RBF transaction to replace the original in the mempool
 	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
 
@@ -1237,6 +1269,26 @@ async fn rbf_splice_channel() {
 			node_b.event_handled().unwrap();
 		},
 		ref e => panic!("node_b got unexpected event: {:?}", e),
+	}
+
+	// After `ChannelReady` we should have graduated to `Succeeded` — even though
+	// `ANTI_REORG_DELAY` may not have elapsed yet — and the `kind.txid` should
+	// reflect the winning RBF candidate, with `fee_paid_msat` matching our
+	// per-node `FundingContribution::estimated_fee` for that candidate.
+	{
+		let payment_id = PaymentId(original_txo.txid.to_byte_array());
+		let payment = node_b.payment(&payment_id).expect("splice payment graduated");
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		match payment.kind {
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Confirmed { .. } } => {
+				assert_eq!(txid, rbf_txo.txid);
+			},
+			ref other => panic!("expected Onchain Confirmed, got {:?}", other),
+		}
+		assert!(
+			payment.fee_paid_msat.is_some(),
+			"splice payment should carry a fee from its FundingContribution",
+		);
 	}
 
 	node_a.stop().unwrap();

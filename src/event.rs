@@ -1518,6 +1518,18 @@ where
 					);
 				}
 
+				if let Err(e) =
+					self.wallet.handle_channel_ready(channel_id, funding_txo.map(|txo| txo.txid))
+				{
+					log_error!(
+						self.logger,
+						"Failed to graduate funding payment on ChannelReady for channel {}: {:?}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
+
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					liquidity_source
 						.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
@@ -1546,6 +1558,16 @@ where
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				if let Err(e) = self.wallet.handle_channel_closed(channel_id) {
+					log_error!(
+						self.logger,
+						"Failed to handle ChannelClosed for channel {}: {:?}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
 
 				let event = Event::ChannelClosed {
 					channel_id,
