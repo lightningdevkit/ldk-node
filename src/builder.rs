@@ -1757,7 +1757,7 @@ fn build_with_store_internal(
 				.to_socket_addrs()
 				.map_err(|_| BuildError::DNSResolverSetupFailed)?
 				.next()
-				.ok_or({
+				.ok_or_else(|| {
 					log_error!(logger, "No valid address found for: {}", dns_server_address);
 					BuildError::DNSResolverSetupFailed
 				})?;
