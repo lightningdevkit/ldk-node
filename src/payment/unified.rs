@@ -350,8 +350,8 @@ impl UnifiedPayment {
 	/// offers allow us to bypass this resolution step and test the subsequent payment flow.
 	///
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
-	pub fn set_test_offer(&self, _offer: Offer) {
-		let _ = self.test_offer.lock().map(|mut guard| *guard = Some(_offer)).map_err(|e| {
+	pub fn set_test_offer(&self, offer: Offer) {
+		let _ = self.test_offer.lock().map(|mut guard| *guard = Some(offer)).map_err(|e| {
 			log_error!(self.logger, "Failed to set test offer due to poisoned lock: {:?}", e)
 		});
 	}
