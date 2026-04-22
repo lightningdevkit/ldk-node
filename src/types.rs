@@ -330,6 +330,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	IgnoringMessageHandler,
 >;
 
+#[derive(Clone)]
 pub enum HRNResolver {
 	Onion(Arc<LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>>),
 	Local(Arc<DNSHrnResolver>),

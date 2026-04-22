@@ -2051,7 +2051,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
-		hrn_resolver: Arc::new(hrn_resolver),
+		hrn_resolver,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})

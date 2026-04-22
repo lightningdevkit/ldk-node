@@ -74,7 +74,7 @@ pub struct UnifiedPayment {
 	bolt12_payment: Arc<Bolt12Payment>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	hrn_resolver: Arc<HRNResolver>,
+	hrn_resolver: HRNResolver,
 	#[cfg(hrn_tests)]
 	test_offer: std::sync::Mutex<Option<Offer>>,
 }
@@ -83,7 +83,7 @@ impl UnifiedPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
-		hrn_resolver: Arc<HRNResolver>,
+		hrn_resolver: HRNResolver,
 	) -> Self {
 		Self {
 			onchain_payment,
@@ -197,7 +197,7 @@ impl UnifiedPayment {
 		}
 
 		let parse_fut =
-			PaymentInstructions::parse(uri_str, target_network, self.hrn_resolver.as_ref(), false);
+			PaymentInstructions::parse(uri_str, target_network, &self.hrn_resolver, false);
 
 		let instructions =
 			tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), parse_fut)
@@ -223,7 +223,7 @@ impl UnifiedPayment {
 					Error::InvalidAmount
 				})?;
 
-				let fut = instr.set_amount(amt, self.hrn_resolver.as_ref());
+				let fut = instr.set_amount(amt, &self.hrn_resolver);
 
 				tokio::time::timeout(Duration::from_secs(HRN_RESOLUTION_TIMEOUT_SECS), fut)
 					.await
