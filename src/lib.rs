@@ -161,7 +161,7 @@ use types::{
 	OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
-	ChannelDetails, ChannelMonitorSizeInfo, CustomTlvRecord, DynStore, PeerDetails,
+	ChannelDetails, ChannelMonitorSizeInfo, CustomTlvRecord, DynStore, KeyValue, PeerDetails,
 	SyncAndAsyncKVStore, UserChannelId, WordCount,
 };
 pub use {
@@ -171,7 +171,6 @@ pub use {
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
 
-use crate::types::KeyValue;
 pub use crate::types::{MigrateStorage, ResetState, TlvEntry};
 
 #[cfg(feature = "uniffi")]
