@@ -118,18 +118,18 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// ### Defaults
 ///
 /// | Parameter                              | Value              |
-/// |----------------------------------------|--------------------|
-/// | `storage_dir_path`                     | /tmp/ldk_node/     |
-/// | `network`                              | Bitcoin            |
-/// | `listening_addresses`                  | None               |
-/// | `announcement_addresses`               | None               |
-/// | `node_alias`                           | None               |
-/// | `trusted_peers_0conf`                  | []                 |
-/// | `probing_liquidity_limit_multiplier`   | 3                  |
-/// | `anchor_channels_config`               | Some(..)           |
-/// | `route_parameters`                     | None               |
-/// | `tor_config`                           | None               |
-/// | `hrn_config`                           | HumanReadableNamesConfig::default()           |
+/// |----------------------------------------|--------------------------------------|
+/// | `storage_dir_path`                     | /tmp/ldk_node/                       |
+/// | `network`                              | Bitcoin                              |
+/// | `listening_addresses`                  | None                                 |
+/// | `announcement_addresses`               | None                                 |
+/// | `node_alias`                           | None                                 |
+/// | `trusted_peers_0conf`                  | []                                   |
+/// | `probing_liquidity_limit_multiplier`   | 3                                    |
+/// | `anchor_channels_config`               | Some(..)                             |
+/// | `route_parameters`                     | None                                 |
+/// | `tor_config`                           | None                                 |
+/// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -264,7 +264,7 @@ pub struct HumanReadableNamesConfig {
 	///
 	/// By default, this uses the `Dns` variant with the following settings:
 	/// * **DNS Server**: `8.8.8.8:53` (Google Public DNS)
-	/// * **Resolution Service**: Enabled (`false`)
+	/// * **Resolution Service**: Disabled (`false`)
 	pub resolution_config: HRNResolverConfig,
 }
 
