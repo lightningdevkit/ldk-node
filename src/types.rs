@@ -699,7 +699,10 @@ impl ChannelDetails {
 				forwarding_info: value.counterparty.forwarding_info,
 				// unwrap safety: This value will be `None` for objects serialized with LDK versions
 				// prior to 0.0.115.
-				outbound_htlc_minimum_msat: value.counterparty.outbound_htlc_minimum_msat.unwrap(),
+				outbound_htlc_minimum_msat: value
+					.counterparty
+					.outbound_htlc_minimum_msat
+					.expect("value is set for objects serialized with LDK v0.0.107+"),
 				outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
 			},
 			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
