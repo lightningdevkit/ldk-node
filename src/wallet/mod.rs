@@ -57,10 +57,8 @@ use persist::KVStoreWalletPersister;
 use crate::config::Config;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::payment::pending_payment_store::{
-	FundingCandidate, FundingDetails, FundingPurpose, PendingPaymentDetailsUpdate,
-};
-use crate::payment::store::{ConfirmationStatus, PaymentDetailsUpdate};
+use crate::payment::pending_payment_store::{FundingCandidate, FundingDetails, FundingPurpose};
+use crate::payment::store::ConfirmationStatus;
 use crate::payment::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PendingPaymentDetails,
 };
@@ -291,13 +289,12 @@ impl Wallet {
 						confirmation_status,
 					);
 
-					self.payment_store.insert_or_update(payment.clone())?;
-
 					if payment_status == PaymentStatus::Pending {
 						let pending_payment =
 							self.create_pending_payment_from_tx(payment, Vec::new());
-
-						self.pending_payment_store.insert_or_update(pending_payment)?;
+						self.persist_pending(pending_payment)?;
+					} else {
+						self.payment_store.insert_or_update(payment)?;
 					}
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
@@ -389,10 +386,8 @@ impl Wallet {
 						PaymentStatus::Pending,
 						ConfirmationStatus::Unconfirmed,
 					);
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.payment_store.insert_or_update(payment)?;
-					self.pending_payment_store.insert_or_update(pending_payment)?;
+					let pending_payment = self.create_pending_payment_from_tx(payment, Vec::new());
+					self.persist_pending(pending_payment)?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
 					let Some(payment_id) = self.find_payment_by_txid(txid) else {
@@ -445,10 +440,8 @@ impl Wallet {
 						PaymentStatus::Pending,
 						ConfirmationStatus::Unconfirmed,
 					);
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.payment_store.insert_or_update(payment)?;
-					self.pending_payment_store.insert_or_update(pending_payment)?;
+					let pending_payment = self.create_pending_payment_from_tx(payment, Vec::new());
+					self.persist_pending(pending_payment)?;
 				},
 				_ => {
 					continue;
@@ -1270,6 +1263,15 @@ impl Wallet {
 		PendingPaymentDetails::new(payment, conflicting_txids)
 	}
 
+	/// Writes a [`PendingPaymentDetails`] and its inner [`PaymentDetails`] to their
+	/// respective stores in a fixed order. Callers that need to keep the two stores in
+	/// sync should always go through this.
+	fn persist_pending(&self, pending: PendingPaymentDetails) -> Result<(), Error> {
+		self.payment_store.insert_or_update(pending.details.clone())?;
+		self.pending_payment_store.insert_or_update(pending)?;
+		Ok(())
+	}
+
 	/// Called on `ChannelReady` to mark a funding payment (channel open or splice) as
 	/// succeeded.
 	///
@@ -1469,14 +1471,7 @@ impl Wallet {
 		pending.details.kind =
 			PaymentKind::Onchain { txid: event_txid, status: confirmation_status };
 
-		let update = PendingPaymentDetailsUpdate {
-			id: payment_id,
-			payment_update: Some(PaymentDetailsUpdate::from(&pending.details)),
-			conflicting_txids: Some(pending.conflicting_txids.clone()),
-			funding_details: Some(pending.funding_details.clone()),
-		};
-		self.payment_store.insert_or_update(pending.details.clone())?;
-		self.pending_payment_store.update(update)?;
+		self.persist_pending(pending)?;
 
 		Ok(true)
 	}
@@ -1712,11 +1707,8 @@ impl Wallet {
 			ConfirmationStatus::Unconfirmed,
 		);
 
-		let pending_payment_store =
-			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
-
-		self.pending_payment_store.insert_or_update(pending_payment_store)?;
-		self.payment_store.insert_or_update(new_payment)?;
+		let pending_payment = self.create_pending_payment_from_tx(new_payment, Vec::new());
+		self.persist_pending(pending_payment)?;
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
@@ -1783,14 +1775,10 @@ impl Wallet {
 			candidates: vec![candidate],
 		};
 
-		let pending = PendingPaymentDetails::with_funding_details(
-			details.clone(),
-			Vec::new(),
-			funding_details,
-		);
+		let pending =
+			PendingPaymentDetails::with_funding_details(details, Vec::new(), funding_details);
 
-		self.payment_store.insert_or_update(details)?;
-		self.pending_payment_store.insert_or_update(pending)?;
+		self.persist_pending(pending)?;
 		log_debug!(
 			self.logger,
 			"Recorded channel-funding broadcast {} for channel {}",
@@ -1871,13 +1859,12 @@ impl Wallet {
 
 				let conflicting_txids = replaced_txid.into_iter().collect();
 				let pending = PendingPaymentDetails::with_funding_details(
-					details.clone(),
+					details,
 					conflicting_txids,
 					funding_details,
 				);
 
-				self.payment_store.insert_or_update(details)?;
-				self.pending_payment_store.insert_or_update(pending)?;
+				self.persist_pending(pending)?;
 				log_debug!(
 					self.logger,
 					"Recorded splice broadcast {} for channel {}",
@@ -1913,15 +1900,7 @@ impl Wallet {
 				pending.details.fee_paid_msat = Some(fee_paid_msat);
 				pending.funding_details = Some(funding_details);
 
-				let update = PendingPaymentDetailsUpdate {
-					id: pending.details.id,
-					payment_update: Some(PaymentDetailsUpdate::from(&pending.details)),
-					conflicting_txids: Some(pending.conflicting_txids.clone()),
-					funding_details: Some(pending.funding_details.clone()),
-				};
-
-				self.payment_store.insert_or_update(pending.details.clone())?;
-				self.pending_payment_store.update(update)?;
+				self.persist_pending(pending)?;
 				log_debug!(
 					self.logger,
 					"Recorded splice RBF broadcast {} for channel {} (replaces {})",
