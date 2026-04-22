@@ -1715,6 +1715,12 @@ impl Wallet {
 		Ok(new_txid)
 	}
 
+	// TODO: `classify_funding` and `classify_splice` assume they are invoked once per
+	// transaction. LDK currently calls `broadcast_transactions` exactly once per signed
+	// funding or splice tx, so the assumption holds. If upstream adds rebroadcasting of
+	// unconfirmed funding/splice txs, add idempotency guards (e.g. skip when the txid is
+	// already tracked via `find_payment_by_txid`, and broaden the "last candidate" check
+	// in `classify_splice` to "any candidate").
 	pub(crate) fn classify_broadcast(
 		&self, tx: &Transaction, tx_type: &TransactionType,
 	) -> Result<(), Error> {
