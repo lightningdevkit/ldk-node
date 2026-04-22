@@ -1526,6 +1526,7 @@ pub struct NodeFeatures {
 	pub(crate) inner: LdkNodeFeatures,
 }
 
+#[uniffi::export]
 impl NodeFeatures {
 	/// Constructs node features from big-endian BOLT 9 encoded bytes.
 	#[uniffi::constructor]
@@ -1816,10 +1817,12 @@ impl From<LdkNodeFeatures> for NodeFeatures {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
 pub struct InitFeatures {
 	pub(crate) inner: LdkInitFeatures,
 }
 
+#[uniffi::export]
 impl InitFeatures {
 	/// Constructs init features from big-endian BOLT 9 encoded bytes.
 	#[uniffi::constructor]
@@ -1832,209 +1835,259 @@ impl InitFeatures {
 		self.inner.encode()
 	}
 
-	/// Whether the peer supports `option_static_remotekey`.
-	///
-	/// This ensures the non-broadcaster's output pays directly to their specified key,
-	/// simplifying recovery if a channel is force-closed.
+	/// Whether the peer's `init` message advertises support for `option_static_remotekey`.
 	pub fn supports_static_remote_key(&self) -> bool {
 		self.inner.supports_static_remote_key()
 	}
 
-	/// Whether the peer supports `option_anchors_zero_fee_htlc_tx`.
-	///
-	/// Anchor channels allow fee-bumping commitment transactions after broadcast,
-	/// improving on-chain fee management.
+	/// Whether the peer's `init` message requires `option_static_remotekey`.
+	pub fn requires_static_remote_key(&self) -> bool {
+		self.inner.requires_static_remote_key()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_anchors_zero_fee_htlc_tx`.
 	pub fn supports_anchors_zero_fee_htlc_tx(&self) -> bool {
 		self.inner.supports_anchors_zero_fee_htlc_tx()
 	}
 
-	/// Whether the peer supports `option_anchors_nonzero_fee_htlc_tx`.
-	///
-	/// The initial version of anchor outputs, which was later found to be
-	/// vulnerable and superseded by `option_anchors_zero_fee_htlc_tx`.
+	/// Whether the peer's `init` message requires `option_anchors_zero_fee_htlc_tx`.
+	pub fn requires_anchors_zero_fee_htlc_tx(&self) -> bool {
+		self.inner.requires_anchors_zero_fee_htlc_tx()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_anchors_nonzero_fee_htlc_tx`.
 	pub fn supports_anchors_nonzero_fee_htlc_tx(&self) -> bool {
 		self.inner.supports_anchors_nonzero_fee_htlc_tx()
 	}
 
-	/// Whether the peer supports `option_support_large_channel`.
-	///
-	/// When supported, channels larger than 2^24 satoshis (≈0.168 BTC) may be opened.
+	/// Whether the peer's `init` message requires `option_anchors_nonzero_fee_htlc_tx`.
+	pub fn requires_anchors_nonzero_fee_htlc_tx(&self) -> bool {
+		self.inner.requires_anchors_nonzero_fee_htlc_tx()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_support_large_channel`.
 	pub fn supports_wumbo(&self) -> bool {
 		self.inner.supports_wumbo()
 	}
 
-	/// Whether the peer supports `option_route_blinding`.
-	///
-	/// Route blinding allows the recipient to hide their node identity and
-	/// last-hop channel from the sender.
+	/// Whether the peer's `init` message requires `option_support_large_channel`.
+	pub fn requires_wumbo(&self) -> bool {
+		self.inner.requires_wumbo()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_route_blinding`.
 	pub fn supports_route_blinding(&self) -> bool {
 		self.inner.supports_route_blinding()
 	}
 
-	/// Whether the peer supports `option_onion_messages`.
-	///
-	/// Onion messages enable communication over the Lightning Network without
-	/// requiring a payment, used by BOLT 12 offers and async payments.
+	/// Whether the peer's `init` message requires `option_route_blinding`.
+	pub fn requires_route_blinding(&self) -> bool {
+		self.inner.requires_route_blinding()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_onion_messages`.
 	pub fn supports_onion_messages(&self) -> bool {
 		self.inner.supports_onion_messages()
 	}
 
-	/// Whether the peer supports `option_scid_alias`.
-	///
-	/// When supported, the peer will only forward using short channel ID aliases,
-	/// preventing the real channel UTXO from being revealed during routing.
+	/// Whether the peer's `init` message requires `option_onion_messages`.
+	pub fn requires_onion_messages(&self) -> bool {
+		self.inner.requires_onion_messages()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_scid_alias`.
 	pub fn supports_scid_privacy(&self) -> bool {
 		self.inner.supports_scid_privacy()
 	}
 
-	/// Whether the peer supports `option_zeroconf`.
-	///
-	/// Zero-conf channels can be used immediately without waiting for
-	/// on-chain funding confirmations.
+	/// Whether the peer's `init` message requires `option_scid_alias`.
+	pub fn requires_scid_privacy(&self) -> bool {
+		self.inner.requires_scid_privacy()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_zeroconf`.
 	pub fn supports_zero_conf(&self) -> bool {
 		self.inner.supports_zero_conf()
 	}
 
-	/// Whether the peer supports `option_dual_fund`.
-	///
-	/// Dual-funded channels allow both parties to contribute funds
-	/// to the channel opening transaction.
+	/// Whether the peer's `init` message requires `option_zeroconf`.
+	pub fn requires_zero_conf(&self) -> bool {
+		self.inner.requires_zero_conf()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_dual_fund`.
 	pub fn supports_dual_fund(&self) -> bool {
 		self.inner.supports_dual_fund()
 	}
 
-	/// Whether the peer supports `option_quiesce`.
-	///
-	/// Quiescence is a prerequisite for splicing, allowing both sides to
-	/// pause HTLC activity before modifying the funding transaction.
+	/// Whether the peer's `init` message requires `option_dual_fund`.
+	pub fn requires_dual_fund(&self) -> bool {
+		self.inner.requires_dual_fund()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_quiesce`.
 	pub fn supports_quiescence(&self) -> bool {
 		self.inner.supports_quiescence()
 	}
 
-	/// Whether the peer supports `option_data_loss_protect`.
-	///
-	/// Allows a node that has fallen behind (e.g., restored from backup)
-	/// to detect that it is out of date and close the channel safely.
+	/// Whether the peer's `init` message requires `option_quiesce`.
+	pub fn requires_quiescence(&self) -> bool {
+		self.inner.requires_quiescence()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_data_loss_protect`.
 	pub fn supports_data_loss_protect(&self) -> bool {
 		self.inner.supports_data_loss_protect()
 	}
 
-	/// Whether the peer supports `option_upfront_shutdown_script`.
-	///
-	/// Commits to a shutdown scriptpubkey when opening a channel,
-	/// preventing a compromised key from redirecting closing funds.
+	/// Whether the peer's `init` message requires `option_data_loss_protect`.
+	pub fn requires_data_loss_protect(&self) -> bool {
+		self.inner.requires_data_loss_protect()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_upfront_shutdown_script`.
 	pub fn supports_upfront_shutdown_script(&self) -> bool {
 		self.inner.supports_upfront_shutdown_script()
 	}
 
-	/// Whether the peer supports `gossip_queries`.
-	///
-	/// Indicates the peer has useful gossip to share and supports
-	/// gossip query messages for synchronization.
+	/// Whether the peer's `init` message requires `option_upfront_shutdown_script`.
+	pub fn requires_upfront_shutdown_script(&self) -> bool {
+		self.inner.requires_upfront_shutdown_script()
+	}
+
+	/// Whether the peer's `init` message advertises support for `gossip_queries`.
 	pub fn supports_gossip_queries(&self) -> bool {
 		self.inner.supports_gossip_queries()
 	}
 
-	/// Whether the peer supports `var_onion_optin`.
-	///
-	/// Requires variable-length routing onion payloads, which is
-	/// assumed to be supported by all modern Lightning nodes.
+	/// Whether the peer's `init` message requires `gossip_queries`.
+	pub fn requires_gossip_queries(&self) -> bool {
+		self.inner.requires_gossip_queries()
+	}
+
+	/// Whether the peer's `init` message advertises support for `var_onion_optin`.
 	pub fn supports_variable_length_onion(&self) -> bool {
 		self.inner.supports_variable_length_onion()
 	}
 
-	/// Whether the peer supports `payment_secret`.
-	///
-	/// Payment secrets prevent forwarding nodes from probing
-	/// payment recipients. Assumed to be supported by all modern nodes.
+	/// Whether the peer's `init` message requires `var_onion_optin`.
+	pub fn requires_variable_length_onion(&self) -> bool {
+		self.inner.requires_variable_length_onion()
+	}
+
+	/// Whether the peer's `init` message advertises support for `payment_secret`.
 	pub fn supports_payment_secret(&self) -> bool {
 		self.inner.supports_payment_secret()
 	}
 
-	/// Whether the peer supports `basic_mpp`.
-	///
-	/// Multi-part payments allow splitting a payment across multiple
-	/// routes for improved reliability and liquidity utilization.
+	/// Whether the peer's `init` message requires `payment_secret`.
+	pub fn requires_payment_secret(&self) -> bool {
+		self.inner.requires_payment_secret()
+	}
+
+	/// Whether the peer's `init` message advertises support for `basic_mpp`.
 	pub fn supports_basic_mpp(&self) -> bool {
 		self.inner.supports_basic_mpp()
 	}
 
-	/// Whether the peer supports `opt_shutdown_anysegwit`.
-	///
-	/// Allows future segwit versions in the shutdown script,
-	/// enabling closing to Taproot or later output types.
+	/// Whether the peer's `init` message requires `basic_mpp`.
+	pub fn requires_basic_mpp(&self) -> bool {
+		self.inner.requires_basic_mpp()
+	}
+
+	/// Whether the peer's `init` message advertises support for `opt_shutdown_anysegwit`.
 	pub fn supports_shutdown_anysegwit(&self) -> bool {
 		self.inner.supports_shutdown_anysegwit()
 	}
 
-	/// Whether the peer supports `option_channel_type`.
-	///
-	/// Supports explicit channel type negotiation during channel opening.
+	/// Whether the peer's `init` message requires `opt_shutdown_anysegwit`.
+	pub fn requires_shutdown_anysegwit(&self) -> bool {
+		self.inner.requires_shutdown_anysegwit()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_channel_type`.
 	pub fn supports_channel_type(&self) -> bool {
 		self.inner.supports_channel_type()
 	}
 
-	/// Whether the peer supports `option_trampoline`.
-	///
-	/// Trampoline routing allows lightweight nodes to delegate
-	/// pathfinding to an intermediate trampoline node.
+	/// Whether the peer's `init` message requires `option_channel_type`.
+	pub fn requires_channel_type(&self) -> bool {
+		self.inner.requires_channel_type()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_trampoline`.
 	pub fn supports_trampoline_routing(&self) -> bool {
 		self.inner.supports_trampoline_routing()
 	}
 
-	/// Whether the peer supports `option_simple_close`.
-	///
-	/// Simplified closing negotiation reduces the number of
-	/// round trips needed for a cooperative channel close.
+	/// Whether the peer's `init` message requires `option_trampoline`.
+	pub fn requires_trampoline_routing(&self) -> bool {
+		self.inner.requires_trampoline_routing()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_simple_close`.
 	pub fn supports_simple_close(&self) -> bool {
 		self.inner.supports_simple_close()
 	}
 
-	/// Whether the peer supports `option_splice`.
-	///
-	/// Splicing allows replacing the funding transaction with a new one,
-	/// enabling on-the-fly capacity changes without closing the channel.
+	/// Whether the peer's `init` message requires `option_simple_close`.
+	pub fn requires_simple_close(&self) -> bool {
+		self.inner.requires_simple_close()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_splice`.
 	pub fn supports_splicing(&self) -> bool {
 		self.inner.supports_splicing()
 	}
 
-	/// Whether the peer supports `option_provide_storage`.
-	///
-	/// Indicates the node offers to store encrypted backup data
-	/// on behalf of its peers.
+	/// Whether the peer's `init` message requires `option_splice`.
+	pub fn requires_splicing(&self) -> bool {
+		self.inner.requires_splicing()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_provide_storage`.
 	pub fn supports_provide_storage(&self) -> bool {
 		self.inner.supports_provide_storage()
 	}
 
-	/// Whether the peer set `initial_routing_sync`.
-	///
-	/// Indicates the sending node needs a complete routing information dump.
-	/// Per BOLT #9, this feature has no even (required) bit.
+	/// Whether the peer's `init` message requires `option_provide_storage`.
+	pub fn requires_provide_storage(&self) -> bool {
+		self.inner.requires_provide_storage()
+	}
+
+	/// Whether the peer's `init` message set `initial_routing_sync`.
 	pub fn initial_routing_sync(&self) -> bool {
 		self.inner.initial_routing_sync()
 	}
 
-	/// Whether the peer supports `option_taproot`.
-	///
-	/// Taproot channels use MuSig2-based multisig for funding outputs,
-	/// improving privacy and efficiency.
+	/// Whether the peer's `init` message advertises support for `option_taproot`.
 	pub fn supports_taproot(&self) -> bool {
 		self.inner.supports_taproot()
 	}
 
-	/// Whether the peer supports `option_zero_fee_commitments`.
-	///
-	/// A channel type which always uses zero transaction fee on commitment
-	/// transactions, combined with anchor outputs.
+	/// Whether the peer's `init` message requires `option_taproot`.
+	pub fn requires_taproot(&self) -> bool {
+		self.inner.requires_taproot()
+	}
+
+	/// Whether the peer's `init` message advertises support for `option_zero_fee_commitments`.
 	pub fn supports_anchor_zero_fee_commitments(&self) -> bool {
 		self.inner.supports_anchor_zero_fee_commitments()
 	}
 
-	/// Whether the peer supports HTLC hold.
-	///
-	/// Supports holding HTLCs and forwarding on receipt of an onion message.
+	/// Whether the peer's `init` message requires `option_zero_fee_commitments`.
+	pub fn requires_anchor_zero_fee_commitments(&self) -> bool {
+		self.inner.requires_anchor_zero_fee_commitments()
+	}
+
+	/// Whether the peer's `init` message advertises support for HTLC hold.
 	pub fn supports_htlc_hold(&self) -> bool {
 		self.inner.supports_htlc_hold()
+	}
+
+	/// Whether the peer's `init` message requires HTLC hold.
+	pub fn requires_htlc_hold(&self) -> bool {
+		self.inner.requires_htlc_hold()
 	}
 }
 
