@@ -10,7 +10,7 @@ use std::convert::TryInto;
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Once, RwLock, Weak};
+use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 use std::{fmt, fs};
 
@@ -1735,15 +1735,8 @@ fn build_with_store_internal(
 		})?;
 	}
 
-	// This hook resolves a circular dependency:
-	// 1. PeerManager requires OnionMessenger (via MessageHandler).
-	// 2. OnionMessenger (via HRN resolver) needs to call PeerManager::process_events.
-	//
-	// We provide the resolver with a Weak pointer via this Mutex-protected "hook."
-	// This allows us to initialize the resolver before the PeerManager exists,
-	// and prevents a reference cycle (memory leak).
-	let peer_manager_hook: Arc<Mutex<Option<Weak<PeerManager>>>> = Arc::new(Mutex::new(None));
 	let hrn_resolver;
+	let mut blip32_resolver = None;
 
 	let runtime_handle = runtime.handle();
 
@@ -1755,16 +1748,8 @@ fn build_with_store_internal(
 			let hrn_res =
 				Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph)));
 			hrn_resolver = HRNResolver::Onion(Arc::clone(&hrn_res));
+			blip32_resolver = Some(Arc::clone(&hrn_res));
 
-			// We clone the hook because it's moved into a Send + Sync closure that outlives this scope.
-			let pm_hook_clone = Arc::clone(&peer_manager_hook);
-			hrn_res.register_post_queue_action(Box::new(move || {
-				if let Ok(guard) = pm_hook_clone.lock() {
-					if let Some(pm) = guard.as_ref().and_then(|weak| weak.upgrade()) {
-						pm.process_events();
-					}
-				}
-			}));
 			hrn_res as Arc<dyn DNSResolverMessageHandler + Send + Sync>
 		},
 		HRNResolverConfig::Dns { dns_server_address, enable_hrn_resolution_service, .. } => {
@@ -1945,8 +1930,13 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
-	if let Ok(mut guard) = peer_manager_hook.lock() {
-		*guard = Some(Arc::downgrade(&peer_manager));
+	if let Some(res) = blip32_resolver {
+		let pm_weak = Arc::downgrade(&peer_manager);
+		res.register_post_queue_action(Box::new(move || {
+			if let Some(upgraded_pm) = pm_weak.upgrade() {
+				upgraded_pm.process_events();
+			}
+		}));
 	}
 
 	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
