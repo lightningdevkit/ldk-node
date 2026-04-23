@@ -2074,6 +2074,81 @@ async fn spontaneous_send_with_custom_preimage() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn cancel_invoice() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 2_125_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let funding_amount_sat = 2_080_000;
+	let push_msat = (funding_amount_sat / 2) * 1000;
+	open_channel_push_amt(&node_a, &node_b, funding_amount_sat, Some(push_msat), true, &electrsd)
+		.await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Sleep a bit for gossip to propagate.
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let amount_msat = 2_500_000;
+
+	// Create an invoice on node_b and immediately cancel it.
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(amount_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
+
+	let payment_hash = PaymentHash(invoice.payment_hash().0);
+	let payment_id = PaymentId(payment_hash.0);
+	node_b.bolt11_payment().cancel_invoice(payment_hash).unwrap();
+
+	// Verify the payment status is now Failed.
+	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+
+	// Attempting to pay the canceled invoice should result in a failure on the sender side.
+	node_a.bolt11_payment().send(&invoice, None).unwrap();
+	expect_event!(node_a, PaymentFailed);
+
+	// Verify cancelling an already claimed payment errors.
+	let invoice_2 = node_b
+		.bolt11_payment()
+		.receive(amount_msat, &invoice_description.clone().into(), 9217)
+		.unwrap();
+	let payment_id_2 = node_a.bolt11_payment().send(&invoice_2, None).unwrap();
+	expect_payment_received_event!(node_b, amount_msat);
+	expect_payment_successful_event!(node_a, Some(payment_id_2), None);
+
+	let payment_hash_2 = PaymentHash(invoice_2.payment_hash().0);
+	assert_eq!(
+		node_b.bolt11_payment().cancel_invoice(payment_hash_2),
+		Err(NodeError::InvalidPaymentHash)
+	);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn drop_in_async_context() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
