@@ -59,22 +59,30 @@ impl TierStore {
 	/// Configures a backup store for primary-backed data.
 	///
 	/// Once set, writes and removals targeting the primary tier are issued to the
-	/// primary and backup stores concurrently. Success semantics depend on the
-	/// configured [`BackupMode`].
+	/// primary and backup stores concurrently.
+	///
+	/// If `retry_queue` is `None`, backup failures are logged and otherwise ignored
+	/// as long as the primary store succeeds.
+	///
+	/// If `retry_queue` is `Some`, backup failures are treated with durable
+	/// semi-synchronous semantics: the operation succeeds only if the failed backup
+	/// intent can be persisted locally and enqueued for asynchronous retry.
 	///
 	/// Note: dual-store writes/removals are not atomic. An error may be returned
 	/// after the primary store has already been updated if the requested backup
 	/// guarantee could not be achieved.
 	///
 	/// The backup store is not consulted for normal reads or lists.
-	pub fn set_backup_store(&mut self, backup: Arc<DynStore>) {
+	pub fn set_backup_store(
+		&mut self, backup: Arc<DynStore>, retry_queue: Option<Arc<BackupRetryQueue<Arc<Logger>>>>,
+	) {
 		debug_assert_eq!(Arc::strong_count(&self.inner), 1);
 
 		let inner = Arc::get_mut(&mut self.inner).expect(
 			"TierStore should not be shared during configuration. No other references should exist",
 		);
 
-		inner.backup_store = Some(backup);
+		inner.backup_store = Some(BackupStore { store: backup, retry_queue });
 	}
 
 	/// Configures the ephemeral store for non-critical, rebuildable data.
@@ -180,13 +188,20 @@ impl KVStoreSync for TierStore {
 	}
 }
 
+struct BackupStore {
+	/// Store may be remote.
+	store: Arc<DynStore>,
+	/// Present only when backup failures should be durably queued for retry.
+	retry_queue: Option<Arc<BackupRetryQueue<Arc<Logger>>>>,
+}
+
 struct TierStoreInner {
 	/// The authoritative store for durable data.
 	primary_store: Arc<DynStore>,
 	/// The store used for non-critical, rebuildable cached data.
 	ephemeral_store: Option<Arc<DynStore>>,
-	/// An optional second durable store for primary-backed data.
-	backup_store: Option<Arc<DynStore>>,
+	/// Optional backup configuration for primary-backed data.
+	backup_store: Option<BackupStore>,
 	logger: Arc<Logger>,
 }
 
@@ -300,11 +315,11 @@ impl TierStoreInner {
 
 		if let Some(backup_store) = self.backup_store.as_ref() {
 			let backup_fut = KVStore::write(
-				backup_store.as_ref(),
+				backup_store.store.as_ref(),
 				primary_namespace,
 				secondary_namespace,
 				key,
-				buf,
+				buf.clone(),
 			);
 
 			let (primary_res, backup_res) = tokio::join!(primary_fut, backup_fut);
@@ -314,6 +329,7 @@ impl TierStoreInner {
 				primary_namespace,
 				secondary_namespace,
 				key,
+				PendingBackupOp::Write { buf },
 				primary_res,
 				backup_res,
 			)
@@ -334,11 +350,11 @@ impl TierStoreInner {
 				buf.clone(),
 			);
 			let backup_res = KVStoreSync::write(
-				backup_store.as_ref(),
+				backup_store.store.as_ref(),
 				primary_namespace,
 				secondary_namespace,
 				key,
-				buf,
+				buf.clone(),
 			);
 
 			self.handle_primary_backup_results(
@@ -346,6 +362,7 @@ impl TierStoreInner {
 				primary_namespace,
 				secondary_namespace,
 				key,
+				PendingBackupOp::Write { buf },
 				primary_res,
 				backup_res,
 			)
@@ -373,7 +390,7 @@ impl TierStoreInner {
 
 		if let Some(backup_store) = self.backup_store.as_ref() {
 			let backup_fut = KVStore::remove(
-				backup_store.as_ref(),
+				backup_store.store.as_ref(),
 				primary_namespace,
 				secondary_namespace,
 				key,
@@ -387,6 +404,7 @@ impl TierStoreInner {
 				primary_namespace,
 				secondary_namespace,
 				key,
+				PendingBackupOp::Remove { lazy },
 				primary_res,
 				backup_res,
 			)
@@ -407,7 +425,7 @@ impl TierStoreInner {
 				lazy,
 			);
 			let backup_res = KVStoreSync::remove(
-				backup_store.as_ref(),
+				backup_store.store.as_ref(),
 				primary_namespace,
 				secondary_namespace,
 				key,
@@ -419,6 +437,7 @@ impl TierStoreInner {
 				primary_namespace,
 				secondary_namespace,
 				key,
+				PendingBackupOp::Remove { lazy },
 				primary_res,
 				backup_res,
 			)
@@ -665,17 +684,22 @@ impl TierStoreInner {
 	}
 
 	fn handle_primary_backup_results(
-		&self, op: &str, primary_namespace: &str, secondary_namespace: &str, key: &str,
-		primary_res: io::Result<()>, backup_res: io::Result<()>,
+		&self, op_name: &str, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		pending_backup_op: PendingBackupOp, primary_res: io::Result<()>,
+		backup_res: io::Result<()>,
 	) -> io::Result<()> {
-		match (primary_res, backup_res) {
-			(Ok(()), Ok(())) => Ok(()),
-			(Err(primary_err), Ok(())) => Err(primary_err),
-			(Ok(()), Err(backup_err)) => {
+		match (
+			primary_res,
+			backup_res,
+			self.backup_store.as_ref().and_then(|b| b.retry_queue.as_ref()),
+		) {
+			(Ok(()), Ok(()), _) => Ok(()),
+			(Err(primary_err), Ok(()), _) => Err(primary_err),
+			(Ok(()), Err(backup_err), None) => {
 				log_error!(
 					self.logger,
 					"Backup {} failed for key {}/{}/{}: {}",
-					op,
+					op_name,
 					primary_namespace,
 					secondary_namespace,
 					key,
@@ -683,11 +707,31 @@ impl TierStoreInner {
 				);
 				Ok(())
 			},
-			(Err(primary_err), Err(backup_err)) => {
+			(Ok(()), Err(backup_err), Some(retry_queue)) => {
+				retry_queue.enqueue_sync(
+					(
+						primary_namespace.to_string(),
+						secondary_namespace.to_string(),
+						key.to_string(),
+					),
+					pending_backup_op,
+				)?;
+				log_error!(
+					self.logger,
+					"Backup {} failed for key {}/{}/{}: {}. Operation was durably queued for retry.",
+					op_name,
+					primary_namespace,
+					secondary_namespace,
+					key,
+					backup_err
+				);
+				Ok(())
+			},
+			(Err(primary_err), Err(backup_err), _) => {
 				log_error!(
 					self.logger,
 					"Primary and backup {}s both failed for key {}/{}/{}: primary={}, backup={}",
-					op,
+					op_name,
 					primary_namespace,
 					secondary_namespace,
 					key,
@@ -1260,7 +1304,7 @@ mod tests {
 
 		let backup_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
-		tier.set_backup_store(Arc::clone(&backup_store));
+		tier.set_backup_store(Arc::clone(&backup_store), None);
 
 		let data = vec![42u8; 32];
 
@@ -1304,7 +1348,7 @@ mod tests {
 
 		let backup_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
-		tier.set_backup_store(Arc::clone(&backup_store));
+		tier.set_backup_store(Arc::clone(&backup_store), None);
 
 		let data = vec![42u8; 32];
 		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
