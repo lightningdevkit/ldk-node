@@ -16,7 +16,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bitcoin::{BlockHash, FeeRate, Network, OutPoint, Transaction, Txid};
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::{BestBlock, Listen};
+use lightning::chain::{BestBlock as BlockLocator, Listen};
 use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpClientError, JsonResponse};
@@ -325,7 +325,7 @@ impl BitcoindChainSource {
 		}
 	}
 
-	pub(super) async fn poll_best_block(&self) -> Result<BestBlock, Error> {
+	pub(super) async fn poll_best_block(&self) -> Result<BlockLocator, Error> {
 		self.poll_chain_tip().await.map(|tip| tip.to_best_block())
 	}
 
