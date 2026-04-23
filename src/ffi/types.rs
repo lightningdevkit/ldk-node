@@ -44,6 +44,7 @@ pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
 pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
+use lightning_types::features::NodeFeatures;
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
 use vss_client::headers::{
@@ -1518,6 +1519,13 @@ pub enum ClosureReason {
 		required_feerate_sat_per_kw: u32,
 	},
 }
+
+#[cfg(feature = "uniffi")]
+uniffi::custom_type!(NodeFeatures, Vec<u8>, {
+	remote,
+	try_lift: |val| Ok(NodeFeatures::from_le_bytes(val)),
+	lower: |obj| obj.le_flags().to_vec(),
+});
 
 #[cfg(test)]
 mod tests {
