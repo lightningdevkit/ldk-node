@@ -662,7 +662,18 @@ impl TierStoreInner {
 		match (primary_res, backup_res) {
 			(Ok(()), Ok(())) => Ok(()),
 			(Err(primary_err), Ok(())) => Err(primary_err),
-			(Ok(()), Err(backup_err)) => Err(backup_err),
+			(Ok(()), Err(backup_err)) => {
+				log_error!(
+					self.logger,
+					"Backup {} failed for key {}/{}/{}: {}",
+					op,
+					primary_namespace,
+					secondary_namespace,
+					key,
+					backup_err
+				);
+				Ok(())
+			},
 			(Err(primary_err), Err(backup_err)) => {
 				log_error!(
 					self.logger,
