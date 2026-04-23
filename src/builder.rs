@@ -854,7 +854,7 @@ impl NodeBuilder {
 		let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
 		if let Some(config) = ts_config {
 			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
-			config.backup.as_ref().map(|s| tier_store.set_backup_store(Arc::clone(s)));
+			config.backup.as_ref().map(|s| tier_store.set_backup_store(Arc::clone(s), None));
 		}
 
 		let seed_bytes = node_entropy.to_seed_bytes();
