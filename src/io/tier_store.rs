@@ -9,15 +9,23 @@ use crate::io::utils::check_namespace_key_validity;
 use crate::logger::{LdkLogger, Logger};
 use crate::types::DynStore;
 
+use bitcoin::io::Read;
+use lightning::ln::msgs::DecodeError;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
+use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::{io, log_error};
 
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 /// A 3-tiered [`KVStore`]/[`KVStoreSync`] implementation that routes data across
 /// storage backends that may be local or remote:
@@ -26,16 +34,16 @@ use std::sync::Arc;
 ///   primary-backed data, and
 /// - an optional ephemeral store for non-critical, rebuildable cached data.
 ///
-/// When a backup store is configured, writes and removals for primary-backed data
-/// are issued to the primary and backup stores concurrently and only succeed once
-/// both stores complete successfully.
+/// When a backup store is configured, writes and removals for primary-backed
+/// data are issued to the primary and backup stores concurrently. Success
+/// semantics depend on the configured [`BackupMode`].
 ///
 /// Reads and lists do not consult the backup store during normal operation.
 /// Ephemeral data is read from and written to the ephemeral store when configured.
 ///
-/// Note that dual-store writes and removals are not atomic across the primary and
-/// backup stores. If one store succeeds and the other fails, the operation
-/// returns an error even though one store may already reflect the change.
+/// Note that dual-store writes and removals are not atomic across the primary
+/// and backup stores. One store may already reflect the change even if the
+/// overall operation returns an error.
 pub(crate) struct TierStore {
 	inner: Arc<TierStoreInner>,
 	logger: Arc<Logger>,
@@ -50,12 +58,13 @@ impl TierStore {
 
 	/// Configures a backup store for primary-backed data.
 	///
-	/// Once set, writes and removals targeting the primary tier succeed only if both
-	/// the primary and backup stores succeed. The two operations are issued
-	/// concurrently, and any failure is returned to the caller.
+	/// Once set, writes and removals targeting the primary tier are issued to the
+	/// primary and backup stores concurrently. Success semantics depend on the
+	/// configured [`BackupMode`].
 	///
 	/// Note: dual-store writes/removals are not atomic. An error may be returned
-	/// after the primary store has already been updated if the backup store fails.
+	/// after the primary store has already been updated if the requested backup
+	/// guarantee could not be achieved.
 	///
 	/// The backup store is not consulted for normal reads or lists.
 	pub fn set_backup_store(&mut self, backup: Arc<DynStore>) {
@@ -697,6 +706,426 @@ fn is_ephemeral_cached_key(pn: &str, sn: &str, key: &str) -> bool {
 		(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
 			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY)
 	)
+}
+
+// Backup retry constants.
+const BACKUP_RETRY_QUEUE_PRIMARY_NAMESPACE: &str = "backup_retry";
+const BACKUP_RETRY_QUEUE_SECONDARY_NAMESPACE: &str = "";
+const BACKUP_RETRY_QUEUE_KEY: &str = "pending_ops";
+
+// Backoff parameters for retry task.
+const RETRY_INITIAL_BACKOFF_MS: u64 = 500;
+const RETRY_MAX_BACKOFF_MS: u64 = 60_000;
+const RETRY_BACKOFF_MULTIPLIER: u64 = 2;
+
+/// Controls how TierStore treats backup-store failures for primary-backed writes and removals.
+pub enum BackupMode {
+	/// Writes must succeed on the primary store.
+	///
+	/// Backup writes/removals are attempted immediately, but if the backup
+	/// store fails, the operation still succeeds as long as the primary store
+	/// succeeds. Backup failures are logged.
+	BestEffortBackup,
+
+	/// Writes must succeed on the primary store.
+	///
+	/// Backup writes/removals are attempted immediately. If the backup store
+	/// fails but the primary succeeds, the operation still succeeds only if the
+	/// failed backup operation is durably persisted locally and enqueued for
+	/// asynchronous retry.
+	SemiSync,
+}
+
+/// A pending operation against the backup store that failed on the write path
+/// and needs to be retried asynchronously.
+///
+/// Limitation:
+/// `Write` carries the exact `buf` at enqueue time. We never re-read from
+/// primary at retry time — if a `Remove` for the same key succeeds on primary
+/// after this `Write` was enqueued, re-reading primary would find nothing and
+/// potentially resurrect deleted data on the backup.
+#[derive(Clone)]
+pub(crate) enum PendingBackupOp {
+	Write { buf: Vec<u8> },
+	Remove { lazy: bool },
+}
+
+impl Writeable for PendingBackupOp {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		match self {
+			PendingBackupOp::Write { buf } => {
+				0u8.write(writer)?;
+				(buf.len() as u32).write(writer)?;
+				writer.write_all(buf)?;
+			},
+			PendingBackupOp::Remove { lazy } => {
+				1u8.write(writer)?;
+				lazy.write(writer)?;
+			},
+		}
+		Ok(())
+	}
+}
+
+impl Readable for PendingBackupOp {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let tag: u8 = Readable::read(reader)?;
+		match tag {
+			0 => {
+				let len: u32 = Readable::read(reader)?;
+				let mut buf = vec![0u8; len as usize];
+				reader.read_exact(&mut buf)?;
+				Ok(PendingBackupOp::Write { buf })
+			},
+			1 => {
+				let lazy: bool = Readable::read(reader)?;
+				Ok(PendingBackupOp::Remove { lazy })
+			},
+			_ => Err(DecodeError::InvalidValue),
+		}
+	}
+}
+
+/// Deserialization wrapper for the pending ops map.
+/// Decodes from a length-prefixed list of `(pn, sn, key, op_tag, [buf])` entries.
+struct PendingOpsDeserWrapper(HashMap<(String, String, String), PendingBackupOp>);
+
+impl Readable for PendingOpsDeserWrapper {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let count: u32 = Readable::read(reader)?;
+		let mut map = HashMap::with_capacity(count as usize);
+		for _ in 0..count {
+			let pn: String = Readable::read(reader)?;
+			let sn: String = Readable::read(reader)?;
+			let key: String = Readable::read(reader)?;
+			let op: PendingBackupOp = Readable::read(reader)?;
+			map.insert((pn, sn, key), op);
+		}
+		Ok(Self(map))
+	}
+}
+
+/// Serialization wrapper for the pending ops map.
+/// Encodes as a length-prefixed list of `(pn, sn, key, op_tag, [buf])` entries.
+struct PendingOpsSerWrapper<'a>(&'a HashMap<(String, String, String), PendingBackupOp>);
+
+impl Writeable for PendingOpsSerWrapper<'_> {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		(self.0.len() as u32).write(writer)?;
+		let mut entries: Vec<_> = self.0.iter().collect();
+		entries.sort_by(|a, b| a.0.cmp(b.0));
+
+		for ((pn, sn, key), op) in entries {
+			pn.write(writer)?;
+			sn.write(writer)?;
+			key.write(writer)?;
+			op.write(writer)?;
+		}
+
+		Ok(())
+	}
+}
+
+/// A durable, locally-persisted queue of backup operations that failed on the
+/// write path and are pending async retry.
+///
+/// The queue is keyed by `(primary_namespace, secondary_namespace, key)` so
+/// that a newer op for the same key always replaces an older one —
+/// deduplication is structural. This means:
+/// - `Write` followed by `Write` to same key: only latest `buf` is retried.
+/// - `Write` followed by `Remove` to same key: only `Remove` is retried.
+/// - `Remove` followed by `Write` to same key: only latest `Write` is retried.
+///
+/// The queue persists to a local `FilesystemStoreV2` at a dedicated namespace,
+/// never through `TierStore`'s backup replication path, to avoid recursion
+/// and to remain available even when primary is a remote store.
+pub(crate) struct BackupRetryQueue<L: Deref>
+where
+	L::Target: LdkLogger,
+{
+	pending: Arc<Mutex<HashMap<(String, String, String), PendingBackupOp>>>,
+	waker: Arc<Mutex<Option<Waker>>>,
+	/// Always a local store — FilesystemStoreV2 at node data dir.
+	/// Never the user's primary or backup store.
+	local_store: Arc<DynStore>,
+	logger: L,
+}
+
+impl<L: Deref> BackupRetryQueue<L>
+where
+	L::Target: LdkLogger,
+{
+	/// Creates a new queue, loading any previously persisted pending ops from
+	/// `local_store` so that ops enqueued before a crash are not lost.
+	pub(crate) fn new(local_store: Arc<DynStore>, logger: L) -> Self {
+		let pending = Arc::new(Mutex::new(HashMap::new()));
+
+		match KVStoreSync::read(
+			local_store.as_ref(),
+			BACKUP_RETRY_QUEUE_PRIMARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_SECONDARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_KEY,
+		) {
+			Ok(data) => match PendingOpsDeserWrapper::read(&mut io::Cursor::new(data)) {
+				Ok(wrapper) => {
+					*pending.lock().expect("lock") = wrapper.0;
+				},
+				Err(e) => {
+					log_error!(
+						logger,
+						"Failed to decode persisted backup retry queue, \
+                        starting fresh. Backup store may be missing recent \
+                        writes. Error: {}",
+						e
+					);
+				},
+			},
+			Err(e) if e.kind() == io::ErrorKind::NotFound => {
+				// No persisted queue — normal on first startup.
+			},
+			Err(e) => {
+				log_error!(
+					logger,
+					"Failed to read persisted backup retry queue: {}. \
+                Starting fresh.",
+					e
+				);
+			},
+		}
+
+		Self { pending, waker: Arc::new(Mutex::new(None)), local_store, logger }
+	}
+
+	/// Enqueues a failed backup operation for asynchronous retry.
+	///
+	/// If a pending op already exists for this key, it is replaced by the newer
+	/// op. The updated queue is persisted synchronously to the local store before
+	/// this function returns.
+	///
+	/// Returns an error if the retry intent could not be durably persisted locally.
+	/// In that case, the op may still remain queued in memory for the current
+	/// process, but it is not guaranteed to survive a restart.
+	///
+	/// This is the sync enqueue path, used from synchronous write/remove flows.
+	pub(crate) fn enqueue_sync(
+		&self, key: (String, String, String), op: PendingBackupOp,
+	) -> io::Result<()> {
+		let encoded = {
+			let mut locked = self.pending.lock().expect("lock");
+			locked.insert(key, op);
+			PendingOpsSerWrapper(&*locked).encode()
+		};
+
+		KVStoreSync::write(
+			self.local_store.as_ref(),
+			BACKUP_RETRY_QUEUE_PRIMARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_SECONDARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_KEY,
+			encoded,
+		)?;
+
+		if let Some(waker) = self.waker.lock().expect("lock").take() {
+			waker.wake();
+		}
+
+		Ok(())
+	}
+
+	/// Enqueues a failed backup operation for asynchronous retry.
+	///
+	/// This is the async enqueue path, used from asynchronous write/remove flows.
+	/// Internally it reuses the synchronous implementation because queue mutation
+	/// and local queue persistence are both synchronous operations.
+	///
+	/// Returns an error if the retry intent could not be durably persisted locally.
+	/// In that case, the op may still remain queued in memory for the current
+	/// process, but it is not guaranteed to survive a restart.
+	pub(crate) async fn enqueue_async(
+		&self, key: (String, String, String), op: PendingBackupOp,
+	) -> io::Result<()> {
+		self.enqueue_sync(key, op)
+	}
+
+	/// Removes a successfully retried entry from the in-memory queue and
+	/// best-effort persists the updated state.
+	///
+	/// Failure to persist this cleanup is logged but not returned. At that
+	/// point the backup operation has already succeeded, so correctness relies
+	/// on at-least-once replay semantics: if the process restarts before a
+	/// later successful queue persistence, the completed op may be retried
+	/// again from the on-disk snapshot.
+	///
+	/// This is acceptable because retried backup writes/removals are expected
+	/// to be idempotent at the `KVStore` layer.
+	pub(crate) fn remove_completed(&self, key: &(String, String, String)) {
+		let encoded = {
+			let mut locked = self.pending.lock().expect("lock");
+			locked.remove(key);
+			PendingOpsSerWrapper(&*locked).encode()
+		};
+
+		if let Err(e) = KVStoreSync::write(
+			self.local_store.as_ref(),
+			BACKUP_RETRY_QUEUE_PRIMARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_SECONDARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_KEY,
+			encoded,
+		) {
+			// Cleanup persistence is best-effort only. The backup op has already
+			// succeeded, so a later restart may replay it from the stale on-disk
+			// queue snapshot. This is acceptable because backup ops are expected
+			// to be idempotent.
+			log_error!(
+				self.logger,
+				"Failed to persist backup retry queue after successful retry for key {:?}: {}",
+				key,
+				e
+			);
+		}
+	}
+
+	/// Returns a snapshot of all pending entries for the retry task to drain.
+	///
+	/// Returns cloned entries so the lock is not held during I/O.
+	pub(crate) fn snapshot(&self) -> Vec<((String, String, String), PendingBackupOp)> {
+		self.pending.lock().expect("lock").iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+	}
+
+	/// Returns true if the queue has no pending entries.
+	pub(crate) fn is_empty(&self) -> bool {
+		self.pending.lock().expect("lock").is_empty()
+	}
+
+	/// Waits asynchronously until the queue has entries to process.
+	pub(crate) async fn wait_for_entries(&self) {
+		RetryQueueFuture { pending: Arc::clone(&self.pending), waker: Arc::clone(&self.waker) }
+			.await
+	}
+}
+
+/// Future that resolves when the retry queue has pending entries.
+/// Mirrors `EventFuture` in `EventQueue`.
+struct RetryQueueFuture {
+	pending: Arc<Mutex<HashMap<(String, String, String), PendingBackupOp>>>,
+	waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl Future for RetryQueueFuture {
+	type Output = ();
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		if !self.pending.lock().expect("lock").is_empty() {
+			Poll::Ready(())
+		} else {
+			*self.waker.lock().expect("lock") = Some(cx.waker().clone());
+			Poll::Pending
+		}
+	}
+}
+
+/// Runs the background retry loop for the given `BackupRetryQueue` against
+/// `backup_store`.
+///
+/// Wakes when the queue has entries, iterates all pending ops, applies each
+/// against the backup store, and removes successfully retried entries.
+/// Uses exponential backoff with jitter on persistent failures.
+/// Throttles error logging to avoid log spam.
+///
+/// This function runs for node lifetime and should be spawned via
+/// `tokio::spawn` during `build()` when `BackupMode::SemiSync` is configured.
+pub(crate) async fn run_backup_retry_task<L: Deref + Send + Sync + 'static>(
+	queue: Arc<BackupRetryQueue<L>>, backup_store: Arc<DynStore>, logger: L,
+) where
+	L::Target: LdkLogger,
+{
+	let mut backoff_ms = RETRY_INITIAL_BACKOFF_MS;
+	let mut consecutive_failures: usize = 0;
+
+	loop {
+		// Wait until there is something to do.
+		queue.wait_for_entries().await;
+
+		let entries = queue.snapshot();
+		let mut all_succeeded = true;
+
+		for (key, op) in &entries {
+			let (pn, sn, k) = key;
+
+			// Before applying, check whether this key is still in the queue
+			// with the same op. A newer op may have replaced it since we
+			// took the snapshot.
+			{
+				let locked = queue.pending.lock().expect("lock");
+				match locked.get(key) {
+					None => {
+						// Entry was removed (completed by a concurrent retry).
+						continue;
+					},
+					Some(current_op) => {
+						// If the op in the queue differs from our snapshot,
+						// a newer op replaced it. Skip — next iteration will
+						// pick up the newer op.
+						if !ops_match(current_op, op) {
+							continue;
+						}
+					},
+				}
+			}
+
+			let result = match op {
+				PendingBackupOp::Write { buf } => {
+					KVStoreSync::write(backup_store.as_ref(), pn, sn, k, buf.clone())
+				},
+				PendingBackupOp::Remove { lazy } => {
+					KVStoreSync::remove(backup_store.as_ref(), pn, sn, k, *lazy)
+				},
+			};
+
+			match result {
+				Ok(()) => {
+					queue.remove_completed(key);
+					consecutive_failures = 0;
+					backoff_ms = RETRY_INITIAL_BACKOFF_MS;
+				},
+				Err(e) => {
+					all_succeeded = false;
+					consecutive_failures += 1;
+					// Throttle logging — only log every 8 failures to avoid
+					// spam on persistent remote store outages.
+					if consecutive_failures == 1 || consecutive_failures.is_power_of_two() {
+						log_error!(
+							logger,
+							"Backup retry failed for key {}/{}/{} \
+                            (attempt {}): {}",
+							pn,
+							sn,
+							k,
+							consecutive_failures,
+							e
+						);
+					}
+				},
+			}
+		}
+
+		if !all_succeeded {
+			// Exponential backoff with a small jitter.
+			let jitter_ms = (backoff_ms / 10).max(1);
+			let sleep_ms = backoff_ms + (jitter_ms % 17); // deterministic but offset
+			tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+			backoff_ms = (backoff_ms * RETRY_BACKOFF_MULTIPLIER).min(RETRY_MAX_BACKOFF_MS);
+		}
+	}
+}
+
+/// Returns true if two `PendingBackupOp` values are the same variant with
+/// equivalent data. Used to detect staleness before applying a retried op.
+fn ops_match(a: &PendingBackupOp, b: &PendingBackupOp) -> bool {
+	match (a, b) {
+		(PendingBackupOp::Write { buf: ba }, PendingBackupOp::Write { buf: bb }) => ba == bb,
+		(PendingBackupOp::Remove { lazy: la }, PendingBackupOp::Remove { lazy: lb }) => la == lb,
+		_ => false,
+	}
 }
 
 #[cfg(test)]
