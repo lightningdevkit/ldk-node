@@ -294,7 +294,9 @@ impl ElectrumChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+	pub(crate) async fn process_broadcast_package(
+		&self, txs: impl IntoIterator<Item = Transaction>,
+	) {
 		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 			self.electrum_runtime_status.read().expect("lock").client().as_ref()
 		{
@@ -304,7 +306,7 @@ impl ElectrumChainSource {
 			return;
 		};
 
-		for tx in package {
+		for tx in txs {
 			electrum_client.broadcast(tx).await;
 		}
 	}
