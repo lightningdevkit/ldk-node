@@ -44,16 +44,16 @@ use std::time::Duration;
 /// Note that dual-store writes and removals are not atomic across the primary
 /// and backup stores. One store may already reflect the change even if the
 /// overall operation returns an error.
+#[derive(Clone)]
 pub(crate) struct TierStore {
 	inner: Arc<TierStoreInner>,
-	logger: Arc<Logger>,
 }
 
 impl TierStore {
 	pub fn new(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
 		let inner = Arc::new(TierStoreInner::new(primary_store, Arc::clone(&logger)));
 
-		Self { inner, logger }
+		Self { inner }
 	}
 
 	/// Configures a backup store for primary-backed data.
@@ -97,6 +97,10 @@ impl TierStore {
 		);
 
 		inner.ephemeral_store = Some(ephemeral);
+	}
+
+	pub(crate) fn backup_store(&self) -> Option<&BackupStore> {
+		self.inner.backup_store.as_ref()
 	}
 }
 
@@ -188,11 +192,11 @@ impl KVStoreSync for TierStore {
 	}
 }
 
-struct BackupStore {
+pub(crate) struct BackupStore {
 	/// Store may be remote.
-	store: Arc<DynStore>,
+	pub(crate) store: Arc<DynStore>,
 	/// Present only when backup failures should be durably queued for retry.
-	retry_queue: Option<Arc<BackupRetryQueue<Arc<Logger>>>>,
+	pub(crate) retry_queue: Option<Arc<BackupRetryQueue<Arc<Logger>>>>,
 }
 
 struct TierStoreInner {
@@ -763,6 +767,7 @@ const RETRY_MAX_BACKOFF_MS: u64 = 60_000;
 const RETRY_BACKOFF_MULTIPLIER: u64 = 2;
 
 /// Controls how TierStore treats backup-store failures for primary-backed writes and removals.
+#[derive(Debug)]
 pub enum BackupMode {
 	/// Writes must succeed on the primary store.
 	///
@@ -778,6 +783,12 @@ pub enum BackupMode {
 	/// failed backup operation is durably persisted locally and enqueued for
 	/// asynchronous retry.
 	SemiSync,
+}
+
+impl Default for BackupMode {
+	fn default() -> Self {
+		Self::BestEffortBackup
+	}
 }
 
 /// A pending operation against the backup store that failed on the write path
@@ -1070,49 +1081,61 @@ impl Future for RetryQueueFuture {
 /// Runs the background retry loop for the given `BackupRetryQueue` against
 /// `backup_store`.
 ///
-/// Wakes when the queue has entries, iterates all pending ops, applies each
-/// against the backup store, and removes successfully retried entries.
-/// Uses exponential backoff with jitter on persistent failures.
-/// Throttles error logging to avoid log spam.
+/// The task waits for pending queue entries, a periodic fallback wake, or a
+/// shutdown signal. When woken, it snapshots the current queue and retries
+/// each pending operation against the backup store.
 ///
-/// This function runs for node lifetime and should be spawned via
-/// `tokio::spawn` during `build()` when `BackupMode::SemiSync` is configured.
-pub(crate) async fn run_backup_retry_task<L: Deref + Send + Sync + 'static>(
-	queue: Arc<BackupRetryQueue<L>>, backup_store: Arc<DynStore>, logger: L,
-) where
-	L::Target: LdkLogger,
-{
+/// `Write` retries write the originally queued buffer directly to the backup
+/// store and never re-read from primary. `Remove` retries issue a remove
+/// against the backup store and treat `io::ErrorKind::NotFound` as success.
+///
+/// Successfully retried entries are removed from the queue and the updated
+/// queue state is persisted locally. Failed entries remain queued for later
+/// retry. If any retries fail in a round, the task waits using exponential
+/// backoff with jitter before retrying again.
+///
+/// This function runs for node lifetime and should be spawned as a background
+/// task during [`Node::start`] when semisynchronous backup retry is configured.
+///
+/// [`Node::start`]: crate::Node::start
+pub(crate) async fn run_backup_retry_task(
+	queue: Arc<BackupRetryQueue<Arc<Logger>>>, backup_store: Arc<DynStore>, logger: Arc<Logger>,
+	mut stop_receiver: tokio::sync::watch::Receiver<()>,
+) {
 	let mut backoff_ms = RETRY_INITIAL_BACKOFF_MS;
-	let mut consecutive_failures: usize = 0;
 
 	loop {
-		// Wait until there is something to do.
-		queue.wait_for_entries().await;
+		let fallback_sleep = tokio::time::sleep(Duration::from_secs(60));
+		tokio::pin!(fallback_sleep);
+
+		tokio::select! {
+			_ = stop_receiver.changed() => break,
+			_ = queue.wait_for_entries() => {},
+			_ = &mut fallback_sleep => {},
+		}
+
+		if queue.is_empty() {
+			continue;
+		}
 
 		let entries = queue.snapshot();
-		let mut all_succeeded = true;
+		let mut any_failed = false;
 
 		for (key, op) in &entries {
+			if stop_receiver.has_changed().unwrap_or(false) {
+				return;
+			}
+
 			let (pn, sn, k) = key;
 
-			// Before applying, check whether this key is still in the queue
-			// with the same op. A newer op may have replaced it since we
-			// took the snapshot.
+			// Skip stale snapshot entries that were removed or replaced
+			// after we took the snapshot.
 			{
 				let locked = queue.pending.lock().unwrap();
 				match locked.get(key) {
-					None => {
-						// Entry was removed (completed by a concurrent retry).
-						continue;
-					},
-					Some(current_op) => {
-						// If the op in the queue differs from our snapshot,
-						// a newer op replaced it. Skip — next iteration will
-						// pick up the newer op.
-						if !ops_match(current_op, op) {
-							continue;
-						}
-					},
+					None => continue,
+					Some(current_op) if !ops_match(current_op, op) => continue,
+					Some(_) => {},
 				}
 			}
 
@@ -1121,43 +1144,39 @@ pub(crate) async fn run_backup_retry_task<L: Deref + Send + Sync + 'static>(
 					KVStoreSync::write(backup_store.as_ref(), pn, sn, k, buf.clone())
 				},
 				PendingBackupOp::Remove { lazy } => {
-					KVStoreSync::remove(backup_store.as_ref(), pn, sn, k, *lazy)
+					match KVStoreSync::remove(backup_store.as_ref(), pn, sn, k, *lazy) {
+						Ok(()) => Ok(()),
+						Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+						Err(e) => Err(e),
+					}
 				},
 			};
 
 			match result {
 				Ok(()) => {
 					queue.remove_completed(key);
-					consecutive_failures = 0;
-					backoff_ms = RETRY_INITIAL_BACKOFF_MS;
 				},
 				Err(e) => {
-					all_succeeded = false;
-					consecutive_failures += 1;
-					// Throttle logging — only log every 8 failures to avoid
-					// spam on persistent remote store outages.
-					if consecutive_failures == 1 || consecutive_failures.is_power_of_two() {
-						log_error!(
-							logger,
-							"Backup retry failed for key {}/{}/{} \
-                            (attempt {}): {}",
-							pn,
-							sn,
-							k,
-							consecutive_failures,
-							e
-						);
-					}
+					any_failed = true;
+					log_error!(logger, "Backup retry failed for key {}/{}/{}: {}", pn, sn, k, e);
 				},
 			}
 		}
 
-		if !all_succeeded {
-			// Exponential backoff with a small jitter.
+		if any_failed {
 			let jitter_ms = (backoff_ms / 10).max(1);
-			let sleep_ms = backoff_ms + (jitter_ms % 17); // deterministic but offset
-			tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+			let sleep_ms = backoff_ms + (jitter_ms % 17);
+			let sleep = tokio::time::sleep(Duration::from_millis(sleep_ms));
+			tokio::pin!(sleep);
+
+			tokio::select! {
+				_ = stop_receiver.changed() => break,
+				_ = &mut sleep => {},
+			}
+
 			backoff_ms = (backoff_ms * RETRY_BACKOFF_MULTIPLIER).min(RETRY_MAX_BACKOFF_MS);
+		} else {
+			backoff_ms = RETRY_INITIAL_BACKOFF_MS;
 		}
 	}
 }
