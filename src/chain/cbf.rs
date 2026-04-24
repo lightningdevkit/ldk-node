@@ -432,7 +432,6 @@ impl CbfChainSource {
 						let _ = tx.send(sync_update);
 					}
 				},
-				Event::Block(_) => {},
 				Event::ChainUpdate(header_changes) => match header_changes {
 					BlockHeaderChanges::Reorganized { accepted, reorganized } => {
 						log_debug!(
@@ -1136,7 +1135,7 @@ impl CbfChainSource {
 			let tx_bytes = tx.encode();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
-				requester.broadcast_tx(tx),
+				requester.submit_package(tx),
 			);
 			match timeout_fut.await {
 				Ok(res) => match res {
