@@ -799,7 +799,7 @@ impl Default for BackupMode {
 /// primary at retry time — if a `Remove` for the same key succeeds on primary
 /// after this `Write` was enqueued, re-reading primary would find nothing and
 /// potentially resurrect deleted data on the backup.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum PendingBackupOp {
 	Write { buf: Vec<u8> },
 	Remove { lazy: bool },
@@ -1193,10 +1193,13 @@ fn ops_match(a: &PendingBackupOp, b: &PendingBackupOp) -> bool {
 
 #[cfg(test)]
 mod tests {
+	use std::future::Future;
 	use std::panic::RefUnwindSafe;
 	use std::path::PathBuf;
 	use std::sync::Arc;
+	use std::time::Duration;
 
+	use bitcoin::io::ErrorKind;
 	use lightning::util::logger::Level;
 	use lightning::util::persist::{
 		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -1205,10 +1208,8 @@ mod tests {
 	use lightning_persister::fs_store::v1::FilesystemStore;
 
 	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
-	use crate::io::tier_store::TierStore;
 	use crate::logger::Logger;
-	use crate::types::DynStore;
-	use crate::types::DynStoreWrapper;
+	use crate::types::{DynStore, DynStoreWrapper};
 
 	use super::*;
 
@@ -1221,40 +1222,167 @@ mod tests {
 		}
 	}
 
+	struct TestStores {
+		_cleanup: CleanupDir,
+		logger: Arc<Logger>,
+		primary: Arc<DynStore>,
+		backup: Arc<DynStore>,
+		retry: Arc<DynStore>,
+		ephemeral: Arc<DynStore>,
+	}
+
+	impl TestStores {
+		fn new() -> Self {
+			let base_dir = random_storage_path();
+			let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+			let logger = Arc::new(
+				Logger::new_fs_writer(log_path, Level::Trace).expect("logger setup failed."),
+			);
+
+			let primary: Arc<DynStore> =
+				Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+			let backup: Arc<DynStore> =
+				Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
+			let retry: Arc<DynStore> =
+				Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("retry_queue"))));
+			let ephemeral: Arc<DynStore> =
+				Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("ephemeral"))));
+
+			Self { _cleanup: CleanupDir(base_dir), logger, primary, backup, retry, ephemeral }
+		}
+	}
+
+	#[derive(Clone, Copy)]
+	enum FailMode {
+		Write,
+		Remove,
+	}
+
+	struct FailingStore {
+		mode: FailMode,
+	}
+
+	impl FailingStore {
+		fn new(mode: FailMode) -> Self {
+			Self { mode }
+		}
+
+		fn should_fail_write(&self) -> bool {
+			matches!(self.mode, FailMode::Write)
+		}
+
+		fn should_fail_remove(&self) -> bool {
+			matches!(self.mode, FailMode::Remove)
+		}
+	}
+
+	impl KVStore for FailingStore {
+		fn read(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + Send + 'static {
+			async { Err(io::Error::from(ErrorKind::NotFound)) }
+		}
+
+		fn write(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + Send + 'static {
+			let fail = self.should_fail_write();
+			async move {
+				if fail {
+					Err(io::Error::new(ErrorKind::Other, "intentional backup write failure"))
+				} else {
+					Ok(())
+				}
+			}
+		}
+
+		fn remove(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + Send + 'static {
+			let fail = self.should_fail_remove();
+			async move {
+				if fail {
+					Err(io::Error::new(ErrorKind::Other, "intentional backup remove failure"))
+				} else {
+					Ok(())
+				}
+			}
+		}
+
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + Send + 'static {
+			async { Ok(Vec::new()) }
+		}
+	}
+
+	impl KVStoreSync for FailingStore {
+		fn read(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
+		) -> Result<Vec<u8>, io::Error> {
+			Err(io::Error::from(ErrorKind::NotFound))
+		}
+
+		fn write(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _buf: Vec<u8>,
+		) -> Result<(), io::Error> {
+			if self.should_fail_write() {
+				Err(io::Error::new(ErrorKind::Other, "intentional backup write failure"))
+			} else {
+				Ok(())
+			}
+		}
+
+		fn remove(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _lazy: bool,
+		) -> Result<(), io::Error> {
+			if self.should_fail_remove() {
+				Err(io::Error::new(ErrorKind::Other, "intentional backup remove failure"))
+			} else {
+				Ok(())
+			}
+		}
+
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> Result<Vec<String>, io::Error> {
+			Ok(Vec::new())
+		}
+	}
+
 	fn setup_tier_store(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> TierStore {
 		TierStore::new(primary_store, logger)
 	}
 
+	fn read_retry_queue_ops(
+		retry_store: Arc<DynStore>,
+	) -> HashMap<(String, String, String), PendingBackupOp> {
+		let data = KVStoreSync::read(
+			&*retry_store,
+			BACKUP_RETRY_QUEUE_PRIMARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_SECONDARY_NAMESPACE,
+			BACKUP_RETRY_QUEUE_KEY,
+		)
+		.expect("Failed to read backup retry queue.");
+
+		PendingOpsDeserWrapper::read(&mut io::Cursor::new(data))
+			.expect("Failed to deserialization retry queue.")
+			.0
+	}
+
 	#[test]
 	fn write_read_list_remove() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
-
-		let primary_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
-		let tier = setup_tier_store(primary_store, logger);
-
+		let stores = TestStores::new();
+		let tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
 		do_read_write_remove_list_persist(&tier);
 	}
 
 	#[test]
 	fn ephemeral_routing() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
 
-		let _cleanup = CleanupDir(base_dir.clone());
-
-		let primary_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
-		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
-
-		let ephemeral_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("ephemeral"))));
-		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+		tier.set_ephemeral_store(Arc::clone(&stores.ephemeral));
 
 		let data = vec![42u8; 32];
 
@@ -1265,7 +1393,7 @@ mod tests {
 			NETWORK_GRAPH_PERSISTENCE_KEY,
 			data.clone(),
 		)
-		.unwrap();
+		.expect("Failed to write network graph.");
 
 		KVStoreSync::write(
 			&tier,
@@ -1274,56 +1402,53 @@ mod tests {
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 			data.clone(),
 		)
-		.unwrap();
+		.expect("Failed to write channel manager to tier store.");
 
 		let primary_read_ng = KVStoreSync::read(
-			&*primary_store,
+			&*stores.primary,
 			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_KEY,
 		);
 		let ephemeral_read_ng = KVStoreSync::read(
-			&*ephemeral_store,
+			&*stores.ephemeral,
 			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_KEY,
 		);
 
 		let primary_read_cm = KVStoreSync::read(
-			&*primary_store,
+			&*stores.primary,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		);
 		let ephemeral_read_cm = KVStoreSync::read(
-			&*ephemeral_store,
+			&*stores.ephemeral,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		);
 
 		assert!(primary_read_ng.is_err());
-		assert_eq!(ephemeral_read_ng.unwrap(), data);
+		assert_eq!(
+			ephemeral_read_ng.expect("Failed to read network graph from ephemeral store."),
+			data
+		);
 
 		assert!(ephemeral_read_cm.is_err());
-		assert_eq!(primary_read_cm.unwrap(), data);
+		assert_eq!(
+			primary_read_cm.expect("Failed to read channel manager from primary store."),
+			data
+		);
 	}
 
 	#[test]
 	fn backup_write_is_part_of_success_path() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
 
-		let _cleanup = CleanupDir(base_dir.clone());
-
-		let primary_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
-		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
-
-		let backup_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
-		tier.set_backup_store(Arc::clone(&backup_store), None);
+		tier.set_backup_store(Arc::clone(&stores.backup), None);
 
 		let data = vec![42u8; 32];
 
@@ -1334,40 +1459,31 @@ mod tests {
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 			data.clone(),
 		)
-		.unwrap();
+		.expect("Failed to write channel manager to tier store.");
 
 		let primary_read = KVStoreSync::read(
-			&*primary_store,
+			&*stores.primary,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		);
 		let backup_read = KVStoreSync::read(
-			&*backup_store,
+			&*stores.backup,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		);
 
-		assert_eq!(primary_read.unwrap(), data);
-		assert_eq!(backup_read.unwrap(), data);
+		assert_eq!(primary_read.expect("Failed to read channel manager from primary store."), data);
+		assert_eq!(backup_read.expect("Failed to read channel manager from backup store."), data);
 	}
 
 	#[test]
 	fn backup_remove_is_part_of_success_path() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
 
-		let _cleanup = CleanupDir(base_dir.clone());
-
-		let primary_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
-		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
-
-		let backup_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
-		tier.set_backup_store(Arc::clone(&backup_store), None);
+		tier.set_backup_store(Arc::clone(&stores.backup), None);
 
 		let data = vec![42u8; 32];
 		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
@@ -1379,7 +1495,7 @@ mod tests {
 			key,
 			data,
 		)
-		.unwrap();
+		.expect("Failed to write channel manager to tier store.");
 
 		KVStoreSync::remove(
 			&tier,
@@ -1388,16 +1504,16 @@ mod tests {
 			key,
 			true,
 		)
-		.unwrap();
+		.expect("Failed to remove channel manager from tier store.");
 
 		let primary_read = KVStoreSync::read(
-			&*primary_store,
+			&*stores.primary,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			key,
 		);
 		let backup_read = KVStoreSync::read(
-			&*backup_store,
+			&*stores.backup,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			key,
@@ -1405,5 +1521,554 @@ mod tests {
 
 		assert!(primary_read.is_err());
 		assert!(backup_read.is_err());
+	}
+
+	#[test]
+	fn best_effort_backup_write_failure_returns_success() {
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
+
+		let failing_backup: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FailingStore::new(FailMode::Write)));
+
+		tier.set_backup_store(Arc::clone(&failing_backup), None);
+
+		let data = vec![42u8; 32];
+
+		let res = KVStoreSync::write(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			data.clone(),
+		);
+
+		assert!(res.is_ok());
+
+		let primary_read = KVStoreSync::read(
+			&*stores.primary,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+
+		assert_eq!(primary_read.expect("Failed to read channel manager from primary store."), data);
+	}
+
+	#[test]
+	fn best_effort_backup_remove_failure_returns_success() {
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
+
+		let failing_backup: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FailingStore::new(FailMode::Remove)));
+
+		tier.set_backup_store(Arc::clone(&failing_backup), None);
+
+		let data = vec![11u8; 20];
+		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
+
+		KVStoreSync::write(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			data,
+		)
+		.expect("Failed to write channel manager to tier store.");
+
+		let res = KVStoreSync::remove(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			true,
+		);
+
+		assert!(res.is_ok());
+
+		let primary_read = KVStoreSync::read(
+			&*stores.primary,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+		);
+
+		assert!(primary_read.is_err());
+	}
+
+	#[test]
+	fn semisync_backup_write_failure_enqueues_retry() {
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
+
+		let failing_backup: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FailingStore::new(FailMode::Write)));
+
+		let retry_queue =
+			Arc::new(BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger)));
+
+		tier.set_backup_store(Arc::clone(&failing_backup), Some(Arc::clone(&retry_queue)));
+
+		let data = vec![7u8; 16];
+
+		let res = KVStoreSync::write(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			data.clone(),
+		);
+
+		assert!(res.is_ok());
+
+		let primary_read = KVStoreSync::read(
+			&*stores.primary,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+
+		assert_eq!(primary_read.expect("Failed to read channel manager from primary store."), data);
+
+		let queued_ops = read_retry_queue_ops(stores.retry);
+		let queued_op = queued_ops.get(&(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		));
+
+		match queued_op {
+			Some(PendingBackupOp::Write { buf }) => assert_eq!(buf, &data),
+			other => panic!("expected queued write op, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn semisync_backup_remove_failure_enqueues_retry() {
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
+
+		let failing_backup: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FailingStore::new(FailMode::Remove)));
+
+		let retry_queue =
+			Arc::new(BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger)));
+
+		tier.set_backup_store(Arc::clone(&failing_backup), Some(Arc::clone(&retry_queue)));
+
+		let data = vec![5u8; 24];
+		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
+
+		KVStoreSync::write(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			data,
+		)
+		.expect("Failed to write channel manager to tier store.");
+
+		let res = KVStoreSync::remove(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			true,
+		);
+
+		assert!(res.is_ok());
+
+		let primary_read = KVStoreSync::read(
+			&*stores.primary,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+		);
+		assert!(primary_read.is_err());
+
+		let queued_ops = read_retry_queue_ops(stores.retry);
+		let queued_op = queued_ops.get(&(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			key.to_string(),
+		));
+
+		match queued_op {
+			Some(PendingBackupOp::Remove { lazy }) => assert!(*lazy),
+			other => panic!("expected queued remove op, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn semisync_queue_persist_failure_returns_error() {
+		let stores = TestStores::new();
+		let mut tier = setup_tier_store(Arc::clone(&stores.primary), Arc::clone(&stores.logger));
+
+		let failing_backup: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FailingStore::new(FailMode::Write)));
+
+		let failing_retry_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FailingStore::new(FailMode::Write)));
+		let retry_queue = Arc::new(BackupRetryQueue::new(
+			Arc::clone(&failing_retry_store),
+			Arc::clone(&stores.logger),
+		));
+
+		tier.set_backup_store(Arc::clone(&failing_backup), Some(Arc::clone(&retry_queue)));
+
+		let data = vec![9u8; 8];
+
+		let res = KVStoreSync::write(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			data.clone(),
+		);
+
+		assert!(res.is_err());
+
+		let primary_read = KVStoreSync::read(
+			&*stores.primary,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+
+		assert_eq!(primary_read.expect("Failed to read channel manager from primary store."), data);
+	}
+
+	#[test]
+	fn retry_task_replays_queued_write() {
+		let stores = TestStores::new();
+
+		let queue =
+			Arc::new(BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger)));
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+		let data = vec![3u8; 12];
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: data.clone() })
+			.expect("Failed to enqueue write op.");
+
+		let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime.");
+		let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
+
+		runtime.block_on(async {
+			let task_queue = Arc::clone(&queue);
+			let task_backup = Arc::clone(&stores.backup);
+			let task_logger = Arc::clone(&stores.logger);
+
+			let handle = tokio::spawn(async move {
+				run_backup_retry_task(task_queue, task_backup, task_logger, stop_rx).await;
+			});
+
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			let _ = stop_tx.send(());
+			let _ = handle.await;
+		});
+
+		let backup_read = KVStoreSync::read(
+			&*stores.backup,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+
+		assert_eq!(backup_read.expect("Failed to read channel manager from backup store."), data);
+
+		let queued_ops = read_retry_queue_ops(stores.retry);
+		assert!(queued_ops.is_empty());
+	}
+
+	#[test]
+	fn retry_task_replays_queued_remove() {
+		let stores = TestStores::new();
+
+		let queue =
+			Arc::new(BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger)));
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+
+		KVStoreSync::write(
+			&*stores.backup,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			vec![1u8; 4],
+		)
+		.expect("Failed to write channel manager to backup store.");
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Remove { lazy: true })
+			.expect("Failed to enqueue remove op.");
+
+		let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime.");
+		let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
+
+		runtime.block_on(async {
+			let task_queue = Arc::clone(&queue);
+			let task_backup = Arc::clone(&stores.backup);
+			let task_logger = Arc::clone(&stores.logger);
+
+			let handle = tokio::spawn(async move {
+				run_backup_retry_task(task_queue, task_backup, task_logger, stop_rx).await;
+			});
+
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			let _ = stop_tx.send(());
+			let _ = handle.await;
+		});
+
+		let backup_read = KVStoreSync::read(
+			&*stores.backup,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		);
+		assert!(backup_read.is_err());
+
+		let queued_ops = read_retry_queue_ops(stores.retry);
+		assert!(queued_ops.is_empty());
+	}
+
+	#[test]
+	fn retry_task_remove_not_found_is_success() {
+		let stores = TestStores::new();
+
+		let queue =
+			Arc::new(BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger)));
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Remove { lazy: true })
+			.expect("Failed to enqueue remove op.");
+
+		let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime.");
+		let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
+
+		runtime.block_on(async {
+			let task_queue = Arc::clone(&queue);
+			let task_backup = Arc::clone(&stores.backup);
+			let task_logger = Arc::clone(&stores.logger);
+
+			let handle = tokio::spawn(async move {
+				run_backup_retry_task(task_queue, task_backup, task_logger, stop_rx).await;
+			});
+
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			let _ = stop_tx.send(());
+			let _ = handle.await;
+		});
+
+		let queued_ops = read_retry_queue_ops(stores.retry);
+		assert!(queued_ops.is_empty());
+	}
+
+	#[test]
+	fn retry_task_skips_stale_snapshot_entries() {
+		let stores = TestStores::new();
+
+		let queue =
+			Arc::new(BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger)));
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: vec![1u8; 4] })
+			.expect("Failed to enqueue first write op.");
+
+		let snapshot = queue.snapshot();
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: vec![2u8; 4] })
+			.expect("Failed to enqueue second write op.");
+
+		for (snap_key, snap_op) in &snapshot {
+			let locked = queue.pending.lock().expect("Failed to lock pending ops.");
+			match locked.get(snap_key) {
+				None => continue,
+				Some(current_op) if !ops_match(current_op, snap_op) => continue,
+				Some(_) => panic!("expected stale snapshot op to be skipped"),
+			}
+		}
+	}
+
+	#[test]
+	fn pending_ops_roundtrip_ser_deser() {
+		let mut map = HashMap::new();
+		map.insert(
+			("ns1".to_string(), "".to_string(), "k1".to_string()),
+			PendingBackupOp::Write { buf: vec![1, 2, 3] },
+		);
+		map.insert(
+			("ns2".to_string(), "sub".to_string(), "k2".to_string()),
+			PendingBackupOp::Remove { lazy: true },
+		);
+
+		let encoded = PendingOpsSerWrapper(&map).encode();
+		let decoded = PendingOpsDeserWrapper::read(&mut io::Cursor::new(encoded))
+			.expect("Failed to deserialize pending ops.")
+			.0;
+
+		assert_eq!(decoded.len(), 2);
+
+		match decoded.get(&("ns1".to_string(), "".to_string(), "k1".to_string())) {
+			Some(PendingBackupOp::Write { buf }) => assert_eq!(buf, &vec![1, 2, 3]),
+			other => panic!("expected queued write op, got {:?}", other),
+		}
+
+		match decoded.get(&("ns2".to_string(), "sub".to_string(), "k2".to_string())) {
+			Some(PendingBackupOp::Remove { lazy }) => assert!(*lazy),
+			other => panic!("expected queued remove op, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn retry_queue_reloads_persisted_entries_on_restart() {
+		let stores = TestStores::new();
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+
+		{
+			let queue = Arc::new(BackupRetryQueue::new(
+				Arc::clone(&stores.retry),
+				Arc::clone(&stores.logger),
+			));
+
+			queue
+				.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: vec![1u8, 2u8, 3u8] })
+				.expect("Failed to enqueue write op.");
+		}
+
+		let reloaded_queue =
+			BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger));
+		let snapshot = reloaded_queue.snapshot();
+
+		assert_eq!(snapshot.len(), 1);
+
+		match snapshot.first() {
+			Some((queued_key, PendingBackupOp::Write { buf })) => {
+				assert_eq!(queued_key, &key);
+				assert_eq!(buf, &vec![1u8, 2u8, 3u8]);
+			},
+			other => panic!("expected reloaded queued write op, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn retry_queue_dedups_write_then_write_to_latest() {
+		let stores = TestStores::new();
+
+		let queue = BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger));
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: vec![1u8, 2u8] })
+			.expect("Failed to enqueue first write op.");
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: vec![9u8, 8u8] })
+			.expect("Failed to enqueue second write op.");
+
+		let snapshot = queue.snapshot();
+		assert_eq!(snapshot.len(), 1);
+
+		match snapshot.first() {
+			Some((queued_key, PendingBackupOp::Write { buf })) => {
+				assert_eq!(queued_key, &key);
+				assert_eq!(buf, &vec![9u8, 8u8]);
+			},
+			other => panic!("expected latest queued write op, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn retry_queue_dedups_write_then_remove_to_remove() {
+		let stores = TestStores::new();
+
+		let queue = BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger));
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: vec![1u8, 2u8] })
+			.expect("Failed to enqueue write op.");
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Remove { lazy: true })
+			.expect("Failed to enqueue remove op.");
+
+		let snapshot = queue.snapshot();
+		assert_eq!(snapshot.len(), 1);
+
+		match snapshot.first() {
+			Some((queued_key, PendingBackupOp::Remove { lazy })) => {
+				assert_eq!(queued_key, &key);
+				assert!(*lazy);
+			},
+			other => panic!("expected queued remove op, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn retry_queue_dedups_remove_then_write_to_write() {
+		let stores = TestStores::new();
+
+		let queue = BackupRetryQueue::new(Arc::clone(&stores.retry), Arc::clone(&stores.logger));
+
+		let key = (
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			CHANNEL_MANAGER_PERSISTENCE_KEY.to_string(),
+		);
+
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Remove { lazy: true })
+			.expect("Failed to enqueue remove op.");
+		queue
+			.enqueue_sync(key.clone(), PendingBackupOp::Write { buf: vec![5u8, 6u8, 7u8] })
+			.expect("Failed to enqueue write op.");
+
+		let snapshot = queue.snapshot();
+		assert_eq!(snapshot.len(), 1);
+
+		match snapshot.first() {
+			Some((queued_key, PendingBackupOp::Write { buf })) => {
+				assert_eq!(queued_key, &key);
+				assert_eq!(buf, &vec![5u8, 6u8, 7u8]);
+			},
+			other => panic!("expected queued write op, got {:?}", other),
+		}
 	}
 }
