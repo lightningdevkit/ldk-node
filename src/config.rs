@@ -28,6 +28,8 @@ const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
+// Alby: our project is well-tested and requires larger inbound channels,
+// especially for business users.
 const DEFAULT_MAX_INBOUND_CHANNEL_SIZE_SATS: u64 = 10 * 100_000_000;
 
 /// The default log level.
@@ -330,6 +332,8 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// some of the values set here, e.g. the ChannelHandshakeConfig, meaning these default values
 	// will mostly be relevant for inbound channels.
 	let mut user_config = UserConfig::default();
+	// Alby: override LDK's default inbound channel limit to allow larger
+	// channels needed by well-tested deployments and business users.
 	user_config.channel_handshake_limits.max_funding_satoshis =
 		DEFAULT_MAX_INBOUND_CHANNEL_SIZE_SATS;
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
