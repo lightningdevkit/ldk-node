@@ -11,6 +11,10 @@ typedef dictionary ElectrumSyncConfig;
 
 typedef dictionary TorConfig;
 
+typedef dictionary ScoringFeeParameters;
+
+typedef dictionary ScoringDecayParameters;
+
 typedef interface NodeEntropy;
 
 typedef enum WordCount;
@@ -43,6 +47,8 @@ interface Builder {
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
 	void set_pathfinding_scores_source(string url);
+	void set_scoring_fee_params(ScoringFeeParameters scoring_fee_params);
+	void set_scoring_decay_params(ScoringDecayParameters scoring_decay_params);
 	void set_liquidity_source_lsps1(PublicKey node_id, SocketAddress address, string? token);
 	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);

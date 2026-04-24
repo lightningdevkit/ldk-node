@@ -50,7 +50,8 @@ use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
-	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	ScoringDecayParameters, ScoringFeeParameters, TorConfig, DEFAULT_ESPLORA_SERVER_URL,
+	DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -441,6 +442,22 @@ impl NodeBuilder {
 	/// The external scores are merged into the local scoring system to improve routing.
 	pub fn set_pathfinding_scores_source(&mut self, url: String) -> &mut Self {
 		self.pathfinding_scores_sync_config = Some(PathfindingScoresSyncConfig { url });
+		self
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer fee parameters.
+	pub fn set_scoring_fee_params(
+		&mut self, scoring_fee_params: ScoringFeeParameters,
+	) -> &mut Self {
+		self.config.scoring_fee_params = Some(scoring_fee_params);
+		self
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer decay parameters.
+	pub fn set_scoring_decay_params(
+		&mut self, scoring_decay_params: ScoringDecayParameters,
+	) -> &mut Self {
+		self.config.scoring_decay_params = Some(scoring_decay_params);
 		self
 	}
 
@@ -963,6 +980,16 @@ impl ArcedNodeBuilder {
 	/// The external scores are merged into the local scoring system to improve routing.
 	pub fn set_pathfinding_scores_source(&self, url: String) {
 		self.inner.write().expect("lock").set_pathfinding_scores_source(url);
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer fee parameters.
+	pub fn set_scoring_fee_params(&self, scoring_fee_params: ScoringFeeParameters) {
+		self.inner.write().expect("lock").set_scoring_fee_params(scoring_fee_params);
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer decay parameters.
+	pub fn set_scoring_decay_params(&self, scoring_decay_params: ScoringDecayParameters) {
+		self.inner.write().expect("lock").set_scoring_decay_params(scoring_decay_params);
 	}
 
 	/// Configures the [`Node`] instance to source inbound liquidity from the given
@@ -1614,7 +1641,8 @@ fn build_with_store_internal(
 		Ok(scorer) => scorer,
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
-				let params = ProbabilisticScoringDecayParameters::default();
+				let params: ProbabilisticScoringDecayParameters =
+					config.scoring_decay_params.unwrap_or_default().into();
 				ProbabilisticScorer::new(params, Arc::clone(&network_graph), Arc::clone(&logger))
 			} else {
 				log_error!(logger, "Failed to read scoring data from store: {}", e);
@@ -1639,7 +1667,8 @@ fn build_with_store_internal(
 		},
 	}
 
-	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let scoring_fee_params: ProbabilisticScoringFeeParameters =
+		config.scoring_fee_params.unwrap_or_default().into();
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
