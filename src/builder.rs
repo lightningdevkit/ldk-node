@@ -58,7 +58,7 @@ use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
-use crate::io::tier_store::TierStore;
+use crate::io::tier_store::{BackupMode, BackupRetryQueue, TierStore};
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
 	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
@@ -157,9 +157,10 @@ impl std::fmt::Debug for LogWriterConfig {
 }
 
 #[derive(Default)]
-struct TierStoreConfig {
-	ephemeral: Option<Arc<DynStore>>,
-	backup: Option<Arc<DynStore>>,
+pub(crate) struct TierStoreConfig {
+	pub(crate) ephemeral: Option<Arc<DynStore>>,
+	pub(crate) backup: Option<Arc<DynStore>>,
+	pub(crate) backup_mode: BackupMode,
 }
 
 impl std::fmt::Debug for TierStoreConfig {
@@ -167,6 +168,7 @@ impl std::fmt::Debug for TierStoreConfig {
 		f.debug_struct("TierStoreConfig")
 			.field("ephemeral", &self.ephemeral.as_ref().map(|_| "Arc<DynStore>"))
 			.field("backup", &self.backup.as_ref().map(|_| "Arc<DynStore>"))
+			.field("backup_mode", &self.backup_mode)
 			.finish()
 	}
 }
@@ -650,13 +652,26 @@ impl NodeBuilder {
 	/// When building with tiered storage, this store receives a second durable
 	/// copy of data written to the primary store.
 	///
-	/// Writes and removals for primary-backed data only succeed once both the
-	/// primary and backup stores complete successfully.
+	/// Backup failure handling depends on `backup_mode`:
+	/// - [`BackupMode::BestEffortBackup`] logs backup failures and still returns
+	///   success as long as the primary store succeeds.
+	/// - [`BackupMode::SemiSync`] returns success only if a failed backup
+	///   operation can be durably persisted locally and enqueued for
+	///   asynchronous retry.
 	///
-	/// If not set, durable data will be stored only in the primary store.
-	pub fn set_backup_store(&mut self, backup_store: Arc<DynStore>) -> &mut Self {
-		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
-		tier_store_config.backup = Some(backup_store);
+	/// Note: in [`BackupMode::SemiSync`], writes and removals are still not atomic
+	/// across the primary and backup stores. A call may return an error after the
+	/// primary store has already been updated if immediate backup replication
+	/// fails and the retry intent cannot be durably persisted locally.
+	///
+	/// If no backup store is configured, durable data will be stored only in the
+	/// primary store.
+	pub fn set_backup_store(
+		&mut self, backup_store: Arc<DynStore>, backup_mode: BackupMode,
+	) -> &mut Self {
+		let cfg = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		cfg.backup = Some(backup_store);
+		cfg.backup_mode = backup_mode;
 		self
 	}
 
@@ -852,13 +867,40 @@ impl NodeBuilder {
 
 		let ts_config = self.tier_store_config.as_ref();
 		let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
+
 		if let Some(config) = ts_config {
 			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
-			config.backup.as_ref().map(|s| tier_store.set_backup_store(Arc::clone(s), None));
+
+			if let Some(backup_store) = config.backup.as_ref() {
+				match config.backup_mode {
+					BackupMode::BestEffortBackup => {
+						tier_store.set_backup_store(Arc::clone(backup_store), None);
+					},
+					BackupMode::SemiSync => {
+						let retry_store: Arc<DynStore> =
+							Arc::new(DynStoreWrapper(FilesystemStore::new(
+								PathBuf::from(&self.config.storage_dir_path)
+									.join("backup_retry_queue"),
+							)));
+
+						let retry_queue = Arc::new(BackupRetryQueue::new(
+							Arc::clone(&retry_store),
+							Arc::clone(&logger),
+						));
+						tier_store.set_backup_store(
+							Arc::clone(backup_store),
+							Some(Arc::clone(&retry_queue)),
+						);
+					},
+				}
+			}
 		}
 
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
+
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(tier_store.clone()));
+		let tier_store = Arc::new(tier_store);
 
 		build_with_store_internal(
 			config,
@@ -871,7 +913,8 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(DynStoreWrapper(tier_store)),
+			kv_store,
+			tier_store,
 		)
 	}
 }
@@ -1311,6 +1354,7 @@ fn build_with_store_internal(
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
 	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	tier_store: Arc<TierStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -2131,6 +2175,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver: Arc::new(hrn_resolver),
+		tier_store,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})
