@@ -2177,7 +2177,8 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{sanitize_alias, BuildError, NodeAlias};
+	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
+	use crate::config::{ScoringDecayParameters, ScoringFeeParameters};
 
 	#[test]
 	fn sanitize_empty_node_alias() {
@@ -2213,5 +2214,33 @@ mod tests {
 		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
 		let node = sanitize_alias(alias);
 		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
+	}
+
+	#[test]
+	fn set_scoring_params_on_builder_config() {
+		let mut builder = NodeBuilder::new();
+
+		let scoring_fee_params = ScoringFeeParameters {
+			base_penalty_msat: 2_048,
+			base_penalty_amount_multiplier_msat: 262_144,
+			liquidity_penalty_multiplier_msat: 10,
+			liquidity_penalty_amount_multiplier_msat: 20,
+			historical_liquidity_penalty_multiplier_msat: 30,
+			historical_liquidity_penalty_amount_multiplier_msat: 40,
+			anti_probing_penalty_msat: 50,
+			considered_impossible_penalty_msat: 60,
+			linear_success_probability: true,
+			probing_diversity_penalty_msat: 70,
+		};
+		let scoring_decay_params = ScoringDecayParameters {
+			historical_no_updates_half_life_secs: 1234,
+			liquidity_offset_half_life_secs: 5678,
+		};
+
+		builder.set_scoring_fee_params(scoring_fee_params);
+		builder.set_scoring_decay_params(scoring_decay_params);
+
+		assert_eq!(builder.config.scoring_fee_params, Some(scoring_fee_params));
+		assert_eq!(builder.config.scoring_decay_params, Some(scoring_decay_params));
 	}
 }
