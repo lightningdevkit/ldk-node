@@ -10,16 +10,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::{OutPoint, ScriptBuf};
 use bitcoin_payment_instructions::amount::Amount as BPIAmount;
 use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
 use bitcoin_payment_instructions::hrn_resolution::{
 	HrnResolutionFuture, HrnResolver, HumanReadableName, LNURLResolutionFuture,
 };
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
-
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::{OutPoint, ScriptBuf};
-
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
