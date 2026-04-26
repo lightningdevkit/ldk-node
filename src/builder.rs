@@ -37,8 +37,8 @@ use lightning::routing::scoring::{
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::config::HTLCInterceptionFlags;
 use lightning::util::persist::{
-	KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStore, MigratableKVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
@@ -844,7 +844,7 @@ impl NodeBuilder {
 	///
 	/// [`set_ephemeral_store`]: Self::set_ephemeral_store
 	/// [`set_backup_store`]: Self::set_backup_store
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
@@ -1339,7 +1339,7 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)

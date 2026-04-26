@@ -12,7 +12,7 @@ use crate::types::DynStore;
 use bitcoin::io::Read;
 use lightning::ln::msgs::DecodeError;
 use lightning::util::persist::{
-	KVStore, KVStoreSync, NETWORK_GRAPH_PERSISTENCE_KEY,
+	KVStore, KVStoreSync, MigratableKVStore, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
@@ -1191,6 +1191,12 @@ fn ops_match(a: &PendingBackupOp, b: &PendingBackupOp) -> bool {
 	}
 }
 
+impl MigratableKVStore for TierStore {
+	fn list_all_keys(&self) -> io::Result<Vec<(String, String, String)>> {
+		self.inner.primary_store.list_all_keys()
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::future::Future;
@@ -1202,7 +1208,8 @@ mod tests {
 	use bitcoin::io::ErrorKind;
 	use lightning::util::logger::Level;
 	use lightning::util::persist::{
-		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		MigratableKVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 	use lightning_persister::fs_store::v1::FilesystemStore;
@@ -1345,6 +1352,12 @@ mod tests {
 		fn list(
 			&self, _primary_namespace: &str, _secondary_namespace: &str,
 		) -> Result<Vec<String>, io::Error> {
+			Ok(Vec::new())
+		}
+	}
+
+	impl MigratableKVStore for FailingStore {
+		fn list_all_keys(&self) -> Result<Vec<(String, String, String)>, io::Error> {
 			Ok(Vec::new())
 		}
 	}

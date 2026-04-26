@@ -31,7 +31,9 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersisterAsync};
+use lightning::util::persist::{
+	KVStore, KVStoreSync, MigratableKVStore, MonitorUpdatingPersisterAsync,
+};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
@@ -85,6 +87,16 @@ pub trait DynStoreTrait: Send + Sync {
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Result<Vec<String>, bitcoin::io::Error>;
+
+	/// Returns all known keys as `(primary_namespace, secondary_namespace, key)` tuples.
+	///
+	/// As with [`lightning::util::persist::MigratableKVStore::list_all_keys`],
+	/// implementations must exhaustively return all entries known to the store so
+	/// migration and restoration do not miss data.
+	///
+	/// Implementations that do not support exhaustive enumeration may return an
+	/// error with [`bitcoin::io::ErrorKind::Other`].
+	fn list_all_keys(&self) -> Result<Vec<(String, String, String)>, bitcoin::io::Error>;
 }
 
 impl<'a> KVStore for dyn DynStoreTrait + 'a {
@@ -174,9 +186,13 @@ impl KVStore for DynStoreRef {
 	}
 }
 
-pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + Send + Sync>(pub(crate) T);
+pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync>(
+	pub(crate) T,
+);
 
-impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
+impl<T: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync> DynStoreTrait
+	for DynStoreWrapper<T>
+{
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>> {
@@ -223,6 +239,10 @@ impl<T: SyncAndAsyncKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> 
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Result<Vec<String>, bitcoin::io::Error> {
 		KVStoreSync::list(&self.0, primary_namespace, secondary_namespace)
+	}
+
+	fn list_all_keys(&self) -> Result<Vec<(String, String, String)>, bitcoin::io::Error> {
+		MigratableKVStore::list_all_keys(&self.0)
 	}
 }
 

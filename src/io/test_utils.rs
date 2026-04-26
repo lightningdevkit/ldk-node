@@ -21,7 +21,7 @@ use lightning::ln::functional_test_utils::{
 	TestChanMonCfg,
 };
 use lightning::util::persist::{
-	KVStore, KVStoreSync, MonitorUpdatingPersister, PageToken, PaginatedKVStore,
+	KVStore, KVStoreSync, MigratableKVStore, MonitorUpdatingPersister, PageToken, PaginatedKVStore,
 	PaginatedKVStoreSync, PaginatedListResponse, KVSTORE_NAMESPACE_KEY_MAX_LEN,
 };
 use lightning::util::test_utils;
@@ -242,6 +242,29 @@ impl PaginatedKVStore for InMemoryStore {
 	) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
 		let res = self.list_paginated_internal(primary_namespace, secondary_namespace, page_token);
 		async move { res }
+	}
+}
+
+impl MigratableKVStore for InMemoryStore {
+	fn list_all_keys(&self) -> io::Result<Vec<(String, String, String)>> {
+		let persisted_lock = self.persisted_bytes.lock().unwrap();
+		let mut keys = Vec::new();
+
+		for (namespace, entries) in persisted_lock.iter() {
+			let mut parts = namespace.splitn(2, '/');
+			let primary_namespace = parts.next().unwrap_or_default();
+			let secondary_namespace = parts.next().unwrap_or_default();
+
+			for key in entries.keys() {
+				keys.push((
+					primary_namespace.to_string(),
+					secondary_namespace.to_string(),
+					key.clone(),
+				));
+			}
+		}
+
+		Ok(keys)
 	}
 }
 
