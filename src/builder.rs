@@ -52,7 +52,7 @@ use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	DEFAULT_MAX_PROBE_AMOUNT_MSAT, MIN_PROBE_AMOUNT_MSAT,
+	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -2067,7 +2067,7 @@ fn build_with_store_internal(
 					Arc::clone(&channel_manager),
 					Arc::clone(&router),
 					*top_node_count,
-					MIN_PROBE_AMOUNT_MSAT,
+					DEFAULT_MIN_PROBE_AMOUNT_MSAT,
 					DEFAULT_MAX_PROBE_AMOUNT_MSAT,
 					probing_cfg.cooldown,
 					config.probing_liquidity_limit_multiplier,
@@ -2077,7 +2077,7 @@ fn build_with_store_internal(
 				Arc::clone(&network_graph),
 				Arc::clone(&channel_manager),
 				*max_hops,
-				MIN_PROBE_AMOUNT_MSAT,
+				DEFAULT_MIN_PROBE_AMOUNT_MSAT,
 				DEFAULT_MAX_PROBE_AMOUNT_MSAT,
 			)),
 			ProbingStrategyKind::Custom(s) => Arc::clone(s),
