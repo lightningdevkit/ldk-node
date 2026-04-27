@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
-use lightning::chain::{BestBlock, Filter};
+use lightning::chain::{BestBlock as BlockLocator, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
 use crate::chain::electrum::ElectrumChainSource;
@@ -24,7 +24,7 @@ use crate::config::{
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
@@ -101,7 +101,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Result<(Self, Option<BestBlock>), ()> {
+	) -> Result<(Self, Option<BlockLocator>), ()> {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
@@ -122,7 +122,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> (Self, Option<BestBlock>) {
+	) -> (Self, Option<BlockLocator>) {
 		let electrum_chain_source = ElectrumChainSource::new(
 			server_url,
 			sync_config,
@@ -142,7 +142,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> (Self, Option<BestBlock>) {
+	) -> (Self, Option<BlockLocator>) {
 		let bitcoind_chain_source = BitcoindChainSource::new_rpc(
 			rpc_host,
 			rpc_port,
@@ -165,7 +165,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, rest_client_config: BitcoindRestClientConfig,
 		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> (Self, Option<BestBlock>) {
+	) -> (Self, Option<BlockLocator>) {
 		let bitcoind_chain_source = BitcoindChainSource::new_rest(
 			rpc_host,
 			rpc_port,
@@ -453,15 +453,26 @@ impl ChainSource {
 					return;
 				}
 				Some(next_package) = receiver.recv() => {
+					let txs = match self.tx_broadcaster.classify_package(next_package).await {
+						Ok(txs) => txs,
+						Err(e) => {
+							log_error!(
+								tx_bcast_logger,
+								"Skipping broadcast: failed to persist payment records: {:?}",
+								e,
+							);
+							continue;
+						},
+					};
 					match &self.kind {
 						ChainSourceKind::Esplora(esplora_chain_source) => {
-							esplora_chain_source.process_broadcast_package(next_package).await
+							esplora_chain_source.process_broadcast_package(txs).await
 						},
 						ChainSourceKind::Electrum(electrum_chain_source) => {
-							electrum_chain_source.process_broadcast_package(next_package).await
+							electrum_chain_source.process_broadcast_package(txs).await
 						},
 						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-							bitcoind_chain_source.process_broadcast_package(next_package).await
+							bitcoind_chain_source.process_broadcast_package(txs).await
 						},
 					}
 				}

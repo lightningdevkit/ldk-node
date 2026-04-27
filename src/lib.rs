@@ -117,6 +117,7 @@ pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use bip39;
 pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::BlockHash;
 #[cfg(feature = "uniffi")]
 pub use bitcoin::FeeRate;
 #[cfg(not(feature = "uniffi"))]
@@ -145,7 +146,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
-use lightning::chain::BestBlock;
+use lightning::chain::BestBlock as BlockLocator;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
@@ -1194,14 +1195,6 @@ impl Node {
 		let mut user_config = default_user_config(&self.config);
 		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
 		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
-		// We set the max inflight to 100% for private channels.
-		// FIXME: LDK will default to this behavior soon, too, at which point we should drop this
-		// manual override.
-		if !announce_for_forwarding {
-			user_config
-				.channel_handshake_config
-				.max_inbound_htlc_value_in_flight_percent_of_channel = 100;
-		}
 
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
 		let user_channel_id: u128 = u128::from_ne_bytes(
@@ -1577,6 +1570,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.min_rbf_feerate().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: pending splice requires RBF, use rbf_channel instead"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let contribution = self
 				.runtime
 				.block_on(funding_template.splice_in(
@@ -1690,6 +1691,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.min_rbf_feerate().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: pending splice requires RBF, use rbf_channel instead"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
@@ -1716,6 +1725,69 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id {} and counterparty {}",
+				user_channel_id,
+				counterparty_node_id
+			);
+			Err(Error::ChannelSplicingFailed)
+		}
+	}
+
+	/// Replace a pending splice's funding transaction with a higher-feerate version.
+	///
+	/// If a prior splice negotiation is pending, this bumps its feerate via RBF. The prior
+	/// contribution is reused when possible; otherwise, coin selection is re-run.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental and may change in the future.
+	pub fn rbf_channel(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			let min_feerate =
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
+
+			let funding_template = self
+				.channel_manager
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			if funding_template.min_rbf_feerate().is_none() {
+				log_error!(self.logger, "Failed to RBF channel: no pending splice to replace");
+				return Err(Error::ChannelSplicingFailed);
+			}
+
+			let contribution = self
+				.runtime
+				.block_on(funding_template.rbf(max_feerate, Arc::clone(&self.wallet)))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			self.channel_manager
+				.funding_contributed(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
 					Error::ChannelSplicingFailed
 				})
 		} else {
@@ -2053,6 +2125,22 @@ impl Node {
 impl Drop for Node {
 	fn drop(&mut self) {
 		let _ = self.stop();
+	}
+}
+
+/// The best known block as identified by its hash and height.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct BestBlock {
+	/// The block's hash.
+	pub block_hash: BlockHash,
+	/// The height at which the block was confirmed.
+	pub height: u32,
+}
+
+impl From<BlockLocator> for BestBlock {
+	fn from(locator: BlockLocator) -> Self {
+		Self { block_hash: locator.block_hash, height: locator.height }
 	}
 }
 

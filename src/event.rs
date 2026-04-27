@@ -26,9 +26,7 @@ use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
-use lightning::util::config::{
-	ChannelConfigOverrides, ChannelConfigUpdate, ChannelHandshakeConfigUpdate,
-};
+use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
@@ -1273,19 +1271,12 @@ where
 					if lsp_node_id == counterparty_node_id {
 						// When we're an LSPS2 client, allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 						// check that they don't take too much before claiming.
-						//
-						// We also set maximum allowed inbound HTLC value in flight
-						// to 100%. We should eventually be able to set this on a per-channel basis, but for
-						// now we just bump the default for all channels.
 						channel_override_config = Some(ChannelConfigOverrides {
-							handshake_overrides: Some(ChannelHandshakeConfigUpdate {
-								max_inbound_htlc_value_in_flight_percent_of_channel: Some(100),
-								..Default::default()
-							}),
 							update_overrides: Some(ChannelConfigUpdate {
 								accept_underpaying_htlcs: Some(true),
 								..Default::default()
 							}),
+							..Default::default()
 						});
 					}
 				}
@@ -1527,6 +1518,18 @@ where
 					);
 				}
 
+				if let Err(e) =
+					self.wallet.handle_channel_ready(channel_id, funding_txo.map(|txo| txo.txid))
+				{
+					log_error!(
+						self.logger,
+						"Failed to graduate funding payment on ChannelReady for channel {}: {:?}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
+
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					liquidity_source
 						.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
@@ -1555,6 +1558,16 @@ where
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				if let Err(e) = self.wallet.handle_channel_closed(channel_id) {
+					log_error!(
+						self.logger,
+						"Failed to handle ChannelClosed for channel {}: {:?}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
 
 				let event = Event::ChannelClosed {
 					channel_id,
