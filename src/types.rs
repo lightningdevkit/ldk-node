@@ -61,6 +61,22 @@ where
 {
 }
 
+/// An object-safe façade over [`KVStore`], [`KVStoreSync`], and
+/// [`MigratableKVStore`].
+///
+/// The LDK store traits are convenient for concrete backends, but they are not
+/// directly suitable for dynamic dispatch because the async methods on
+/// [`KVStore`] return `impl Future`, which is not object-safe. `DynStoreTrait`
+/// bridges that gap by:
+/// - exposing boxed async methods for object-safe async access
+/// - exposing synchronous methods mirroring [`KVStoreSync`]
+/// - exposing [`list_all_keys`] for exhaustive key enumeration during
+///   migration and restoration
+///
+/// This trait is the common erased storage interface used by the builder,
+/// tiered storage, runtime plumbing, and FFI-facing store integrations.
+///
+/// [`list_all_keys`]: DynStoreTrait::list_all_keys
 pub trait DynStoreTrait: Send + Sync {
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
@@ -151,7 +167,25 @@ impl<'a> KVStoreSync for dyn DynStoreTrait + 'a {
 	}
 }
 
-pub(crate) type DynStore = dyn DynStoreTrait;
+/// An object-safe, type-erased key-value store used throughout the node.
+///
+/// [`KVStore`] and [`KVStoreSync`] are not directly object-safe because their
+/// async methods return `impl Future`. [`DynStoreTrait`] provides an object-safe
+/// façade over both traits by boxing the async futures and exposing the sync
+/// methods directly.
+///
+/// `DynStore` is the common erased store type used when the node needs to hold
+/// storage behind dynamic dispatch, such as:
+/// - primary, backup, or ephemeral stores in tiered storage
+/// - FFI-facing stores
+/// - generic builder and runtime plumbing that should not depend on a concrete
+///   backend type
+///
+/// Implementations are also expected to support exhaustive key enumeration via
+/// [`DynStoreTrait::list_all_keys`], mirroring
+/// [`lightning::util::persist::MigratableKVStore`], so the same erased store
+/// abstraction can be used for migration and restoration.
+pub type DynStore = dyn DynStoreTrait;
 
 // Newtype wrapper that implements `KVStore` for `Arc<DynStore>`. This is needed because `KVStore`
 // methods return `impl Future`, which is not object-safe. `DynStoreTrait` works around this by
@@ -186,9 +220,19 @@ impl KVStore for DynStoreRef {
 	}
 }
 
-pub(crate) struct DynStoreWrapper<T: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync>(
-	pub(crate) T,
-);
+/// Wraps a concrete store so it can be used as a [`DynStore`].
+///
+/// This adapter bridges a concrete backend implementing
+/// [`SyncAndAsyncKVStore`] and [`MigratableKVStore`] into the object-safe
+/// [`DynStoreTrait`] abstraction by:
+/// - delegating synchronous operations to [`KVStoreSync`]
+/// - boxing async operations from [`KVStore`]
+/// - forwarding exhaustive key enumeration to [`MigratableKVStore`]
+///
+/// In practice, this is the main entry point for erasing native store types
+/// such as SQLite-, filesystem-, tiered-, or VSS-backed stores into the common
+/// dynamic store abstraction used by the builder and runtime.
+pub struct DynStoreWrapper<T: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync>(pub T);
 
 impl<T: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync> DynStoreTrait
 	for DynStoreWrapper<T>
