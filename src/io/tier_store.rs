@@ -990,21 +990,6 @@ where
 		Ok(())
 	}
 
-	/// Enqueues a failed backup operation for asynchronous retry.
-	///
-	/// This is the async enqueue path, used from asynchronous write/remove flows.
-	/// Internally it reuses the synchronous implementation because queue mutation
-	/// and local queue persistence are both synchronous operations.
-	///
-	/// Returns an error if the retry intent could not be durably persisted locally.
-	/// In that case, the op may still remain queued in memory for the current
-	/// process, but it is not guaranteed to survive a restart.
-	pub(crate) async fn enqueue_async(
-		&self, key: (String, String, String), op: PendingBackupOp,
-	) -> io::Result<()> {
-		self.enqueue_sync(key, op)
-	}
-
 	/// Removes a successfully retried entry from the in-memory queue and
 	/// best-effort persists the updated state.
 	///
