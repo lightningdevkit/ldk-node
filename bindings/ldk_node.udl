@@ -156,8 +156,8 @@ typedef interface OnchainPayment;
 interface FeeRate {
 	[Name=from_sat_per_kwu]
 	constructor(u64 sat_kwu);
-	[Name=from_sat_per_vb_unchecked]
-	constructor(u64 sat_vb);
+	[Name=from_sat_per_vb_u32]
+	constructor(u32 sat_vb);
 	u64 to_sat_per_kwu();
 	u64 to_sat_per_vb_floor();
 	u64 to_sat_per_vb_ceil();
