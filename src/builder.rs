@@ -201,6 +201,13 @@ pub enum BuildError {
 	AsyncPaymentsConfigMismatch,
 	/// An attempt to setup a DNS Resolver failed.
 	DNSResolverSetupFailed,
+	/// We failed to determine the current chain tip on first startup.
+	///
+	/// Returned when a fresh node is built against a Bitcoin Core RPC or REST chain source that
+	/// is unreachable or misconfigured, so we cannot learn the tip height/hash to use as the
+	/// wallet birthday. Falling back to genesis would silently force a full-history rescan on
+	/// the next successful startup, so we abort instead.
+	ChainTipFetchFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -238,11 +245,45 @@ impl fmt::Display for BuildError {
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
 			},
+			Self::ChainTipFetchFailed => {
+				write!(
+					f,
+					"Failed to determine the current chain tip on first startup. Verify the chain data source is reachable and correctly configured."
+				)
+			},
 		}
 	}
 }
 
 impl std::error::Error for BuildError {}
+
+/// Describes how the wallet should be recovered on the next startup.
+///
+/// Pass `Some(RecoveryMode { .. })` to [`NodeBuilder::set_wallet_recovery_mode`] to opt into
+/// recovery behavior; see [`RecoveryMode::rescan_from_height`] for the details of what each
+/// setting does on each chain source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct RecoveryMode {
+	/// Where the wallet should start rescanning the chain from on the next startup.
+	///
+	/// Behavior depends on the configured chain source:
+	///
+	/// **`Bitcoind` (RPC or REST):**
+	/// * `None` — no wallet checkpoint is inserted; BDK rescans from genesis. This matches the
+	///   previous `recovery_mode = true` flag.
+	/// * `Some(h)` — the block hash at height `h` is resolved via the chain source and inserted
+	///   as the initial wallet checkpoint, so BDK rescans forward from `h`. Useful for
+	///   restoring a wallet on a pruned node where the full history is unavailable but the
+	///   wallet's birthday height is known.
+	///
+	/// **`Esplora` / `Electrum`:** this field is ignored — the BDK client APIs for these
+	/// backends do not currently expose a block-hash-by-height lookup. Instead, setting any
+	/// `Some(RecoveryMode { .. })` forces a one-shot BDK `full_scan` on the next wallet sync
+	/// after startup — even if the node has synced before — so funds sent to addresses the
+	/// current instance does not yet know about are re-discovered.
+	pub rescan_from_height: Option<u32>,
+}
 
 /// A builder for an [`Node`] instance, allowing to set some configuration and module choices from
 /// the getgo.
@@ -292,7 +333,7 @@ pub struct NodeBuilder {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
-	recovery_mode: bool,
+	recovery_mode: Option<RecoveryMode>,
 }
 
 impl NodeBuilder {
@@ -310,7 +351,7 @@ impl NodeBuilder {
 		let log_writer_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
-		let recovery_mode = false;
+		let recovery_mode = None;
 		Self {
 			config,
 			chain_data_source_config,
@@ -616,13 +657,17 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
-	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
-	/// historical wallet funds.
+	/// Configures the [`Node`] to perform wallet recovery on the next startup, optionally
+	/// specifying the block height to rescan the chain from.
+	///
+	/// Pass `Some(RecoveryMode { .. })` to enable recovery; pass `None` to clear any previously
+	/// configured recovery mode and use the default "checkpoint at current tip" behavior. See
+	/// [`RecoveryMode`] for the details of what each setting does on each chain source.
 	///
 	/// This should only be set on first startup when importing an older wallet from a previously
 	/// used [`NodeEntropy`].
-	pub fn set_wallet_recovery_mode(&mut self) -> &mut Self {
-		self.recovery_mode = true;
+	pub fn set_wallet_recovery_mode(&mut self, mode: Option<RecoveryMode>) -> &mut Self {
+		self.recovery_mode = mode;
 		self
 	}
 
@@ -1088,13 +1133,17 @@ impl ArcedNodeBuilder {
 		self.inner.write().expect("lock").set_async_payments_role(role).map(|_| ())
 	}
 
-	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
-	/// historical wallet funds.
+	/// Configures the [`Node`] to perform wallet recovery on the next startup, optionally
+	/// specifying the block height to rescan the chain from.
+	///
+	/// Pass `Some(RecoveryMode { .. })` to enable recovery; pass `None` to clear any previously
+	/// configured recovery mode and use the default "checkpoint at current tip" behavior. See
+	/// [`RecoveryMode`] for the details of what each setting does on each chain source.
 	///
 	/// This should only be set on first startup when importing an older wallet from a previously
 	/// used [`NodeEntropy`].
-	pub fn set_wallet_recovery_mode(&self) {
-		self.inner.write().expect("lock").set_wallet_recovery_mode();
+	pub fn set_wallet_recovery_mode(&self, mode: Option<RecoveryMode>) {
+		self.inner.write().expect("lock").set_wallet_recovery_mode(mode);
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1240,8 +1289,8 @@ fn build_with_store_internal(
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
-	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
-	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: Option<RecoveryMode>,
+	seed_bytes: [u8; 64], runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1440,6 +1489,23 @@ fn build_with_store_internal(
 	let bdk_wallet = match wallet_opt {
 		Some(wallet) => wallet,
 		None => {
+			// Guard against silently setting the wallet birthday to genesis on a fresh node:
+			// if we are creating a new wallet but failed to learn the current chain tip from
+			// a Bitcoin Core RPC/REST backend, we'd otherwise persist fresh wallet state
+			// pinned at height 0 and force a full-history rescan once the backend comes back.
+			// Abort cleanly instead so the misconfiguration surfaces on the first startup.
+			// Esplora/Electrum backends currently never return a tip at build time, so they
+			// retain their existing behavior.
+			let is_bitcoind_source =
+				matches!(chain_data_source_config, Some(ChainDataSourceConfig::Bitcoind { .. }));
+			if recovery_mode.is_none() && chain_tip_opt.is_none() && is_bitcoind_source {
+				log_error!(
+					logger,
+					"Failed to determine chain tip on first startup. Aborting to avoid pinning the wallet birthday to genesis."
+				);
+				return Err(BuildError::ChainTipFetchFailed);
+			}
+
 			let mut wallet = BdkWallet::create(descriptor, change_descriptor)
 				.network(config.network)
 				.create_wallet(&mut wallet_persister)
@@ -1448,23 +1514,62 @@ fn build_with_store_internal(
 					BuildError::WalletSetupFailed
 				})?;
 
-			if !recovery_mode {
-				if let Some(best_block) = chain_tip_opt {
-					// Insert the first checkpoint if we have it, to avoid resyncing from genesis.
-					// TODO: Use a proper wallet birthday once BDK supports it.
-					let mut latest_checkpoint = wallet.latest_checkpoint();
-					let block_id = bdk_chain::BlockId {
-						height: best_block.height,
-						hash: best_block.block_hash,
-					};
-					latest_checkpoint = latest_checkpoint.insert(block_id);
-					let update =
-						bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
-					wallet.apply_update(update).map_err(|e| {
-						log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
+			// Decide which block (if any) to insert as the initial BDK checkpoint.
+			// - No recovery mode: use the current chain tip to avoid any rescan.
+			// - Recovery mode with an explicit `rescan_from_height` on a bitcoind backend:
+			//   resolve the block hash at that height and use it as the checkpoint, so BDK
+			//   rescans forward from there.
+			// - Recovery mode otherwise (no explicit height, or non-bitcoind backend): skip
+			//   the checkpoint entirely. For bitcoind this falls back to a full rescan from
+			//   genesis; for Esplora/Electrum the on-chain wallet syncer forces a one-shot
+			//   `full_scan` (see `Wallet::take_force_full_scan`).
+			let checkpoint_block = match recovery_mode {
+				None => chain_tip_opt,
+				Some(RecoveryMode { rescan_from_height: Some(height) }) if is_bitcoind_source => {
+					let utxo_source = chain_source.as_utxo_source().ok_or_else(|| {
+						log_error!(
+							logger,
+							"Recovery mode requested a rescan height but the chain source does not support block-by-height lookups.",
+						);
 						BuildError::WalletSetupFailed
 					})?;
-				}
+					let hash_res = runtime.block_on(async {
+						lightning_block_sync::gossip::UtxoSource::get_block_hash_by_height(
+							&utxo_source,
+							height,
+						)
+						.await
+					});
+					match hash_res {
+						Ok(hash) => Some(BestBlock { block_hash: hash, height }),
+						Err(e) => {
+							log_error!(
+								logger,
+								"Failed to resolve block hash at height {} for wallet rescan: {:?}",
+								height,
+								e,
+							);
+							return Err(BuildError::WalletSetupFailed);
+						},
+					}
+				},
+				Some(_) => None,
+			};
+
+			if let Some(best_block) = checkpoint_block {
+				// Insert the checkpoint so BDK starts scanning from there instead of from
+				// genesis.
+				// TODO: Use a proper wallet birthday once BDK supports it.
+				let mut latest_checkpoint = wallet.latest_checkpoint();
+				let block_id =
+					bdk_chain::BlockId { height: best_block.height, hash: best_block.block_hash };
+				latest_checkpoint = latest_checkpoint.insert(block_id);
+				let update =
+					bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
+				wallet.apply_update(update).map_err(|e| {
+					log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
+					BuildError::WalletSetupFailed
+				})?;
 			}
 			wallet
 		},
@@ -1484,6 +1589,12 @@ fn build_with_store_internal(
 		},
 	};
 
+	// On Esplora/Electrum the initial wallet-checkpoint logic above cannot honor a specific
+	// rescan height because the backends don't expose a block-hash-by-height lookup. When the
+	// user has explicitly opted into recovery mode we instead force the next on-chain sync to
+	// escalate to a BDK `full_scan` so funds sent to previously-unknown addresses are
+	// re-discovered.
+	let force_full_scan = recovery_mode.is_some();
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
@@ -1494,6 +1605,7 @@ fn build_with_store_internal(
 		Arc::clone(&config),
 		Arc::clone(&logger),
 		Arc::clone(&pending_payment_store),
+		force_full_scan,
 	));
 
 	// Initialize the KeysManager

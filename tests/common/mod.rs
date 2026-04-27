@@ -37,7 +37,7 @@ use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
-	PendingSweepBalance, UserChannelId,
+	PendingSweepBalance, RecoveryMode, UserChannelId,
 };
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
@@ -349,7 +349,7 @@ pub(crate) struct TestConfig {
 	pub store_type: TestStoreType,
 	pub node_entropy: NodeEntropy,
 	pub async_payments_role: Option<AsyncPaymentsRole>,
-	pub recovery_mode: bool,
+	pub recovery_mode: Option<RecoveryMode>,
 }
 
 impl Default for TestConfig {
@@ -361,7 +361,7 @@ impl Default for TestConfig {
 		let mnemonic = generate_entropy_mnemonic(None);
 		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 		let async_payments_role = None;
-		let recovery_mode = false;
+		let recovery_mode = None;
 		TestConfig {
 			node_config,
 			log_writer,
@@ -497,8 +497,8 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 	builder.set_async_payments_role(config.async_payments_role).unwrap();
 
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
+	if config.recovery_mode.is_some() {
+		builder.set_wallet_recovery_mode(config.recovery_mode);
 	}
 
 	let node = match config.store_type {
@@ -508,10 +508,6 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
 	};
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
 
 	node.start().unwrap();
 	assert!(node.status().is_running);

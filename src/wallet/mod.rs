@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
@@ -89,6 +90,11 @@ pub(crate) struct Wallet {
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 	pending_payment_store: Arc<PendingPaymentStore>,
+	// If set, the next on-chain wallet sync will force a BDK `full_scan` even when the node has
+	// synced before. Used on Esplora/Electrum backends to honor a user-requested recovery mode:
+	// those backends don't expose a block-hash-by-height lookup, so the only way to rediscover
+	// funds sent to previously-unknown addresses is to re-run the gap-limit scan once.
+	force_full_scan: AtomicBool,
 }
 
 impl Wallet {
@@ -97,7 +103,7 @@ impl Wallet {
 		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
 		fee_estimator: Arc<OnchainFeeEstimator>, chain_source: Arc<ChainSource>,
 		payment_store: Arc<PaymentStore>, config: Arc<Config>, logger: Arc<Logger>,
-		pending_payment_store: Arc<PendingPaymentStore>,
+		pending_payment_store: Arc<PendingPaymentStore>, force_full_scan: bool,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = Mutex::new(wallet_persister);
@@ -111,7 +117,17 @@ impl Wallet {
 			config,
 			logger,
 			pending_payment_store,
+			force_full_scan: AtomicBool::new(force_full_scan),
 		}
+	}
+
+	/// Consume a pending "force a full_scan on the next sync" flag.
+	///
+	/// Returns `true` exactly once if the flag was set at construction time, and `false` on every
+	/// subsequent call. Used by the Esplora/Electrum syncers to decide whether to escalate an
+	/// incremental sync to a full_scan.
+	pub(crate) fn take_force_full_scan(&self) -> bool {
+		self.force_full_scan.swap(false, Ordering::AcqRel)
 	}
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
