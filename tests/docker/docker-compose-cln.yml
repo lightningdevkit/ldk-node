@@ -11,11 +11,16 @@ services:
         "-rpcbind=0.0.0.0",
         "-rpcuser=user",
         "-rpcpassword=pass",
-        "-fallbackfee=0.00001"
+        "-fallbackfee=0.00001",
+        "-rest",
+        "-zmqpubrawblock=tcp://0.0.0.0:28332",
+        "-zmqpubrawtx=tcp://0.0.0.0:28333"
       ]
     ports:
       - "18443:18443"  # Regtest RPC port
       - "18444:18444"  # Regtest P2P port
+      - "28332:28332"  # ZMQ block port
+      - "28333:28333"  # ZMQ tx port
     networks:
       - bitcoin-electrs
     healthcheck:
@@ -53,6 +58,8 @@ services:
     depends_on:
       bitcoin:
         condition: service_healthy
+    volumes:
+      - ${CLN_DATA_DIR:-/tmp/cln-data}:/root/.lightning
     command:
       [
         "--bitcoin-rpcconnect=bitcoin",
@@ -60,6 +67,7 @@ services:
         "--bitcoin-rpcuser=user",
         "--bitcoin-rpcpassword=pass",
         "--regtest",
+        "--experimental-splicing",
       ]
     ports:
       - "19846:19846"

@@ -47,7 +47,7 @@ jobs:
         run: ./scripts/uniffi_bindgen_generate_kotlin_android.sh
 
       - name: Start bitcoind and electrs
-        run: docker compose up -d
+        run: docker compose -p ldk-node -f tests/docker/docker-compose.yml up -d
 
       - name: Run ldk-node-jvm tests
         run: |

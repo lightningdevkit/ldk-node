@@ -1,0 +1,56 @@
+name: CI Checks - Eclair Integration Tests
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-eclair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start bitcoind and electrs
+        run: docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml up -d bitcoin electrs
+
+      - name: Wait for bitcoind to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockchaininfo > /dev/null 2>&1; then
+              echo "bitcoind is ready"
+              exit 0
+            fi
+            echo "Waiting for bitcoind... ($i/30)"
+            sleep 2
+          done
+          echo "ERROR: bitcoind not ready"
+          exit 1
+
+      - name: Create wallets on bitcoind
+        run: |
+          docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass createwallet eclair
+          docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=eclair getnewaddress
+          docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass createwallet ldk_node_test
+
+      - name: Start Eclair
+        run: docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml up -d eclair
+
+      - name: Wait for Eclair to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf -u :eclairpassword -X POST http://127.0.0.1:8080/getinfo > /dev/null 2>&1; then
+              echo "Eclair is ready"
+              exit 0
+            fi
+            echo "Waiting for Eclair... ($i/60)"
+            sleep 5
+          done
+          echo "Eclair failed to start"
+          docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml logs eclair
+          exit 1
+
+      - name: Run Eclair integration tests
+        run: RUSTFLAGS="--cfg eclair_test" cargo test --test integration_tests_eclair -- --show-output --test-threads=1

@@ -5,10 +5,18 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-#![cfg(any(test, cln_test, lnd_test, vss_test))]
+#![cfg(any(test, cln_test, lnd_test, eclair_test, vss_test))]
 #![allow(dead_code)]
 
+pub(crate) mod external_node;
 pub(crate) mod logging;
+
+#[cfg(cln_test)]
+pub(crate) mod cln;
+#[cfg(eclair_test)]
+pub(crate) mod eclair;
+#[cfg(lnd_test)]
+pub(crate) mod lnd;
 
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -52,9 +60,24 @@ use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 use serde_json::{json, Value};
 
+/// Shared timeout (in seconds) for waiting on LDK events and external node operations.
+pub(crate) const INTEROP_TIMEOUT_SECS: u64 = 60;
+
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
-		match $node.next_event_async().await {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			$node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!(
+				"{} timed out waiting for {} event after 60s",
+				$node.node_id(),
+				std::stringify!($event_type)
+			)
+		});
+		match event {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				$node.event_handled().unwrap();
@@ -70,7 +93,15 @@ pub(crate) use expect_event;
 
 macro_rules! expect_channel_pending_event {
 	($node:expr, $counterparty_node_id:expr) => {{
-		match $node.next_event_async().await {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			$node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for ChannelPending event after 60s", $node.node_id())
+		});
+		match event {
 			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
@@ -88,7 +119,15 @@ pub(crate) use expect_channel_pending_event;
 
 macro_rules! expect_channel_ready_event {
 	($node:expr, $counterparty_node_id:expr) => {{
-		match $node.next_event_async().await {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			$node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for ChannelReady event after 60s", $node.node_id())
+		});
+		match event {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
@@ -108,7 +147,15 @@ macro_rules! expect_channel_ready_events {
 	($node:expr, $counterparty_node_id_a:expr, $counterparty_node_id_b:expr) => {{
 		let mut ids = Vec::new();
 		for _ in 0..2 {
-			match $node.next_event_async().await {
+			let event = tokio::time::timeout(
+				std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+				$node.next_event_async(),
+			)
+			.await
+			.unwrap_or_else(|_| {
+				panic!("{} timed out waiting for ChannelReady event after 60s", $node.node_id())
+			});
+			match event {
 				ref e @ Event::ChannelReady { counterparty_node_id, .. } => {
 					println!("{} got event {:?}", $node.node_id(), e);
 					ids.push(counterparty_node_id);
@@ -134,7 +181,15 @@ pub(crate) use expect_channel_ready_events;
 
 macro_rules! expect_splice_pending_event {
 	($node:expr, $counterparty_node_id:expr) => {{
-		match $node.next_event_async().await {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			$node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for SplicePending event after 60s", $node.node_id())
+		});
+		match event {
 			ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
@@ -152,19 +207,27 @@ pub(crate) use expect_splice_pending_event;
 
 macro_rules! expect_payment_received_event {
 	($node:expr, $amount_msat:expr) => {{
-		match $node.next_event_async().await {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			$node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for PaymentReceived event after 60s", $node.node_id())
+		});
+		match event {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
 				let payment = $node.payment(&payment_id.unwrap()).unwrap();
-				if !matches!(payment.kind, PaymentKind::Onchain { .. }) {
+				if !matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }) {
 					assert_eq!(payment.fee_paid_msat, None);
 				}
 				$node.event_handled().unwrap();
 				payment_id
 			},
 			ref e => {
-				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
+				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
 			},
 		}
 	}};
@@ -174,7 +237,18 @@ pub(crate) use expect_payment_received_event;
 
 macro_rules! expect_payment_claimable_event {
 	($node:expr, $payment_id:expr, $payment_hash:expr, $claimable_amount_msat:expr) => {{
-		match $node.next_event_async().await {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			$node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!(
+				"{} timed out waiting for PaymentClaimable event after 60s",
+				std::stringify!($node)
+			)
+		});
+		match event {
 			ref e @ Event::PaymentClaimable {
 				payment_id,
 				payment_hash,
@@ -199,7 +273,15 @@ pub(crate) use expect_payment_claimable_event;
 
 macro_rules! expect_payment_successful_event {
 	($node:expr, $payment_id:expr, $fee_paid_msat:expr) => {{
-		match $node.next_event_async().await {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			$node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for PaymentSuccessful event after 60s", $node.node_id())
+		});
+		match event {
 			ref e @ Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				if let Some(fee_msat) = $fee_paid_msat {
@@ -383,6 +465,9 @@ macro_rules! setup_builder {
 }
 
 pub(crate) use setup_builder;
+
+#[cfg(any(cln_test, lnd_test, eclair_test))]
+pub(crate) mod scenarios;
 
 pub(crate) fn setup_two_nodes(
 	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
