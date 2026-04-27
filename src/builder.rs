@@ -50,7 +50,8 @@ use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
-	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	ScoringDecayParameters, ScoringFeeParameters, TorConfig, DEFAULT_ESPLORA_SERVER_URL,
+	DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -441,6 +442,22 @@ impl NodeBuilder {
 	/// The external scores are merged into the local scoring system to improve routing.
 	pub fn set_pathfinding_scores_source(&mut self, url: String) -> &mut Self {
 		self.pathfinding_scores_sync_config = Some(PathfindingScoresSyncConfig { url });
+		self
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer fee parameters.
+	pub fn set_scoring_fee_params(
+		&mut self, scoring_fee_params: ScoringFeeParameters,
+	) -> &mut Self {
+		self.config.scoring_fee_params = Some(scoring_fee_params);
+		self
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer decay parameters.
+	pub fn set_scoring_decay_params(
+		&mut self, scoring_decay_params: ScoringDecayParameters,
+	) -> &mut Self {
+		self.config.scoring_decay_params = Some(scoring_decay_params);
 		self
 	}
 
@@ -963,6 +980,16 @@ impl ArcedNodeBuilder {
 	/// The external scores are merged into the local scoring system to improve routing.
 	pub fn set_pathfinding_scores_source(&self, url: String) {
 		self.inner.write().expect("lock").set_pathfinding_scores_source(url);
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer fee parameters.
+	pub fn set_scoring_fee_params(&self, scoring_fee_params: ScoringFeeParameters) {
+		self.inner.write().expect("lock").set_scoring_fee_params(scoring_fee_params);
+	}
+
+	/// Configures the [`Node`] instance to use custom probabilistic scorer decay parameters.
+	pub fn set_scoring_decay_params(&self, scoring_decay_params: ScoringDecayParameters) {
+		self.inner.write().expect("lock").set_scoring_decay_params(scoring_decay_params);
 	}
 
 	/// Configures the [`Node`] instance to source inbound liquidity from the given
@@ -1614,7 +1641,8 @@ fn build_with_store_internal(
 		Ok(scorer) => scorer,
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
-				let params = ProbabilisticScoringDecayParameters::default();
+				let params: ProbabilisticScoringDecayParameters =
+					config.scoring_decay_params.unwrap_or_default().into();
 				ProbabilisticScorer::new(params, Arc::clone(&network_graph), Arc::clone(&logger))
 			} else {
 				log_error!(logger, "Failed to read scoring data from store: {}", e);
@@ -1639,7 +1667,8 @@ fn build_with_store_internal(
 		},
 	}
 
-	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let scoring_fee_params: ProbabilisticScoringFeeParameters =
+		config.scoring_fee_params.unwrap_or_default().into();
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
@@ -2138,7 +2167,8 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{sanitize_alias, BuildError, NodeAlias};
+	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
+	use crate::config::{ScoringDecayParameters, ScoringFeeParameters};
 
 	#[test]
 	fn sanitize_empty_node_alias() {
@@ -2174,5 +2204,33 @@ mod tests {
 		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
 		let node = sanitize_alias(alias);
 		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
+	}
+
+	#[test]
+	fn set_scoring_params_on_builder_config() {
+		let mut builder = NodeBuilder::new();
+
+		let scoring_fee_params = ScoringFeeParameters {
+			base_penalty_msat: 2_048,
+			base_penalty_amount_multiplier_msat: 262_144,
+			liquidity_penalty_multiplier_msat: 10,
+			liquidity_penalty_amount_multiplier_msat: 20,
+			historical_liquidity_penalty_multiplier_msat: 30,
+			historical_liquidity_penalty_amount_multiplier_msat: 40,
+			anti_probing_penalty_msat: 50,
+			considered_impossible_penalty_msat: 60,
+			linear_success_probability: true,
+			probing_diversity_penalty_msat: 70,
+		};
+		let scoring_decay_params = ScoringDecayParameters {
+			historical_no_updates_half_life_secs: 1234,
+			liquidity_offset_half_life_secs: 5678,
+		};
+
+		builder.set_scoring_fee_params(scoring_fee_params);
+		builder.set_scoring_decay_params(scoring_decay_params);
+
+		assert_eq!(builder.config.scoring_fee_params, Some(scoring_fee_params));
+		assert_eq!(builder.config.scoring_decay_params, Some(scoring_decay_params));
 	}
 }
