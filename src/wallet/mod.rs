@@ -35,7 +35,7 @@ use lightning::chain::chaininterface::{
 	BroadcasterInterface, INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
-use lightning::chain::{BestBlock, ClaimId, Listen};
+use lightning::chain::{BestBlock as BlockLocator, ClaimId, Listen};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
@@ -136,9 +136,16 @@ impl Wallet {
 			.collect()
 	}
 
-	pub(crate) fn current_best_block(&self) -> BestBlock {
+	pub(crate) fn current_best_block(&self) -> BlockLocator {
 		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
-		BestBlock { block_hash: checkpoint.hash(), height: checkpoint.height() }
+		let mut current_block = Some(checkpoint.clone());
+		let previous_blocks = std::array::from_fn(|_| {
+			let child = current_block.take()?;
+			let parent = child.prev().filter(|cp| cp.height() + 1 == child.height())?;
+			current_block = Some(parent.clone());
+			Some(parent.hash())
+		});
+		BlockLocator { block_hash: checkpoint.hash(), height: checkpoint.height(), previous_blocks }
 	}
 
 	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
@@ -1491,7 +1498,7 @@ impl Listen for Wallet {
 		};
 	}
 
-	fn blocks_disconnected(&self, _fork_point_block: BestBlock) {
+	fn blocks_disconnected(&self, _fork_point_block: BlockLocator) {
 		// This is a no-op as we don't have to tell BDK about disconnections. According to the BDK
 		// team, it's sufficient in case of a reorg to always connect blocks starting from the last
 		// point of disagreement.

@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +16,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bitcoin::{BlockHash, FeeRate, Network, OutPoint, Transaction, Txid};
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::{BestBlock, Listen};
+use lightning::chain::{BestBlock as BlockLocator, Listen};
 use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpClientError, JsonResponse};
@@ -25,7 +25,7 @@ use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 use lightning_block_sync::rest::RestClient;
 use lightning_block_sync::rpc::{RpcClient, RpcClientError};
 use lightning_block_sync::{
-	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind, Cache,
+	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind, HeaderCache,
 	SpvClient,
 };
 use serde::Serialize;
@@ -49,7 +49,6 @@ const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
 
 pub(super) struct BitcoindChainSource {
 	api_client: Arc<BitcoindClient>,
-	header_cache: tokio::sync::Mutex<BoundedHeaderCache>,
 	latest_chain_tip: RwLock<Option<ValidatedBlockHeader>>,
 	wallet_polling_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
@@ -72,12 +71,10 @@ impl BitcoindChainSource {
 			rpc_password.clone(),
 		));
 
-		let header_cache = tokio::sync::Mutex::new(BoundedHeaderCache::new());
 		let latest_chain_tip = RwLock::new(None);
 		let wallet_polling_status = Mutex::new(WalletSyncStatus::Completed);
 		Self {
 			api_client,
-			header_cache,
 			latest_chain_tip,
 			wallet_polling_status,
 			fee_estimator,
@@ -103,13 +100,11 @@ impl BitcoindChainSource {
 			rpc_password,
 		));
 
-		let header_cache = tokio::sync::Mutex::new(BoundedHeaderCache::new());
 		let latest_chain_tip = RwLock::new(None);
 		let wallet_polling_status = Mutex::new(WalletSyncStatus::Completed);
 
 		Self {
 			api_client,
-			header_cache,
 			latest_chain_tip,
 			wallet_polling_status,
 			fee_estimator,
@@ -153,14 +148,14 @@ impl BitcoindChainSource {
 				return;
 			}
 
-			let channel_manager_best_block_hash = channel_manager.current_best_block().block_hash;
-			let sweeper_best_block_hash = output_sweeper.current_best_block().block_hash;
-			let onchain_wallet_best_block_hash = onchain_wallet.current_best_block().block_hash;
+			let onchain_wallet_best_block = onchain_wallet.current_best_block();
+			let channel_manager_best_block = channel_manager.current_best_block();
+			let sweeper_best_block = output_sweeper.current_best_block();
 
 			let mut chain_listeners = vec![
-				(onchain_wallet_best_block_hash, &*onchain_wallet as &(dyn Listen + Send + Sync)),
-				(channel_manager_best_block_hash, &*channel_manager as &(dyn Listen + Send + Sync)),
-				(sweeper_best_block_hash, &*output_sweeper as &(dyn Listen + Send + Sync)),
+				(onchain_wallet_best_block, &*onchain_wallet as &(dyn Listen + Send + Sync)),
+				(channel_manager_best_block, &*channel_manager as &(dyn Listen + Send + Sync)),
+				(sweeper_best_block, &*output_sweeper as &(dyn Listen + Send + Sync)),
 			];
 
 			// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
@@ -168,31 +163,28 @@ impl BitcoindChainSource {
 			// trivial as we load them on initialization (in the `Builder`) and only gain
 			// network access during `start`. For now, we just make sure we get the worst known
 			// block hash and sychronize them via `ChainMonitor`.
-			if let Some(worst_channel_monitor_block_hash) = chain_monitor
+			if let Some(worst_channel_monitor_best_block) = chain_monitor
 				.list_monitors()
 				.iter()
 				.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
 				.map(|m| m.current_best_block())
 				.min_by_key(|b| b.height)
-				.map(|b| b.block_hash)
 			{
 				chain_listeners.push((
-					worst_channel_monitor_block_hash,
+					worst_channel_monitor_best_block,
 					&*chain_monitor as &(dyn Listen + Send + Sync),
 				));
 			}
 
-			let mut locked_header_cache = self.header_cache.lock().await;
 			let now = SystemTime::now();
 			match synchronize_listeners(
 				self.api_client.as_ref(),
 				self.config.network,
-				&mut *locked_header_cache,
 				chain_listeners.clone(),
 			)
 			.await
 			{
-				Ok(chain_tip) => {
+				Ok((_header_cache, chain_tip)) => {
 					{
 						let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 						log_info!(
@@ -333,7 +325,7 @@ impl BitcoindChainSource {
 		}
 	}
 
-	pub(super) async fn poll_best_block(&self) -> Result<BestBlock, Error> {
+	pub(super) async fn poll_best_block(&self) -> Result<BlockLocator, Error> {
 		self.poll_chain_tip().await.map(|tip| tip.to_best_block())
 	}
 
@@ -400,7 +392,6 @@ impl BitcoindChainSource {
 		let chain_tip =
 			if let Some(tip) = latest_chain_tip_opt { tip } else { self.poll_chain_tip().await? };
 
-		let mut locked_header_cache = self.header_cache.lock().await;
 		let chain_poller = ChainPoller::new(Arc::clone(&self.api_client), self.config.network);
 		let chain_listener = ChainListener {
 			onchain_wallet: Arc::clone(&onchain_wallet),
@@ -409,7 +400,7 @@ impl BitcoindChainSource {
 			output_sweeper,
 		};
 		let mut spv_client =
-			SpvClient::new(chain_tip, chain_poller, &mut *locked_header_cache, &chain_listener);
+			SpvClient::new(chain_tip, chain_poller, HeaderCache::new(), &chain_listener);
 
 		let now = SystemTime::now();
 		match spv_client.poll_best_tip().await {
@@ -1348,46 +1339,6 @@ pub(crate) struct MempoolEntry {
 pub(crate) enum FeeRateEstimationMode {
 	Economical,
 	Conservative,
-}
-
-const MAX_HEADER_CACHE_ENTRIES: usize = 100;
-
-pub(crate) struct BoundedHeaderCache {
-	header_map: HashMap<BlockHash, ValidatedBlockHeader>,
-	recently_seen: VecDeque<BlockHash>,
-}
-
-impl BoundedHeaderCache {
-	pub(crate) fn new() -> Self {
-		let header_map = HashMap::new();
-		let recently_seen = VecDeque::new();
-		Self { header_map, recently_seen }
-	}
-}
-
-impl Cache for BoundedHeaderCache {
-	fn look_up(&self, block_hash: &BlockHash) -> Option<&ValidatedBlockHeader> {
-		self.header_map.get(block_hash)
-	}
-
-	fn block_connected(&mut self, block_hash: BlockHash, block_header: ValidatedBlockHeader) {
-		self.recently_seen.push_back(block_hash);
-		self.header_map.insert(block_hash, block_header);
-
-		if self.header_map.len() >= MAX_HEADER_CACHE_ENTRIES {
-			// Keep dropping old entries until we've actually removed a header entry.
-			while let Some(oldest_entry) = self.recently_seen.pop_front() {
-				if self.header_map.remove(&oldest_entry).is_some() {
-					break;
-				}
-			}
-		}
-	}
-
-	fn block_disconnected(&mut self, block_hash: &BlockHash) -> Option<ValidatedBlockHeader> {
-		self.recently_seen.retain(|e| e != block_hash);
-		self.header_map.remove(block_hash)
-	}
 }
 
 pub(crate) struct ChainListener {
