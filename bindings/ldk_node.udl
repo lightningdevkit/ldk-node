@@ -233,12 +233,6 @@ enum NodeError {
 
 typedef dictionary NodeStatus;
 
-[Remote]
-dictionary BestBlock {
-	BlockHash block_hash;
-	u32 height;
-};
-
 typedef enum BuildError;
 
 [Trait, WithForeign]

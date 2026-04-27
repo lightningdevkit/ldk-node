@@ -19,10 +19,10 @@ use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{BlockHash, Network};
+use bitcoin::Network;
 use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
-use lightning::chain::{chainmonitor, BestBlock};
+use lightning::chain::{chainmonitor, BestBlock as BlockLocator};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
@@ -1695,8 +1695,8 @@ fn build_with_store_internal(
 				user_config,
 				channel_monitor_references,
 			);
-			let (_hash, channel_manager) =
-				<(BlockHash, ChannelManager)>::read(&mut &*reader, read_args).map_err(|e| {
+			let (_best_block, channel_manager) =
+				<(BlockLocator, ChannelManager)>::read(&mut &*reader, read_args).map_err(|e| {
 					log_error!(logger, "Failed to read channel manager from store: {}", e);
 					BuildError::ReadFailed
 				})?;
@@ -1704,7 +1704,7 @@ fn build_with_store_internal(
 		} else {
 			// We're starting a fresh node.
 			let best_block =
-				chain_tip_opt.unwrap_or_else(|| BestBlock::from_network(config.network));
+				chain_tip_opt.unwrap_or_else(|| BlockLocator::from_network(config.network));
 
 			let chain_params = ChainParameters { network: config.network.into(), best_block };
 			channelmanager::ChannelManager::new(
