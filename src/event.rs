@@ -52,6 +52,7 @@ use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
+use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
 	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
@@ -509,12 +510,13 @@ where
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
-	runtime: Arc<Runtime>,
-	logger: L,
-	config: Arc<Config>,
 	static_invoice_store: Option<StaticInvoiceStore>,
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
+	prober: Option<Arc<Prober>>,
+	runtime: Arc<Runtime>,
+	logger: L,
+	config: Arc<Config>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -530,7 +532,7 @@ where
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
 		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
 		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -544,12 +546,13 @@ where
 			payment_store,
 			peer_store,
 			keys_manager,
-			logger,
-			runtime,
-			config,
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+			prober,
+			runtime,
+			logger,
+			config,
 		}
 	}
 
@@ -1158,8 +1161,16 @@ where
 
 			LdkEvent::PaymentPathSuccessful { .. } => {},
 			LdkEvent::PaymentPathFailed { .. } => {},
-			LdkEvent::ProbeSuccessful { .. } => {},
-			LdkEvent::ProbeFailed { .. } => {},
+			LdkEvent::ProbeSuccessful { path, .. } => {
+				if let Some(prober) = &self.prober {
+					prober.handle_probe_successful(&path);
+				}
+			},
+			LdkEvent::ProbeFailed { path, .. } => {
+				if let Some(prober) = &self.prober {
+					prober.handle_probe_failed(&path);
+				}
+			},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
 				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
 					liquidity_source.handle_htlc_handling_failed(failure_type).await;

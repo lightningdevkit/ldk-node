@@ -101,10 +101,12 @@ pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
+pub mod probing;
 mod runtime;
 mod scoring;
 mod tx_broadcaster;
 mod types;
+mod util;
 mod wallet;
 
 use std::default::Default;
@@ -113,6 +115,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(cycle_tests)]
 use std::{any::Any, sync::Weak};
 
+#[cfg(feature = "uniffi")]
+use crate::probing::ProbingConfig;
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use bip39;
 pub use bitcoin;
@@ -170,6 +174,9 @@ use payment::{
 	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
+#[cfg(feature = "uniffi")]
+pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
+use probing::{run_prober, Prober};
 use runtime::Runtime;
 pub use tokio;
 use types::{
@@ -239,6 +246,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: HRNResolver,
+	prober: Option<Arc<Prober>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -596,10 +604,18 @@ impl Node {
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
+			self.prober.clone(),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
 		));
+
+		if let Some(prober) = self.prober.clone() {
+			let stop_rx = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				run_prober(prober, stop_rx).await;
+			});
+		}
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
@@ -1077,6 +1093,11 @@ impl Node {
 			self.liquidity_source.clone(),
 			Arc::clone(&self.logger),
 		))
+	}
+
+	/// Returns a reference to the [`Prober`], or `None` if no probing strategy is configured.
+	pub fn prober(&self) -> Option<&Prober> {
+		self.prober.as_deref()
 	}
 
 	/// Retrieve a list of known channels.

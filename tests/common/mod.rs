@@ -35,6 +35,7 @@ use ldk_node::config::{
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+use ldk_node::probing::ProbingConfig;
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
 	PendingSweepBalance, UserChannelId,
@@ -318,9 +319,9 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 }
 
 #[cfg(feature = "uniffi")]
-type TestNode = Arc<Node>;
+pub(crate) type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
-type TestNode = Node;
+pub(crate) type TestNode = Node;
 
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
@@ -350,6 +351,7 @@ pub(crate) struct TestConfig {
 	pub node_entropy: NodeEntropy,
 	pub async_payments_role: Option<AsyncPaymentsRole>,
 	pub recovery_mode: bool,
+	pub probing: Option<ProbingConfig>,
 }
 
 impl Default for TestConfig {
@@ -369,6 +371,7 @@ impl Default for TestConfig {
 			node_entropy,
 			async_payments_role,
 			recovery_mode,
+			probing: None,
 		}
 	}
 }
@@ -499,6 +502,10 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 	if config.recovery_mode {
 		builder.set_wallet_recovery_mode();
+	}
+
+	if let Some(probing) = config.probing {
+		builder.set_probing_config(probing.into());
 	}
 
 	let node = match config.store_type {
@@ -728,12 +735,18 @@ pub async fn open_channel(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, should_announce: bool,
 	electrsd: &ElectrsD,
 ) -> OutPoint {
-	open_channel_push_amt(node_a, node_b, funding_amount_sat, None, should_announce, electrsd).await
+	let funding_txo =
+		open_channel_no_wait(node_a, node_b, funding_amount_sat, None, should_announce).await;
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	funding_txo
 }
 
-pub async fn open_channel_push_amt(
+/// Like [`open_channel`] but skips the `wait_for_tx` electrum check so that
+/// multiple channels can be opened back-to-back before any blocks are mined.
+/// The caller is responsible for mining blocks and confirming the funding txs.
+pub async fn open_channel_no_wait(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
-	should_announce: bool, electrsd: &ElectrsD,
+	should_announce: bool,
 ) -> OutPoint {
 	if should_announce {
 		node_a
@@ -761,9 +774,18 @@ pub async fn open_channel_push_amt(
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
-	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
-
 	funding_txo_a
+}
+
+pub async fn open_channel_push_amt(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
+	should_announce: bool, electrsd: &ElectrsD,
+) -> OutPoint {
+	let funding_txo =
+		open_channel_no_wait(node_a, node_b, funding_amount_sat, push_amount_msat, should_announce)
+			.await;
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	funding_txo
 }
 
 pub async fn open_channel_with_all(
