@@ -2165,8 +2165,9 @@ pub(crate) fn new_channel_anchor_reserve_sats(
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use lightning::util::ser::{Readable, Writeable};
+
+	use super::*;
 
 	#[test]
 	fn node_metrics_reads_legacy_rgs_snapshot_timestamp() {
