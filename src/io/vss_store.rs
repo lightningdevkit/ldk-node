@@ -24,7 +24,7 @@ use bitcoin::Network;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
 use lightning::sign::{EntropySource as LdkEntropySource, RandomBytes};
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::{KVStore, KVStoreSync, MigratableKVStore};
 use lightning::util::ser::{Readable, Writeable};
 use prost::Message;
 use vss_client::client::VssClient;
@@ -386,6 +386,27 @@ impl Drop for VssStore {
 	}
 }
 
+impl MigratableKVStore for VssStore {
+	fn list_all_keys(&self) -> io::Result<Vec<(String, String, String)>> {
+		let internal_runtime = self.internal_runtime.as_ref().ok_or_else(|| {
+			debug_assert!(false, "Failed to access internal runtime");
+			let msg = format!("Failed to access internal runtime");
+			Error::new(ErrorKind::Other, msg)
+		})?;
+		let inner = Arc::clone(&self.inner);
+		let fut = async move {
+			let stored_keys = inner.list_all_stored_keys(&inner.blocking_client).await?;
+			let mut decoded = Vec::with_capacity(stored_keys.len());
+			for stored_key in stored_keys {
+				if let Some(key_parts) = inner.decode_stored_key(&stored_key)? {
+					decoded.push(key_parts);
+				}
+			}
+			Ok(decoded)
+		};
+		tokio::task::block_in_place(move || internal_runtime.block_on(fut))
+	}
+}
 struct VssStoreInner {
 	schema_version: VssSchemaVersion,
 	blocking_client: VssClient<CustomRetryPolicy>,
@@ -505,6 +526,93 @@ impl VssStoreInner {
 			page_token = response.next_page_token;
 		}
 		Ok(keys)
+	}
+
+	async fn list_all_stored_keys(
+		&self, client: &VssClient<CustomRetryPolicy>,
+	) -> io::Result<Vec<String>> {
+		let mut page_token = None;
+		let mut keys = Vec::new();
+
+		while page_token != Some("".to_string()) {
+			let request = ListKeyVersionsRequest {
+				store_id: self.store_id.clone(),
+				key_prefix: None,
+				page_token,
+				page_size: None,
+			};
+
+			let response = client.list_key_versions(&request).await.map_err(|e| {
+				let msg = format!("Failed to list all stored keys: {}", e);
+				Error::new(ErrorKind::Other, msg)
+			})?;
+
+			for kv in response.key_versions {
+				keys.push(kv.key);
+			}
+
+			page_token = response.next_page_token;
+		}
+
+		Ok(keys)
+	}
+
+	fn decode_stored_key(&self, stored_key: &str) -> io::Result<Option<(String, String, String)>> {
+		match self.schema_version {
+			VssSchemaVersion::V0 => {
+				if !stored_key.contains('#') {
+					let key = self.key_obfuscator.deobfuscate(stored_key)?;
+					if key == VSS_SCHEMA_VERSION_KEY {
+						return Ok(None);
+					}
+					return Ok(Some(("".to_string(), "".to_string(), key)));
+				}
+
+				let mut parts = stored_key.splitn(3, '#');
+				let primary_namespace = parts
+					.next()
+					.ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid VSS key format"))?;
+				let secondary_namespace = parts
+					.next()
+					.ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid VSS key format"))?;
+				let obfuscated_key = parts
+					.next()
+					.ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid VSS key format"))?;
+
+				let key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
+				if key == VSS_SCHEMA_VERSION_KEY {
+					return Ok(None);
+				}
+
+				Ok(Some((primary_namespace.to_string(), secondary_namespace.to_string(), key)))
+			},
+			VssSchemaVersion::V1 => {
+				let mut parts = stored_key.splitn(2, '#');
+				let obfuscated_prefix = parts
+					.next()
+					.ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid VSS key format"))?;
+				let obfuscated_key = parts
+					.next()
+					.ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid VSS key format"))?;
+
+				let prefix = self.key_obfuscator.deobfuscate(obfuscated_prefix)?;
+				let key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
+
+				if key == VSS_SCHEMA_VERSION_KEY {
+					return Ok(None);
+				}
+
+				let mut prefix_parts = prefix.splitn(2, '#');
+				let primary_namespace = prefix_parts
+					.next()
+					.ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid VSS key prefix"))?;
+				let secondary_namespace = prefix_parts
+					.next()
+					.ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid VSS key prefix"))?;
+
+				Ok(Some((primary_namespace.to_string(), secondary_namespace.to_string(), key)))
+			},
+		}
 	}
 
 	async fn read_internal(

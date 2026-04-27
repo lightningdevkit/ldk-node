@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use lightning::io;
 use lightning::util::persist::{
-	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
+	KVStore, KVStoreSync, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedKVStoreSync,
+	PaginatedListResponse,
 };
 use lightning_types::string::PrintableString;
 use rusqlite::{named_params, Connection};
@@ -252,6 +253,44 @@ impl PaginatedKVStore for SqliteStore {
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
 		}
+	}
+}
+
+impl MigratableKVStore for SqliteStore {
+	fn list_all_keys(&self) -> io::Result<Vec<(String, String, String)>> {
+		let locked_conn = self.inner.connection.lock().unwrap();
+
+		let sql = format!(
+			"SELECT DISTINCT primary_namespace, secondary_namespace, key FROM {}",
+			self.inner.kv_table_name
+		);
+
+		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
+			let msg = format!("Failed to prepare statement: {}", e);
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
+
+		let rows = stmt
+			.query_map([], |row| {
+				let primary_namespace: String = row.get(0)?;
+				let secondary_namespace: String = row.get(1)?;
+				let key: String = row.get(2)?;
+				Ok((primary_namespace, secondary_namespace, key))
+			})
+			.map_err(|e| {
+				let msg = format!("Failed to list all keys: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+
+		let mut keys = Vec::new();
+		for row in rows {
+			keys.push(row.map_err(|e| {
+				let msg = format!("Failed to decode row while listing all keys: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?);
+		}
+
+		Ok(keys)
 	}
 }
 

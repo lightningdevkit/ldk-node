@@ -42,7 +42,7 @@ use ldk_node::{
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::{KVStore, KVStoreSync, MigratableKVStore};
 use lightning::util::test_utils::TestStore;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_persister::fs_store::v1::FilesystemStore;
@@ -442,7 +442,17 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
+	setup_node_with_builder(chain_source, config, |_| {})
+}
+
+pub(crate) fn setup_node_with_builder<F>(
+	chain_source: &TestChainSource, config: TestConfig, configure_builder: F,
+) -> TestNode
+where
+	F: FnOnce(&mut Builder),
+{
 	setup_builder!(builder, config.node_config);
+
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
@@ -501,6 +511,8 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		builder.set_wallet_recovery_mode();
 	}
 
+	configure_builder(&mut builder);
+
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
@@ -508,10 +520,6 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
 	};
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
 
 	node.start().unwrap();
 	assert!(node.status().is_running);
@@ -1616,6 +1624,12 @@ impl KVStoreSync for TestSyncStore {
 	}
 }
 
+impl MigratableKVStore for TestSyncStore {
+	fn list_all_keys(&self) -> lightning::io::Result<Vec<(String, String, String)>> {
+		self.inner.list_all_keys_internal()
+	}
+}
+
 struct TestSyncStoreInner {
 	serializer: RwLock<()>,
 	test_store: TestStore,
@@ -1788,5 +1802,20 @@ impl TestSyncStoreInner {
 	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().unwrap();
 		self.do_list(primary_namespace, secondary_namespace)
+	}
+
+	fn list_all_keys_internal(&self) -> lightning::io::Result<Vec<(String, String, String)>> {
+		let _guard = self.serializer.read().unwrap();
+
+		let mut fs_keys = MigratableKVStore::list_all_keys(&self.fs_store)?;
+		fs_keys.sort();
+
+		let mut sqlite_keys = MigratableKVStore::list_all_keys(&self.sqlite_store)?;
+		sqlite_keys.sort();
+		assert_eq!(fs_keys, sqlite_keys);
+
+		// TODO(enigbe): Upstream MigratableKVStore implementation for TestStore
+
+		Ok(fs_keys)
 	}
 }

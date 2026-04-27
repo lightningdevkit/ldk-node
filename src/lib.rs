@@ -143,6 +143,7 @@ use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
+pub use io::tier_store::BackupMode;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BestBlock;
@@ -173,13 +174,16 @@ use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
 pub use tokio;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
-	Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, Graph, HRNResolver,
+	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{
+	ChannelDetails, CustomTlvRecord, DynStore, DynStoreWrapper, PeerDetails, SyncAndAsyncKVStore,
+	UserChannelId,
+};
 pub use vss_client;
 
+use crate::io::tier_store::{run_backup_retry_task, TierStore};
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
 
@@ -239,6 +243,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
+	tier_store: Arc<TierStore>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -344,6 +349,26 @@ impl Node {
 				Arc::clone(&self.runtime),
 				self.stop_sender.subscribe(),
 			);
+		}
+
+		// Spawn background task to asynchronously retry failed backup operations.
+		if let Some(backup_store) = self.tier_store.backup_store() {
+			if let Some(retry_queue) = backup_store.retry_queue.as_ref() {
+				let retry_queue = Arc::clone(retry_queue);
+				let retry_backup_store = Arc::clone(&backup_store.store);
+				let retry_logger = Arc::clone(&self.logger);
+				let stop_retry = self.stop_sender.subscribe();
+
+				self.runtime.spawn_background_task(async move {
+					run_backup_retry_task(
+						retry_queue,
+						retry_backup_store,
+						retry_logger,
+						stop_retry,
+					)
+					.await;
+				});
+			}
 		}
 
 		if let Some(listening_addresses) = &self.config.listening_addresses {

@@ -26,7 +26,6 @@ use lightning::chain::{chainmonitor, BestBlock};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
-use lightning::log_trace;
 use lightning::onion_message::dns_resolution::DNSResolverMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
@@ -37,11 +36,12 @@ use lightning::routing::scoring::{
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::config::HTLCInterceptionFlags;
 use lightning::util::persist::{
-	KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStore, MigratableKVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
+use lightning::{log_info, log_trace};
 use lightning_dns_resolver::OMDomainResolver;
 use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
@@ -57,7 +57,9 @@ use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
+use crate::io::recovery::{list_existing_durable_keys, restore_from_backup};
 use crate::io::sqlite_store::SqliteStore;
+use crate::io::tier_store::{BackupMode, BackupRetryQueue, TierStore};
 use crate::io::utils::{
 	read_event_queue, read_external_pathfinding_scores_from_cache, read_network_graph,
 	read_node_metrics, read_output_sweeper, read_payments, read_peer_info, read_pending_payments,
@@ -155,6 +157,29 @@ impl std::fmt::Debug for LogWriterConfig {
 	}
 }
 
+#[derive(Default)]
+pub(crate) struct TierStoreConfig {
+	pub(crate) ephemeral: Option<Arc<DynStore>>,
+	pub(crate) backup: Option<Arc<DynStore>>,
+	pub(crate) backup_mode: BackupMode,
+}
+
+impl std::fmt::Debug for TierStoreConfig {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("TierStoreConfig")
+			.field("ephemeral", &self.ephemeral.as_ref().map(|_| "Arc<DynStore>"))
+			.field("backup", &self.backup.as_ref().map(|_| "Arc<DynStore>"))
+			.field("backup_mode", &self.backup_mode)
+			.finish()
+	}
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RecoveryConfig {
+	wallet_recovery: bool,
+	restore_from_backup: bool,
+}
+
 /// An error encountered during building a [`Node`].
 ///
 /// [`Node`]: crate::Node
@@ -201,6 +226,12 @@ pub enum BuildError {
 	AsyncPaymentsConfigMismatch,
 	/// An attempt to setup a DNS Resolver failed.
 	DNSResolverSetupFailed,
+	/// Restore was requested but no backup store is configured.
+	RestoreRequiresBackupStore,
+	/// Restore was requested but the primary store already contains durable data.
+	RestorePrimaryNotEmpty,
+	/// Failed to restore state from the backup store.
+	RestoreFailed,
 }
 
 impl fmt::Display for BuildError {
@@ -237,6 +268,15 @@ impl fmt::Display for BuildError {
 			},
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
+			},
+			Self::RestoreRequiresBackupStore => {
+				write!(f, "Restore from backup was requested but no backup store is configured.")
+			},
+			Self::RestorePrimaryNotEmpty => {
+				write!(f, "Restore from backup was requested but the primary store already contains durable data.")
+			},
+			Self::RestoreFailed => {
+				write!(f, "Failed to restore state from the backup store.")
 			},
 		}
 	}
@@ -290,9 +330,10 @@ pub struct NodeBuilder {
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	tier_store_config: Option<TierStoreConfig>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
-	recovery_mode: bool,
+	recovery_config: RecoveryConfig,
 }
 
 impl NodeBuilder {
@@ -308,19 +349,21 @@ impl NodeBuilder {
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
+		let tier_store_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
-		let recovery_mode = false;
+		let recovery_config = RecoveryConfig::default();
 		Self {
 			config,
 			chain_data_source_config,
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
+			tier_store_config,
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
-			recovery_mode,
+			recovery_config,
 		}
 	}
 
@@ -622,7 +665,69 @@ impl NodeBuilder {
 	/// This should only be set on first startup when importing an older wallet from a previously
 	/// used [`NodeEntropy`].
 	pub fn set_wallet_recovery_mode(&mut self) -> &mut Self {
-		self.recovery_mode = true;
+		self.recovery_config.wallet_recovery = true;
+		self
+	}
+
+	/// Configures the [`Node`] to restore durable state from the configured backup
+	/// store before normal startup reads occur.
+	///
+	/// This is intended for disaster recovery: when the primary store has been lost
+	/// or corrupted, the node can be rebuilt from a backup store that was previously
+	/// configured via [`set_backup_store`] and actively receiving writes during
+	/// normal operation.
+	///
+	/// The primary store must be empty (contain no durable state) else the build will
+	/// fail with [`BuildError::RestorePrimaryNotEmpty`] if existing durable data
+	/// is detected.
+	///
+	/// Note: this is distinct from wallet recovery mode, which controls whether the
+	/// on-chain wallet is rescanned from genesis on first startup.
+	///
+	/// [`set_backup_store`]: Self::set_backup_store
+	pub fn set_restore_from_backup(&mut self) -> &mut Self {
+		self.recovery_config.restore_from_backup = true;
+		self
+	}
+
+	/// Configures the backup store for local disaster recovery.
+	///
+	/// When building with tiered storage, this store receives a second durable
+	/// copy of data written to the primary store.
+	///
+	/// Backup failure handling depends on `backup_mode`:
+	/// - [`BackupMode::BestEffortBackup`] logs backup failures and still returns
+	///   success as long as the primary store succeeds.
+	/// - [`BackupMode::SemiSync`] returns success only if a failed backup
+	///   operation can be durably persisted locally and enqueued for
+	///   asynchronous retry.
+	///
+	/// Note: in [`BackupMode::SemiSync`], writes and removals are still not atomic
+	/// across the primary and backup stores. A call may return an error after the
+	/// primary store has already been updated if immediate backup replication
+	/// fails and the retry intent cannot be durably persisted locally.
+	///
+	/// If no backup store is configured, durable data will be stored only in the
+	/// primary store.
+	pub fn set_backup_store(
+		&mut self, backup_store: Arc<DynStore>, backup_mode: BackupMode,
+	) -> &mut Self {
+		let cfg = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		cfg.backup = Some(backup_store);
+		cfg.backup_mode = backup_mode;
+		self
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with tiered storage, this store is used for ephemeral data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	pub fn set_ephemeral_store(&mut self, ephemeral_store: Arc<DynStore>) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.ephemeral = Some(ephemeral_store);
 		self
 	}
 
@@ -774,8 +879,23 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	///
+	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
+	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
+	/// and a backup store for local disaster recovery can be configured via
+	/// [`set_ephemeral_store`] and [`set_backup_store`].
+	///
+	/// [`set_ephemeral_store`]: Self::set_ephemeral_store
+	/// [`set_backup_store`]: Self::set_backup_store
+	pub fn build_with_store<S: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
+	) -> Result<Node, BuildError> {
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
+		self.build_with_dynstore(node_entropy, primary_store)
+	}
+
+	fn build_with_dynstore(
+		&self, node_entropy: NodeEntropy, primary_store: Arc<DynStore>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
@@ -788,8 +908,42 @@ impl NodeBuilder {
 			})?)
 		};
 
+		let ts_config = self.tier_store_config.as_ref();
+		let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
+
+		if let Some(config) = ts_config {
+			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
+
+			if let Some(backup_store) = config.backup.as_ref() {
+				match config.backup_mode {
+					BackupMode::BestEffortBackup => {
+						tier_store.set_backup_store(Arc::clone(backup_store), None);
+					},
+					BackupMode::SemiSync => {
+						let retry_store: Arc<DynStore> =
+							Arc::new(DynStoreWrapper(FilesystemStore::new(
+								PathBuf::from(&self.config.storage_dir_path)
+									.join("backup_retry_queue"),
+							)));
+
+						let retry_queue = Arc::new(BackupRetryQueue::new(
+							Arc::clone(&retry_store),
+							Arc::clone(&logger),
+						));
+						tier_store.set_backup_store(
+							Arc::clone(backup_store),
+							Some(Arc::clone(&retry_queue)),
+						);
+					},
+				}
+			}
+		}
+
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
+
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(tier_store.clone()));
+		let tier_store = Arc::new(tier_store);
 
 		build_with_store_internal(
 			config,
@@ -798,11 +952,12 @@ impl NodeBuilder {
 			self.liquidity_source_config.as_ref(),
 			self.pathfinding_scores_sync_config.as_ref(),
 			self.async_payments_role,
-			self.recovery_mode,
+			self.recovery_config,
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(DynStoreWrapper(kv_store)),
+			kv_store,
+			tier_store,
 		)
 	}
 }
@@ -1227,7 +1382,7 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: SyncAndAsyncKVStore + MigratableKVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
@@ -1240,9 +1395,38 @@ fn build_with_store_internal(
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
-	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
-	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	async_payments_role: Option<AsyncPaymentsRole>, recovery_config: RecoveryConfig,
+	seed_bytes: [u8; 64], runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	tier_store: Arc<TierStore>,
 ) -> Result<Node, BuildError> {
+	if recovery_config.restore_from_backup {
+		let backup = Arc::clone(
+			&tier_store.backup_store().ok_or(BuildError::RestoreRequiresBackupStore)?.store,
+		);
+
+		let existing_durable_keys = list_existing_durable_keys(&*tier_store.primary_store())
+			.map_err(|e| {
+				log_error!(logger, "Failed to enumerate primary store during restore: {}", e);
+				BuildError::ReadFailed
+			})?;
+
+		if !existing_durable_keys.is_empty() {
+			log_error!(
+				logger,
+				"Restore refused: primary store already contains {} durable key(s)",
+				existing_durable_keys.len()
+			);
+			return Err(BuildError::RestorePrimaryNotEmpty);
+		}
+
+		restore_from_backup(&*tier_store.primary_store(), &*backup).map_err(|e| {
+			log_error!(logger, "Failed to restore from backup: {}", e);
+			BuildError::RestoreFailed
+		})?;
+
+		log_info!(logger, "Successfully restored durable state from backup store");
+	}
+
 	optionally_install_rustls_cryptoprovider();
 
 	if let Err(err) = may_announce_channel(&config) {
@@ -1448,7 +1632,7 @@ fn build_with_store_internal(
 					BuildError::WalletSetupFailed
 				})?;
 
-			if !recovery_mode {
+			if !recovery_config.wallet_recovery {
 				if let Some(best_block) = chain_tip_opt {
 					// Insert the first checkpoint if we have it, to avoid resyncing from genesis.
 					// TODO: Use a proper wallet birthday once BDK supports it.
@@ -2062,6 +2246,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver: Arc::new(hrn_resolver),
+		tier_store,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})
@@ -2148,7 +2333,14 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{sanitize_alias, BuildError, NodeAlias};
+	use lightning::util::persist::KVStoreSync;
+
+	use crate::io::{
+		test_utils::InMemoryStore, EVENT_QUEUE_PERSISTENCE_KEY,
+		EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE, EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+
+	use super::*;
 
 	#[test]
 	fn sanitize_empty_node_alias() {
@@ -2184,5 +2376,40 @@ mod tests {
 		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
 		let node = sanitize_alias(alias);
 		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
+	}
+
+	#[test]
+	fn restore_requires_backup_store() {
+		let mut builder = NodeBuilder::new();
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		let primary = InMemoryStore::new();
+
+		let res = builder.set_restore_from_backup().build_with_store(entropy, primary);
+
+		assert!(matches!(res, Err(BuildError::RestoreRequiresBackupStore)));
+	}
+
+	#[test]
+	fn restore_refuses_nonempty_primary() {
+		let mut builder = NodeBuilder::new();
+		let entropy = NodeEntropy::from_seed_bytes([43; 64]);
+
+		let primary = InMemoryStore::new();
+		let backup: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+
+		KVStoreSync::write(
+			&primary,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			b"existing".to_vec(),
+		)
+		.unwrap();
+
+		builder.set_backup_store(backup, BackupMode::BestEffortBackup);
+		builder.set_restore_from_backup();
+
+		let res = builder.build_with_store(entropy, primary);
+		assert!(matches!(res, Err(BuildError::RestorePrimaryNotEmpty)));
 	}
 }
