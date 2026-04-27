@@ -7,6 +7,8 @@
 
 #![cfg(any(test, cln_test, lnd_test, vss_test))]
 #![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_macros)]
 
 pub(crate) mod logging;
 
@@ -29,8 +31,8 @@ use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::{corepc_node, ElectrsD};
 use electrum_client::ElectrumApi;
 use ldk_node::config::{
-	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
-	HumanReadableNamesConfig,
+	AsyncPaymentsRole, CbfSyncConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
+	HRNResolverConfig, HumanReadableNamesConfig, SyncTimeoutsConfig,
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
@@ -51,6 +53,17 @@ use logging::TestLogWriter;
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 use serde_json::{json, Value};
+
+macro_rules! skip_if_cbf {
+	($chain_source:expr) => {
+		if matches!($chain_source, TestChainSource::Cbf(_)) {
+			println!("Skipping test: not compatible with CBF chain source");
+			return;
+		}
+	};
+}
+
+pub(crate) use skip_if_cbf;
 
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
@@ -227,6 +240,11 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+
+	bitcoind_conf.p2p = corepc_node::P2P::Yes;
+	bitcoind_conf.args.push("-blockfilterindex=1");
+	bitcoind_conf.args.push("-peerblockfilters=1");
+
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
@@ -243,7 +261,16 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..3);
+	// Allow forcing a specific backend via LDK_TEST_CHAIN_SOURCE env var.
+	// Valid values: "esplora", "electrum", "bitcoind-rpc", "bitcoind-rest", "cbf"
+	let r = match std::env::var("LDK_TEST_CHAIN_SOURCE").ok().as_deref() {
+		Some("esplora") => 0,
+		Some("electrum") => 1,
+		Some("bitcoind-rpc") => 2,
+		Some("bitcoind-rest") => 3,
+		Some("cbf") => 4,
+		_ => rand::random_range(0..3),
+	};
 	match r {
 		0 => {
 			println!("Randomly setting up Esplora chain syncing...");
@@ -260,6 +287,10 @@ pub(crate) fn random_chain_source<'a>(
 		3 => {
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
+		},
+		4 => {
+			println!("Randomly setting up CBF compact block filter syncing...");
+			TestChainSource::Cbf(bitcoind)
 		},
 		_ => unreachable!(),
 	}
@@ -328,6 +359,7 @@ pub(crate) enum TestChainSource<'a> {
 	Electrum(&'a ElectrsD),
 	BitcoindRpcSync(&'a BitcoinD),
 	BitcoindRestSync(&'a BitcoinD),
+	Cbf(&'a BitcoinD),
 }
 
 #[derive(Clone, Copy)]
@@ -481,6 +513,12 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 				rpc_password,
 			);
 		},
+		TestChainSource::Cbf(bitcoind) => {
+			let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
+			let peer_addr = format!("{}", p2p_socket);
+			let sync_config = CbfSyncConfig { background_sync_config: None, ..Default::default() };
+			builder.set_chain_source_cbf(vec![peer_addr], Some(sync_config), None);
+		},
 	}
 
 	match &config.log_writer {
@@ -515,7 +553,10 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 	node.start().unwrap();
 	assert!(node.status().is_running);
-	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+
+	if !matches!(chain_source, TestChainSource::Cbf(_)) {
+		assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
+	}
 	node
 }
 
@@ -589,7 +630,9 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
 
-	let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+	// An output's script will have at least 1 history entry (the tx that created it).
+	// When the output is spent, there will be at least 2 entries (creating + spending tx).
+	let is_spent = electrs.script_get_history(&txout_script).unwrap().len() >= 2;
 	if is_spent {
 		return;
 	}
@@ -597,10 +640,42 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	exponential_backoff_poll(|| {
 		electrs.ping().unwrap();
 
-		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+		let is_spent = electrs.script_get_history(&txout_script).unwrap().len() >= 2;
 		is_spent.then_some(())
 	})
 	.await;
+}
+
+/// Wait for a CBF sync cycle to complete successfully.
+///
+/// Unlike the old version which only checked that the onchain sync timestamp
+/// advanced, this also verifies that both the onchain *and* lightning wallet
+/// syncs completed, and calls a user-supplied `check` closure after each
+/// successful sync so the caller can verify concrete wallet state (e.g.
+/// balance). This prevents false passes where the timestamp advances but
+/// the wallet state is still stale.
+pub(crate) async fn wait_for_cbf_sync<F>(node: &TestNode, check: F)
+where
+	F: Fn() -> bool,
+{
+	let before_onchain = node.status().latest_onchain_wallet_sync_timestamp;
+	let before_lightning = node.status().latest_lightning_wallet_sync_timestamp;
+	let mut delay = Duration::from_millis(200);
+	for _ in 0..30 {
+		if node.sync_wallets().is_ok() {
+			let status = node.status();
+			let onchain_synced = status.latest_onchain_wallet_sync_timestamp > before_onchain;
+			let lightning_synced = status.latest_lightning_wallet_sync_timestamp > before_lightning;
+			if onchain_synced && lightning_synced && check() {
+				return;
+			}
+		}
+		tokio::time::sleep(delay).await;
+		if delay < Duration::from_secs(2) {
+			delay = delay.mul_f32(1.5);
+		}
+	}
+	panic!("wait_for_cbf_sync: timed out waiting for CBF sync to complete");
 }
 
 pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
@@ -1275,8 +1350,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_out_sat = funding_amount_sat / 2;
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
+	let splice_out_txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(electrsd, splice_out_txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
@@ -1297,8 +1373,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_in_sat = splice_out_sat;
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
+	let splice_in_txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(electrsd, splice_in_txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
@@ -1373,9 +1450,19 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(electrsd, funding_txo_b).await;
+	// After splices, the latest funding outpoint is from the last splice.
+	// We must wait for the close tx (which spends the latest funding output)
+	// to propagate before mining.
+	wait_for_outpoint_spend(electrsd, splice_in_txo).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// CBF needs a second sync: the first sync confirms the close tx in the
+	// Lightning wallet, which may trigger new script registrations. The
+	// second sync picks up blocks matching those new scripts for the
+	// on-chain wallet.
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
