@@ -102,6 +102,10 @@ impl TierStore {
 	pub(crate) fn backup_store(&self) -> Option<&BackupStore> {
 		self.inner.backup_store.as_ref()
 	}
+
+	pub(crate) fn primary_store(&self) -> Arc<DynStore> {
+		Arc::clone(&self.inner.primary_store)
+	}
 }
 
 impl KVStore for TierStore {

@@ -23,22 +23,28 @@ use common::{
 	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
 	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_tx, TestChainSource, TestStoreType, TestSyncStore,
+	random_storage_path, setup_bitcoind_and_electrsd, setup_builder, setup_node,
+	setup_node_with_builder, setup_two_nodes, splice_in_with_all, wait_for_tx, TestChainSource,
+	TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
+use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{BackupMode, Builder, DynStore, DynStoreWrapper, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::{
+	MigratableKVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
@@ -2956,4 +2962,83 @@ async fn splice_in_with_all_balance() {
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn restore_from_backup_full_cycle() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let config_a = random_config(true);
+	let config_b = random_config(true);
+	let entropy_a = config_a.node_entropy.clone();
+
+	let backup_dir = random_storage_path();
+	let backup_db_file = "backup_db".to_string();
+	let backup_table = "backup_table".to_string();
+
+	let make_backup_store = || {
+		SqliteStore::new(
+			backup_dir.clone(),
+			Some(backup_db_file.clone()),
+			Some(backup_table.clone()),
+		)
+		.expect("Failed to create SQLite store.")
+	};
+
+	// 1. Run a real node cycle with backup replication enabled.
+	let original_node_id = {
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(make_backup_store()));
+
+		let node_a = setup_node_with_builder(&chain_source, config_a.clone(), |builder| {
+			builder.set_backup_store(Arc::clone(&backup_store), BackupMode::BestEffortBackup);
+		});
+		let node_b = setup_node(&chain_source, config_b.clone());
+
+		let node_id = node_a.node_id();
+
+		do_channel_full_cycle(
+			node_a,
+			node_b,
+			&bitcoind.client,
+			&electrsd.client,
+			false,
+			true,
+			false,
+		)
+		.await;
+
+		node_id
+	};
+
+	// 2. Reopen the backup store concretely and verify it contains a known
+	// durable key from normal node operation.
+	let reopened_backup = make_backup_store();
+	let backup_keys =
+		MigratableKVStore::list_all_keys(&reopened_backup).expect("Failed to list backup keys");
+
+	assert!(
+		backup_keys.iter().any(|(p, s, k)| {
+			p == CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE
+				&& s == CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE
+				&& k == CHANNEL_MANAGER_PERSISTENCE_KEY
+		}),
+		"Backup store should contain the persisted ChannelManager"
+	);
+
+	// 3. Restore into a fresh primary and ensure the restored node can boot.
+	let mut restore_config = config_a.clone();
+	restore_config.node_config.storage_dir_path =
+		random_storage_path().to_str().unwrap().to_owned();
+
+	let restore_backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(make_backup_store()));
+
+	let restored_node = setup_node_with_builder(&chain_source, restore_config, |builder| {
+		builder.set_backup_store(restore_backup_store, BackupMode::BestEffortBackup);
+		builder.restore_from_backup();
+	});
+
+	assert_eq!(restored_node.node_id(), original_node_id);
+
+	restored_node.stop().unwrap();
 }
