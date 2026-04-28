@@ -50,6 +50,7 @@ use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -76,6 +77,9 @@ use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
+use crate::probing::{
+	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind, RandomWalkStrategy,
+};
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
@@ -292,6 +296,7 @@ pub struct NodeBuilder {
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	recovery_mode: bool,
+	probing_config: Option<ProbingConfig>,
 }
 
 impl NodeBuilder {
@@ -310,6 +315,8 @@ impl NodeBuilder {
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
 		let recovery_mode = false;
+		let async_payments_role = None;
+		let probing_config = None;
 		Self {
 			config,
 			chain_data_source_config,
@@ -317,9 +324,10 @@ impl NodeBuilder {
 			liquidity_source_config,
 			log_writer_config,
 			runtime_handle,
-			async_payments_role: None,
+			async_payments_role,
 			pathfinding_scores_sync_config,
 			recovery_mode,
+			probing_config,
 		}
 	}
 
@@ -625,6 +633,31 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Configures background probing.
+	///
+	/// Use [`ProbingConfigBuilder`] to build the configuration:
+	/// ```no_run
+	/// # #[cfg(not(feature = "uniffi"))]
+	/// # {
+	/// use std::time::Duration;
+	/// use ldk_node::Builder;
+	/// use ldk_node::probing::ProbingConfigBuilder;
+	///
+	/// let mut builder = Builder::new();
+	/// builder.set_probing_config(
+	///     ProbingConfigBuilder::high_degree(100)
+	///         .interval(Duration::from_secs(30))
+	///         .build()
+	/// );
+	/// # }
+	/// ```
+	///
+	/// [`ProbingConfigBuilder`]: crate::probing::ProbingConfigBuilder
+	pub fn set_probing_config(&mut self, config: ProbingConfig) -> &mut Self {
+		self.probing_config = Some(config);
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -864,6 +897,7 @@ impl NodeBuilder {
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
 			self.pathfinding_scores_sync_config.as_ref(),
+			self.probing_config.as_ref(),
 			self.async_payments_role,
 			self.recovery_mode,
 			seed_bytes,
@@ -1164,6 +1198,15 @@ impl ArcedNodeBuilder {
 		self.inner.write().expect("lock").set_wallet_recovery_mode();
 	}
 
+	/// Configures background probing.
+	///
+	/// Use [`ProbingConfigBuilder`] to build the configuration.
+	///
+	/// [`ProbingConfigBuilder`]: crate::probing::ProbingConfigBuilder
+	pub fn set_probing_config(&self, config: Arc<ProbingConfig>) {
+		self.inner.write().unwrap().set_probing_config((*config).clone());
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
@@ -1359,8 +1402,9 @@ fn build_with_store_internal(
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
-	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
-	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	probing_config: Option<&ProbingConfig>, async_payments_role: Option<AsyncPaymentsRole>,
+	recovery_mode: bool, seed_bytes: [u8; 64], runtime: Arc<Runtime>, logger: Arc<Logger>,
+	kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1777,7 +1821,10 @@ fn build_with_store_internal(
 		},
 	}
 
-	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let mut scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	if let Some(penalty) = probing_config.and_then(|c| c.diversity_penalty_msat) {
+		scoring_fee_params.probing_diversity_penalty_msat = penalty;
+	}
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
@@ -2152,6 +2199,38 @@ fn build_with_store_internal(
 		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
 	}
 
+	let prober = probing_config.map(|probing_cfg| {
+		let strategy: Arc<dyn ProbingStrategy> = match &probing_cfg.kind {
+			ProbingStrategyKind::HighDegree { top_node_count } => {
+				Arc::new(HighDegreeStrategy::new(
+					Arc::clone(&network_graph),
+					Arc::clone(&channel_manager),
+					Arc::clone(&router),
+					*top_node_count,
+					DEFAULT_MIN_PROBE_AMOUNT_MSAT,
+					DEFAULT_MAX_PROBE_AMOUNT_MSAT,
+					probing_cfg.cooldown,
+					config.probing_liquidity_limit_multiplier,
+				))
+			},
+			ProbingStrategyKind::RandomWalk { max_hops } => Arc::new(RandomWalkStrategy::new(
+				Arc::clone(&network_graph),
+				Arc::clone(&channel_manager),
+				*max_hops,
+				DEFAULT_MIN_PROBE_AMOUNT_MSAT,
+				DEFAULT_MAX_PROBE_AMOUNT_MSAT,
+			)),
+			ProbingStrategyKind::Custom(s) => Arc::clone(s),
+		};
+		Arc::new(Prober {
+			channel_manager: Arc::clone(&channel_manager),
+			logger: Arc::clone(&logger),
+			strategy,
+			interval: probing_cfg.interval,
+			max_locked_msat: probing_cfg.max_locked_msat,
+		})
+	});
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -2185,6 +2264,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver,
+		prober,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})
