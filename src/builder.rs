@@ -1204,7 +1204,7 @@ impl ArcedNodeBuilder {
 	///
 	/// [`ProbingConfigBuilder`]: crate::probing::ProbingConfigBuilder
 	pub fn set_probing_config(&self, config: Arc<ProbingConfig>) {
-		self.inner.write().unwrap().set_probing_config((*config).clone());
+		self.inner.write().expect("lock").set_probing_config((*config).clone());
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options

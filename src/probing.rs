@@ -308,14 +308,14 @@ impl ArcedProbingConfigBuilder {
 	///
 	/// Defaults to 10 seconds.
 	pub fn set_interval(&self, secs: u64) {
-		self.inner.write().unwrap().interval(Duration::from_secs(secs));
+		self.inner.write().expect("lock").interval(Duration::from_secs(secs));
 	}
 
 	/// Overrides the maximum millisatoshis that may be locked in in-flight probes at any time.
 	///
 	/// Defaults to 100 000 000 msat (100k sats).
 	pub fn set_max_locked_msat(&self, max_msat: u64) {
-		self.inner.write().unwrap().max_locked_msat(max_msat);
+		self.inner.write().expect("lock").max_locked_msat(max_msat);
 	}
 
 	/// Sets the probing diversity penalty applied by the probabilistic scorer.
@@ -330,19 +330,19 @@ impl ArcedProbingConfigBuilder {
 	///
 	/// If unset, LDK's default of `0` (no penalty) is used.
 	pub fn set_diversity_penalty_msat(&self, penalty_msat: u64) {
-		self.inner.write().unwrap().diversity_penalty_msat(penalty_msat);
+		self.inner.write().expect("lock").diversity_penalty_msat(penalty_msat);
 	}
 
 	/// Sets how long a probed node stays ineligible before being probed again.
 	///
 	/// Only applies to [`HighDegreeStrategy`]. Defaults to 1 hour.
 	pub fn set_cooldown(&self, secs: u64) {
-		self.inner.write().unwrap().cooldown(Duration::from_secs(secs));
+		self.inner.write().expect("lock").cooldown(Duration::from_secs(secs));
 	}
 
 	/// Builds the [`ProbingConfig`].
 	pub fn build(&self) -> Arc<ProbingConfig> {
-		Arc::new(self.inner.read().unwrap().build())
+		Arc::new(self.inner.read().expect("lock").build())
 	}
 }
 
