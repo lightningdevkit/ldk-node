@@ -26,7 +26,7 @@ use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::ser::LSPSDateTime;
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
-use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
+use lightning_liquidity::lsps2::event::LSPS2ServiceEvent;
 use lightning_liquidity::lsps2::msgs::LSPS2RawOpeningFeeParams;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
@@ -41,9 +41,7 @@ use crate::{total_anchor_channels_reserve_sats, Config};
 
 pub(crate) use client::lsps1::{LSPS1Client, LSPS1ClientConfig};
 pub use client::lsps1::{LSPS1Liquidity, LSPS1OrderStatus};
-pub(crate) use client::lsps2::{
-	LSPS2BuyResponse, LSPS2Client, LSPS2ClientConfig, LSPS2FeeResponse,
-};
+pub(crate) use client::lsps2::{LSPS2Client, LSPS2ClientConfig};
 
 pub(crate) const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
@@ -631,106 +629,11 @@ where
 					},
 				}
 			},
-			LiquidityEvent::LSPS2Client(LSPS2ClientEvent::OpeningParametersReady {
-				request_id,
-				counterparty_node_id,
-				opening_fee_params_menu,
-			}) => {
+			LiquidityEvent::LSPS2Client(event) => {
 				if let Some(lsps2_client) = self.lsps2_client.as_ref() {
-					if counterparty_node_id != lsps2_client.lsp_node_id {
-						debug_assert!(
-							false,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						log_error!(
-							self.logger,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						return;
-					}
-
-					if let Some(sender) =
-						lsps2_client.pending_fee_requests.lock().expect("lock").remove(&request_id)
-					{
-						let response = LSPS2FeeResponse { opening_fee_params_menu };
-
-						match sender.send(response) {
-							Ok(()) => (),
-							Err(_) => {
-								log_error!(
-									self.logger,
-									"Failed to handle response for request {:?} from liquidity service",
-									request_id
-								);
-							},
-						}
-					} else {
-						debug_assert!(
-							false,
-							"Received response from liquidity service for unknown request."
-						);
-						log_error!(
-							self.logger,
-							"Received response from liquidity service for unknown request."
-						);
-					}
+					lsps2_client.handle_event(event, &self.logger).await;
 				} else {
-					log_error!(
-						self.logger,
-						"Received unexpected LSPS2Client::OpeningParametersReady event!"
-					);
-				}
-			},
-			LiquidityEvent::LSPS2Client(LSPS2ClientEvent::InvoiceParametersReady {
-				request_id,
-				counterparty_node_id,
-				intercept_scid,
-				cltv_expiry_delta,
-				..
-			}) => {
-				if let Some(lsps2_client) = self.lsps2_client.as_ref() {
-					if counterparty_node_id != lsps2_client.lsp_node_id {
-						debug_assert!(
-							false,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						log_error!(
-							self.logger,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						return;
-					}
-
-					if let Some(sender) =
-						lsps2_client.pending_buy_requests.lock().expect("lock").remove(&request_id)
-					{
-						let response = LSPS2BuyResponse { intercept_scid, cltv_expiry_delta };
-
-						match sender.send(response) {
-							Ok(()) => (),
-							Err(_) => {
-								log_error!(
-									self.logger,
-									"Failed to handle response for request {:?} from liquidity service",
-									request_id
-								);
-							},
-						}
-					} else {
-						debug_assert!(
-							false,
-							"Received response from liquidity service for unknown request."
-						);
-						log_error!(
-							self.logger,
-							"Received response from liquidity service for unknown request."
-						);
-					}
-				} else {
-					log_error!(
-						self.logger,
-						"Received unexpected LSPS2Client::InvoiceParametersReady event!"
-					);
+					log_error!(self.logger, "Received unexpected LSPS2Client event!");
 				}
 			},
 			e => {

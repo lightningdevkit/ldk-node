@@ -18,6 +18,7 @@ use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::lsps0::ser::LSPSRequestId;
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
+use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::PaymentHash;
@@ -39,6 +40,107 @@ pub(crate) struct LSPS2Client {
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2FeeResponse>>>,
 	pub(crate) pending_buy_requests:
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2BuyResponse>>>,
+}
+
+impl LSPS2Client {
+	pub(crate) async fn handle_event<L: Deref>(&self, event: LSPS2ClientEvent, logger: &L)
+	where
+		L::Target: LdkLogger,
+	{
+		match event {
+			LSPS2ClientEvent::OpeningParametersReady {
+				request_id,
+				counterparty_node_id,
+				opening_fee_params_menu,
+			} => {
+				if counterparty_node_id != self.lsp_node_id {
+					debug_assert!(
+						false,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					log_error!(
+						logger,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					return;
+				}
+
+				if let Some(sender) =
+					self.pending_fee_requests.lock().expect("lock").remove(&request_id)
+				{
+					let response = LSPS2FeeResponse { opening_fee_params_menu };
+
+					match sender.send(response) {
+						Ok(()) => (),
+						Err(_) => {
+							log_error!(
+								logger,
+								"Failed to handle response for request {:?} from liquidity service",
+								request_id
+							);
+						},
+					}
+				} else {
+					debug_assert!(
+						false,
+						"Received response from liquidity service for unknown request."
+					);
+					log_error!(
+						logger,
+						"Received response from liquidity service for unknown request."
+					);
+				}
+			},
+			LSPS2ClientEvent::InvoiceParametersReady {
+				request_id,
+				counterparty_node_id,
+				intercept_scid,
+				cltv_expiry_delta,
+				..
+			} => {
+				if counterparty_node_id != self.lsp_node_id {
+					debug_assert!(
+						false,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					log_error!(
+						logger,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					return;
+				}
+
+				if let Some(sender) =
+					self.pending_buy_requests.lock().expect("lock").remove(&request_id)
+				{
+					let response = LSPS2BuyResponse { intercept_scid, cltv_expiry_delta };
+
+					match sender.send(response) {
+						Ok(()) => (),
+						Err(_) => {
+							log_error!(
+								logger,
+								"Failed to handle response for request {:?} from liquidity service",
+								request_id
+							);
+						},
+					}
+				} else {
+					debug_assert!(
+						false,
+						"Received response from liquidity service for unknown request."
+					);
+					log_error!(
+						logger,
+						"Received response from liquidity service for unknown request."
+					);
+				}
+			},
+			_ => {
+				log_error!(logger, "Received unexpected LSPS2Client liquidity event!");
+			},
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
