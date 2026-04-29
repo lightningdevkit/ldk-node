@@ -70,7 +70,7 @@ pub struct Bolt11Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
@@ -82,9 +82,9 @@ impl Bolt11Payment {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
-		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
-		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
+		peer_store: Arc<PeerStore<Arc<Logger>>>, config: Arc<Config>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
 			runtime,
@@ -168,45 +168,29 @@ impl Bolt11Payment {
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	) -> Result<LdkBolt11Invoice, Error> {
-		let liquidity_source =
-			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let (node_id, address) =
-			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
-
-		let peer_info = PeerInfo { node_id, address };
-
-		let con_node_id = peer_info.node_id;
-		let con_addr = peer_info.address.clone();
-		let con_cm = Arc::clone(&self.connection_manager);
-
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
-
-		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
-
-		let liquidity_source = Arc::clone(&liquidity_source);
-		let invoice = self.runtime.block_on(async move {
+		let connection_manager = Arc::clone(&self.connection_manager);
+		let (invoice, chosen_lsp) = self.runtime.block_on(async move {
 			if let Some(amount_msat) = amount_msat {
-				liquidity_source
+				self.liquidity_source
+					.lsps2_client()
 					.lsps2_receive_to_jit_channel(
 						amount_msat,
 						description,
 						expiry_secs,
 						max_total_lsp_fee_limit_msat,
 						payment_hash,
+						connection_manager,
 					)
 					.await
 			} else {
-				liquidity_source
+				self.liquidity_source
+					.lsps2_client()
 					.lsps2_receive_variable_amount_to_jit_channel(
 						description,
 						expiry_secs,
 						max_proportional_lsp_fee_limit_ppm_msat,
 						payment_hash,
+						connection_manager,
 					)
 					.await
 			}
@@ -241,7 +225,8 @@ impl Bolt11Payment {
 		);
 		self.runtime.block_on(self.payment_store.insert(payment))?;
 
-		// Persist LSP peer to make sure we reconnect on restart.
+		// Persist the chosen LSP peer to make sure we reconnect on restart.
+		let peer_info = PeerInfo { node_id: chosen_lsp.node_id, address: chosen_lsp.address };
 		self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 
 		Ok(invoice)

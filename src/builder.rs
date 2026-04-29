@@ -68,9 +68,7 @@ use crate::io::{
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::liquidity::{
-	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
-};
+use crate::liquidity::{LSPS2ServiceConfig, LiquiditySourceBuilder, LspConfig};
 use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
@@ -123,10 +121,8 @@ struct PathfindingScoresSyncConfig {
 
 #[derive(Debug, Clone, Default)]
 struct LiquiditySourceConfig {
-	// Act as an LSPS1 client connecting to the given service.
-	lsps1_client: Option<LSPS1ClientConfig>,
-	// Act as an LSPS2 client connecting to the given service.
-	lsps2_client: Option<LSPS2ClientConfig>,
+	// Acts for both LSPS1 and LSPS2 clients connecting to the given service.
+	lsp_nodes: Vec<LspConfig>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
 }
@@ -443,45 +439,36 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Configures the [`Node`] instance to source inbound liquidity from the given
-	/// [bLIP-51 / LSPS1] service.
+	/// Configures the [`Node`] instance to source inbound liquidity from the given LSP.
 	///
-	/// Will mark the LSP as trusted for 0-confirmation channels, see [`Config::trusted_peers_0conf`].
-	///
-	/// The given `token` will be used by the LSP to authenticate the user.
-	///
-	/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
-	pub fn set_liquidity_source_lsps1(
-		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
-	) -> &mut Self {
-		// Mark the LSP as trusted for 0conf
-		self.config.trusted_peers_0conf.push(node_id.clone());
-
-		let liquidity_source_config =
-			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		let lsps1_client_config = LSPS1ClientConfig { node_id, address, token };
-		liquidity_source_config.lsps1_client = Some(lsps1_client_config);
-		self
-	}
-
-	/// Configures the [`Node`] instance to source just-in-time inbound liquidity from the given
-	/// [bLIP-52 / LSPS2] service.
-	///
-	/// Will mark the LSP as trusted for 0-confirmation channels, see [`Config::trusted_peers_0conf`].
+	/// The node will discover the LSP's supported protocols (LSPS1/LSPS2) on startup via [bLIP-50 / LSPS0]
+	/// and select the appropriate protocol per request automatically.
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
+	/// `trust_peer_0conf` controls whether the node will additionally accept
+	/// 0-confirmation channels opened by this LSP. If `false`, 0-confirmation
+	/// acceptance for this peer falls back to [`Config::trusted_peers_0conf`].
 	///
-	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
-	pub fn set_liquidity_source_lsps2(
+	/// May be called multiple times to register several LSPs. Duplicate `node_id`s are ignored.
+	///
+	/// [bLIP-50 / LSPS0]: https://github.com/lightning/blips/blob/master/blip-0050.md
+	pub fn add_liquidity_source(
 		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+		trust_peer_0conf: bool,
 	) -> &mut Self {
-		// Mark the LSP as trusted for 0conf
-		self.config.trusted_peers_0conf.push(node_id.clone());
-
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		let lsps2_client_config = LSPS2ClientConfig { node_id, address, token };
-		liquidity_source_config.lsps2_client = Some(lsps2_client_config);
+
+		if liquidity_source_config.lsp_nodes.iter().any(|n| n.node_id == node_id) {
+			return self;
+		}
+
+		liquidity_source_config.lsp_nodes.push(LspConfig {
+			node_id,
+			address,
+			token,
+			trust_peer_0conf,
+		});
 		self
 	}
 
@@ -491,12 +478,12 @@ impl NodeBuilder {
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn set_liquidity_provider_lsps2(
-		&mut self, service_config: LSPS2ServiceConfig,
+	pub fn enable_liquidity_provider(
+		&mut self, lsps2_service_config: LSPS2ServiceConfig,
 	) -> &mut Self {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps2_service = Some(service_config);
+		liquidity_source_config.lsps2_service = Some(lsps2_service_config);
 		self
 	}
 
@@ -1032,32 +1019,29 @@ impl ArcedNodeBuilder {
 		self.inner.write().expect("lock").set_pathfinding_scores_source(url);
 	}
 
-	/// Configures the [`Node`] instance to source inbound liquidity from the given
-	/// [bLIP-51 / LSPS1] service.
+	/// Configures the [`Node`] instance to source inbound liquidity from the given LSP.
 	///
-	/// Will mark the LSP as trusted for 0-confirmation channels, see [`Config::trusted_peers_0conf`].
-	///
-	/// The given `token` will be used by the LSP to authenticate the user.
-	///
-	/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
-	pub fn set_liquidity_source_lsps1(
-		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
-	) {
-		self.inner.write().expect("lock").set_liquidity_source_lsps1(node_id, address, token);
-	}
-
-	/// Configures the [`Node`] instance to source just-in-time inbound liquidity from the given
-	/// [bLIP-52 / LSPS2] service.
-	///
-	/// Will mark the LSP as trusted for 0-confirmation channels, see [`Config::trusted_peers_0conf`].
+	/// The node will discover the LSP's supported protocols (LSPS1/LSPS2) on startup via [bLIP-50 / LSPS0]
+	/// and select the appropriate protocol per request automatically.
 	///
 	/// The given `token` will be used by the LSP to authenticate the user.
+	/// `trust_peer_0conf` controls whether the node will additionally accept
+	/// 0-confirmation channels opened by this LSP. If `false`, 0-confirmation
+	/// acceptance for this peer falls back to [`Config::trusted_peers_0conf`].
 	///
-	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
-	pub fn set_liquidity_source_lsps2(
+	/// May be called multiple times to register several LSPs. Duplicate `node_id`s are ignored.
+	///
+	/// [bLIP-50 / LSPS0]: https://github.com/lightning/blips/blob/master/blip-0050.md
+	pub fn add_liquidity_source(
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+		trust_peer_0conf: bool,
 	) {
-		self.inner.write().expect("lock").set_liquidity_source_lsps2(node_id, address, token);
+		self.inner.write().expect("lock").add_liquidity_source(
+			node_id,
+			address,
+			token,
+			trust_peer_0conf,
+		);
 	}
 
 	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
@@ -1066,8 +1050,8 @@ impl ArcedNodeBuilder {
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn set_liquidity_provider_lsps2(&self, service_config: LSPS2ServiceConfig) {
-		self.inner.write().expect("lock").set_liquidity_provider_lsps2(service_config);
+	pub fn enable_liquidity_provider(&self, lsps2_service_config: LSPS2ServiceConfig) {
+		self.inner.write().expect("lock").enable_liquidity_provider(lsps2_service_config);
 	}
 
 	/// Sets the used storage directory path.
@@ -1975,33 +1959,19 @@ fn build_with_store_internal(
 		},
 	};
 
-	let (liquidity_source, custom_message_handler) =
+	let (liquidity_source, custom_message_handler) = {
+		let mut liquidity_source_builder = LiquiditySourceBuilder::new(
+			Arc::clone(&wallet),
+			Arc::clone(&channel_manager),
+			Arc::clone(&keys_manager),
+			Arc::clone(&tx_broadcaster),
+			Arc::clone(&kv_store),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+		);
+
 		if let Some(lsc) = liquidity_source_config.as_ref() {
-			let mut liquidity_source_builder = LiquiditySourceBuilder::new(
-				Arc::clone(&wallet),
-				Arc::clone(&channel_manager),
-				Arc::clone(&keys_manager),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-			);
-
-			lsc.lsps1_client.as_ref().map(|config| {
-				liquidity_source_builder.lsps1_client(
-					config.node_id,
-					config.address.clone(),
-					config.token.clone(),
-				)
-			});
-
-			lsc.lsps2_client.as_ref().map(|config| {
-				liquidity_source_builder.lsps2_client(
-					config.node_id,
-					config.address.clone(),
-					config.token.clone(),
-				)
-			});
+			liquidity_source_builder.set_lsp_nodes(lsc.lsp_nodes.clone());
 
 			let promise_secret = {
 				let lsps_xpriv = derive_xprv(
@@ -2015,15 +1985,15 @@ fn build_with_store_internal(
 			lsc.lsps2_service.as_ref().map(|config| {
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
+		}
 
-			let liquidity_source = runtime
-				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
-			let custom_message_handler =
-				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
-			(Some(liquidity_source), custom_message_handler)
-		} else {
-			(None, Arc::new(NodeCustomMessageHandler::new_ignoring()))
-		};
+		let liquidity_source = runtime
+			.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
+		let custom_message_handler =
+			Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
+
+		(liquidity_source, custom_message_handler)
+	};
 
 	let msg_handler = match gossip_source.as_gossip_sync() {
 		GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
@@ -2072,7 +2042,7 @@ fn build_with_store_internal(
 		}));
 	}
 
-	liquidity_source.as_ref().map(|l| l.set_peer_manager(Arc::downgrade(&peer_manager)));
+	liquidity_source.lsps2_service().set_peer_manager(Arc::downgrade(&peer_manager));
 
 	let connection_manager = Arc::new(ConnectionManager::new(
 		Arc::clone(&peer_manager),
