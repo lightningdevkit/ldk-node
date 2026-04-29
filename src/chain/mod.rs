@@ -206,7 +206,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<RwLock<NodeMetrics>>,
-	) -> Result<(Self, Option<BestBlock>), Error> {
+	) -> Result<(Self, Option<BlockLocator>), Error> {
 		let cbf_chain_source = CbfChainSource::new(
 			peers,
 			sync_config,
